@@ -3010,7 +3010,10 @@ mod tests {
     /// i.e. the exact users.id UUID / tenant_id VARCHAR(26) shape the SCIM
     /// `$1::uuid` casts and status writes target, plus every constraint a
     /// deploy installs. Returns the pool plus what `drop_test_database`
-    /// needs for cleanup.
+    /// needs for cleanup. Soft-skips when `TEST_DATABASE_URL` is unset; a
+    /// CONFIGURED provisioning failure panics (the F01 Result contract —
+    /// adapted mechanically when `fresh_canonical_db` gained its error
+    /// type).
     async fn prod_lineage_pool(test_name: &str) -> Option<(sqlx::PgPool, String, String)> {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .ok()
@@ -3025,7 +3028,9 @@ mod tests {
             "apexmail_scim_canon_{}",
             &Uuid::new_v4().simple().to_string()[..12]
         );
-        let pool = migrator::test_support::fresh_canonical_db(&database_url, &db_name).await?;
+        let pool = migrator::test_support::fresh_canonical_db(&database_url, &db_name)
+            .await
+            .unwrap_or_else(|error| panic!("{}", error.panic_message()))?;
         Some((pool, db_name, server_part.to_string()))
     }
 

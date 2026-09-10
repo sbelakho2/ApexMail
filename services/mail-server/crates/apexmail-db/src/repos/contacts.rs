@@ -1,10 +1,23 @@
 //! Contacts repository.
+//!
+//! Canonical shape (audit F07): `contacts.id` is UUID (migration 068),
+//! `contacts.tags` is NOT NULL `'[]'::jsonb` (migration 150), and
+//! `contacts.metadata` is object-or-NULL JSONB (migration 171). Ids are
+//! `uuid::Uuid` end to end — parsed at the API boundary, bound as UUIDs,
+//! stringified only in response DTOs. A `None` tag argument means "use the
+//! canonical empty array" on create and "keep the stored value" on update,
+//! so the NOT NULL column can never be violated through this repo.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::types::Contact;
+
+/// Column list every reader in this repo selects — one canonical projection
+/// including tags (coalesced to '[]' for pre-150 databases) and metadata.
+const CONTACT_COLUMNS: &str =
+    "id, tenant_id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at";
 
 /// Repository for contact operations.
 pub struct ContactsRepo;
@@ -21,8 +34,8 @@ impl ContactsRepo {
     ) -> Result<Contact, sqlx::Error> {
         sqlx::query_as::<_, Contact>(
             "INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW(), NOW()) \
-             RETURNING id, tenant_id, email, name, tags, metadata, status, created_at, updated_at"
+             VALUES ($1, $2, $3, $4, COALESCE($5, '[]'::jsonb), $6, 'active', NOW(), NOW()) \
+             RETURNING id, tenant_id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at",
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -40,10 +53,10 @@ impl ContactsRepo {
         tenant_id: &str,
         id: Uuid,
     ) -> Result<Option<Contact>, sqlx::Error> {
-        sqlx::query_as::<_, Contact>(
-            "SELECT id, tenant_id, email, name, tags, metadata, status, created_at, updated_at \
+        sqlx::query_as::<_, Contact>(&format!(
+            "SELECT {CONTACT_COLUMNS} \
              FROM contacts WHERE id = $1 AND tenant_id = $2",
-        )
+        ))
         .bind(id)
         .bind(tenant_id)
         .fetch_optional(pool)
@@ -56,10 +69,10 @@ impl ContactsRepo {
         tenant_id: &str,
         email: &str,
     ) -> Result<Option<Contact>, sqlx::Error> {
-        sqlx::query_as::<_, Contact>(
-            "SELECT id, tenant_id, email, name, tags, metadata, status, created_at, updated_at \
+        sqlx::query_as::<_, Contact>(&format!(
+            "SELECT {CONTACT_COLUMNS} \
              FROM contacts WHERE tenant_id = $1 AND email = $2",
-        )
+        ))
         .bind(tenant_id)
         .bind(email)
         .fetch_optional(pool)
@@ -75,10 +88,10 @@ impl ContactsRepo {
     ) -> Result<Vec<Contact>, sqlx::Error> {
         let limit = limit.clamp(1, 200);
         let offset = offset.clamp(0, 100_000);
-        sqlx::query_as::<_, Contact>(
-            "SELECT id, tenant_id, email, name, tags, metadata, status, created_at, updated_at \
+        sqlx::query_as::<_, Contact>(&format!(
+            "SELECT {CONTACT_COLUMNS} \
              FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-        )
+        ))
         .bind(tenant_id)
         .bind(limit)
         .bind(offset)
@@ -108,11 +121,11 @@ impl ContactsRepo {
 
         match (cursor_created_at, cursor_id) {
             (Some(created_at), Some(id)) => {
-                sqlx::query_as::<_, Contact>(
-                    "SELECT id, tenant_id, email, name, tags, metadata, status, created_at, updated_at \
+                sqlx::query_as::<_, Contact>(&format!(
+                    "SELECT {CONTACT_COLUMNS} \
                      FROM contacts WHERE tenant_id = $1 AND (created_at, id) < ($2, $3) \
                      ORDER BY created_at DESC, id DESC LIMIT $4",
-                )
+                ))
                 .bind(tenant_id)
                 .bind(created_at)
                 .bind(id)
@@ -122,11 +135,11 @@ impl ContactsRepo {
             }
             _ => {
                 // First page — no cursor
-                sqlx::query_as::<_, Contact>(
-                    "SELECT id, tenant_id, email, name, tags, metadata, status, created_at, updated_at \
+                sqlx::query_as::<_, Contact>(&format!(
+                    "SELECT {CONTACT_COLUMNS} \
                      FROM contacts WHERE tenant_id = $1 \
                      ORDER BY created_at DESC, id DESC LIMIT $2",
-                )
+                ))
                 .bind(tenant_id)
                 .bind(fetch_limit)
                 .fetch_all(pool)
@@ -136,6 +149,10 @@ impl ContactsRepo {
     }
 
     /// Update a contact.
+    ///
+    /// `None` tags/metadata keep the stored values (the canonical columns
+    /// are NOT NULL tags / object-or-NULL metadata — a SQL NULL write would
+    /// violate the contract, so absent means unchanged).
     pub async fn update(
         pool: &PgPool,
         tenant_id: &str,
@@ -146,8 +163,12 @@ impl ContactsRepo {
         status: &str,
     ) -> Result<Option<Contact>, sqlx::Error> {
         sqlx::query_as::<_, Contact>(
-            "UPDATE contacts SET name = $1, tags = $2, metadata = $3, status = $4, updated_at = NOW() \
-             WHERE id = $5 AND tenant_id = $6 RETURNING id, tenant_id, email, name, tags, metadata, status, created_at, updated_at"
+            "UPDATE contacts SET name = COALESCE($1, contacts.name), \
+                 tags = COALESCE($2, contacts.tags), \
+                 metadata = COALESCE($3, contacts.metadata), \
+                 status = $4, updated_at = NOW() \
+             WHERE id = $5 AND tenant_id = $6 \
+             RETURNING id, tenant_id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at",
         )
         .bind(name)
         .bind(tags)
@@ -207,7 +228,7 @@ impl ContactsRepo {
                 ));
                 param_idx += 4;
             }
-            query.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING RETURNING id, tenant_id, email, name, status, created_at, updated_at");
+            query.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING RETURNING id, tenant_id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at");
 
             let mut q = sqlx::query_as::<_, Contact>(&query);
             for (email, name) in chunk {

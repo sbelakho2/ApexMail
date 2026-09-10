@@ -287,9 +287,18 @@ pub(crate) mod test_db {
     ///
     /// The suffix must be unique per test so parallel tests never share the
     /// database (it is dropped + recreated + re-migrated on every call).
-    /// Soft-skips without `TEST_DATABASE_URL` (workspace convention).
+    /// Soft-skips without `TEST_DATABASE_URL` (workspace convention); a
+    /// CONFIGURED provisioning failure PANICS — the F01 contract: an
+    /// infrastructure failure must fail the test, never read as a skip.
     pub(crate) async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-        migrator::test_support::fresh_canonical_pool(db_suffix, &format!("api_canon_{db_suffix}"))
-            .await
+        match migrator::test_support::fresh_canonical_pool(
+            db_suffix,
+            &format!("api_canon_{db_suffix}"),
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
     }
 }

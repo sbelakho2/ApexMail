@@ -45,14 +45,18 @@ pub fn router() -> Router<AppState> {
 const KEYSET_CURSOR_SEP: char = '\n';
 
 /// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
-fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
+fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &Uuid) -> String {
     encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
 }
 
 /// Decode and validate a `(created_at, id)` keyset cursor. Malformed
 /// encodings, unparsable timestamps, or bogus ids are client errors (400) —
 /// an unvalidated cursor used to reach the database and surface as a 500.
-fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
+/// The row id is decoded as a UUID because contacts.id is a UUID on the
+/// canonical chain (migration 068) and the cursor tuple comparison binds it
+/// against that column (audit F07: no text-to-uuid casts at the database
+/// boundary).
+fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, Uuid), ApiError> {
     let Some(decoded) = decode_cursor(encoded) else {
         return Err(ApiError::BadRequest(
             "invalid cursor: malformed encoding".into(),
@@ -68,12 +72,10 @@ fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErr
             ApiError::BadRequest("invalid cursor: must be an encoded created_at timestamp".into())
         })?
         .with_timezone(&Utc);
-    if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
-        return Err(ApiError::BadRequest(
-            "invalid cursor: malformed row id".into(),
-        ));
-    }
-    Ok((timestamp, id.to_string()))
+    let id = Uuid::parse_str(id).map_err(|_| {
+        ApiError::BadRequest("invalid cursor: malformed row id (must be a UUID)".into())
+    })?;
+    Ok((timestamp, id))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -108,6 +110,31 @@ fn validate_tags(tags: &[String]) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+/// Canonical `contacts.metadata` contract (migration 171): either a JSON
+/// object or nothing at all. Scalars and arrays are rejected with 422
+/// BEFORE reaching the database, so the column's CHECK constraint never
+/// surfaces as a 500 (audit F07).
+fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), ApiError> {
+    if let Some(value) = metadata {
+        if !value.is_object() {
+            return Err(ApiError::Validation(vec![
+                "metadata must be a JSON object".into()
+            ]));
+        }
+    }
+    Ok(())
+}
+
+/// Parse a contact id from a request path ONCE, at the API boundary, and
+/// reject anything that is not a canonical UUID with a controlled 400 —
+/// contacts.id is a UUID column (migration 068), and an unvalidated text id
+/// used to surface as a database 500 (audit F07). Every handler that
+/// receives an id in path or body goes through this boundary.
+fn parse_contact_id(raw: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(raw)
+        .map_err(|_| ApiError::BadRequest(format!("invalid contact id '{raw}': must be a UUID")))
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +227,8 @@ async fn create_contact(
     if let Some(tags) = &body.tags {
         validate_tags(tags)?;
     }
+    // Canonical metadata contract (migration 171): object or NULL.
+    validate_metadata(&body.metadata)?;
     // One representation: an absent tag list is stored as the empty array
     // (contacts.tags is NOT NULL DEFAULT '[]' since migration 150), never
     // as SQL NULL.
@@ -298,10 +327,14 @@ async fn list_contacts(
     let more = has_more(&mut details, limit as usize);
 
     // Compute the next cursor from the last row's (created_at, id) pair.
+    // The DTO's id string is a canonical UUID text form (from ContactRow.id),
+    // so the parse cannot fail — but skip the cursor instead of panicking
+    // if it ever does.
     let next_cursor = details.last().and_then(|r| {
         chrono::DateTime::parse_from_rfc3339(&r.created_at)
             .ok()
-            .map(|ts| encode_keyset_cursor(&ts.with_timezone(&Utc), &r.id))
+            .zip(Uuid::parse_str(&r.id).ok())
+            .map(|(ts, id)| encode_keyset_cursor(&ts.with_timezone(&Utc), &id))
     });
     let meta = pagination_meta(more, next_cursor);
 
@@ -338,6 +371,9 @@ async fn get_contact(
     Path(id): Path<String>,
 ) -> Result<Json<ContactResponse>, ApiError> {
     require_scopes(&auth, &["contacts:read"])?;
+    // Parse the path id ONCE at the boundary: an invalid UUID is a
+    // controlled 400, never a database 500 (audit F07).
+    let id = parse_contact_id(&id)?;
     let row = fetch_contact(&state, &auth.tenant_id, id).await?;
     Ok(Json(row.into()))
 }
@@ -349,8 +385,9 @@ async fn update_contact(
     Json(body): Json<UpdateContactRequest>,
 ) -> Result<Json<ContactResponse>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
+    let id = parse_contact_id(&id)?;
 
-    let existing = fetch_contact(&state, &auth.tenant_id, id.clone()).await?;
+    let existing = fetch_contact(&state, &auth.tenant_id, id).await?;
 
     let name = body.name.or(existing.name);
     // A provided tag list fully replaces the stored one (validated against
@@ -362,6 +399,10 @@ async fn update_contact(
         }
         None => existing.tags.clone(),
     };
+    // Metadata: a provided JSON object replaces the stored one; an absent
+    // (or JSON null) field keeps the existing value. Canonical contract is
+    // object-or-NULL (migration 171).
+    validate_metadata(&body.metadata)?;
     let metadata = body.metadata.or(existing.metadata);
     let status = body.status.unwrap_or(existing.status);
 
@@ -390,13 +431,13 @@ async fn update_contact(
     .bind(&tags)
     .bind(&metadata)
     .bind(&status)
-    .bind(&id)
+    .bind(id)
     .bind(&auth.tenant_id)
     .execute(&state.db)
     .await?;
 
     Ok(Json(ContactResponse {
-        id,
+        id: id.to_string(),
         email: existing.email,
         name,
         tags,
@@ -413,6 +454,7 @@ async fn delete_contact(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
+    let id = parse_contact_id(&id)?;
 
     let result = sqlx::query("DELETE FROM contacts WHERE id = $1 AND tenant_id = $2")
         .bind(id)
@@ -465,10 +507,12 @@ async fn bulk_import(
             continue;
         }
         // Tag shape is structural: one malformed list rejects the batch
-        // before any database work rather than failing mid-upsert.
+        // before any database work rather than failing mid-upsert. Same for
+        // the metadata object contract (migration 171).
         if let Some(tags) = &contact.tags {
             validate_tags(tags)?;
         }
+        validate_metadata(&contact.metadata)?;
         if !seen.insert(contact.email.to_lowercase()) {
             updated += 1;
             continue;
@@ -476,10 +520,20 @@ async fn bulk_import(
         valid.push(contact);
     }
 
-    // Chunked multi-row upsert inside ONE transaction (previously one query
+    // Chunked set-based upsert inside ONE transaction (previously one query
     // per contact — 10,000 sequential round-trips for a max-size import).
     // `xmax = 0` means a fresh insert; non-zero means the conflict path
     // updated an existing row.
+    //
+    // F88: tags presence is carried through the staging input as an
+    // EXPLICIT `tags_present` flag. The old shape bound absent tags as
+    // `'[]'`, making EXCLUDED.tags never-null, so the COALESCE could never
+    // preserve existing tags and a name-only import CLEARED them. Now:
+    //   * a NEW contact with omitted tags receives the canonical '[]';
+    //   * an EXISTING contact keeps its tags unless the row explicitly
+    //     supplied a list (which fully replaces it — `[]` clears).
+    // The tenant is bound ONCE ($2) for every row of the chunk, keeping the
+    // tenant predicate identical to every other contacts statement.
     let mut created = 0usize;
     if !valid.is_empty() {
         let mut tx = state.db.begin().await.map_err(|error| {
@@ -488,51 +542,42 @@ async fn bulk_import(
         })?;
 
         for chunk in valid.chunks(BULK_IMPORT_CHUNK_SIZE) {
-            let mut query = String::from(
-                "INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at) VALUES ",
-            );
-            let mut param_idx = 1u32;
-            for (i, _) in chunk.iter().enumerate() {
-                if i > 0 {
-                    query.push_str(", ");
-                }
-                query.push_str(&format!(
-                    "(${}, ${}, ${}, ${}, ${}, ${}, 'active', NOW(), NOW())",
-                    param_idx,
-                    param_idx + 1,
-                    param_idx + 2,
-                    param_idx + 3,
-                    param_idx + 4,
-                    param_idx + 5,
-                ));
-                param_idx += 6;
-            }
-            query.push_str(
-                " ON CONFLICT (tenant_id, email) DO UPDATE SET \
-                   name = COALESCE(EXCLUDED.name, contacts.name), \
-                   tags = COALESCE(EXCLUDED.tags, contacts.tags), \
-                   metadata = COALESCE(EXCLUDED.metadata, contacts.metadata), \
-                   updated_at = NOW() \
-                 RETURNING (xmax::text::bigint)",
-            );
-
-            let mut q = sqlx::query_scalar::<_, i64>(&query);
+            let ids: Vec<Uuid> = chunk.iter().map(|_| Uuid::new_v4()).collect();
+            let emails: Vec<String> = chunk
+                .iter()
+                .map(|contact| contact.email.to_lowercase())
+                .collect();
+            let names: Vec<Option<String>> =
+                chunk.iter().map(|contact| contact.name.clone()).collect();
+            // NULL staging value for omitted tags; the explicit flag tells
+            // the conflict arm whether the caller supplied a list.
+            let mut tags: Vec<Option<serde_json::Value>> = Vec::with_capacity(chunk.len());
             for contact in chunk {
-                q = q
-                    .bind(Uuid::new_v4())
-                    .bind(&auth.tenant_id)
-                    .bind(contact.email.to_lowercase())
-                    .bind(&contact.name)
-                    // Not NULL: an absent tag list inserts the canonical
-                    // empty array (contacts.tags is NOT NULL, migration 150).
-                    .bind(serde_json::json!(contact
-                        .tags
-                        .as_deref()
-                        .unwrap_or_default()))
-                    .bind(&contact.metadata);
+                let tag_value = match &contact.tags {
+                    Some(list) => Some(serde_json::to_value(list).map_err(|e| {
+                        ApiError::Internal(format!("tags serialization error: {e}"))
+                    })?),
+                    None => None,
+                };
+                tags.push(tag_value);
             }
+            let tags_present: Vec<bool> =
+                chunk.iter().map(|contact| contact.tags.is_some()).collect();
+            let metadata: Vec<Option<serde_json::Value>> = chunk
+                .iter()
+                .map(|contact| contact.metadata.clone())
+                .collect();
 
-            let xmaxes = match q.fetch_all(&mut *tx).await {
+            let upsert = sqlx::query_scalar::<_, i64>(BULK_IMPORT_UPSERT_SQL)
+                .bind(&ids)
+                .bind(&emails)
+                .bind(&names)
+                .bind(&tags)
+                .bind(&tags_present)
+                .bind(&metadata)
+                .bind(&auth.tenant_id);
+
+            let xmaxes = match upsert.fetch_all(&mut *tx).await {
                 Ok(xmaxes) => xmaxes,
                 Err(error) => {
                     let _ = tx.rollback().await;
@@ -566,11 +611,66 @@ async fn bulk_import(
     }))
 }
 
+/// Set-based import upsert (F88): the staging CTE carries `tags_present`,
+/// and the conflict arm re-joins the staged row by the conflict key to see
+/// whether tags were EXPLICITLY supplied. Named constant so tests can pin
+/// the exact semantics.
+///
+/// The tenant predicate is `$7` — bound once, identical for every row of
+/// the chunk and equal to the predicate every other contacts statement
+/// uses. `xmax::text::bigint = 0` distinguishes fresh inserts from
+/// conflict-path updates. Arrays arrive via `unnest`, so a 500-row chunk
+/// uses seven bind parameters total — far under Postgres'
+/// 65,535-statement-parameter limit (the previous per-row VALUES ladder
+/// scaled with 6×rows).
+const BULK_IMPORT_UPSERT_SQL: &str = r#"
+    WITH input AS (
+        SELECT *
+        FROM unnest(
+                $1::uuid[],
+                $2::text[],
+                $3::text[],
+                $4::jsonb[],
+                $5::boolean[],
+                $6::jsonb[]
+             ) AS u(id, email, name, tags, tags_present, metadata)
+    ),
+    upserted AS (
+        INSERT INTO contacts AS c
+            (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
+        SELECT i.id, $7::text, i.email, i.name,
+               -- New rows: omitted tags default to the canonical '[]'
+               -- (contacts.tags is NOT NULL, migration 150).
+               CASE WHEN i.tags_present THEN i.tags ELSE '[]'::jsonb END,
+               i.metadata,
+               'active', NOW(), NOW()
+        FROM input i
+        ON CONFLICT (tenant_id, email) DO UPDATE SET
+            name = COALESCE(EXCLUDED.name, c.name),
+            -- F88: re-join the staged row by the conflict key (the tenant
+            -- half is fixed by the conflict target) — replace tags ONLY
+            -- when the caller explicitly supplied a list (an explicit []
+            -- clears; an omitted field preserves the stored array).
+            tags = COALESCE(
+                (SELECT CASE WHEN i2.tags_present THEN i2.tags ELSE NULL END
+                 FROM input i2
+                 WHERE i2.email = c.email),
+                c.tags),
+            metadata = COALESCE(EXCLUDED.metadata, c.metadata),
+            updated_at = NOW()
+        RETURNING (xmax::text::bigint)
+    )
+    SELECT * FROM upserted
+"#;
+
 // ─── Row types ─────────────────────────────────────────────────
 
 #[derive(sqlx::FromRow)]
 struct ContactRow {
-    id: String,
+    /// contacts.id is a UUID on the canonical chain (migration 068) —
+    /// decoded as `uuid::Uuid` and bound as such everywhere; converted to
+    /// its string form only in response DTOs (audit F07).
+    id: Uuid,
     email: String,
     name: Option<String>,
     /// Always a JSON array — every SELECT for this row type coalesces a
@@ -585,7 +685,7 @@ struct ContactRow {
 impl From<ContactRow> for ContactResponse {
     fn from(r: ContactRow) -> Self {
         Self {
-            id: r.id,
+            id: r.id.to_string(),
             email: r.email,
             name: r.name,
             tags: r.tags,
@@ -600,7 +700,7 @@ impl From<ContactRow> for ContactResponse {
 async fn fetch_contact(
     state: &AppState,
     tenant_id: &str,
-    id: String,
+    id: Uuid,
 ) -> Result<ContactRow, ApiError> {
     sqlx::query_as::<_, ContactRow>(
         "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
@@ -1108,22 +1208,41 @@ mod tests_extra {
     }
 }
 
-// ─── F07 database tests ────────────────────────────────────────
+// ─── F07/F70/F88 database tests ────────────────────────────────
 //
-// Exercise migration 150 (as shipped) and the bulk-tag SQL constants
-// against a real PostgreSQL, following the audit_log.rs isolated-per-test
-// database convention. Skipped unless TEST_DATABASE_URL is set.
+// Two layers:
+//
+// 1. `contact_migration_tests` — validate the REAL migration files
+//    (150 → 170 → 171, verbatim include_str!) against the two historical
+//    contacts shapes (068 tags-less, 075 nullable+metadata), including the
+//    F70 reconciliation policy and the documented pending-upgrade preflight.
+//    These deliberately hand-create LEGACY shapes; they cannot use the
+//    canonical fixture.
+//
+// 2. `canonical_crud_tests` — handler-level CRUD (create → list → get →
+//    update → import → delete, two tenants, invalid-UUID 400s, metadata
+//    contract, F88 tags-presence semantics) against a FRESH CANONICAL
+//    database provisioned through the shared migrator fixture
+//    (`crate::test_db::canonical_pool` — audit F01), so a green test means
+//    the statements work against the schema a deploy produces. No
+//    hand-written DDL that could hide metadata/UUID drift.
+//
+// Both layers skip unless TEST_DATABASE_URL is set (workspace convention);
+// a configured provisioning failure panics (the F01 Result contract).
 
 #[cfg(test)]
-mod tags_db_tests {
+mod contact_migration_tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
 
-    /// Migration 150 verbatim — these tests validate the real file, not a
-    /// restatement of it.
+    /// Migrations verbatim — these tests validate the real files, not a
+    /// restatement of them.
     const MIGRATION_150: &str =
         include_str!("../../../../migrations/150_contacts_tags_canonical.sql");
+    const MIGRATION_170: &str =
+        include_str!("../../../../migrations/170_contacts_tags_validator_repair.sql");
+    const MIGRATION_171: &str = include_str!("../../../../migrations/171_contacts_metadata.sql");
 
     /// Dedicated per-test database (audit_log.rs pattern): skips unless
     /// TEST_DATABASE_URL is set (workspace convention).
@@ -1193,11 +1312,12 @@ mod tags_db_tests {
 
     /// The 068 shape has NO tags column at all — the shape that made every
     /// `UPDATE contacts SET tags` fail with "column does not exist".
-    /// Migration 150 must add the canonical column and enforce its bounds.
+    /// Migrations 150 → 170 → 171 must add the canonical tags column,
+    /// enforce its (repaired) bounds, and add the metadata column.
     #[tokio::test]
-    async fn migration_150_establishes_tags_on_a_tags_less_shape() {
+    async fn migrations_150_170_171_establish_tags_and_metadata_on_a_tags_less_shape() {
         let Some(pool) = isolated_pool("shape").await else {
-            eprintln!("skipping migration_150_establishes_tags_on_a_tags_less_shape: TEST_DATABASE_URL not set");
+            eprintln!("skipping migrations_150_170_171_establish_tags_and_metadata_on_a_tags_less_shape: TEST_DATABASE_URL not set");
             return;
         };
 
@@ -1216,12 +1336,20 @@ mod tags_db_tests {
         .await
         .expect("068-shape contacts table");
 
-        // raw_sql: the migration file is a multi-statement script (the
-        // prepared-statement protocol cannot carry it).
+        // raw_sql: the migration files are multi-statement scripts (the
+        // prepared-statement protocol cannot carry them).
         sqlx::raw_sql(MIGRATION_150)
             .execute(&pool)
             .await
             .expect("migration 150 applies to the tags-less shape");
+        sqlx::raw_sql(MIGRATION_170)
+            .execute(&pool)
+            .await
+            .expect("migration 170 (validator repair) applies after 150");
+        sqlx::raw_sql(MIGRATION_171)
+            .execute(&pool)
+            .await
+            .expect("migration 171 (metadata) applies after 170");
 
         let tenant = "test-f07-shape-tenant";
         let id = Uuid::new_v4();
@@ -1262,6 +1390,29 @@ mod tags_db_tests {
             assert!(result.is_err(), "non-array tags must violate the CHECK");
         }
 
+        // F70: NONSTRING ELEMENTS are rejected by the repaired validator
+        // (150's jsonb_array_elements_text stringified them and accepted).
+        for bad_elements in [
+            serde_json::json!([42, true]),
+            serde_json::json!([null, "vip"]),
+            serde_json::json!([{"a": 1}]),
+            serde_json::json!([" vip ", "vip"]), // trimmed forms collide
+            serde_json::json!(["   "]),          // empty after trimming
+        ] {
+            let result = sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'g@x.ee', $3)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(bad_elements.clone())
+            .execute(&pool)
+            .await;
+            assert!(
+                result.is_err(),
+                "tags {bad_elements} must violate the repaired CHECK"
+            );
+        }
+
         // >50 tags is rejected.
         let fifty_one: Vec<String> = (0..=50).map(|i| format!("t{i}")).collect();
         let result = sqlx::query(
@@ -1288,24 +1439,28 @@ mod tags_db_tests {
             assert_eq!(result.is_ok(), expect_ok, "tag of {len} chars");
         }
 
-        // A JSON null element is rejected too.
-        let result = sqlx::query(
-            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'f@x.ee', $3)",
+        // F07/migration 171: metadata is object-or-NULL — a scalar is
+        // rejected by the CHECK, an object round-trips.
+        let scalar_metadata = sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, metadata) VALUES ($1, $2, 'h@x.ee', $3)",
         )
         .bind(Uuid::new_v4())
         .bind(tenant)
-        .bind(serde_json::json!([null, "vip"]))
+        .bind(serde_json::json!("oops"))
         .execute(&pool)
         .await;
-        assert!(result.is_err(), "null tag elements must violate the CHECK");
+        assert!(
+            scalar_metadata.is_err(),
+            "scalar metadata must violate the 171 CHECK"
+        );
 
         pool.close().await;
     }
 
     /// Bulk tag add/remove against the canonical apexmail-db SCHEMA shape
-    /// (nullable tags) with migration 150 applied on top: union dedupe,
-    /// removal, round-trip through the coalescing read, tenant isolation,
-    /// and the 50-tag ceiling.
+    /// (nullable tags) with migrations 150 + 170 applied on top: union
+    /// dedupe, removal, round-trip through the coalescing read, tenant
+    /// isolation, and the 50-tag ceiling.
     #[tokio::test]
     async fn bulk_tag_add_remove_round_trip_and_tenant_isolation() {
         let Some(pool) = isolated_pool("roundtrip").await else {
@@ -1314,10 +1469,10 @@ mod tags_db_tests {
         };
 
         // The 075/SCHEMA shape: contacts.tags exists but is nullable with
-        // no shape constraint — migration 150 must normalise it. (The full
-        // apexmail-db SCHEMA cannot be applied to a fresh database — its
-        // campaigns/templates FK is uuid-to-varchar — so the subset is
-        // spelled out here.)
+        // no shape constraint — migrations 150 + 170 must normalise it and
+        // repair the validator. (The full apexmail-db SCHEMA cannot be
+        // applied to a fresh database — its campaigns/templates FK is
+        // uuid-to-varchar — so the subset is spelled out here.)
         sqlx::raw_sql(
             "CREATE TABLE contacts (
                 id         UUID PRIMARY KEY,
@@ -1338,6 +1493,10 @@ mod tags_db_tests {
             .execute(&pool)
             .await
             .expect("migration 150 applies on the SCHEMA shape");
+        sqlx::raw_sql(MIGRATION_170)
+            .execute(&pool)
+            .await
+            .expect("migration 170 applies on the SCHEMA shape");
 
         let tenant_a = "test-f07-round-a";
         let tenant_b = "test-f07-round-b";
@@ -1445,6 +1604,691 @@ mod tags_db_tests {
             fetch_tags(&pool, tenant_a, contact_a).await,
             serde_json::json!(["beta", "new"])
         );
+
+        pool.close().await;
+    }
+
+    /// F70: values the BUGGY 150 validator accepted (nonstring elements,
+    /// duplicates) are reconciled by migration 170 per the documented
+    /// policy — nonstring scalars → their trimmed string form, objects and
+    /// whitespace-only values dropped, dedupe before the count cap.
+    #[tokio::test]
+    async fn migration_170_reconciles_values_the_buggy_validator_accepted() {
+        let Some(pool) = isolated_pool("repair").await else {
+            eprintln!("skipping migration_170_reconciles_values_the_buggy_validator_accepted: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        sqlx::raw_sql(
+            "CREATE TABLE contacts (
+                id         UUID PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                email      VARCHAR(320) NOT NULL,
+                status     VARCHAR(20) NOT NULL DEFAULT 'subscribed',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("068-shape contacts table");
+        sqlx::raw_sql(MIGRATION_150)
+            .execute(&pool)
+            .await
+            .expect("migration 150 applies (its validator is still buggy here)");
+
+        let tenant = "test-f70-repair";
+        // Fixed emails so the ORDER BY email read-back below is deterministic.
+        let seeded: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "a-repair@x.ee",
+                serde_json::json!([42, true, {"a": 1}, " vip ", "vip", "  "]),
+            ),
+            ("b-repair@x.ee", serde_json::json!(["a", "a", "b"])),
+        ];
+        for (email, tags) in &seeded {
+            let result = sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(email)
+            .bind(tags)
+            .execute(&pool)
+            .await;
+            assert!(
+                result.is_ok(),
+                "the buggy 150 validator accepted {tags} (this is the F70 defect)"
+            );
+        }
+
+        sqlx::raw_sql(MIGRATION_170)
+            .execute(&pool)
+            .await
+            .expect("migration 170 repairs the validator and reconciles stored data");
+
+        let stored: Vec<serde_json::Value> =
+            sqlx::query_scalar("SELECT tags FROM contacts WHERE tenant_id = $1 ORDER BY email")
+                .bind(tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("read back reconciled tags");
+        assert_eq!(
+            stored,
+            vec![
+                // 42 -> "42", true -> "true" (trimmed string forms); the
+                // object dropped; " vip " and "vip" collapse to one deduped
+                // "vip"; the whitespace-only value dropped.
+                serde_json::json!(["42", "true", "vip"]),
+                serde_json::json!(["a", "b"]),
+            ],
+            "F70 reconciliation policy must hold"
+        );
+
+        // And the repaired validator no longer accepts the shapes.
+        let result = sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'z@x.ee', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .bind(serde_json::json!([42, true]))
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "repaired validator must reject nonstrings");
+
+        pool.close().await;
+    }
+
+    /// F70 pending-upgrade path: on a database that has NOT applied 150 and
+    /// carries SCALAR legacy values, 150's normalisation UPDATE aborts with
+    /// 22023. The preflight documented in migration 170's header
+    /// reconciles the scalars first; afterwards the full chain applies
+    /// cleanly (the multi-statement script rolls back atomically, so the
+    /// retry starts from a clean slate).
+    #[tokio::test]
+    async fn migration_150_scalar_abort_is_rescued_by_the_documented_preflight() {
+        let Some(pool) = isolated_pool("preflight").await else {
+            eprintln!("skipping migration_150_scalar_abort_is_rescued_by_the_documented_preflight: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        sqlx::raw_sql(
+            "CREATE TABLE contacts (
+                id         UUID PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                email      TEXT NOT NULL,
+                tags       JSONB,
+                metadata   JSONB,
+                status     TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("075-shape contacts table (nullable, unconstrained tags)");
+
+        let tenant = "test-f70-preflight";
+        for (n, tags) in [
+            serde_json::json!("vip"), // scalar string
+            serde_json::json!(42),    // scalar number
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(format!("s{n}@x.ee"))
+            .bind(tags)
+            .execute(&pool)
+            .await
+            .expect("seed scalar legacy value");
+        }
+
+        let aborted = sqlx::raw_sql(MIGRATION_150).execute(&pool).await;
+        let aborted = aborted.expect_err("150 must abort on scalar legacy values (22023)");
+        let code = aborted
+            .as_database_error()
+            .and_then(|db| db.code())
+            .unwrap_or_default();
+        assert_eq!(
+            code, "22023",
+            "expected jsonb_array_elements type error, got {aborted:?}"
+        );
+
+        // The documented preflight (migration 170 header).
+        sqlx::query("UPDATE contacts SET tags = '[]'::jsonb WHERE tags IS NOT NULL AND jsonb_typeof(tags) IS DISTINCT FROM 'array'")
+            .execute(&pool)
+            .await
+            .expect("preflight reconciliation");
+
+        sqlx::raw_sql(MIGRATION_150)
+            .execute(&pool)
+            .await
+            .expect("150 applies cleanly after the preflight");
+        sqlx::raw_sql(MIGRATION_170)
+            .execute(&pool)
+            .await
+            .expect("170 applies after 150");
+        sqlx::raw_sql(MIGRATION_171)
+            .execute(&pool)
+            .await
+            .expect("171 applies after 170");
+
+        let stored: Vec<serde_json::Value> =
+            sqlx::query_scalar("SELECT tags FROM contacts WHERE tenant_id = $1 ORDER BY email")
+                .bind(tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("read back tags");
+        assert_eq!(
+            stored,
+            vec![serde_json::json!([]), serde_json::json!([])],
+            "preflight-reconciled scalars land on the canonical empty array"
+        );
+
+        pool.close().await;
+    }
+
+    /// F07/migration 171 legacy backfill: on the 075 shape (which HAS an
+    /// unconstrained metadata column), object values survive verbatim and
+    /// every nonobject value is reconciled to NULL — the deliberate policy
+    /// documented in the migration header.
+    #[tokio::test]
+    async fn migration_171_backfills_legacy_metadata_conservatively() {
+        let Some(pool) = isolated_pool("metadata").await else {
+            eprintln!("skipping migration_171_backfills_legacy_metadata_conservatively: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        sqlx::raw_sql(
+            "CREATE TABLE contacts (
+                id         UUID PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                email      TEXT NOT NULL,
+                tags       JSONB,
+                metadata   JSONB,
+                status     TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("075-shape contacts table");
+
+        let tenant = "test-f07-metadata";
+        for (n, metadata) in [
+            serde_json::json!({"tier": "enterprise", "k": 1}), // object: keep
+            serde_json::json!("scalar"),                       // scalar: NULL
+            serde_json::json!([1, 2]),                         // array: NULL
+            serde_json::Value::Null,                           // null: stays NULL
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, metadata) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(format!("m{n}@x.ee"))
+            .bind(metadata)
+            .execute(&pool)
+            .await
+            .expect("seed legacy metadata value");
+        }
+
+        for migration in [MIGRATION_150, MIGRATION_170, MIGRATION_171] {
+            sqlx::raw_sql(migration)
+                .execute(&pool)
+                .await
+                .expect("canonical chain applies over the 075 shape");
+        }
+
+        let stored: Vec<Option<serde_json::Value>> =
+            sqlx::query_scalar("SELECT metadata FROM contacts WHERE tenant_id = $1 ORDER BY email")
+                .bind(tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("read back reconciled metadata");
+        assert_eq!(
+            stored,
+            vec![
+                Some(serde_json::json!({"tier": "enterprise", "k": 1})),
+                None,
+                None,
+                None,
+            ],
+            "objects preserved, nonobjects reconciled to NULL (deliberate 171 policy)"
+        );
+
+        pool.close().await;
+    }
+}
+
+// ─── F07/F88 canonical CRUD tests ──────────────────────────────
+//
+// Handler-level CRUD against a FRESH CANONICAL database provisioned
+// through the shared migrator fixture (audit F01) — no hand-written DDL
+// that could invent columns production lacks. Covers the finding's
+// acceptance case: fresh migrations → create → list → get → update →
+// import (bulk + CSV) → delete, with populated metadata/tags, a second
+// tenant for isolation, and invalid-UUID ids returning 400 (never 500).
+
+#[cfg(test)]
+mod canonical_crud_tests {
+    use super::*;
+    use crate::middleware::auth::AuthUser;
+
+    fn auth_for(tenant: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.into(),
+            user_id: Some(format!("user-{tenant}")),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn create(
+        state: &AppState,
+        tenant: &str,
+        email: &str,
+        name: Option<&str>,
+        tags: Option<Vec<String>>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(StatusCode, Json<ContactResponse>), ApiError> {
+        create_contact(
+            State(state.clone()),
+            auth_for(tenant),
+            Json(CreateContactRequest {
+                email: email.into(),
+                name: name.map(Into::into),
+                tags,
+                metadata,
+            }),
+        )
+        .await
+    }
+
+    async fn tags_of(state: &AppState, tenant: &str, id: &str) -> serde_json::Value {
+        get_contact(State(state.clone()), auth_for(tenant), Path(id.into()))
+            .await
+            .expect("get contact")
+            .0
+            .tags
+    }
+
+    /// The finding's full walk, both tenants, all write paths.
+    #[tokio::test]
+    async fn canonical_crud_metadata_tags_two_tenants_and_uuid_boundary() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_crud_walk").await else {
+            eprintln!("skipping canonical_crud_metadata_tags_two_tenants_and_uuid_boundary: TEST_DATABASE_URL not set");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant_a = "ten_contacts_crud_a";
+        let tenant_b = "ten_contacts_crud_b";
+
+        // ── create (tenant A): tags + populated metadata round-trip.
+        let (status, created) = create(
+            &state,
+            tenant_a,
+            "alice@example.com",
+            Some("Alice"),
+            Some(vec!["vip".into(), "beta".into()]),
+            Some(serde_json::json!({"tier": "enterprise", "external_id": "x-1"})),
+        )
+        .await
+        .expect("create must succeed on the canonical schema (F07: metadata exists)");
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            Uuid::parse_str(&created.id).is_ok(),
+            "DTO id is a UUID string"
+        );
+        assert_eq!(created.email, "alice@example.com");
+        assert_eq!(created.tags, serde_json::json!(["vip", "beta"]));
+        assert_eq!(
+            created.metadata.as_ref(),
+            Some(&serde_json::json!({"tier": "enterprise", "external_id": "x-1"}))
+        );
+        let alice_id = created.id.clone();
+
+        // Absent tags/metadata land on the canonical defaults.
+        let (_, minimal) = create(&state, tenant_a, "bob@example.com", None, None, None)
+            .await
+            .expect("create without tags/metadata");
+        assert_eq!(minimal.tags, serde_json::json!([]));
+        assert_eq!(minimal.metadata, None);
+
+        // Scalar metadata is a 422, not a CHECK violation surfaced as 500.
+        let err = create(
+            &state,
+            tenant_a,
+            "carol@example.com",
+            None,
+            None,
+            Some(serde_json::json!("scalar")),
+        )
+        .await
+        .expect_err("scalar metadata must be rejected");
+        assert!(matches!(err, ApiError::Validation(_)), "got {err:?}");
+
+        // Duplicate email within the tenant is 409.
+        let err = create(&state, tenant_a, "alice@example.com", None, None, None)
+            .await
+            .expect_err("duplicate email must conflict");
+        assert!(matches!(err, ApiError::Conflict(_)), "got {err:?}");
+
+        // ── tenant B: same email is allowed (per-tenant uniqueness).
+        let (_, other_tenant) = create(&state, tenant_b, "alice@example.com", None, None, None)
+            .await
+            .expect("same email in another tenant is a different contact");
+
+        // ── list: tenant A sees its two contacts; tenant B sees only its own.
+        let list_a = list_contacts(
+            State(state.clone()),
+            auth_for(tenant_a),
+            HeaderMap::new(),
+            Query(ListContactsQuery {
+                limit: 50,
+                offset: 0,
+                cursor: None,
+                tag: None,
+            }),
+        )
+        .await
+        .expect("list tenant A");
+        let body = axum::body::to_bytes(list_a.into_body(), 1 << 20)
+            .await
+            .expect("list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("list JSON");
+        let data_a = json["data"].as_array().expect("data array");
+        assert_eq!(data_a.len(), 2, "tenant A sees exactly its contacts");
+        assert!(data_a.iter().all(|row| row["email"] != "david@example.com"));
+
+        let list_b = list_contacts(
+            State(state.clone()),
+            auth_for(tenant_b),
+            HeaderMap::new(),
+            Query(ListContactsQuery {
+                limit: 50,
+                offset: 0,
+                cursor: None,
+                tag: None,
+            }),
+        )
+        .await
+        .expect("list tenant B");
+        let body = axum::body::to_bytes(list_b.into_body(), 1 << 20)
+            .await
+            .expect("list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("list JSON");
+        let data_b = json["data"].as_array().expect("data array");
+        assert_eq!(data_b.len(), 1, "tenant B never sees tenant A's rows");
+        assert_eq!(data_b[0]["id"], serde_json::json!(other_tenant.id));
+
+        // ── get: same-tenant id resolves; cross-tenant id is 404.
+        let fetched = get_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(alice_id.clone()),
+        )
+        .await
+        .expect("get by canonical UUID id");
+        assert_eq!(fetched.email, "alice@example.com");
+        assert_eq!(
+            fetched.metadata.as_ref(),
+            Some(&serde_json::json!({"tier": "enterprise", "external_id": "x-1"}))
+        );
+        let err = get_contact(
+            State(state.clone()),
+            auth_for(tenant_b),
+            Path(alice_id.clone()),
+        )
+        .await
+        .expect_err("cross-tenant get must not find the row");
+        assert!(matches!(err, ApiError::NotFound(_)), "got {err:?}");
+
+        // ── UUID boundary (F07): invalid ids are 400 BadRequest, never 500.
+        for raw in [
+            "not-a-uuid",
+            "12345",
+            "00000000-0000-0000-0000-00000000000g",
+        ] {
+            let err = get_contact(State(state.clone()), auth_for(tenant_a), Path(raw.into()))
+                .await
+                .expect_err("invalid UUID must be rejected at the boundary");
+            assert!(
+                matches!(err, ApiError::BadRequest(_)),
+                "GET invalid UUID must be 400, got {err:?} for {raw:?}"
+            );
+            let err = update_contact(
+                State(state.clone()),
+                auth_for(tenant_a),
+                Path(raw.into()),
+                Json(UpdateContactRequest {
+                    name: None,
+                    tags: None,
+                    metadata: None,
+                    status: None,
+                }),
+            )
+            .await
+            .expect_err("invalid UUID must be rejected at the boundary");
+            assert!(
+                matches!(err, ApiError::BadRequest(_)),
+                "UPDATE invalid UUID must be 400, got {err:?}"
+            );
+            let err = delete_contact(State(state.clone()), auth_for(tenant_a), Path(raw.into()))
+                .await
+                .expect_err("invalid UUID must be rejected at the boundary");
+            assert!(
+                matches!(err, ApiError::BadRequest(_)),
+                "DELETE invalid UUID must be 400, got {err:?}"
+            );
+        }
+
+        // ── update: replace tags + metadata; absent fields keep values.
+        let updated = update_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(alice_id.clone()),
+            Json(UpdateContactRequest {
+                name: Some("Alice II".into()),
+                tags: Some(vec!["core".into()]),
+                metadata: Some(serde_json::json!({"tier": "smb"})),
+                status: None,
+            }),
+        )
+        .await
+        .expect("update on canonical schema");
+        assert_eq!(updated.name.as_deref(), Some("Alice II"));
+        assert_eq!(updated.tags, serde_json::json!(["core"]));
+        assert_eq!(
+            updated.metadata.as_ref(),
+            Some(&serde_json::json!({"tier": "smb"}))
+        );
+
+        // ── bulk import (F88): omitted tags PRESERVE, explicit [] clears,
+        //    new contacts with omitted tags get [].
+        let import = bulk_import(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Json(BulkImportRequest {
+                contacts: vec![
+                    // Existing tagged contact, tags omitted → tags preserved.
+                    CreateContactRequest {
+                        email: "alice@example.com".into(),
+                        name: Some("Alice III".into()),
+                        tags: None,
+                        metadata: None,
+                    },
+                    // Existing contact, explicit [] → tags cleared.
+                    CreateContactRequest {
+                        email: "bob@example.com".into(),
+                        name: None,
+                        tags: Some(vec![]),
+                        metadata: None,
+                    },
+                    // New contact, tags omitted → canonical [].
+                    CreateContactRequest {
+                        email: "david@example.com".into(),
+                        name: None,
+                        tags: None,
+                        metadata: None,
+                    },
+                    // New contact, tags supplied → stored.
+                    CreateContactRequest {
+                        email: "erin@example.com".into(),
+                        name: None,
+                        tags: Some(vec!["launch".into()]),
+                        metadata: Some(serde_json::json!({"src": "import"})),
+                    },
+                ],
+            }),
+        )
+        .await
+        .expect("bulk import on canonical schema")
+        .0;
+        assert_eq!(import.created, 2);
+        assert_eq!(import.updated, 2);
+        assert_eq!(import.failed, 0);
+        assert_eq!(
+            tags_of(&state, tenant_a, &alice_id).await,
+            serde_json::json!(["core"]),
+            "F88: omitted tags must PRESERVE existing tags"
+        );
+        let updated_alice = get_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(alice_id.clone()),
+        )
+        .await
+        .expect("alice after import");
+        assert_eq!(updated_alice.name.as_deref(), Some("Alice III"));
+        let bob_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM contacts WHERE tenant_id = $1 AND email = 'bob@example.com'",
+        )
+        .bind(tenant_a)
+        .fetch_one(&pool)
+        .await
+        .expect("bob id");
+        assert_eq!(
+            tags_of(&state, tenant_a, &bob_id.to_string()).await,
+            serde_json::json!([]),
+            "bob had no tags; [] keeps []"
+        );
+        let david_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM contacts WHERE tenant_id = $1 AND email = 'david@example.com'",
+        )
+        .bind(tenant_a)
+        .fetch_one(&pool)
+        .await
+        .expect("david id");
+        assert_eq!(
+            tags_of(&state, tenant_a, &david_id.to_string()).await,
+            serde_json::json!([]),
+            "F88: new contact with omitted tags gets []"
+        );
+        let erin = get_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(
+                sqlx::query_scalar::<_, Uuid>(
+                    "SELECT id FROM contacts WHERE tenant_id = $1 AND email = 'erin@example.com'",
+                )
+                .bind(tenant_a)
+                .fetch_one(&pool)
+                .await
+                .expect("erin id")
+                .to_string(),
+            ),
+        )
+        .await
+        .expect("erin after import");
+        assert_eq!(erin.tags, serde_json::json!(["launch"]));
+        assert_eq!(
+            erin.metadata.as_ref(),
+            Some(&serde_json::json!({"src": "import"}))
+        );
+
+        // F88 direct clear: import [] over a TAGGED contact clears.
+        let import = bulk_import(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Json(BulkImportRequest {
+                contacts: vec![CreateContactRequest {
+                    email: "alice@example.com".into(),
+                    name: None,
+                    tags: Some(vec![]),
+                    metadata: None,
+                }],
+            }),
+        )
+        .await
+        .expect("explicit [] import")
+        .0;
+        assert_eq!(import.updated, 1);
+        assert_eq!(
+            tags_of(&state, tenant_a, &alice_id).await,
+            serde_json::json!([]),
+            "F88: explicit [] must CLEAR tags"
+        );
+
+        // ── CSV import: existing contact updated, tags untouched.
+        let csv = b"email,name\ndavid@example.com,David V\n";
+        let mut csv_headers = HeaderMap::new();
+        csv_headers.insert("content-type", "text/csv".parse().unwrap());
+        let imported = import_contacts(
+            State(state.clone()),
+            auth_for(tenant_a),
+            csv_headers,
+            axum::body::Bytes::from_static(csv),
+        )
+        .await
+        .expect("CSV import on canonical schema")
+        .0;
+        assert_eq!(imported["imported"], serde_json::json!(1));
+        let david = get_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(david_id.to_string()),
+        )
+        .await
+        .expect("david after CSV import");
+        assert_eq!(david.name.as_deref(), Some("David V"));
+
+        // ── delete: 204, then 404; tenant predicate identical.
+        let status = delete_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(alice_id.clone()),
+        )
+        .await
+        .expect("delete by UUID id");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let err = get_contact(
+            State(state.clone()),
+            auth_for(tenant_a),
+            Path(alice_id.clone()),
+        )
+        .await
+        .expect_err("deleted contact is gone");
+        assert!(matches!(err, ApiError::NotFound(_)));
+        // Tenant B's contact with the same email survives tenant A's delete.
+        let survives = get_contact(
+            State(state.clone()),
+            auth_for(tenant_b),
+            Path(other_tenant.id.clone()),
+        )
+        .await
+        .expect("tenant B contact survives");
+        assert_eq!(survives.email, "alice@example.com");
 
         pool.close().await;
     }

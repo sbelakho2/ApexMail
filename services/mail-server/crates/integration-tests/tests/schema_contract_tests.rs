@@ -94,19 +94,17 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
     // parallelism the concurrent DDL exhausted the cluster's shared lock
     // memory ("out of shared memory", migration 64). The chain is applied
     // once into the cluster's template; each test clones it. A provisioning
-    // FAILURE here panics rather than soft-skipping: this is a required
-    // gate (the F52 rule — missing infrastructure must not read as green).
+    // FAILURE panics rather than soft-skipping: this is a required gate
+    // (the F52 rule — missing infrastructure must not read as green, and
+    // the F01 Result contract makes configured failures explicit errors).
     match migrator::test_support::fresh_canonical_db(
         &format!("{server_part}/{db_only}"),
         &isolated_db,
     )
     .await
     {
-        Some(pool) => Some(pool),
-        None => panic!(
-            "schema-contract DB bootstrap: template-clone provisioning failed for \
-             {isolated_db} ({test_name})"
-        ),
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
     }
 }
 
@@ -314,11 +312,17 @@ async fn registration_test_app(pool: PgPool) -> Router {
     // on a dedicated database and seed the dkim-ready system sender.
     let (server_part, db_only) = database_url.rsplit_once('/').unwrap();
     let canonical_db = format!("{db_only}_register");
-    if let Some(canon_pool) =
-        migrator::test_support::fresh_canonical_db(&database_url, &canonical_db).await
-    {
-        seed_system_sender_domain(&canon_pool).await;
-        canon_pool.close().await;
+    // Provision through the REAL production migrator (audit F01) on a
+    // dedicated database and seed the dkim-ready system sender. The F01
+    // Result contract: a configured provisioning failure PANICS (never a
+    // silent skip); Ok(None) cannot occur here because the URL is present.
+    match migrator::test_support::fresh_canonical_db(&database_url, &canonical_db).await {
+        Ok(Some(canon_pool)) => {
+            seed_system_sender_domain(&canon_pool).await;
+            canon_pool.close().await;
+        }
+        Ok(None) => {}
+        Err(error) => panic!("{}", error.panic_message()),
     }
     let database_url = format!("{server_part}/{canonical_db}");
 
@@ -951,11 +955,17 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
         &uuid::Uuid::new_v4().simple().to_string()[..10]
     );
     // Provision through the REAL production migrator (audit F01) — the same
-    // embedded canonical chain the deploy gate applies.
-    if let Some(pool) = migrator::test_support::fresh_canonical_db(&raw, &register_db).await {
-        pool.close().await;
-    } else {
-        panic!("failed to provision canonical register database {register_db}");
+    // embedded canonical chain the deploy gate applies. F01 contract: a
+    // configured failure panics instead of skipping.
+    match migrator::test_support::fresh_canonical_db(&raw, &register_db).await {
+        Ok(Some(pool)) => {
+            pool.close().await;
+        }
+        Ok(None) => panic!(
+            "TEST_DATABASE_URL is configured but the canonical register database \
+             {register_db} could not be provisioned"
+        ),
+        Err(error) => panic!("{}", error.panic_message()),
     }
 
     // The concurrent INSERTs below race on the users unique constraint
@@ -1158,4 +1168,135 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
         "tenant deletion left rows behind in: {}",
         leftover_tables.join(", ")
     );
+}
+
+// ─── F89: incident-advice investigation query against the canonical schema ──
+
+/// The AI incident-advice tool generates an investigation query from the
+/// supported audit search interface and the identity audit_logs actually
+/// records. Validate the GENERATED SQL against the canonical schema: it
+/// must PREPARE (the old api_key_id output failed with 42703), and when
+/// EXECUTED with two tenants'/principals' recorded actions it must return
+/// only the intended tenant/principal/window evidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn incident_advice_query_validates_against_canonical_audit_schema() {
+    let Some(pool) = optional_pg_pool("incident_advice_audit_query").await else {
+        return;
+    };
+
+    // Generate the guidance through the public, RBAC-guarded tool surface.
+    let call = ai_service::tools::ToolCall {
+        tool: "generate_incident_timeline".into(),
+        params: serde_json::json!({"key_id": "key_f89", "exposure_hours": 24}),
+        tenant_id: None,
+        role: None,
+    };
+    let output = ai_service::tools::execute_tool(&call, "ten_f89", &ai_service::tools::Role::Admin);
+    assert!(
+        output.get("error").is_none(),
+        "tool must execute for an admin caller: {output}"
+    );
+    let investigation = &output["investigation"];
+    let sql = investigation["parameterized_sql"].as_str().expect("sql");
+    assert!(!sql.contains("api_key_id"), "no absent-column reference");
+
+    // The window is derived, not fixed — and the endpoint carries it.
+    let endpoint = investigation["apexmail_investigation_endpoint"]
+        .as_str()
+        .expect("endpoint");
+    assert!(endpoint.contains("from="));
+
+    // PREPARE against the canonical audit_logs: proves every referenced
+    // column exists (42703 otherwise). PREPARE/EXECUTE/DEALLOCATE are
+    // session-scoped, so pin ONE dedicated connection for all three.
+    let mut session = pool
+        .acquire()
+        .await
+        .expect("dedicated connection for the prepared statement");
+    sqlx::query(&format!(
+        "PREPARE f89_incident(text, text, timestamptz, timestamptz) AS {sql}"
+    ))
+    .execute(&mut *session)
+    .await
+    .expect("generated SQL must prepare against canonical audit_logs");
+
+    // Record actions under two tenants and principals, inside and outside
+    // the derived window, then EXECUTE the generated query: only the
+    // intended tenant/principal/window evidence comes back.
+    let now = chrono::Utc::now();
+    for (tenant, user, age_hours, id) in [
+        ("ten_f89", "user_a", 1, "f89-0001"),
+        ("ten_f89", "user_a", 5, "f89-0002"),
+        ("ten_f89", "user_b", 1, "f89-0003"),
+        ("ten_f89", "user_a", 48, "f89-0004"), // outside a 24h window
+        ("ten_f89_other", "user_a", 1, "f89-0005"), // other tenant
+    ] {
+        sqlx::query(
+            "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, outcome, timestamp, hash, signature)
+             VALUES ($1, $2, $3, 'read', 'settings', 'success', $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(user)
+        .bind(now - chrono::Duration::hours(age_hours))
+        .bind(format!("hash-{id}"))
+        .bind(format!("sig-{id}"))
+        .execute(&pool)
+        .await
+        .expect("seed audit row");
+    }
+
+    let window_start = now - chrono::Duration::hours(24);
+    // EXECUTE carries literal values ($n binds do not exist there); all
+    // four are test-controlled constants.
+    let execute_sql = format!(
+        "EXECUTE f89_incident('ten_f89', 'user_a', '{}', '{}')",
+        window_start.to_rfc3339(),
+        now.to_rfc3339()
+    );
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(&execute_sql)
+        .fetch_all(&mut *session)
+        .await
+        .expect("execute generated investigation query");
+    let mut ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        vec!["f89-0001", "f89-0002"],
+        "only the intended tenant + principal + window evidence"
+    );
+
+    // Principal NULL scope (API-key entries): the IS NOT DISTINCT FROM bind
+    // keeps them when scoping by tenant only.
+    sqlx::query(
+        "INSERT INTO audit_logs (id, tenant_id, user_id, action, resource, outcome, timestamp, hash, signature)
+         VALUES ('f89-0006', 'ten_f89', NULL, 'read', 'settings', 'success', NOW(), 'hash-x', 'sig-x')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed api-key (NULL principal) audit row");
+    // Window end slightly ahead of NOW(): the f89-0006 row was inserted
+    // after `now` was captured, and the query's upper bound is exclusive.
+    let execute_null_sql = format!(
+        "EXECUTE f89_incident('ten_f89', NULL, '{}', '{}')",
+        window_start.to_rfc3339(),
+        (now + chrono::Duration::minutes(1)).to_rfc3339()
+    );
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(&execute_null_sql)
+        .fetch_all(&mut *session)
+        .await
+        .expect("execute with NULL principal scope");
+    assert!(
+        rows.iter().any(|(id, _)| id == "f89-0006"),
+        "NULL principal bind must include API-key entries: {rows:?}"
+    );
+
+    sqlx::query("DEALLOCATE f89_incident")
+        .execute(&mut *session)
+        .await
+        .expect("deallocate");
+    drop(session);
+
+    pool.close().await;
 }

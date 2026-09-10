@@ -946,11 +946,17 @@ impl ContentScanner {
             }
         }
 
-        // Tenant-specific policies from DB
-        // L-04: Propagate DB errors instead of silently swallowing them
+        // Tenant-specific policies from DB.
+        // The canonical content_policies column is `enabled` (migration 092
+        // lineage) — the previous `active = true` predicate failed with
+        // 42703 and propagated out of policy loading, so scans never
+        // evaluated stored policies (audit F77).
+        // L-04: a policy-store outage propagates as an EXPLICIT error from
+        // analyze_policy (scan_email returns Err) — it is never swallowed
+        // into an empty policy set that would stamp scans "clean".
         let tenant_policies: Vec<(String, serde_json::Value)> = sqlx::query_as(
             "SELECT name, rules FROM content_policies
-             WHERE tenant_id = $1 AND active = true",
+             WHERE tenant_id = $1 AND enabled = true",
         )
         .bind(&content.tenant_id)
         .fetch_all(&self.db)
