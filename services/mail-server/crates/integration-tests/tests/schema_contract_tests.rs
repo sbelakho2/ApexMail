@@ -24,7 +24,7 @@ use api_server::{
 };
 use axum::Router;
 use deadpool_redis::Config as RedisConfig;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -88,46 +88,26 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         .collect();
     let suffix = &sanitized[..sanitized.len().min(max_suffix)];
     let isolated_db = format!("{db_only}{PREFIX}{suffix}");
-    let isolated_url = format!("{server_part}/{isolated_db}");
-    let admin_url = format!("{server_part}/postgres");
 
-    let admin = PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(30))
-        .connect(&admin_url)
-        .await
-        .unwrap_or_else(|error| {
-            panic!("schema-contract DB bootstrap: cannot connect to admin URL: {error}")
-        });
-    let create = async {
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
-        ))
-        .execute(&admin)
-        .await?;
-        sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
-            .execute(&admin)
-            .await
+    // Template-clone provisioning (migrator::test_support): applying the
+    // ~170-file chain per test was fine locally but at CI nextest
+    // parallelism the concurrent DDL exhausted the cluster's shared lock
+    // memory ("out of shared memory", migration 64). The chain is applied
+    // once into the cluster's template; each test clones it. A provisioning
+    // FAILURE here panics rather than soft-skipping: this is a required
+    // gate (the F52 rule — missing infrastructure must not read as green).
+    match migrator::test_support::fresh_canonical_db(
+        &format!("{server_part}/{db_only}"),
+        &isolated_db,
+    )
+    .await
+    {
+        Some(pool) => Some(pool),
+        None => panic!(
+            "schema-contract DB bootstrap: template-clone provisioning failed for \
+             {isolated_db} ({test_name})"
+        ),
     }
-    .await;
-    admin.close().await;
-    create.unwrap_or_else(|error| {
-        panic!("schema-contract DB bootstrap: cannot create {isolated_db}: {error}")
-    });
-
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&isolated_url)
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "schema-contract isolated DB ({isolated_url}) could not connect for \
-                 {test_name}: {error}"
-            )
-        });
-    apply_canonical_migrations(&pool).await;
-    Some(pool)
 }
 
 fn bounded_id(prefix: &str) -> String {
