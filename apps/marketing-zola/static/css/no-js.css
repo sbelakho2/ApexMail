@@ -222,6 +222,11 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
   color: rgb(var(--surface-500));
   cursor: pointer;
 }
+/* Dark cards: zinc-500 on zinc-950 is 4.12 — step up one shade. */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .billing-pill { color: rgb(var(--surface-600)); }
+}
+html.dark .billing-pill { color: rgb(var(--surface-600)); }
 .billing-pill:hover { color: rgb(var(--surface-950)); }
 .billing-pill:has(input:checked) {
   /* Theme-stable literals: --surface-950 flips to near-white in dark

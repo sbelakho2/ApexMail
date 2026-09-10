@@ -1685,8 +1685,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
       the small brand-mono index everywhere, never as body text. ── */
 .ix {
   font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
-  letter-spacing: 0.16em; color: rgb(var(--brand-500));
+  /* brand-600 on light cards (brand-500 is 3.61 — sub-AA for 10px);
+     brand-500 returns in dark where it sits on zinc-950 at 5.2. */
+  letter-spacing: 0.16em; color: rgb(var(--brand-600));
 }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .ix { color: rgb(var(--brand-500)); }
+}
+html.dark .ix { color: rgb(var(--brand-500)); }
 /* The centered "All features →" exit under the features grid: the arc
    label in the brand color (the eyebrow variant stays muted). Compound
    selector beats the base .k-arc-label color regardless of order. */
@@ -1778,8 +1784,14 @@ html.dark .stats-v-dim { color: rgb(var(--surface-600)); }
 }
 .ledger-feat .ix {
   font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
-  letter-spacing: 0.16em; color: rgb(var(--brand-500));
+  /* brand-600 on light cards (brand-500 is 3.61 — sub-AA for 10px);
+     brand-500 returns in dark where it sits on zinc-950 at 5.2. */
+  letter-spacing: 0.16em; color: rgb(var(--brand-600));
 }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .ix { color: rgb(var(--brand-500)); }
+}
+html.dark .ix { color: rgb(var(--brand-500)); }
 .ledger-feat .tag-slots { display: flex; gap: 2px; }
 .ledger-feat .tag-slots span {
   display: grid; place-items: center; min-width: 14px; height: 17px; padding: 0 3px;
