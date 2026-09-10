@@ -1750,7 +1750,10 @@ html.dark .stats-v-dim { color: rgb(var(--surface-600)); }
   display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap;
   font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
   letter-spacing: 0.16em; text-transform: uppercase;
-  color: rgb(var(--surface-500));
+  /* surface-600: one step darker than the old 500 so 10px mono clears
+     AA on surface-100 cards too; the token flip keeps dark themes on
+     the light shade via the dark overrides below. */
+  color: rgb(var(--surface-600));
 }
 .k-arc-label::before {
   content: ""; width: 17px; height: 11px; flex-shrink: 0;
