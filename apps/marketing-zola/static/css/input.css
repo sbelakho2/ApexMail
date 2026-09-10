@@ -1696,8 +1696,14 @@ html.dark .ix { color: rgb(var(--brand-500)); }
 /* The centered "All features →" exit under the features grid: the arc
    label in the brand color (the eyebrow variant stays muted). Compound
    selector beats the base .k-arc-label color regardless of order. */
-.k-arc-label.features-see-all { color: rgb(var(--brand-500)); }
-.k-arc-label.features-see-all:hover { color: rgb(var(--brand-600)); }
+.k-arc-label.features-see-all { color: rgb(var(--brand-600)); }
+.k-arc-label.features-see-all:hover { color: rgb(var(--brand-700)); }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .k-arc-label.features-see-all { color: rgb(var(--brand-500)); }
+  :root:not(.light) .k-arc-label.features-see-all:hover { color: rgb(var(--brand-400)); }
+}
+html.dark .k-arc-label.features-see-all { color: rgb(var(--brand-500)); }
+html.dark .k-arc-label.features-see-all:hover { color: rgb(var(--brand-400)); }
 
 /* ── The terminal panel (hero right column) ── */
 .term {
