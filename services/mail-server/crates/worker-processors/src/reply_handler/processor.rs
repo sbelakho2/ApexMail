@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 
 use super::classifier::classify;
 use super::types::{ActionType, ClassificationResult, InboundMessage, ReplyClassification};
-use crate::common::{ProcessorResult, ReplyHandlerConfig};
+use crate::common::{ProcessorError, ProcessorResult, ReplyHandlerConfig};
 
 /// Age at which a reply-handler claim is considered stale and may be
 /// reclaimed by any worker. Mirrors the analytics processor's 10-minute
@@ -50,7 +50,8 @@ const FETCH_MESSAGES_SQL: &str = r#"
                 LEFT(body_text, $2::int) as "bodyText",
                 LEFT(body_html, $2::int) as "bodyHtml",
                 headers, received_at as "receivedAt",
-                processed_at as "processedAt", classification
+                processed_at as "processedAt", classification,
+                message_id_header as "messageIdHeader"
         "#;
 
 /// The stale-claim reclaim bound as a SQL interval expression, derived
@@ -86,6 +87,11 @@ const RESET_CLAIM_SQL: &str = r#"
 pub struct ReplyHandler {
     db: PgPool,
     config: ReplyHandlerConfig,
+    /// F67: durable reply-analytics handoff (canonical reply_events model,
+    /// migration 159). Committed with inbound acceptance in
+    /// process_message_inner — an analytics failure fails the message so the
+    /// claim resets and the handoff retries idempotently.
+    reply_analytics: analytics::reply_tracking::ReplyTrackingService,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
     shutdown_notify: Arc<Notify>,
@@ -95,6 +101,7 @@ impl ReplyHandler {
     /// Create a new reply handler.
     pub fn new(db: PgPool, config: ReplyHandlerConfig) -> Self {
         Self {
+            reply_analytics: analytics::reply_tracking::ReplyTrackingService::new(db.clone()),
             db,
             config,
             is_running: AtomicBool::new(false),
@@ -295,6 +302,37 @@ impl ReplyHandler {
         } else {
             None
         };
+
+        // F67: commit the durable reply-analytics handoff WITH inbound
+        // acceptance — before the row is marked processed. A failure here
+        // fails the whole message (claim reset → retry), and the handoff is
+        // idempotent through restarts (tenant-qualified message identity),
+        // so a retry after a crash between the two writes collapses to one
+        // reply event. Messages without a tenant are skipped: analytics is
+        // tenant-scoped.
+        if let Some(tenant_id) = msg.tenant_id.as_deref() {
+            let in_reply_to = msg.in_reply_to();
+            let handoff = analytics::reply_tracking::InboundReplyHandoff {
+                inbound_id: &msg.id,
+                tenant_id,
+                message_id_header: msg.message_id_header.as_deref(),
+                in_reply_to: in_reply_to.as_deref(),
+                from_email: &msg.from_email,
+                subject: &msg.subject,
+                body,
+                headers: msg.analytics_headers(),
+                received_at: msg.received_at,
+            };
+            self.reply_analytics
+                .process_inbound_reply(&handoff)
+                .await
+                .map_err(|e| {
+                    ProcessorError::Internal(anyhow::anyhow!(
+                        "reply analytics handoff failed for {}: {e}",
+                        msg.id
+                    ))
+                })?;
+        }
 
         // Update the message record
         sqlx::query(MARK_PROCESSED_SQL)
@@ -508,5 +546,160 @@ mod tests {
             RESET_CLAIM_SQL.contains("SET processing = false, processing_at = NULL"),
             "reset must release the claim for immediate re-claim"
         );
+    }
+
+    // ── F67: durable reply-analytics handoff ───────────────────────────
+
+    /// The fetch must surface the stable provider/inbound event identity
+    /// (Message-ID header) to the analytics adapter.
+    #[test]
+    fn fetch_selects_the_message_id_header() {
+        assert!(
+            FETCH_MESSAGES_SQL.contains("message_id_header as \"messageIdHeader\""),
+            "the analytics handoff needs the inbound Message-ID"
+        );
+    }
+
+    /// Ingest a real inbound fixture through the production entry point,
+    /// retry it, and restart before consumption: exactly one reply event
+    /// appears and metrics update only for its tenant. DB-backed (unit test
+    /// so the private processing path is reachable); gated on
+    /// TEST_DATABASE_URL via the canonical migrator fixture.
+    #[tokio::test]
+    async fn inbound_reply_ingests_exactly_one_analytics_event_under_retry() {
+        let Some(pool) =
+            migrator::test_support::fresh_canonical_pool("worker_f67", "reply_handoff").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        // The inbound fixture: tenant-scoped, with canonical headers.
+        sqlx::query(
+            r#"
+            INSERT INTO inbound_messages
+                (id, tenant_id, from_email, to_email, subject, body_text,
+                 headers, message_id_header, received_at)
+            VALUES
+                ('inb_f67_1', 'tenant_f67', 'replier@example.com', 'sales@apex.example',
+                 'Re: proposal', 'Thanks, this looks great — one question: when can we start?',
+                 '{"message-id": "<repl-1@example.com>", "in-reply-to": "<orig-1@apex.example>",
+                   "auto-submitted": "auto-generated"}'::jsonb,
+                 '<repl-1@example.com>', NOW() - INTERVAL '1 minute')
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("seed inbound fixture");
+
+        let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+        // start() ensures the timestamped-claim column at startup; the test
+        // drives the fetch/process path directly so it does the same.
+        handler
+            .ensure_timestamped_claim_column()
+            .await
+            .expect("ensure claim column");
+
+        // Claim + process through the production entry point.
+        let messages = handler.fetch_messages(10).await.expect("fetch");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].message_id_header.as_deref(),
+            Some("<repl-1@example.com>")
+        );
+        let msg = messages.into_iter().next().unwrap();
+        handler
+            .process_message(msg)
+            .await
+            .expect("process commits the analytics handoff");
+
+        // Exactly one durable reply event, derived from the Message-ID.
+        let (count, tenant, recipient): (i64, String, String) =
+            sqlx::query_as("SELECT COUNT(*), MAX(tenant_id), MAX(recipient) FROM reply_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(tenant, "tenant_f67");
+        assert_eq!(recipient, "replier@example.com");
+        let (message_id, is_auto, in_reply_to): (String, bool, String) =
+            sqlx::query_as("SELECT message_id, is_auto_reply, in_reply_to FROM reply_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(message_id, "<repl-1@example.com>");
+        assert_eq!(in_reply_to, "<orig-1@apex.example>");
+        assert!(
+            is_auto,
+            "auto-submitted header must drive auto-reply detection"
+        );
+
+        // The inbound row is accepted (processed).
+        let processed: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT processed_at FROM inbound_messages WHERE id = 'inb_f67_1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            processed.is_some(),
+            "handoff committed WITH inbound acceptance"
+        );
+
+        // Restart + retry: nothing left to process, still one event.
+        let restarted = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+        let leftover = restarted
+            .fetch_messages(10)
+            .await
+            .expect("fetch after restart");
+        assert!(leftover.is_empty(), "accepted rows never re-process");
+
+        // Idempotency through the analytics path itself: replaying the same
+        // handoff (the crash-between-writes case) collapses to one event.
+        let analytics = analytics::reply_tracking::ReplyTrackingService::new(pool.clone());
+        let headers = std::collections::HashMap::from([(
+            "auto-submitted".to_string(),
+            "auto-generated".to_string(),
+        )]);
+        let handoff = analytics::reply_tracking::InboundReplyHandoff {
+            inbound_id: "inb_f67_1",
+            tenant_id: "tenant_f67",
+            message_id_header: Some("<repl-1@example.com>"),
+            in_reply_to: Some("<orig-1@apex.example>"),
+            from_email: "replier@example.com",
+            subject: "Re: proposal",
+            body: "Thanks, this looks great — one question: when can we start?",
+            headers,
+            received_at: chrono::Utc::now(),
+        };
+        analytics
+            .process_inbound_reply(&handoff)
+            .await
+            .expect("replayed handoff");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reply_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "replay must not add a second event");
+
+        // Metrics update only for the owning tenant.
+        let metrics = analytics
+            .get_metrics("tenant_f67", 7)
+            .await
+            .expect("metrics");
+        assert_eq!(metrics.total_replies, 1);
+        let other = analytics
+            .get_metrics("tenant_other", 7)
+            .await
+            .expect("metrics for another tenant");
+        assert_eq!(other.total_replies, 0);
+
+        // Readiness/lag + explicit no-events state.
+        let status = analytics.status().await;
+        assert!(status.schema_ready);
+        assert_eq!(status.pending_inbound, 0);
+        assert!(status.has_events);
+        assert!(status.latest_reply_at.is_some());
+
+        pool.close().await;
     }
 }

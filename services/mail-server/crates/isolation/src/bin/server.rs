@@ -87,11 +87,20 @@ async fn main() -> anyhow::Result<()> {
     // Build services
     let tenant = TenantService::new(db.clone(), config.clone());
     let mut isolation = DataIsolationService::new(db.clone());
+    // F63: initialization failures (policy store unreadable, access-attempt
+    // audit relation missing) are STARTUP errors. The previously logged-and-
+    // continued behavior served requests with an unenforceable policy set and
+    // a silently discarded audit trail.
     if let Err(e) = isolation.initialize().await {
         error!(error = %e, "Failed to initialize data isolation policies");
+        return Err(e);
     }
     let security_config = config.security.clone();
     let encryption = EncryptionService::new(db.clone(), security_config.clone());
+    // F63: load keys + field-encryption policies (iso_encryption_keys /
+    // iso_encryption_policies) before serving. A missing relation or
+    // unreadable key store is a readiness failure, not a runtime warn.
+    encryption.initialize().await?;
     let rate_limit = RateLimitService::new(redis.clone());
     let audit = AuditService::new(db.clone(), security_config);
 
@@ -186,10 +195,12 @@ async fn shutdown_signal() {
 /// Background cron jobs:/// 1. Audit buffer flush — every 5s
 /// 2. Audit log cleanup — daily (every 24h)
 /// 3. Encryption key rotation check — every 60min
+/// 4. Access-attempt audit retention cleanup — daily (F63)
 async fn run_cron_jobs(state: Arc<AppState>) {
     let mut flush_ticker = interval(Duration::from_secs(5));
     let mut cleanup_ticker = interval(Duration::from_secs(86400));
     let mut rotation_ticker = interval(Duration::from_secs(3600));
+    let mut access_cleanup_ticker = interval(Duration::from_secs(86400));
 
     loop {
         tokio::select! {
@@ -202,6 +213,15 @@ async fn run_cron_jobs(state: Arc<AppState>) {
                         match state.audit.cleanup().await {
                             Ok(n) if n > 0 => info!(count = n, "Audit log cleanup completed"),
                             Err(e) => error!(error = %e, "Audit log cleanup failed"),
+                            _ => {}
+                        }
+                    }
+                    _ = access_cleanup_ticker.tick() => {
+                        // F63: iso_access_attempts is append-only per decision —
+                        // retention keeps it bounded.
+                        match state.isolation.cleanup_access_attempts(365).await {
+                            Ok(n) if n > 0 => info!(count = n, "Access-attempt audit cleanup completed"),
+                            Err(e) => error!(error = %e, "Access-attempt audit cleanup failed"),
                             _ => {}
                         }
                     }

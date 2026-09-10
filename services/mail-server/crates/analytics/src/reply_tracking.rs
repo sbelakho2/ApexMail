@@ -4,6 +4,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use moka::sync::Cache;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::LazyLock;
@@ -321,6 +322,126 @@ impl ReplyTrackingService {
 
         Ok(next_thread_depth(depth))
     }
+
+    /// F67: adapter from authenticated inbound reply ingestion to the durable
+    /// reply-analytics operation. Maps the inbound processor's row onto the
+    /// canonical ReplyEvent contract and commits it through
+    /// [`Self::process_reply`]: tenant-scoped, canonical message identity,
+    /// replier as recipient, the inbound headers (auto-reply detection), and
+    /// a STABLE provider/inbound event id — the RFC 5322 Message-ID header
+    /// when present, else the inbound row id (both survive restarts and
+    /// re-delivery collapses through the same event_id hash).
+    pub async fn process_inbound_reply(
+        &self,
+        handoff: &InboundReplyHandoff<'_>,
+    ) -> anyhow::Result<ProcessedReply> {
+        let canonical_message_id = handoff
+            .message_id_header
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("inbound:{}", handoff.inbound_id));
+        let event = ReplyEvent {
+            message_id: canonical_message_id,
+            in_reply_to: handoff.in_reply_to.unwrap_or_default().to_string(),
+            tenant_id: handoff.tenant_id.to_string(),
+            recipient: handoff.from_email.to_string(),
+            subject: handoff.subject.to_string(),
+            body: handoff.body.to_string(),
+            headers: handoff.headers.clone(),
+            timestamp: handoff.received_at,
+        };
+        self.process_reply(&event).await
+    }
+
+    /// F67: ingestion readiness and lag. `schema_ready` is false when the
+    /// canonical reply_events relation (migration 159) is missing — the
+    /// component must not pretend to ingest. `pending_inbound` is the count
+    /// of accepted-but-unprocessed inbound messages (the analytics handoff's
+    /// backlog); `latest_reply_at` makes the explicit no-events state
+    /// distinguishable from "events exist but are old".
+    pub async fn status(&self) -> ReplyAnalyticsStatus {
+        let schema_ready = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.reply_events')::text",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        let pending_inbound = if sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.inbound_messages')::text",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+        {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM inbound_messages WHERE processed_at IS NULL",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let latest_reply_at = if schema_ready {
+            sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+                "SELECT MAX(timestamp) FROM reply_events",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(None)
+        } else {
+            None
+        };
+
+        ReplyAnalyticsStatus {
+            schema_ready,
+            pending_inbound,
+            latest_reply_at,
+            has_events: latest_reply_at.is_some(),
+        }
+    }
+}
+
+/// F67: inbound → analytics handoff contract. Built by the authenticated
+/// inbound reply processor (worker reply_handler) from its claimed
+/// `inbound_messages` row.
+#[derive(Debug, Clone)]
+pub struct InboundReplyHandoff<'a> {
+    /// The inbound row's primary key (stable across redelivery).
+    pub inbound_id: &'a str,
+    /// Tenant that accepted the message (None rows are not handed off).
+    pub tenant_id: &'a str,
+    /// RFC 5322 Message-ID header of the reply, when captured.
+    pub message_id_header: Option<&'a str>,
+    /// In-Reply-To header, when captured.
+    pub in_reply_to: Option<&'a str>,
+    /// The replier's address (the `from` of the inbound message).
+    pub from_email: &'a str,
+    pub subject: &'a str,
+    pub body: &'a str,
+    /// Selected inbound headers (lower-cased names → values) feeding
+    /// auto-reply detection.
+    pub headers: std::collections::HashMap<String, String>,
+    pub received_at: chrono::DateTime<Utc>,
+}
+
+/// F67: explicit readiness/lag/no-events state for the reply-analytics
+/// component.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyAnalyticsStatus {
+    /// The canonical reply_events relation exists.
+    pub schema_ready: bool,
+    /// Accepted inbound messages not yet processed (handoff backlog).
+    pub pending_inbound: i64,
+    /// Newest persisted reply event, if any.
+    pub latest_reply_at: Option<chrono::DateTime<Utc>>,
+    /// Explicit no-events state (false = no reply has ever been ingested).
+    pub has_events: bool,
 }
 
 /// Processed reply result.

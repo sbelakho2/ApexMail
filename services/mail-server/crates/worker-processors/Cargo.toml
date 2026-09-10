@@ -50,6 +50,9 @@ apexmail-lib = { path = "../apexmail-lib" }
 # F13: the shared unsubscribe-token codec — the outgoing pipeline generates
 # v2 tokens with the SAME codec the tracking-service verifies them with.
 tracking-service = { path = "../tracking-service" }
+# F67: the inbound reply processor hands accepted replies to the durable
+# reply-analytics model (analytics::reply_tracking, migration 159).
+analytics = { path = "../analytics" }
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 
@@ -97,3 +100,9 @@ aws-sdk-sesv2.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
+# F67 DB-backed handoff test: canonical schema via the production migrator.
+migrator = { path = "../migrator" }
+# C: cross-crate round-trip tests — worker-encoded tracking tokens must
+# decode with the tracking-service codec under the same secret.
+tracking-service = { path = "../tracking-service" }
+

@@ -67,6 +67,151 @@ impl CampaignAutopilot {
         })
     }
 
+    /// F85: component readiness — the canonical arm store (migration 197)
+    /// must exist before optimization reads/writes run.
+    pub async fn schema_ready(&self) -> bool {
+        sqlx::query_scalar::<_, Option<String>>("SELECT to_regclass('public.campaign_arms')::text")
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// F85: create arms for a campaign through the production workflow.
+    /// Idempotent: existing (campaign, arm_index) rows are left untouched,
+    /// so re-invoking with the same templates never resets accumulated
+    /// statistics. New arms start at the uniform Beta(1, 1) prior.
+    pub async fn ensure_arms(
+        &self,
+        tenant_id: &str,
+        campaign_id: &str,
+        template_ids: &[String],
+    ) -> anyhow::Result<()> {
+        if template_ids.is_empty() {
+            anyhow::bail!("cannot create zero arms for campaign {campaign_id}");
+        }
+        if !self.campaign_owned(tenant_id, campaign_id).await? {
+            anyhow::bail!("campaign {campaign_id} not found for tenant {tenant_id}");
+        }
+        let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
+            .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
+
+        let mut tx = self.pool.begin().await?;
+        for (arm_index, template_id) in template_ids.iter().enumerate() {
+            let index = i32::try_from(arm_index)?;
+            sqlx::query(
+                "INSERT INTO campaign_arms \
+                     (campaign_id, arm_index, template_id, alpha, beta, trials, successes) \
+                 VALUES ($1, $2, $3, 1.0, 1.0, 0, 0) \
+                 ON CONFLICT (campaign_id, arm_index) DO NOTHING",
+            )
+            .bind(campaign_uuid)
+            .bind(index)
+            .bind(template_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// F85: idempotent outcome event. `outcome_key` is the caller's stable
+    /// logical identity for the observation (e.g. "<message-id>:opened");
+    /// replaying it (including after a restart) moves the arm counters at
+    /// most once. The dedup insert and the counter update share one
+    /// transaction, and a missing arm is an error, not a silent no-op.
+    pub async fn record_outcome(
+        &self,
+        tenant_id: &str,
+        campaign_id: &str,
+        arm_idx: usize,
+        success: bool,
+        outcome_key: &str,
+    ) -> anyhow::Result<bool> {
+        let arm_index = i32::try_from(arm_idx)
+            .map_err(|_| anyhow::anyhow!("arm index {arm_idx} out of range"))?;
+        let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
+            .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
+        if !self.campaign_owned(tenant_id, campaign_id).await? {
+            anyhow::bail!("campaign {campaign_id} not found for tenant {tenant_id}");
+        }
+
+        let (alpha_inc, beta_inc, success_inc) = if success {
+            (1.0_f64, 0.0_f64, 1_i64)
+        } else {
+            (0.0, 1.0, 0)
+        };
+
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT INTO campaign_arm_outcomes (outcome_key, campaign_id, arm_index, success) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (outcome_key) DO NOTHING",
+        )
+        .bind(outcome_key)
+        .bind(campaign_uuid)
+        .bind(arm_index)
+        .bind(success)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+
+        if inserted {
+            let updated = sqlx::query(
+                "UPDATE campaign_arms \
+                 SET alpha = alpha + $1, beta = beta + $2, \
+                     trials = trials + 1, successes = successes + $3, updated_at = NOW() \
+                 WHERE campaign_id = $4 AND arm_index = $5",
+            )
+            .bind(alpha_inc)
+            .bind(beta_inc)
+            .bind(success_inc)
+            .bind(campaign_uuid)
+            .bind(arm_index)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if updated != 1 {
+                anyhow::bail!(
+                    "outcome {outcome_key}: arm {arm_idx} of campaign {campaign_id} \
+                     does not exist — create arms through the campaign workflow first"
+                );
+            }
+        }
+        tx.commit().await?;
+
+        // Invalidate cache — strictly best-effort: a Redis outage must not
+        // fail a committed outcome (the cache key carries no authority).
+        let cache_key = format!("autopilot:{campaign_id}");
+        if let Ok(mut conn) = self.redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&cache_key)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        Ok(inserted)
+    }
+
+    /// Tenant ownership verification for a campaign.
+    async fn campaign_owned(&self, tenant_id: &str, campaign_id: &str) -> anyhow::Result<bool> {
+        // Canonical campaign identity is UUID — bind the parsed value (a
+        // text parameter against the uuid column is an operator error).
+        let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
+            .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
+        let owned: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sales_campaigns WHERE id = $1 AND tenant_id = $2)",
+        )
+        .bind(campaign_uuid)
+        .bind(tenant_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(owned)
+    }
+
     /// Update arm statistics with new observation.
     /// `tenant_id` is required to verify campaign ownership before mutating arms.
     pub async fn update_arm(
@@ -79,41 +224,46 @@ impl CampaignAutopilot {
         let (alpha_inc, beta_inc) = if success { (1.0, 0.0) } else { (0.0, 1.0) };
 
         // Verify tenant ownership before mutation
-        let owned: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(campaign_id)
-        .bind(tenant_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?
-            > 0;
-
-        if !owned {
+        if !self.campaign_owned(tenant_id, campaign_id).await? {
             anyhow::bail!("campaign {campaign_id} not found for tenant {tenant_id}");
         }
 
-        sqlx::query(
+        // Checked arm-index conversion: an out-of-range index is an error,
+        // never a wrapped counter.
+        let arm_index = i32::try_from(arm_idx)
+            .map_err(|_| anyhow::anyhow!("arm index {arm_idx} out of range"))?;
+        let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
+            .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
+
+        // F85: verify the mutation actually landed — a missing arm used to
+        // report success while updating nothing.
+        let updated = sqlx::query(
             "UPDATE campaign_arms SET alpha = alpha + $1, beta = beta + $2, \
-             trials = trials + 1, successes = successes + $3 \
+             trials = trials + 1, successes = successes + $3, updated_at = NOW() \
              WHERE campaign_id = $4 AND arm_index = $5",
         )
         .bind(alpha_inc)
         .bind(beta_inc)
         .bind(if success { 1_i64 } else { 0 })
-        .bind(campaign_id)
-        .bind(arm_idx as i32)
+        .bind(campaign_uuid)
+        .bind(arm_index)
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+        if updated != 1 {
+            anyhow::bail!(
+                "arm {arm_idx} of campaign {campaign_id} does not exist (updated {updated} rows)"
+            );
+        }
 
-        // Invalidate cache
+        // Invalidate cache — best-effort (see record_outcome).
         let cache_key = format!("autopilot:{campaign_id}");
-        let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-        redis::cmd("DEL")
-            .arg(&cache_key)
-            .query_async::<()>(&mut *conn)
-            .await
-            .ok();
+        if let Ok(mut conn) = self.redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&cache_key)
+                .query_async(&mut *conn)
+                .await;
+        }
 
         Ok(())
     }
@@ -125,6 +275,11 @@ impl CampaignAutopilot {
         tenant_id: &str,
         campaign_id: &str,
     ) -> anyhow::Result<OptimizationReport> {
+        // Ownership first: a foreign tenant gets an explicit error, not an
+        // empty report indistinguishable from a campaign without arms.
+        if !self.campaign_owned(tenant_id, campaign_id).await? {
+            anyhow::bail!("campaign {campaign_id} not found for tenant {tenant_id}");
+        }
         let arms = self.load_arms(tenant_id, campaign_id).await?;
         let selection_probs = monte_carlo_selection_probs(&arms).await?;
         let intervals: Vec<(f64, f64)> = arms
@@ -157,6 +312,9 @@ impl CampaignAutopilot {
         tenant_id: &str,
         campaign_id: &str,
     ) -> anyhow::Result<Vec<TemplateArm>> {
+        // Canonical campaign identity is UUID — parse once at the boundary.
+        let campaign_uuid = uuid::Uuid::parse_str(campaign_id)
+            .map_err(|e| anyhow::anyhow!("campaign id must be a canonical UUID: {e}"))?;
         // Join with sales_campaigns to enforce tenant isolation
         let rows = sqlx::query_as::<_, (String, f64, f64, i64, i64, i32)>(
             "SELECT a.template_id, a.alpha, a.beta, a.trials, a.successes, a.arm_index \
@@ -165,7 +323,7 @@ impl CampaignAutopilot {
              WHERE a.campaign_id = $1 AND c.tenant_id = $2 \
              ORDER BY a.arm_index",
         )
-        .bind(campaign_id)
+        .bind(campaign_uuid)
         .bind(tenant_id)
         .fetch_all(&self.pool)
         .await?;

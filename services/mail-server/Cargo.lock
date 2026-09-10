@@ -178,6 +178,7 @@ dependencies = [
  "dotenvy",
  "hmac 0.12.1",
  "mail-common",
+ "migrator",
  "moka",
  "observability-service",
  "parking_lot",
@@ -285,6 +286,7 @@ dependencies = [
  "anyhow",
  "apexmail-lib",
  "chrono",
+ "migrator",
  "once_cell",
  "prometheus",
  "serde",
@@ -3855,6 +3857,7 @@ dependencies = [
  "deadpool-redis",
  "dotenvy",
  "flate2",
+ "migrator",
  "observability-service",
  "rand 0.9.4",
  "redis",
@@ -5096,6 +5099,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac 0.12.1",
+ "migrator",
  "observability-service",
  "rand 0.9.4",
  "redis",
@@ -8755,6 +8759,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "sales-autopilot"
 version = "0.1.0"
 dependencies = [
+ "analytics",
  "anyhow",
  "apexmail-db",
  "apexmail-lib",
@@ -12276,6 +12281,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
+ "analytics",
  "anyhow",
  "apexmail-lib",
  "async-trait",
@@ -12296,6 +12302,7 @@ dependencies = [
  "mail-send",
  "metrics",
  "metrics-exporter-prometheus",
+ "migrator",
  "moka",
  "nonzero_ext",
  "observability-service",

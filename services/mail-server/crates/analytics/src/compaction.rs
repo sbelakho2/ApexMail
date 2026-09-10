@@ -75,6 +75,12 @@ impl CompactionWorker {
         .await?;
 
         if tenants.is_empty() {
+            // F83: retention still runs when there is nothing to migrate —
+            // the cold tier must be pruned on schedule, not only after a
+            // migration batch (the early return used to skip it).
+            if self.config.cold_retention_days > 0 {
+                self.cleanup_cold_storage().await?;
+            }
             return Ok(CompactionStatus {
                 rows_migrated: 0,
                 rows_deleted: 0,
@@ -93,12 +99,22 @@ impl CompactionWorker {
             let mut manifested = load_manifested_ids(&self.storage_path, tenant_id).await;
 
             loop {
+                // F83: provider/region do not exist as columns on the
+                // canonical PostgreSQL events table. They are derived from
+                // VALIDATED metadata only: jsonb_typeof(...) = 'string'
+                // guards the extraction so a number/object/null metadata
+                // value yields NULL instead of its JSON text encoding — no
+                // invented values, no 42703.
                 let rows = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     sqlx::query_as::<_, EventRow>(
                         "SELECT id, tenant_id, message_id, event_type, recipient, timestamp, \
                          metadata, ip_address, user_agent, link_id, bounce_type, bounce_subtype, \
-                         provider, region, campaign_id \
+                         CASE WHEN jsonb_typeof(metadata->'provider') = 'string' \
+                              THEN metadata->>'provider' END AS provider, \
+                         CASE WHEN jsonb_typeof(metadata->'region') = 'string' \
+                              THEN metadata->>'region' END AS region, \
+                         campaign_id \
                          FROM events WHERE tenant_id = $1 AND timestamp < $2 \
                          ORDER BY timestamp LIMIT $3",
                     )
@@ -142,13 +158,13 @@ impl CompactionWorker {
                     total_bytes += bytes;
 
                     let dir = jsonl_dir(&self.storage_path, pending[0]);
-                    write_batch_manifest(&dir, &file, pending.iter().map(|r| r.id)).await?;
-                    manifested.extend(pending.iter().map(|r| r.id));
+                    write_batch_manifest(&dir, &file, pending.iter().map(|r| r.id.clone())).await?;
+                    manifested.extend(pending.iter().map(|r| r.id.clone()));
                 }
 
                 // Delete migrated rows (both fresh writes and ids whose cold
                 // copy already existed from an interrupted run).
-                let ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.id).collect();
+                let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
                 sqlx::query("DELETE FROM events WHERE id = ANY($1)")
                     .bind(&ids)
                     .execute(&self.pool)
@@ -331,8 +347,8 @@ pub fn compute_checksum(data: &[u8]) -> String {
 struct BatchManifest {
     /// Cold JSONL file name (inside the manifest's own directory).
     file: String,
-    /// Event ids contained in that file.
-    ids: Vec<uuid::Uuid>,
+    /// Event ids contained in that file (canonical text ids).
+    ids: Vec<String>,
 }
 
 /// Directory a batch's JSONL (+ manifest) lives in:
@@ -347,7 +363,7 @@ fn jsonl_dir(storage_path: &str, first_row: &EventRow) -> String {
 async fn write_batch_manifest(
     dir: &str,
     file: &str,
-    ids: impl Iterator<Item = uuid::Uuid>,
+    ids: impl Iterator<Item = String>,
 ) -> anyhow::Result<()> {
     let manifest = BatchManifest {
         file: file.to_string(),
@@ -382,7 +398,7 @@ fn parse_manifest(data: &[u8]) -> Option<BatchManifest> {
 async fn load_manifested_ids(
     storage_path: &str,
     tenant_id: &str,
-) -> std::collections::HashSet<uuid::Uuid> {
+) -> std::collections::HashSet<String> {
     let storage_path = storage_path.to_string();
     let tenant_id = tenant_id.to_string();
     tokio::task::spawn_blocking(move || scan_manifested_ids(&storage_path, &tenant_id))
@@ -391,10 +407,7 @@ async fn load_manifested_ids(
 }
 
 /// Synchronous core of [`load_manifested_ids`] (runs on the blocking pool).
-fn scan_manifested_ids(
-    storage_path: &str,
-    tenant_id: &str,
-) -> std::collections::HashSet<uuid::Uuid> {
+fn scan_manifested_ids(storage_path: &str, tenant_id: &str) -> std::collections::HashSet<String> {
     let mut ids = std::collections::HashSet::new();
     let tenant_dir = std::path::Path::new(storage_path).join(tenant_id);
     let year_entries = match std::fs::read_dir(&tenant_dir) {
@@ -475,7 +488,7 @@ mod tests {
 
     // ── F13:idempotent compaction manifests ───────────────────────────
 
-    fn example_row(id: uuid::Uuid, ip: Option<&str>) -> EventRow {
+    fn example_row(id: String, ip: Option<&str>) -> EventRow {
         EventRow {
             id,
             tenant_id: "tenant_a".into(),
@@ -497,7 +510,10 @@ mod tests {
 
     #[test]
     fn manifest_roundtrips_through_json() {
-        let ids: Vec<uuid::Uuid> = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let ids: Vec<String> = vec![
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ];
         let manifest = BatchManifest {
             file: "events_123.jsonl".into(),
             ids: ids.clone(),
@@ -528,7 +544,10 @@ mod tests {
         let dir = root.join("tenant_a/2026/08");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let ids: Vec<uuid::Uuid> = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let ids: Vec<String> = vec![
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ];
         let manifest = BatchManifest {
             file: "events_1.jsonl".into(),
             ids: ids.clone(),
@@ -563,14 +582,14 @@ mod tests {
     /// GDPR:the cold JSONL line carries the MASKED IP, never the full one.
     #[test]
     fn cold_jsonl_line_masks_client_ip() {
-        let row = example_row(uuid::Uuid::new_v4(), Some("203.0.113.178"));
+        let row = example_row(uuid::Uuid::new_v4().to_string(), Some("203.0.113.178"));
         let mut masked = row.clone();
         masked.ip_address = crate::ip_mask::mask_ip_opt(row.ip_address.as_deref());
         let line = serde_json::to_string(&masked).unwrap();
         assert!(line.contains("203.0.113.0"), "{line}");
         assert!(!line.contains("203.0.113.178"), "{line}");
 
-        let none_row = example_row(uuid::Uuid::new_v4(), None);
+        let none_row = example_row(uuid::Uuid::new_v4().to_string(), None);
         assert!(serde_json::to_string(&none_row)
             .unwrap()
             .contains("\"ip_address\":null"));

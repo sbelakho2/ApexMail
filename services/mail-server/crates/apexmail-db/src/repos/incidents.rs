@@ -4,6 +4,37 @@ use sqlx::PgPool;
 
 use crate::types::{StatusPageIncident, StatusPageIncidentUpdate};
 
+/// Typed incident lifecycle state. ONE transition function
+/// ([`IncidentRepo::transition`]) derives both the stored `status` label and
+/// `resolved_at` from this value, so callers can never supply contradictory
+/// (status, resolved) pairs, and reopening always clears the resolution
+/// timestamp (F86).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncidentStatus {
+    Investigating,
+    Identified,
+    Monitoring,
+    Resolved,
+}
+
+impl IncidentStatus {
+    /// Canonical status label stored in status_page_incidents.status.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Investigating => "investigating",
+            Self::Identified => "identified",
+            Self::Monitoring => "monitoring",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    /// Whether this state represents a resolved incident. Only
+    /// [`Self::Resolved`] stamps resolved_at; every other state clears it.
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, Self::Resolved)
+    }
+}
+
 /// Repository for status page incident operations.
 pub struct IncidentRepo;
 
@@ -45,7 +76,10 @@ impl IncidentRepo {
         .await
     }
 
-    /// List all active (non-resolved) incidents.
+    /// List all active (non-resolved) incidents. A reopened incident has its
+    /// resolved_at cleared by the typed transition, so it reappears here
+    /// (F86: the unresolved update branch used to keep the stale timestamp
+    /// and hide reopened incidents).
     pub async fn list_active(
         pool: &PgPool,
         limit: i64,
@@ -77,36 +111,28 @@ impl IncidentRepo {
         .await
     }
 
-    /// Update incident status.
-    pub async fn update_status(
+    /// F86: the ONE typed state transition. `next` alone determines both the
+    /// stored status and resolved_at — resolving stamps NOW(), any other
+    /// state clears the timestamp (reopening included). There is no separate
+    /// (status, resolved) parameter pair to get out of sync.
+    pub async fn transition(
         pool: &PgPool,
         id: &str,
-        status: &str,
-        resolved: bool,
+        next: IncidentStatus,
     ) -> Result<Option<StatusPageIncident>, sqlx::Error> {
-        if resolved {
-            sqlx::query_as::<_, StatusPageIncident>(
-                "UPDATE status_page_incidents \
-                 SET status = $2, resolved_at = NOW(), updated_at = NOW() \
-                 WHERE id = $1 \
-                 RETURNING id, title, status, impact, affected_components, created_at, updated_at, resolved_at",
-            )
-            .bind(id)
-            .bind(status)
-            .fetch_optional(pool)
-            .await
-        } else {
-            sqlx::query_as::<_, StatusPageIncident>(
-                "UPDATE status_page_incidents \
-                 SET status = $2, updated_at = NOW() \
-                 WHERE id = $1 \
-                 RETURNING id, title, status, impact, affected_components, created_at, updated_at, resolved_at",
-            )
-            .bind(id)
-            .bind(status)
-            .fetch_optional(pool)
-            .await
-        }
+        sqlx::query_as::<_, StatusPageIncident>(
+            "UPDATE status_page_incidents \
+             SET status = $2, \
+                 resolved_at = CASE WHEN $3 THEN NOW() ELSE NULL END, \
+                 updated_at = NOW() \
+             WHERE id = $1 \
+             RETURNING id, title, status, impact, affected_components, created_at, updated_at, resolved_at",
+        )
+        .bind(id)
+        .bind(next.as_str())
+        .bind(next.is_resolved())
+        .fetch_optional(pool)
+        .await
     }
 
     /// Add a timeline update to an incident.
@@ -164,6 +190,24 @@ mod tests {
     #[test]
     fn test_incident_repo_is_stateless() {
         let _repo = IncidentRepo;
+    }
+
+    #[test]
+    fn test_typed_status_labels() {
+        assert_eq!(IncidentStatus::Investigating.as_str(), "investigating");
+        assert_eq!(IncidentStatus::Identified.as_str(), "identified");
+        assert_eq!(IncidentStatus::Monitoring.as_str(), "monitoring");
+        assert_eq!(IncidentStatus::Resolved.as_str(), "resolved");
+    }
+
+    /// F86: only Resolved stamps the timestamp; every other state clears it
+    /// (reopening included) — one typed value, no contradictory pairs.
+    #[test]
+    fn test_only_resolved_state_carries_resolution() {
+        assert!(IncidentStatus::Resolved.is_resolved());
+        assert!(!IncidentStatus::Investigating.is_resolved());
+        assert!(!IncidentStatus::Identified.is_resolved());
+        assert!(!IncidentStatus::Monitoring.is_resolved());
     }
 
     #[test]

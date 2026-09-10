@@ -80,7 +80,10 @@ pub struct EventCounts {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EventRow {
-    pub id: uuid::Uuid,
+    /// Canonical events.id is VARCHAR (F83: producers write textual event
+    /// ids) — NOT a UUID column; decoding as uuid fails against the
+    /// canonical schema.
+    pub id: String,
     pub tenant_id: String,
     pub message_id: String,
     pub event_type: String,
@@ -337,16 +340,55 @@ pub struct BotDetectionResult {
     pub signals: Vec<String>,
 }
 
-// ── inbox placement types ──────────────────────────────────────────────────────
+// ── inbox placement types (F84: measured placement ≠ delivery) ────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacementSummary {
-    pub overall_inbox_rate: f64,
-    pub inbox_count: i64,
-    pub spam_count: i64,
-    pub bounce_count: i64,
+    /// Placement MEASURED by the inbox-placement workflow's seed results
+    /// (placement_results joined through the seed model).
+    pub measured: MeasuredPlacement,
+    /// SMTP-level delivery/complaint/bounce counts from canonical events —
+    /// distinct metrics that make no placement claim.
+    pub delivery: DeliveryMetrics,
+    /// inbox / (inbox + spam) over MEASURED placements. `None` when nothing
+    /// was measured: placement is unknown, never zero.
+    pub overall_inbox_rate: Option<f64>,
     pub by_provider: Vec<crate::inbox_placement::ProviderPlacement>,
     pub recommendations: Vec<String>,
+}
+
+/// Measured seed placements by folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeasuredPlacement {
+    pub inbox: i64,
+    pub spam: i64,
+    /// Observed folders that are neither inbox nor spam (e.g. promotions).
+    pub other_folders: i64,
+    /// Seeds delivered but never observed — placement unknown.
+    pub unknown: i64,
+    /// inbox + spam + other_folders (everything actually observed).
+    pub measured_total: i64,
+}
+
+/// SMTP-level delivery metrics (canonical events).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryMetrics {
+    pub delivered: i64,
+    pub complained: i64,
+    pub bounced: i64,
+}
+
+/// Per-day measured placement trend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlacementTrend {
+    pub date: String,
+    /// inbox / (inbox + spam) among that day's MEASURED placements; None
+    /// when the day has no inbox/spam observations.
+    pub inbox_rate: Option<f64>,
+    pub inbox_count: i64,
+    pub spam_count: i64,
+    /// Other measured folders that day (neither inbox nor spam).
+    pub other_measured: i64,
 }
 
 // ── reply tracking types ───────────────────────────────────────────────────────

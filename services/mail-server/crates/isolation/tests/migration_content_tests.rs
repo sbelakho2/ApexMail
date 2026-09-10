@@ -10,6 +10,8 @@ const MIGRATION_164: &str = include_str!("../../../migrations/164_isolation_tena
 const MIGRATION_165: &str = include_str!("../../../migrations/165_isolation_audit.sql");
 const MIGRATION_166: &str = include_str!("../../../migrations/166_isolation_data_isolation.sql");
 const MIGRATION_167: &str = include_str!("../../../migrations/167_isolation_encryption.sql");
+const MIGRATION_195: &str = include_str!("../../../migrations/195_iso_access_attempts.sql");
+const MIGRATION_196: &str = include_str!("../../../migrations/196_iso_encryption_policies.sql");
 
 #[test]
 fn migrations_define_isolation_tables() {
@@ -37,6 +39,16 @@ fn migrations_define_isolation_tables() {
     assert!(
         MIGRATION_167.contains("CREATE TABLE IF NOT EXISTS iso_encryption_keys"),
         "migration 167 must create iso_encryption_keys"
+    );
+    // F63 remainder: the access-attempt audit trail and the encryption
+    // policy catalog.
+    assert!(
+        MIGRATION_195.contains("CREATE TABLE IF NOT EXISTS iso_access_attempts"),
+        "migration 195 must create iso_access_attempts"
+    );
+    assert!(
+        MIGRATION_196.contains("CREATE TABLE IF NOT EXISTS iso_encryption_policies"),
+        "migration 196 must create iso_encryption_policies"
     );
 }
 
@@ -83,4 +95,20 @@ fn migrations_match_column_types_bound_by_code() {
     assert!(MIGRATION_167.contains("key_material     BYTEA       NOT NULL"));
     assert!(MIGRATION_167.contains("expires_at       TIMESTAMPTZ NOT NULL"));
     assert!(MIGRATION_167.contains("WHERE status = 'active'"));
+
+    // data_isolation.rs audit_access_attempt INSERTs the ten-column
+    // decision row; organization/workspace FKs stay in the iso_* TEXT id
+    // domain and retention cleanup scans created_at.
+    assert!(MIGRATION_195
+        .contains("organization_id     TEXT        NOT NULL REFERENCES iso_organizations(id)"));
+    assert!(MIGRATION_195.contains("context             JSONB       NOT NULL"));
+    assert!(MIGRATION_195.contains("idx_iso_access_attempts_created_at"));
+
+    // encryption.rs create_policy/load_policies use the seven-column policy
+    // contract; resource is the policy ownership identity (UNIQUE), the
+    // rotation window must be positive.
+    assert!(MIGRATION_196.contains("resource          TEXT        NOT NULL UNIQUE"));
+    assert!(MIGRATION_196
+        .contains("key_rotation_days BIGINT      NOT NULL CHECK (key_rotation_days > 0)"));
+    assert!(MIGRATION_196.contains("enabled           BOOLEAN     NOT NULL DEFAULT true"));
 }

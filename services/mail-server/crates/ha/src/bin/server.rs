@@ -76,13 +76,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     info!("HA tables ensured (ha_failover_events, ha_replication_lag_history)");
 
+    // F63: the health-check persistence contract (ha_health_checks, canonical
+    // migration 194) must exist before this service starts recording results.
+    // Failing readiness here is honest: without the relation every check
+    // result is warn-discarded while the service still reports healthy.
+    let health_service = HealthCheckService::new(pool.clone(), Arc::clone(&config));
+    if !health_service.persistence_ready().await {
+        error!(
+            "ha_health_checks relation missing — canonical migration 194 not applied; \
+             aborting startup (health results could not be persisted)"
+        );
+        return Err("HA health-check schema missing (migration 194)".into());
+    }
+
     // Build shared state
     let config_for_services = Arc::clone(&config);
     // BackupService::new returns Result to validate encryption key at startup
     let backup_service = BackupService::new(pool.clone(), Arc::clone(&config_for_services))
         .map_err(|e| anyhow::anyhow!("Failed to initialize backup service: {}", e))?;
     let state = Arc::new(AppState {
-        health: HealthCheckService::new(pool.clone(), Arc::clone(&config_for_services)),
+        health: health_service,
         failover: FailoverService::new(pool.clone(), Arc::clone(&config_for_services)),
         backup: backup_service,
         replication: ReplicationService::new(pool.clone(), Arc::clone(&config_for_services)),
@@ -163,6 +176,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tick.tick().await;
                 if let Err(e) = s.replication.cleanup_lag_history(72).await {
                     tracing::warn!(error = %e, "Replication lag history cleanup failed");
+                }
+            }
+        });
+    }
+
+    // Background cron:health-check history retention cleanup (daily, F63).
+    // ha_health_checks is append-only per observation — without this the
+    // relation grows forever.
+    {
+        let s = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(86400));
+            loop {
+                tick.tick().await;
+                match s.health.cleanup_history(30).await {
+                    Ok(deleted) if deleted > 0 => {
+                        info!(deleted, "Health-check history cleanup completed")
+                    }
+                    Ok(_) => {}
+                    Err(e) => error!(error = %e, "Health-check history cleanup failed"),
                 }
             }
         });

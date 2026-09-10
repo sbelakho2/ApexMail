@@ -30,6 +30,9 @@ tower-http.workspace       = true
 tower.workspace            = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
+# F85: campaign creation initializes its optimization arm through the
+# canonical campaign_arms producer (analytics::campaign_autopilot).
+analytics = { path = "../analytics" }
 # Real quota gate for campaign/reply sends (audit F1): the dispatcher calls
 # billing_service::usage::record_with_quota_check / rollback_usage_record —
 # the same functions api-server's REST send path uses — instead of a local

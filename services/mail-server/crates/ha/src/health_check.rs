@@ -92,7 +92,7 @@ impl HealthCheckService {
 
     /// Run all health checks and produce a cluster health report.
     pub async fn check_all(&self) -> ClusterHealth {
-        let mut components = Vec::with_capacity(5);
+        let mut components = Vec::with_capacity(6);
 
         // 1. Database primary
         components.push(self.check_database().await);
@@ -108,6 +108,12 @@ impl HealthCheckService {
 
         // 5. Memory (in-process)
         components.push(self.check_memory().await);
+
+        // 6. Persistence schema (F63): the component's own readiness. A
+        // missing ha_health_checks relation means the results of every
+        // other check are silently discarded — the component must report
+        // unhealthy instead of warn-ing the INSERT failure forever.
+        components.push(self.check_persistence_schema().await);
 
         // Compute overall status
         let overall = Self::compute_overall(&components);
@@ -125,6 +131,47 @@ impl HealthCheckService {
             uptime_secs: self.start_time.elapsed().as_secs_f64(),
             checked_at: Utc::now(),
         }
+    }
+
+    /// F63: is the persistence contract (canonical migration 194) present?
+    /// Readiness for this component = the ha_health_checks relation exists;
+    /// a schema-missing deployment must fail honestly instead of discarding
+    /// results.
+    pub async fn persistence_ready(&self) -> bool {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.ha_health_checks')::text",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    async fn check_persistence_schema(&self) -> ComponentHealth {
+        check_component("persistence", async {
+            if self.persistence_ready().await {
+                Ok((HealthStatus::Healthy, None))
+            } else {
+                Err(
+                    "ha_health_checks relation missing — canonical migration 194 \
+                     not applied; health results cannot be persisted"
+                        .to_string(),
+                )
+            }
+        })
+        .await
+    }
+
+    /// F63: lifecycle cleanup — delete health-check results older than
+    /// `retention_days` and return how many rows were removed.
+    pub async fn cleanup_history(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days.max(1));
+        let result = sqlx::query("DELETE FROM ha_health_checks WHERE checked_at < $1")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     async fn check_database(&self) -> ComponentHealth {

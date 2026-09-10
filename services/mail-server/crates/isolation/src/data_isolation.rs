@@ -188,8 +188,41 @@ impl DataIsolationService {
     pub async fn initialize(&mut self) -> anyhow::Result<()> {
         self.policies = self.load_policies().await?;
         self.policies_loaded = true;
+        // F63: the access-attempt audit trail (canonical migration 195) is
+        // part of this component's persistence contract. A missing relation
+        // must fail readiness honestly — every allow/deny decision would
+        // otherwise be warn-discarded as an audit-trail gap.
+        if !self.audit_schema_ready().await {
+            anyhow::bail!(
+                "iso_access_attempts relation missing — canonical migration 195 \
+                 not applied; access-attempt auditing cannot persist"
+            );
+        }
         info!(count = self.policies.len(), "Data access policies loaded");
         Ok(())
+    }
+
+    /// F63: is the access-attempt audit relation present?
+    pub async fn audit_schema_ready(&self) -> bool {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT to_regclass('public.iso_access_attempts')::text",
+        )
+        .fetch_one(&self.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
+    /// F63: lifecycle cleanup — delete access-attempt audit rows older than
+    /// `retention_days` and return how many rows were removed.
+    pub async fn cleanup_access_attempts(&self, retention_days: i64) -> Result<u64, sqlx::Error> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days.max(1));
+        let result = sqlx::query("DELETE FROM iso_access_attempts WHERE created_at < $1")
+            .bind(cutoff)
+            .execute(&self.db)
+            .await?;
+        Ok(result.rows_affected())
     }
 
     /// Validate a SQL query for safety in a tenant-isolated context.
@@ -470,7 +503,11 @@ impl DataIsolationService {
         })
     }
 
-    async fn audit_access_attempt(
+    /// Record one access decision in the canonical audit trail
+    /// (iso_access_attempts, migration 195). Public so the persistence
+    /// contract is exercisable by canonical create/read/restart tests —
+    /// the finding's required schema coverage.
+    pub async fn audit_access_attempt(
         &self,
         ctx: &IsolationContext,
         target_workspace_id: &str,
