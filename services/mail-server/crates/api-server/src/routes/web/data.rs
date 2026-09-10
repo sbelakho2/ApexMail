@@ -112,14 +112,43 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-/// True when a sqlx error means "relation or column does not exist" — the
-/// optional-table tolerance shared with the admin system-health route.
-fn is_optional_schema_error(error: &sqlx::Error) -> bool {
+/// True when a sqlx error means "relation or column does not exist" —
+/// `42P01` (undefined table) / `42703` (undefined column). Shared with the
+/// admin system-health route.
+fn is_schema_error(error: &sqlx::Error) -> bool {
     matches!(
         error,
         sqlx::Error::Database(db_error)
             if matches!(db_error.code().as_deref(), Some("42P01") | Some("42703"))
     )
+}
+
+/// F14 per-dataset optionality contract.
+///
+/// Every console dataset rendered by this module is backed by a REQUIRED
+/// canonical relation (campaigns, contacts, lists, templates, domains,
+/// events, placement_tests, api_keys, webhooks, users, invoices, …): a
+/// deployment where one of those tables/columns is missing is a MISDEPLOYED
+/// SCHEMA, and the page must say "data unavailable" — rendering an empty
+/// list or a zero KPI would fabricate data.
+///
+/// `OptionalDataset` exists for datasets backed by separately-deployable
+/// components that can be deliberately DISABLED in a deployment: only those
+/// may map a 42P01/42703 "relation does not exist" to an honest empty state
+/// (the component is not deployed, not broken). No dataset in this module
+/// currently qualifies — they are all required — so every
+/// [`load_query`]/[`loaded_count`] call takes the required path. New
+/// datasets must choose explicitly; adding an optional dataset requires
+/// naming the disabled component here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DatasetRequirement {
+    /// Required relation: EVERY query/decoding error — including
+    /// 42P01/42703 — maps to [`LoadState::Unavailable`].
+    Required,
+    /// Optional relation tied to a deliberately disabled, separately
+    /// deployable component: a missing schema (42P01/42703) is an honest
+    /// empty dataset; every other error is still Unavailable.
+    OptionalDisabledComponent,
 }
 
 /// Typed outcome of one console-data query (audit F14).
@@ -196,22 +225,49 @@ fn next_correlation_id() -> String {
 }
 
 /// Run one console-data query, preserving failure as uncertainty (audit
-/// F14). A missing optional relation (42P01/42703) stays an honest empty
-/// dataset; every other error becomes [`LoadState::Unavailable`] so the
-/// render layer can show an explicit unavailable state instead of a fake
-/// empty list.
+/// F14).
+///
+/// For REQUIRED datasets (the default — see [`DatasetRequirement`]) EVERY
+/// query/decoding error, explicitly including a missing table/column
+/// (42P01/42703, a misdeployed schema), maps to [`LoadState::Unavailable`]:
+/// the page renders the explicit unavailable state and never fabricates an
+/// empty list or a zero. Only an explicitly optional dataset tied to a
+/// deliberately disabled component may treat a missing relation as an
+/// honest empty dataset.
 async fn load_query<T: Default, F>(query_id: &str, correlation_id: &str, fetch: F) -> LoadState<T>
+where
+    F: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    load_query_with_requirement(
+        query_id,
+        correlation_id,
+        DatasetRequirement::Required,
+        fetch,
+    )
+    .await
+}
+
+/// [`load_query`] with an explicit per-dataset requirement (F14).
+async fn load_query_with_requirement<T: Default, F>(
+    query_id: &str,
+    correlation_id: &str,
+    requirement: DatasetRequirement,
+    fetch: F,
+) -> LoadState<T>
 where
     F: std::future::Future<Output = Result<T, sqlx::Error>>,
 {
     match fetch.await {
         Ok(value) => LoadState::Loaded(value),
-        Err(error) if is_optional_schema_error(&error) => {
+        Err(error)
+            if requirement == DatasetRequirement::OptionalDisabledComponent
+                && is_schema_error(&error) =>
+        {
             tracing::warn!(
                 query = query_id,
                 correlation_id = correlation_id,
                 error = %error,
-                "optional web-data relation missing; honest empty dataset"
+                "optional (disabled component) web-data relation missing; honest empty dataset"
             );
             LoadState::Loaded(T::default())
         }
@@ -220,6 +276,7 @@ where
                 query = query_id,
                 correlation_id = correlation_id,
                 error = %error,
+                missing_schema = is_schema_error(&error),
                 "web data query failed; data unavailable"
             );
             LoadState::Unavailable
@@ -227,9 +284,9 @@ where
     }
 }
 
-/// COUNT(*) with the page's filters (audit F14): a missing optional
-/// relation tolerates to a loaded 0; any other failure surfaces as
-/// [`LoadState::Unavailable`] so counts never report false zeroes.
+/// COUNT(*) with the page's filters (audit F14): any failure — including a
+/// missing required relation — surfaces as [`LoadState::Unavailable`] so
+/// counts never report false zeroes.
 async fn loaded_count(
     state: &AppState,
     query_id: &str,
@@ -246,11 +303,15 @@ async fn loaded_count(
 
 /// Explicit unavailable-state copy (audit F14): a failed query must render
 /// as "data unavailable", never as the honest (optional-and-empty) state.
-fn mark_rows_unavailable(data: &mut ListPageData, what: &str) {
+/// The per-render correlation id travels into the view so an operator can
+/// correlate the failed page with the exact loader log lines (query
+/// identity + cid) without any bind values being logged.
+fn mark_rows_unavailable(data: &mut ListPageData, what: &str, correlation_id: &str) {
     data.empty_title = "Data unavailable".into();
     data.empty_description = format!(
         "{what} could not be loaded — the query failed. This is not an empty list; \
-         figures shown as \"unavailable\" are unknown, not zero."
+         figures shown as \"unavailable\" are unknown, not zero. \
+         Reference: {correlation_id}."
     );
 }
 
@@ -264,6 +325,96 @@ pub(crate) fn escape_like(value: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+// ─── Required-schema readiness (audit F14) ─────────────────────────
+
+/// The relations every console loader in this module queries, with the
+/// columns its financial/operational queries SELECT or predicate on. A
+/// deployment missing any of these would previously render empty pages and
+/// zero KPIs (the 42P01/42703 tolerance); the readiness probe surfaces the
+/// misdeployment BEFORE any page can fabricate data.
+///
+/// Kept as data, not a schema hash, so adding a loader column means adding
+/// one line here and the readiness failure names the exact missing piece.
+const REQUIRED_CONSOLE_SCHEMA: &[(&str, &[&str])] = &[
+    (
+        "campaigns",
+        &["id", "tenant_id", "name", "status", "created_at"],
+    ),
+    (
+        "campaign_jobs",
+        &["id", "campaign_id", "tenant_id", "status"],
+    ),
+    (
+        "contacts",
+        &["id", "tenant_id", "email", "status", "created_at"],
+    ),
+    ("lists", &["id", "tenant_id", "name"]),
+    ("list_subscribers", &["list_id", "contact_id"]),
+    ("templates", &["id", "tenant_id", "name", "updated_at"]),
+    ("domains", &["id", "tenant_id", "name", "status"]),
+    ("events", &["id", "tenant_id", "event_type", "timestamp"]),
+    (
+        "placement_tests",
+        &["id", "tenant_id", "status", "created_at"],
+    ),
+    ("api_keys", &["id", "tenant_id", "name", "created_at"]),
+    ("webhooks", &["id", "tenant_id", "url"]),
+    ("users", &["id", "tenant_id", "email", "status", "role"]),
+    (
+        "invoices",
+        &[
+            "id",
+            "tenant_id",
+            "status",
+            "total_cents",
+            "currency",
+            "created_at",
+        ],
+    ),
+    ("plans", &["name", "email_limit"]),
+    ("tenants", &["id", "name", "status", "created_at"]),
+    ("dedicated_ips", &["id", "tenant_id", "address"]),
+    (
+        "dedicated_ip_provisioning_requests",
+        &["id", "tenant_id", "status"],
+    ),
+    ("ip_pool_addresses", &["ip_pool_id", "address"]),
+    ("queue_jobs", &["id", "queue", "created_at"]),
+    ("audit_logs", &["id", "tenant_id", "created_at"]),
+    ("gdpr_requests", &["id", "tenant_id", "status"]),
+    ("sales_leads", &["id", "email", "created_at"]),
+    ("system_alerts", &["id", "severity", "created_at"]),
+];
+
+/// Probe the required console schema (F14). Returns the missing pieces as
+/// `table.column` / `table` strings; empty means the schema is complete.
+/// Readiness (routes/health.rs) fails the deployment when this is non-empty
+/// so missing production columns never reach a page render.
+pub(crate) async fn missing_required_console_schema(
+    db: &sqlx::PgPool,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut missing = Vec::new();
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT table_name, column_name FROM information_schema.columns
+         WHERE table_schema = 'public'",
+    )
+    .fetch_all(db)
+    .await?;
+
+    use std::collections::HashSet;
+    let present: HashSet<(String, String)> = rows.into_iter().collect();
+
+    for (table, columns) in REQUIRED_CONSOLE_SCHEMA {
+        for column in *columns {
+            if !present.contains(&((*table).to_string(), (*column).to_string())) {
+                missing.push(format!("{table}.{column}"));
+            }
+        }
+    }
+    Ok(missing)
 }
 
 /// Incremental WHERE builder with correct positional binds ($1, $2, …).
@@ -619,7 +770,7 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     data.empty_title = "No campaigns yet".into();
     data.empty_description = "Create your first email campaign to see it listed here.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Campaigns");
+        mark_rows_unavailable(&mut data, "Campaigns", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -773,7 +924,7 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) 
     data.empty_title = "No contacts yet".into();
     data.empty_description = "Add your first contact to start building an audience.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Contacts");
+        mark_rows_unavailable(&mut data, "Contacts", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -860,7 +1011,7 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> 
     data.empty_title = "No lists yet".into();
     data.empty_description = "Create a list to group contacts into an audience.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Lists");
+        mark_rows_unavailable(&mut data, "Lists", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Name".into(), "Updated".into()],
@@ -944,7 +1095,7 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str)
     data.empty_title = "No templates yet".into();
     data.empty_description = "Create a template to reuse email content across campaigns.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Templates");
+        mark_rows_unavailable(&mut data, "Templates", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -1050,7 +1201,7 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -
     data.empty_title = "No domains yet".into();
     data.empty_description = "Add and verify a sending domain before dispatching mail.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Domains");
+        mark_rows_unavailable(&mut data, "Domains", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Domain".into(), "Status".into(), "Added".into()],
@@ -1169,7 +1320,7 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) ->
     data.empty_title = "No events yet".into();
     data.empty_description = "Delivery events appear here as soon as mail starts flowing.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Events");
+        mark_rows_unavailable(&mut data, "Events", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -1363,7 +1514,7 @@ async fn web_reports(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
     data.empty_title = "No reportable campaigns yet".into();
     data.empty_description = "Send a campaign to populate cross-campaign reports.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Campaign reports");
+        mark_rows_unavailable(&mut data, "Campaign reports", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -1464,7 +1615,7 @@ async fn web_deliverability(state: &AppState, tenant: &str, cid: &str) -> ListPa
     data.empty_title = "No delivery data yet".into();
     data.empty_description = "Deliverability metrics appear once messages are dispatched.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Delivery metrics");
+        mark_rows_unavailable(&mut data, "Delivery metrics", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Event type".into(), "Count (30d)".into()],
@@ -1570,7 +1721,7 @@ async fn web_inbox_placement(
     data.empty_title = "No placement tests yet".into();
     data.empty_description = "Start a seed-account test to measure inbox placement.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Placement tests");
+        mark_rows_unavailable(&mut data, "Placement tests", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -1660,7 +1811,7 @@ async fn web_api_keys(state: &AppState, tenant: &str, cid: &str) -> ListPageData
     data.empty_title = "No API keys yet".into();
     data.empty_description = "Create a key to call the API programmatically.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "API keys");
+        mark_rows_unavailable(&mut data, "API keys", cid);
     }
     let now = chrono::Utc::now();
     data.table = Some(TableData {
@@ -1720,7 +1871,7 @@ async fn web_webhooks(state: &AppState, tenant: &str, cid: &str) -> ListPageData
     data.empty_title = "No webhooks yet".into();
     data.empty_description = "Register an endpoint to receive delivery events.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Webhooks");
+        mark_rows_unavailable(&mut data, "Webhooks", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Endpoint".into(), "Enabled".into(), "Last triggered".into()],
@@ -1770,7 +1921,7 @@ async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
     data.empty_title = "No team members yet".into();
     data.empty_description = "Invite teammates to collaborate on this workspace.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Team members");
+        mark_rows_unavailable(&mut data, "Team members", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -1917,7 +2068,7 @@ async fn web_billing(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
     data.empty_title = "No invoices yet".into();
     data.empty_description = "Invoices appear here once a paid plan is active.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Invoices");
+        mark_rows_unavailable(&mut data, "Invoices", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -1999,7 +2150,7 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPag
     data.empty_title = "No dedicated IPs yet".into();
     data.empty_description = "Request an allocation — the provisioner completes it.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Dedicated IPs");
+        mark_rows_unavailable(&mut data, "Dedicated IPs", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2140,7 +2291,7 @@ async fn cp_home(state: &AppState, cid: &str) -> ListPageData {
     data.empty_description =
         "Provision the first tenant workspace to populate the fleet view.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Recent tenants");
+        mark_rows_unavailable(&mut data, "Recent tenants", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2242,7 +2393,7 @@ async fn cp_dashboard(state: &AppState, cid: &str) -> ListPageData {
     data.empty_description =
         "Fleet alert signals will list here when the alerting pipeline fires.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Recent alerts");
+        mark_rows_unavailable(&mut data, "Recent alerts", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2359,7 +2510,7 @@ async fn cp_tenants(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
     data.empty_title = "No tenants yet".into();
     data.empty_description = "Create the first tenant workspace.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Tenants");
+        mark_rows_unavailable(&mut data, "Tenants", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2459,7 +2610,7 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
     data.empty_title = "No operators yet".into();
     data.empty_description = "Invite an administrator with controlled access.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Operators");
+        mark_rows_unavailable(&mut data, "Operators", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2595,7 +2746,7 @@ async fn cp_sales(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data.empty_title = "No leads yet".into();
     data.empty_description = "Discovery runs populate the pipeline as leads are identified.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Leads");
+        mark_rows_unavailable(&mut data, "Leads", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2702,7 +2853,7 @@ async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data.empty_title = "No audit events yet".into();
     data.empty_description = "Operator actions are recorded here as they happen.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Audit events");
+        mark_rows_unavailable(&mut data, "Audit events", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2782,7 +2933,7 @@ async fn cp_jobs(state: &AppState, cid: &str) -> ListPageData {
     data.empty_title = "No queued jobs".into();
     data.empty_description = "Background work appears here as workers enqueue it.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Job queues");
+        mark_rows_unavailable(&mut data, "Job queues", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2857,7 +3008,7 @@ async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
     data.empty_description =
         "MTA pool addresses appear here as infrastructure registers them.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Nodes");
+        mark_rows_unavailable(&mut data, "Nodes", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -2933,7 +3084,7 @@ async fn cp_queues(state: &AppState, cid: &str) -> ListPageData {
     data.empty_title = "No queues reporting".into();
     data.empty_description = "Queue telemetry appears once workers enqueue jobs.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Queues");
+        mark_rows_unavailable(&mut data, "Queues", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -3042,7 +3193,7 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data.empty_title = "No alerts".into();
     data.empty_description = "Fleet alert signals appear here when raised.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Alerts");
+        mark_rows_unavailable(&mut data, "Alerts", cid);
     }
     data.bulk_action = Some(BulkActionData {
         action: "/web/admin/alerts/ack-bulk".into(),
@@ -3179,7 +3330,7 @@ async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
     data.empty_title = "No domains registered".into();
     data.empty_description = "Tenant domains appear here as they are added.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Domains");
+        mark_rows_unavailable(&mut data, "Domains", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Domain".into(), "Tenant".into(), "Added".into()],
@@ -3241,7 +3392,7 @@ async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
     data.empty_description =
         "Plan packaging appears here once the billing catalog is seeded.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Plans");
+        mark_rows_unavailable(&mut data, "Plans", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Plan".into(), "Display name".into(), "Price".into()],
@@ -3317,7 +3468,7 @@ async fn cp_compliance(state: &AppState, cid: &str) -> ListPageData {
     data.empty_title = "No compliance requests".into();
     data.empty_description = "GDPR and trust workflows appear here as they are filed.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Compliance requests");
+        mark_rows_unavailable(&mut data, "Compliance requests", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -3426,7 +3577,7 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data.empty_title = "No GDPR requests".into();
     data.empty_description = "Data-subject requests appear here as they arrive.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "GDPR requests");
+        mark_rows_unavailable(&mut data, "GDPR requests", cid);
     }
     data.table = Some(TableData {
         columns: vec![
@@ -3486,7 +3637,7 @@ async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
     data.empty_title = "No discovery sources reporting".into();
     data.empty_description = "Discovery runs register their sources here as they execute.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Discovery sources");
+        mark_rows_unavailable(&mut data, "Discovery sources", cid);
     }
     data.table = Some(TableData {
         columns: vec!["Source".into(), "Leads".into()],
@@ -4245,7 +4396,7 @@ mod tests {
         honest_empty.empty_description = "Add your first contact.".into();
 
         let mut unavailable = base_list("Contacts", "desc", "/contacts");
-        mark_rows_unavailable(&mut unavailable, "Contacts");
+        mark_rows_unavailable(&mut unavailable, "Contacts", "web-data-42");
 
         assert_eq!(unavailable.empty_title, "Data unavailable");
         assert_ne!(honest_empty.empty_title, unavailable.empty_title);
@@ -4254,6 +4405,124 @@ mod tests {
             unavailable.empty_description
         );
         assert!(unavailable.empty_description.contains("not an empty list"));
+        // F14: the correlation id travels into the view so the failed page
+        // is traceable to its loader log lines.
+        assert!(unavailable.empty_description.contains("web-data-42"));
+    }
+
+    // ── F14: required vs optional dataset semantics ────────────────
+
+    /// A minimal fake driver error carrying an arbitrary SQLSTATE, so the
+    /// 42P01/42703 classification is testable without a database.
+    #[derive(Debug)]
+    struct FakeSqlStateError(&'static str);
+
+    impl std::fmt::Display for FakeSqlStateError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "db error {}", self.0)
+        }
+    }
+    impl std::error::Error for FakeSqlStateError {}
+    impl sqlx::error::DatabaseError for FakeSqlStateError {
+        fn message(&self) -> &str {
+            "fake"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.0))
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    fn db_error(sqlstate: &'static str) -> sqlx::Error {
+        sqlx::Error::Database(Box::new(FakeSqlStateError(sqlstate)))
+    }
+
+    /// F14 core requirement: a REQUIRED dataset maps EVERY error — including
+    /// missing-table (42P01) and missing-column (42703) — to Unavailable.
+    /// A misdeployed invoices/api_keys schema must never render as an empty
+    /// page or a zero KPI.
+    #[tokio::test]
+    async fn required_datasets_map_schema_errors_to_unavailable() {
+        for sqlstate in ["42P01", "42703"] {
+            let state = load_query_with_requirement(
+                "test.required",
+                "cid",
+                DatasetRequirement::Required,
+                std::future::ready(Err::<i64, _>(db_error(sqlstate))),
+            )
+            .await;
+            assert!(
+                matches!(state, LoadState::Unavailable),
+                "42P01/42703 ({sqlstate}) on a REQUIRED dataset must be Unavailable"
+            );
+        }
+        // Decoding errors are failures too, not defaults.
+        let state = load_query(
+            "test.required",
+            "cid",
+            std::future::ready(Err::<i64, _>(sqlx::Error::ColumnNotFound(
+                "total_cents".into(),
+            ))),
+        )
+        .await;
+        assert!(matches!(state, LoadState::Unavailable));
+    }
+
+    /// F14: only an EXPLICITLY optional dataset (tied to a deliberately
+    /// disabled component) may treat a missing relation as an honest empty
+    /// dataset — and only 42P01/42703; every other error stays Unavailable.
+    #[tokio::test]
+    async fn optional_datasets_tolerate_only_missing_schema() {
+        let state = load_query_with_requirement(
+            "test.optional",
+            "cid",
+            DatasetRequirement::OptionalDisabledComponent,
+            std::future::ready(Err::<i64, _>(db_error("42P01"))),
+        )
+        .await;
+        assert_eq!(
+            state,
+            LoadState::Loaded(0),
+            "missing optional relation = honest empty"
+        );
+
+        let state = load_query_with_requirement(
+            "test.optional",
+            "cid",
+            DatasetRequirement::OptionalDisabledComponent,
+            std::future::ready(Err::<i64, _>(sqlx::Error::PoolClosed)),
+        )
+        .await;
+        assert!(matches!(state, LoadState::Unavailable));
+    }
+
+    /// F14: the readiness probe names the exact missing pieces.
+    #[test]
+    fn required_schema_manifest_covers_the_financial_datasets() {
+        let tables: Vec<&str> = REQUIRED_CONSOLE_SCHEMA.iter().map(|(t, _)| *t).collect();
+        for required in ["invoices", "api_keys", "users", "tenants"] {
+            assert!(tables.contains(&required), "{required} must be probed");
+        }
+        // The invoice probe covers the columns the outstanding-balance
+        // summary reads.
+        let (_, invoice_columns) = REQUIRED_CONSOLE_SCHEMA
+            .iter()
+            .find(|(table, _)| *table == "invoices")
+            .expect("invoices in manifest");
+        for column in ["total_cents", "currency", "status", "tenant_id"] {
+            assert!(invoice_columns.contains(&column), "invoices.{column}");
+        }
     }
 
     #[test]

@@ -70,7 +70,8 @@ fn build_request_context(req: &Request<Body>, state: &AppState) -> ddos_protecti
             .parse::<IpAddr>()
             .unwrap_or(socket_ip)
     } else {
-        tracing::warn!(path = %req.uri().path(), "ddos middleware missing ConnectInfo; using loopback placeholder");
+        // F65: redacted route, never the raw token-bearing URI.
+        tracing::warn!(path = %crate::middleware::request_logger::redact_token_bearing_path(req.uri().path()), "ddos middleware missing ConnectInfo; using loopback placeholder");
         IpAddr::V4(Ipv4Addr::LOCALHOST)
     };
 

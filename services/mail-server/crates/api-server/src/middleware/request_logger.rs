@@ -11,6 +11,18 @@
 //!
 //! Services making outbound HTTP calls should propagate the correlation ID
 //! via the `x-correlation-id` header using the shared `reqwest::Client`.
+//!
+//! # Route redaction (F65)
+//!
+//! One-time secrets (email-verification tokens, password-reset tokens,
+//! RFC 8058 unsubscribe tokens) travel in the request PATH or query. Every
+//! application logging boundary must therefore log the ROUTE, never the raw
+//! token-bearing URI. This module owns the shared normalizer
+//! ([`redacted_route_for_logging`] — MatchedPath first, safe fallback
+//! otherwise) used by this middleware, the outer TraceLayer span and the
+//! other middlewares that log paths. It is the application-level twin of
+//! the nginx `$sanitized_request` map (deploy/nginx/nginx.conf) — extend
+//! both together when a token-bearing endpoint is added.
 
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
@@ -219,7 +231,9 @@ pub async fn request_logger(mut req: Request, next: Next) -> Response {
         .insert(CorrelationId(correlation_id.clone()));
 
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    // F65: log the ROUTE, never the raw token-bearing URI. MatchedPath when
+    // available (route template), the shared redaction fallback otherwise.
+    let path = redacted_route_for_logging(&req);
 
     let start = Instant::now();
     let response = next.run(req).await;
@@ -260,6 +274,60 @@ pub struct RequestId(pub String);
 /// Newtype so handlers can extract the correlation ID from extensions.
 #[derive(Debug, Clone)]
 pub struct CorrelationId(pub String);
+
+// ─── Route redaction (F65) ─────────────────────────────────────
+
+/// Token-bearing routes and their redacted shapes (F65). A route segment
+/// carrying a one-time secret is replaced with a fixed placeholder so the
+/// log line records WHICH route was hit without ever recording the secret.
+/// Keep in lockstep with the nginx `$sanitized_request` map.
+const TOKEN_BEARING_ROUTES: [(&str, &str); 5] = [
+    // Browser + API email verification (path and ?token= forms).
+    ("/verify-email", "/verify-email/{redacted}"),
+    ("/v1/auth/verify-email", "/v1/auth/verify-email/{redacted}"),
+    // Password-reset exchanges (?token= query form on both surfaces).
+    ("/reset-password", "/reset-password?token={redacted}"),
+    (
+        "/web/auth/reset-password",
+        "/web/auth/reset-password?token={redacted}",
+    ),
+    // RFC 8058 one-click unsubscribe links (sales autopilot + tracking).
+    ("/u", "/u/{redacted}"),
+];
+
+/// F65: normalize a raw request PATH for logging. Paths under a
+/// token-bearing route keep only the route shape; every other path is
+/// returned unchanged (no token can appear in it). Queries are never
+/// included — callers log paths, and the token-bearing query forms are
+/// covered by the route entries above.
+pub fn redact_token_bearing_path(path: &str) -> String {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    for (route, shape) in TOKEN_BEARING_ROUTES {
+        if path == route
+            || path
+                .strip_prefix(route)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return shape.to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// F65: the route label every application logging boundary must use.
+///
+/// `MatchedPath` (the route template, e.g. `/verify-email/:token`) is
+/// preferred — it is parametrized by construction, so no secret can appear
+/// in it. When the route has not been matched yet (outer layers, fallback
+/// handler) the raw path is normalized through [`redact_token_bearing_path`],
+/// which redacts the known token-bearing routes and passes everything else
+/// through unchanged.
+pub fn redacted_route_for_logging(req: &axum::extract::Request) -> String {
+    match req.extensions().get::<axum::extract::MatchedPath>() {
+        Some(matched) => matched.as_str().to_string(),
+        None => redact_token_bearing_path(req.uri().path()),
+    }
+}
 
 // ─── Tests ─────────────────────────────────────────────────────
 
@@ -326,5 +394,73 @@ mod tests {
         assert_eq!(json["error"]["message"], "validation failed");
         assert_eq!(json["error"]["details"][0], "email is required");
         assert_eq!(json["error"]["requestId"], "req_456");
+    }
+
+    // ── F65: route redaction ─────────────────────────────────────
+
+    #[test]
+    fn token_bearing_paths_are_redacted_to_their_route_shape() {
+        for (raw, expected) in [
+            ("/verify-email/tok_abc123DEF", "/verify-email/{redacted}"),
+            (
+                "/verify-email/tok_abc123DEF/extra",
+                "/verify-email/{redacted}",
+            ),
+            (
+                "/v1/auth/verify-email/9f8e7d6c",
+                "/v1/auth/verify-email/{redacted}",
+            ),
+            // ?token= query forms are reduced to the route + redaction marker.
+            ("/verify-email?token=sekrit", "/verify-email/{redacted}"),
+            (
+                "/v1/auth/verify-email?token=sekrit&x=1",
+                "/v1/auth/verify-email/{redacted}",
+            ),
+            (
+                "/reset-password?token=sekrit&email=a@b.com",
+                "/reset-password?token={redacted}",
+            ),
+            (
+                "/web/auth/reset-password?token=sekrit",
+                "/web/auth/reset-password?token={redacted}",
+            ),
+            ("/u/one-click-token", "/u/{redacted}"),
+            ("/u/one-click-token/confirm", "/u/{redacted}"),
+        ] {
+            let redacted = redact_token_bearing_path(raw);
+            assert_eq!(
+                redacted, expected,
+                "raw path {raw:?} must redact to {expected:?}"
+            );
+            assert!(
+                !redacted.contains("sekrit")
+                    && !redacted.contains("tok_")
+                    && !redacted.contains("one-click"),
+                "no token material may survive redaction: {redacted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_token_paths_pass_through_unchanged() {
+        for path in [
+            "/v1/messages",
+            "/dashboard",
+            "/api-keys",
+            "/health/ready",
+            "/",
+        ] {
+            assert_eq!(redact_token_bearing_path(path), path);
+        }
+    }
+
+    /// The redaction must not be confused by lookalike prefixes: a route
+    /// such as `/verify-emailing` is NOT the token route `/verify-email`.
+    #[test]
+    fn lookalike_prefixes_are_not_redacted() {
+        assert_eq!(
+            redact_token_bearing_path("/verify-emailing/x"),
+            "/verify-emailing/x"
+        );
     }
 }

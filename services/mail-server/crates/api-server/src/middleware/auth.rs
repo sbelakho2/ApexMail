@@ -1320,7 +1320,8 @@ pub async fn require_system_tenant_middleware(
         if is_browser_path {
             tracing::warn!(
                 tenant_id = %auth_user.tenant_id,
-                path = %req.uri().path(),
+                // F65: redacted route, never the raw token-bearing URI.
+                path = %crate::middleware::request_logger::redact_token_bearing_path(req.uri().path()),
                 "non-system session rejected from the control-plane form surface"
             );
             use axum::response::IntoResponse as _;
