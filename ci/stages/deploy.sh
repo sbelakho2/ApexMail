@@ -124,10 +124,10 @@ stage_main() {
             if compose restart nginx >>"$CI_STAGE_LOG" 2>&1; then
                 ci_info "nginx restarted on the new conf — upstream re-resolution covered by the restart; reload skipped"
                 _reloaded=1
-                break
+            else
+                ci_err "nginx restart on new conf failed"
+                return "$CI_EXIT_FAIL"
             fi
-            ci_err "nginx restart on new conf failed"
-            return "$CI_EXIT_FAIL"
         fi
     fi
 
