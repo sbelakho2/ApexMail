@@ -6,8 +6,10 @@ set -euo pipefail
 # empty buttons, invalid ARIA, duplicate H1, missing page title, color
 # contrast, keyboard traps (where testable).
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.html-validation-report.json"
 
 : "${BUILD_DIR:=../apps/marketing-zola/public}"

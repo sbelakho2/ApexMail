@@ -7,6 +7,15 @@
 # =============================================================================
 FROM debian:bookworm-slim AS builder
 
+# bash + pipefail: the RUN steps below pipe curl|tar and sha256sum|cut —
+# without pipefail a failed download would be masked by tar's success.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Builder-stage tooling (curl/xz); reproducibility is governed by the
+# pinned zola/tailwind downloads below, not the apt set, and version-pinning
+# curl against the moving bookworm-slim tag would break on every point
+# release.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
@@ -65,6 +74,10 @@ FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e591939
 # packages can lag published CVE fixes (curl 8.17 carried five HIGHs fixed
 # in 8.22) — lifting them here keeps the trivy gate honest without
 # chasing ever-newer base digests.
+# The apk upgrade/add pair deliberately tracks the NEWEST CVE-fixed curl
+# (see the comment above); pinning would freeze the exact HIGHs the Trivy
+# images gate exists to catch.
+# hadolint ignore=DL3018
 RUN apk upgrade --no-cache && apk add --no-cache curl \
     && adduser -D -H -u 10001 -s /sbin/nologin apexmail \
     && chown -R apexmail:apexmail /var/cache/nginx /var/log/nginx /etc/nginx/conf.d \

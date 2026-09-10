@@ -20,7 +20,12 @@ FROM rust:1.97.1-slim-bookworm AS chef
 WORKDIR /app/services/mail-server
 ENV CARGO_TARGET_DIR=/app/target
 
-# Install protobuf compiler for gRPC and native deps
+# Install protobuf compiler for gRPC and native deps.
+# Builder-stage toolchain deps on the pinned rust:1.97.1-slim base; the
+# exact apt patch versions are irrelevant to the build output and pinning
+# them against the moving bookworm pool would break on every distro point
+# release.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     pkg-config \
@@ -104,7 +109,11 @@ RUN cargo build --release
 # =============================================================================
 FROM debian:bookworm-slim AS runtime-base
 
-# Install runtime dependencies
+# Install runtime dependencies.
+# Runtime packages from the moving bookworm-slim pool; CVE exposure is
+# gated by the Trivy images stage, and pinning these versions would freeze
+# security updates between base refreshes.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
@@ -333,6 +342,9 @@ ENTRYPOINT ["/usr/bin/tini", "--", "analytics-worker"]
 # Fonts are include_bytes!-embedded at compile time — no runtime assets.
 FROM runtime-base AS pdf-renderer
 
+# Same runtime-package posture as runtime-base (Trivy-gated freshness,
+# not frozen pins).
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends wget \
     && rm -rf /var/lib/apt/lists/*
 

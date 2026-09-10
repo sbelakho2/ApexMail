@@ -5,8 +5,10 @@ set -euo pipefail
 # Checks: font family count, weight count, font-display usage, preloading,
 # unused variants, fallback definitions, layout shift prevention.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.font-optimization-report.json"
 
 : "${BUILD_DIR:=../apps/marketing-zola/public}"
@@ -28,10 +30,6 @@ check_css_fonts() {
     find "${BUILD_DIR}" -name '*.css' 2>/dev/null | while read -r css; do
         local rel
         rel="$(echo "$css" | sed "s|${BUILD_DIR}||")"
-
-        # Count @font-face declarations
-        local font_face_count
-        font_face_count="$(grep -c '@font-face' "$css" 2>/dev/null || echo 0)"
 
         # Count font-family usage
         local families

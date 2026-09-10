@@ -60,7 +60,7 @@ fi
 secure_remove() {
     _rm_dir="$1"
     if command -v shred >/dev/null 2>&1; then
-        find "$_rm_dir" -type f -exec shred -u {} 2>/dev/null \; || true
+        find "$_rm_dir" -type f -exec sh -c 'shred -u "$1" 2>/dev/null' _ {} \; || true
     fi
     rm -rf "$_rm_dir"
 }

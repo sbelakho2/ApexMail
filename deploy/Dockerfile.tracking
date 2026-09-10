@@ -14,6 +14,10 @@
 FROM rust:1.97.1-slim-bookworm AS deps
 
 # Build-time packages needed by ring / openssl-sys / etc.
+# Builder-stage toolchain deps; the rust:1.97.1-slim base pin governs
+# reproducibility, and pinning against the moving bookworm pool would break
+# on every distro point release.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libssl-dev \
@@ -45,7 +49,11 @@ RUN cargo build --release -p tracking-service
 # ── Stage 3: minimal runtime image ────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
-# Runtime dependencies: CA certs for TLS outbound, tini for PID-1 hygiene
+# Runtime dependencies: CA certs for TLS outbound, tini for PID-1 hygiene.
+# The apt-get UPGRADE on purpose tracks the newest CVE-fixed packages (the
+# same posture as the marketing runtime image); pinning would freeze the
+# exposures the Trivy gate exists to catch.
+# hadolint ignore=DL3008
 RUN apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
     ca-certificates \

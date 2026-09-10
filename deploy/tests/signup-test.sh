@@ -6,8 +6,10 @@ set -euo pipefail
 # invalid email, weak/strong password, expired/reused verification link,
 # abandoned signup, resend verification, account deletion, re-registration.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.signup-test-report.json"
 
 : "${APP_URL:=https://app.apexmail.ee}"

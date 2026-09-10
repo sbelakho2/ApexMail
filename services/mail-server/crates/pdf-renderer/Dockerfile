@@ -1,5 +1,9 @@
 FROM rust:1.93-bookworm AS builder
 
+# bash + pipefail: the manifest-stub RUN pipes grep|sed|while — without
+# pipefail a failed grep would be masked by the loop's success.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 WORKDIR /app
 
 # Copy workspace Cargo files for dependency caching
@@ -51,6 +55,10 @@ RUN cargo build --release --bin pdf-renderer && \
 
 FROM debian:bookworm-slim
 
+# Runtime deps from the moving bookworm-slim pool; pinning fonts/wget
+# versions would break on every base refresh while the Trivy images gate
+# covers CVE exposure.
+# hadolint ignore=DL3008
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -68,7 +76,7 @@ USER pdf
 EXPOSE 3004
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-    CMD wget -qO- http://localhost:3004/health || exit 1
+    CMD ["wget", "-qO-", "http://localhost:3004/health"]
 
 ENTRYPOINT ["pdf-renderer-server"]
 CMD ["--host", "0.0.0.0", "--port", "3004"]

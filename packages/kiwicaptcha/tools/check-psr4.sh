@@ -6,8 +6,8 @@
 # Exit 0 when clean, 1 on any violation. Usage: bash packages/kiwicaptcha/tools/check-psr4.sh
 set -eu
 
-TOOLS_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PHP_PKG=$(CDPATH= cd -- "$TOOLS_DIR/../../.." && pwd)/packages/kiwicaptcha-php
+TOOLS_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+PHP_PKG=$(CDPATH='' cd -- "$TOOLS_DIR/../../.." && pwd)/packages/kiwicaptcha-php
 
 php /dev/stdin "$PHP_PKG" <<'PHP'
 <?php

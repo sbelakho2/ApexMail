@@ -1,0 +1,18 @@
+# =============================================================================
+# .hadolint.yaml — repo-wide hadolint config for the CI static-lint gate
+# (ci/stages/test.sh run_static_lint_gates, CI_STATIC_LINT_CHECK=required).
+# =============================================================================
+# Policy:
+#   * failure-threshold=warning — error+warning findings fail the gate;
+#     info-level findings (DL3059 consecutive RUNs, DL3066 non-numeric USER)
+#     are reported but advisory: merging adjacent RUN layers would break the
+#     Dockerfile cache structure on purpose (each RUN is a cache boundary),
+#     and named users are deliberate (readable compose/ps output).
+#   * NO global rule ignores. The only suppressed findings are INLINE
+#     `# hadolint ignore=DL…` comments at the exact instruction, each with a
+#     justification — grep the repo for "hadolint ignore" to audit them.
+#     (Current inline classes: DL3008/DL3018 package pinning, where the
+#     images deliberately track distro security updates — pinning versions
+#     would freeze CVE fixes the Trivy gate exists to catch.)
+# =============================================================================
+failure-threshold: warning

@@ -30,7 +30,7 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PHP_ENUM="$HERE/../../kiwicaptcha-php/src/VerifyError.php"
 RUST_VERIFY="$HERE/../src/verify.rs"
 

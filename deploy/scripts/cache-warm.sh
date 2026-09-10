@@ -89,8 +89,6 @@ log() {
 
 # ── Prerequisites ────────────────────────────────────────────────────────────
 check_prereqs() {
-    local missing=false
-
     if [[ "$WARM_RATE_LIMITER" == "true" && -z "${REDIS_URL:-}" ]]; then
         log "WARN" "REDIS_URL not set. Rate limiter cache warming will be skipped."
         WARM_RATE_LIMITER=false

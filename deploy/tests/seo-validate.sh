@@ -5,8 +5,10 @@ set -euo pipefail
 # Checks: unique titles, unique descriptions, canonicals, OG tags, Twitter
 # cards, JSON-LD validity, sitemap integrity, robots.txt, indexing controls.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.seo-validation-report.json"
 
 : "${BUILD_DIR:=../apps/marketing-zola/public}"

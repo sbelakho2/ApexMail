@@ -66,7 +66,7 @@ curl -fsS -X POST "$BASE_URL/v1/auth/signup" \
   || { echo "signup failed"; exit 1; }
 
 TOKEN=""
-for i in 1 2 3 4 5; do
+for _ in 1 2 3 4 5; do
   HTML=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -c \
     "SELECT html_body FROM messages WHERE to_emails::text ILIKE '%${EMAIL}%' ORDER BY created_at DESC LIMIT 1;" 2>/dev/null)
   TOKEN=$(echo "$HTML" | grep -oE 'token=[A-Za-z0-9_-]+' | head -1 | cut -d= -f2)

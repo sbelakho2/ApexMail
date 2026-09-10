@@ -13,4 +13,8 @@
 # /usr/local/bin/clickhouse-backup.sh) on a nightly schedule and encrypts
 # every produced backup directory before the plaintext is removed.
 FROM clickhouse/clickhouse-server:24.8-alpine
+# Security-tool image: openssl/rsync freshness is the POINT (the container
+# runs on a no-egress network and encrypts backups); alpine micro-versions
+# churn with the base tag and no digest pin exists for these bases.
+# hadolint ignore=DL3018
 RUN apk add --no-cache openssl rsync

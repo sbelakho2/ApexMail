@@ -28,8 +28,10 @@ set -euo pipefail
 #   Report is still written to .contrast-check-report.json as
 #   {checked_at, critical, warnings, issues[]}.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.contrast-check-report.json"
 readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-contrast-check"
 
@@ -166,7 +168,7 @@ var_lookup() {
 
 # Resolve a color value to "r g b" (0-255). Uses light/dark variable maps.
 resolve_color() {
-    local value="$1" light_vars="$2" dark_vars="$3" selector="$4" var val map
+    local value="$1" light_vars="$2" dark_vars="$3" selector="$4" var val
     value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | xargs)"
     value="${value%%!important}"
     value="$(printf '%s' "$value" | xargs)"
@@ -333,7 +335,7 @@ first_color_token() {
 # Analyze a CSS file; call the issue sink for every violation found.
 # args: page_label  css_file  severity(critical|warning)
 analyze_css() {
-    local page_label="$1" css_file="$2" severity="$3"
+    local css_file="$2" severity="$3"
     local light_vars dark_vars light_bg dark_bg sel color bg fs fw
     light_vars="$(mktemp "${WORK_DIR}/lightvars.XXXXXX")"
     dark_vars="$(mktemp "${WORK_DIR}/darkvars.XXXXXX")"
@@ -384,7 +386,8 @@ analyze_css() {
 }
 
 check_contrast() {
-    local page="$1" url="${BASE_URL}${page}" html css_file link
+    local page="$1" html css_file link
+    local url="${BASE_URL}${page}"
     echo "  Checking: $url"
     # Prefer the local build artifact over the live production site; only
     # fall back to the network when the page is not in BUILD_DIR.

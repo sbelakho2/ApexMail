@@ -6,8 +6,10 @@ set -euo pipefail
 # compression, lazy loading, explicit width/height, no oversized images,
 # CDN caching headers.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.image-optimization-report.json"
 
 : "${BUILD_DIR:=../apps/marketing-zola/public}"
@@ -28,7 +30,7 @@ check_image() {
     local img="$1"
     local rel
     rel="$(echo "$img" | sed "s|${BUILD_DIR}||")"
-    local ext size_bytes width height format
+    local ext size_bytes
 
     ext="${img##*.}"
     size_bytes="$(stat -f%z "$img" 2>/dev/null || stat -c%s "$img" 2>/dev/null || echo 0)"

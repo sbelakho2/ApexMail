@@ -191,45 +191,64 @@ export_smoke_env() {
   local detected_internal_service_token=""
   detected_internal_service_token="$(existing_internal_service_token || true)"
 
-  export POSTGRES_PASSWORD="$(resolved_postgres_password)"
-  export REDIS_PASSWORD="$(resolve_env_or_seed_secret REDIS_PASSWORD "$PROJECT_ROOT/secrets/redis_password.txt" 32)"
-  export CLICKHOUSE_PASSWORD="$(resolve_env_or_seed_secret CLICKHOUSE_PASSWORD "$PROJECT_ROOT/secrets/clickhouse_password.txt" 32)"
-  export JWT_SECRET="$(resolve_env_or_generate_secret JWT_SECRET 32)"
+  POSTGRES_PASSWORD="$(resolved_postgres_password)"
+  export POSTGRES_PASSWORD
+  REDIS_PASSWORD="$(resolve_env_or_seed_secret REDIS_PASSWORD "$PROJECT_ROOT/secrets/redis_password.txt" 32)"
+  export REDIS_PASSWORD
+  CLICKHOUSE_PASSWORD="$(resolve_env_or_seed_secret CLICKHOUSE_PASSWORD "$PROJECT_ROOT/secrets/clickhouse_password.txt" 32)"
+  export CLICKHOUSE_PASSWORD
+  JWT_SECRET="$(resolve_env_or_generate_secret JWT_SECRET 32)"
+  export JWT_SECRET
   # Grafana admin credentials — the names docker-compose.yml actually reads
   # (GF_SECURITY_ADMIN_USER directly, GRAFANA_ADMIN_PASSWORD interpolated into
   # GF_SECURITY_ADMIN_PASSWORD). The old GRAFANA_USER/GRAFANA_PASSWORD exports
   # were read by nothing.
   export GF_SECURITY_ADMIN_USER="${GF_SECURITY_ADMIN_USER:-smoke-admin}"
-  export GRAFANA_ADMIN_PASSWORD="$(resolve_env_or_generate_secret GRAFANA_ADMIN_PASSWORD 24)"
-  export TRACKING_SECRET_KEY="$(resolve_env_or_generate_secret TRACKING_SECRET_KEY 32)"
+  GRAFANA_ADMIN_PASSWORD="$(resolve_env_or_generate_secret GRAFANA_ADMIN_PASSWORD 24)"
+  export GRAFANA_ADMIN_PASSWORD
+  TRACKING_SECRET_KEY="$(resolve_env_or_generate_secret TRACKING_SECRET_KEY 32)"
+  export TRACKING_SECRET_KEY
   export BASE_URL="${BASE_URL:-https://api.apexmail.ee}"
   export OAUTH_REDIRECT_BASE_URL="${OAUTH_REDIRECT_BASE_URL:-https://app.apexmail.ee/auth/callback}"
-  export API_KEY_HASH_SECRET="$(resolve_env_or_generate_secret API_KEY_HASH_SECRET 32)"
-  export WEBHOOK_SIGNING_SECRET="$(resolve_env_or_generate_secret WEBHOOK_SIGNING_SECRET 32)"
-  export SESSION_SECRET="$(resolve_env_or_generate_secret SESSION_SECRET 32)"
-  export IMPERSONATION_SECRET="$(resolve_env_or_generate_secret IMPERSONATION_SECRET 32)"
-  export CSRF_SECRET="$(resolve_env_or_generate_secret CSRF_SECRET 32)"
+  API_KEY_HASH_SECRET="$(resolve_env_or_generate_secret API_KEY_HASH_SECRET 32)"
+  export API_KEY_HASH_SECRET
+  WEBHOOK_SIGNING_SECRET="$(resolve_env_or_generate_secret WEBHOOK_SIGNING_SECRET 32)"
+  export WEBHOOK_SIGNING_SECRET
+  SESSION_SECRET="$(resolve_env_or_generate_secret SESSION_SECRET 32)"
+  export SESSION_SECRET
+  IMPERSONATION_SECRET="$(resolve_env_or_generate_secret IMPERSONATION_SECRET 32)"
+  export IMPERSONATION_SECRET
+  CSRF_SECRET="$(resolve_env_or_generate_secret CSRF_SECRET 32)"
+  export CSRF_SECRET
   if [[ -n "$detected_internal_service_token" ]]; then
     export INTERNAL_SERVICE_TOKEN="$detected_internal_service_token"
   else
-    export INTERNAL_SERVICE_TOKEN="$(resolve_env_or_generate_secret INTERNAL_SERVICE_TOKEN 32)"
+    INTERNAL_SERVICE_TOKEN="$(resolve_env_or_generate_secret INTERNAL_SERVICE_TOKEN 32)"
+    export INTERNAL_SERVICE_TOKEN
   fi
   export ENTERPRISE_BASE_URL="${ENTERPRISE_BASE_URL:-https://api.apexmail.ee}"
   export TRACKING_BASE_URL="${TRACKING_BASE_URL:-https://track.apexmail.ee}"
   export BILLING_COMPANY_IBAN="${BILLING_COMPANY_IBAN:-EE381010220123456789}"
   export BILLING_COMPANY_PHONE="${BILLING_COMPANY_PHONE:-+3726000000}"
   export TLS_CERT_DIR="${TLS_CERT_DIR:-$SMOKE_SSL_DIR}"
-  export JWT_PRIVATE_KEY_PEM="$(<"$SMOKE_DIR/jwt-private.pem")"
-  export JWT_PUBLIC_KEY_PEM="$(<"$SMOKE_DIR/jwt-public.pem")"
+  JWT_PRIVATE_KEY_PEM="$(<"$SMOKE_DIR/jwt-private.pem")"
+  export JWT_PRIVATE_KEY_PEM
+  JWT_PUBLIC_KEY_PEM="$(<"$SMOKE_DIR/jwt-public.pem")"
+  export JWT_PUBLIC_KEY_PEM
   # Audit B — the production overlay requires APEXMAIL_API_KEY (:? guard).
-  export APEXMAIL_API_KEY="$(resolve_env_or_generate_secret APEXMAIL_API_KEY 32)"
-  export KIWI_SECRET_KEY="$(resolve_env_or_generate_secret KIWI_SECRET_KEY 32)"
-  export DKIM_PRIVATE_KEY_ENCRYPTION_KEY="$(resolve_env_or_seed_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY "$PROJECT_ROOT/secrets/dkim_private_key_encryption_key.txt" 32)"
+  APEXMAIL_API_KEY="$(resolve_env_or_generate_secret APEXMAIL_API_KEY 32)"
+  export APEXMAIL_API_KEY
+  KIWI_SECRET_KEY="$(resolve_env_or_generate_secret KIWI_SECRET_KEY 32)"
+  export KIWI_SECRET_KEY
+  DKIM_PRIVATE_KEY_ENCRYPTION_KEY="$(resolve_env_or_seed_secret DKIM_PRIVATE_KEY_ENCRYPTION_KEY "$PROJECT_ROOT/secrets/dkim_private_key_encryption_key.txt" 32)"
+  export DKIM_PRIVATE_KEY_ENCRYPTION_KEY
   # Required by ${VAR:?} guards in docker-compose.prod.yml for the services in
   # the smoke set (api-server placement engine, sales-autopilot dispatcher).
-  export PLACEMENT_ENCRYPTION_SECRET="$(resolve_env_or_generate_secret PLACEMENT_ENCRYPTION_SECRET 32)"
+  PLACEMENT_ENCRYPTION_SECRET="$(resolve_env_or_generate_secret PLACEMENT_ENCRYPTION_SECRET 32)"
+  export PLACEMENT_ENCRYPTION_SECRET
   export SALES_CAMPAIGN_FROM_EMAIL="${SALES_CAMPAIGN_FROM_EMAIL:-smoke@apexmail.ee}"
-  export SALES_UNSUBSCRIBE_SECRET="$(resolve_env_or_generate_secret SALES_UNSUBSCRIBE_SECRET 32)"
+  SALES_UNSUBSCRIBE_SECRET="$(resolve_env_or_generate_secret SALES_UNSUBSCRIBE_SECRET 32)"
+  export SALES_UNSUBSCRIBE_SECRET
   export DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}"
   export COMPOSE_DOCKER_CLI_BUILD="${COMPOSE_DOCKER_CLI_BUILD:-0}"
   seed_prod_secret_files

@@ -91,11 +91,6 @@ ALL_IMAGES="${GHCR_NS}/marketing:latest ${GHCR_NS}/tracking-service:latest
             ${GHCR_NS}/redis-backup:latest ${GHCR_NS}/analytics-backup:latest"
 for s in "${ALL_SERVICES[@]}"; do ALL_IMAGES+=" ${GHCR_NS}/${s}:latest"; done
 
-# Services with separate Dockerfiles
-declare -A SEPARATE_DOCKERFILES=(
-    [marketing]="${DEPLOY_DIR}/apps/marketing-zola/Dockerfile"
-    [tracking-service]="${DEPLOY_DIR}/deploy/Dockerfile.tracking"
-)
 
 # Determine which services to build
 if [[ -n "$SERVICES_TO_BUILD" ]]; then
