@@ -174,7 +174,20 @@ const COLLECTOR = `(() => {
     const r = el.getBoundingClientRect();
     return r.width >= 2 && r.height >= 2;
   };
+  // F52: sticky/fixed elements are mis-sampled in full-page captures (the
+  // stitched image does not place them at their captured-scroll bbox), so the
+  // classifier measures them from dedicated element screenshots instead.
+  const isSticky = (el) => {
+    let n = el;
+    while (n && n.nodeType === 1) {
+      const pos = getComputedStyle(n).position;
+      if (pos === 'sticky' || pos === 'fixed') return true;
+      n = n.parentElement;
+    }
+    return false;
+  };
   const findings = [];
+  let nextAuditId = 0;
   const docW = document.documentElement.scrollWidth, docH = document.documentElement.scrollHeight;
   const sx = window.scrollX, sy = window.scrollY;
   const all = document.body.querySelectorAll('*');
@@ -203,8 +216,13 @@ const COLLECTOR = `(() => {
         const fontSize = parseFloat(cs.fontSize) || 16;
         const weight = parseInt(cs.fontWeight, 10) || 400;
         const large = fontSize >= 24 || (fontSize >= 18.66 && weight >= 700);
+        // F52: a unique data attribute lets the Node side re-locate THIS
+        // element for a dedicated element.screenshot() measurement.
+        const auditId = nextAuditId++;
+        el.setAttribute('data-contrast-audit-id', String(auditId));
         findings.push({
           kind: disabled ? 'text-disabled' : 'text', tag, selector: cssPath(el),
+          auditId, sticky: isSticky(el),
           text: text.slice(0, 60), fg: [fgEff.r, fgEff.g, fgEff.b], rawFg: colRaw,
           skipLink: tag === 'a' && (el.getAttribute('href') || '').startsWith('#') && rect.top < 0,
           bg: [info.bg.r, info.bg.g, info.bg.b], bgSource: info.source,
@@ -223,8 +241,11 @@ const COLLECTOR = `(() => {
       else if (!disabled) {
         const fgEff = blendOver({ ...pcol, a: pcol.a * info.chainOpacity }, info.bg);
         const fontSize = parseFloat(pcs.fontSize) || 16;
+        const auditId = nextAuditId++;
+        el.setAttribute('data-contrast-audit-id', String(auditId));
         findings.push({
           kind: 'placeholder', tag, selector: cssPath(el), text: ph.slice(0, 60),
+          auditId, sticky: isSticky(el),
           fg: [fgEff.r, fgEff.g, fgEff.b], rawFg: pcs.color,
           bg: [info.bg.r, info.bg.g, info.bg.b], bgSource: info.source,
           fontSize: Math.round(fontSize * 10) / 10, fontWeight: parseInt(pcs.fontWeight, 10) || 400,
@@ -376,6 +397,162 @@ function pixelRatioBgOnly(img, bbox, scale, domFg) {
   return Math.round(worst * 100) / 100;
 }
 
+// ---------------------------------------------------------------- F52: element measurement + shared classifier
+
+// F52: measure one finding from a dedicated ELEMENT-region screenshot. The
+// in-page collector tags every text/placeholder element with a unique
+// data-contrast-audit-id; the element is scrolled into view and exactly its
+// box is captured at deviceScaleFactor 1 — no fullPage stitching, no
+// downscale, and correct coordinates for sticky/fixed headers (the
+// fullPage-crop bbox for a sticky element points at the wrong rows of the
+// stitched image).
+//
+// Capture protocol (scroll-race hardened): Chromium's scroll anchoring can
+// shift the page AFTER scrollIntoViewIfNeeded resolves (observed ±25px while
+// measuring many elements back-to-back), which decouples a previously read
+// boundingBox from the pixels actually captured. The audit context therefore
+// disables overflow-anchor, the element rect is read in-page after a
+// two-frame settle (one JS task — no round-trip between settle and read),
+// and the capture is dimension-checked against that rect: a capture whose
+// size disagrees with the element box is a failed measurement (null), never
+// a false contrast verdict.
+async function measureFromElement(pg, finding) {
+  try {
+    const selector = `[data-contrast-audit-id="${finding.auditId}"]`;
+    const locator = pg.locator(selector);
+    await locator.scrollIntoViewIfNeeded();
+    // F52: center the element in the viewport before measuring. A minimal
+    // scrollIntoView can park the element at the very bottom/top of the
+    // viewport, UNDER a fixed overlay (cookie-consent banner, sticky footer
+    // CTA) — the captured pixels would then be the overlay's, producing a
+    // false contrast verdict for content that renders correctly. Centering
+    // measures the element clear of the fixed chrome.
+    await pg.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return;
+      const b = el.getBoundingClientRect();
+      const centered = window.scrollY + b.top + b.height / 2 - window.innerHeight / 2;
+      window.scrollTo(0, Math.max(0, centered));
+    }, selector);
+    const rect = await pg.evaluate(async (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      // Let any pending scroll adjustment / layout shift land before the
+      // rect is read; the read itself runs in this one JS task.
+      await new Promise((r) => requestAnimationFrame(r));
+      await new Promise((r) => requestAnimationFrame(r));
+      const b = el.getBoundingClientRect();
+      if (b.width < 2 || b.height < 2) return null;
+      return { left: b.left, top: b.top, width: b.width, height: b.height };
+    }, selector);
+    if (!rect) return null;
+    const shot = await pg.screenshot({
+      clip: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+    });
+    const img = decodePng(shot);
+    // Dimension check: the capture must be exactly the element box (±2px of
+    // rounding). A different size means the clip was taken against a
+    // different scroll/layout state — a failed measurement, never a verdict.
+    if (Math.abs(img.width - rect.width) > 2 || Math.abs(img.height - rect.height) > 2) {
+      return null;
+    }
+    const bbox = [0, 0, img.width, img.height];
+    const pixel = finding.bgSource === 'solid'
+      ? pixelRatioOf(img, bbox, 1)
+      : pixelRatioBgOnly(img, bbox, 1, finding.fg);
+    return { pixel, shot };
+  } catch {
+    return null;
+  }
+}
+
+// F52: the ONE classifier used by the real audit AND the self-test fixtures
+// (node audit.mjs --self-test) — the gate proves its own classifier each
+// run instead of trusting a prior committed report.
+//
+// Verdict rules (F52 hardening):
+//   * gradient/image backgrounds: the RENDERED pixel ratio is authoritative.
+//     There is NO fallback-color exemption — a failing measured gradient
+//     ratio is a failure even when the DOM ratio against the solid fallback
+//     clears AA (an opaque light gradient over a dark fallback is the exact
+//     counterexample that used to be downgraded to pixel-suspect).
+//   * a gradient that cannot be measured is flagged pixel-suspect with
+//     failSource pixel-unmeasured (review), never silently certified by the
+//     fallback-color DOM math.
+//   * solid backgrounds: DOM computed-style math is authoritative; the
+//     pixel sample is an independent confirmation (large shortfalls are
+//     flagged pixel-suspect).
+async function classifyCollected(pg, collected, opts = {}) {
+  const { fullImg = null, scale = 1 } = opts;
+  const violations = [];
+  const stats = { textAaFail: 0, textAaaOnlyFail: 0, borderFail: 0, pixelSuspect: 0 };
+  const borderAgg = new Map();
+  const elementCache = new Map();
+  const measureElement = async (finding) => {
+    if (!elementCache.has(finding.auditId)) {
+      elementCache.set(finding.auditId, await measureFromElement(pg, finding));
+    }
+    return elementCache.get(finding.auditId);
+  };
+
+  for (const f of collected.findings) {
+    if (f.kind === 'text-disabled') continue;
+    const domRatio = Math.round(ratio(f.fg, f.bg) * 100) / 100;
+    const aaTh = f.kind === 'border' ? 3 : f.large ? 3 : 4.5;
+    const aaaTh = f.kind === 'border' ? 3 : f.large ? 4.5 : 7;
+    if (f.kind === 'border') {
+      const key = `${f.fg.join(',')}|${f.bg.join(',')}`;
+      const agg = borderAgg.get(key) || { ...f, occurrences: 0 };
+      agg.occurrences++;
+      borderAgg.set(key, agg);
+      if (domRatio < 3) stats.borderFail++;
+      continue;
+    }
+    const gradientBg = f.bgSource !== 'solid';
+    // F52 sampling strategy: gradient/image backgrounds AND sticky/fixed
+    // elements are measured from element screenshots; plain solid in-flow
+    // elements keep the fullPage-crop confirmation sample.
+    const needsElementShot = gradientBg || f.sticky;
+    let effPixel = null;
+    let measuredVia = null;
+    let elementShot = null;
+    if (needsElementShot) {
+      const measured = await measureElement(f);
+      if (measured) { effPixel = measured.pixel; measuredVia = 'element'; elementShot = measured.shot; }
+    } else if (fullImg) {
+      effPixel = pixelRatioOf(fullImg, f.bbox, scale);
+      measuredVia = 'fullpage';
+    }
+    f.ratio = domRatio;
+    f.pixelRatio = effPixel;
+    f.measuredVia = measuredVia;
+    const effRatio = gradientBg && effPixel != null ? effPixel : domRatio;
+    const domFail = effRatio < aaTh;
+    const pixelFail = effPixel != null && effPixel < aaTh;
+    let verdict = null, failSource = null;
+    if (gradientBg && effPixel == null) {
+      verdict = 'pixel-suspect'; failSource = 'pixel-unmeasured'; stats.pixelSuspect++;
+    } else if (domFail) {
+      verdict = 'fail-aa'; failSource = gradientBg ? 'pixel' : 'dom'; stats.textAaFail++;
+    } else if (!gradientBg && pixelFail && effPixel < aaTh - 0.75) {
+      verdict = 'pixel-suspect'; failSource = 'pixel'; stats.pixelSuspect++;
+    } else if (effRatio < aaaTh) {
+      verdict = 'fail-aaa'; stats.textAaaOnlyFail++;
+    }
+    if (verdict) {
+      violations.push({
+        ...f,
+        threshold: aaTh, aaaThreshold: aaaTh,
+        verdict, failSource: failSource || 'aaa',
+        pixelConfirmed: effPixel != null && effPixel < aaTh,
+        pixelSkipped: effPixel == null,
+        elementShot: elementShot || null,
+      });
+    }
+  }
+  return { violations, stats, borders: [...borderAgg.values()] };
+}
+
 // ---------------------------------------------------------------- audit task
 async function auditTask(browser, port, task, results) {
   const { url: pageUrl, theme, surface, route } = task;
@@ -391,7 +568,7 @@ async function auditTask(browser, port, task, results) {
   await ctx.addInitScript(() => {
     const nuke = () => {
       const s = document.createElement('style');
-      s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;}';
+      s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;}html,body{overflow-anchor:none!important;}';
       (document.head || document.documentElement).appendChild(s);
     };
     nuke();
@@ -435,62 +612,22 @@ async function auditTask(browser, port, task, results) {
     const vpW = isMarketing ? 1440 : 1280;
     const scale = img.width / vpW;
 
-    // classify + pixel-confirm
-    const violations = [];
-    const stats = { textAaFail: 0, textAaaOnlyFail: 0, borderFail: 0, pixelSuspect: 0 };
-    const borderAgg = new Map();
-    for (const f of collected.findings) {
-      if (f.kind === 'text-disabled') continue;
-      const domRatio = Math.round(ratio(f.fg, f.bg) * 100) / 100;
-      const aaTh = f.kind === 'border' ? 3 : f.large ? 3 : 4.5;
-      const aaaTh = f.kind === 'border' ? 3 : f.large ? 4.5 : 7;
-      // borders: DOM math only (1px lines resist pixel sampling); text/placeholder: pixel-confirmed
-      const pixel = f.kind === 'border' || f.bgSource !== 'solid' ? null : pixelRatioOf(img, f.bbox, scale);
-      f.ratio = domRatio; f.pixelRatio = pixel;
-      if (f.kind === 'border') {
-        const key = `${f.fg.join(',')}|${f.bg.join(',')}`;
-        const agg = borderAgg.get(key) || { ...f, occurrences: 0 };
-        agg.occurrences++;
-        borderAgg.set(key, agg);
-        if (domRatio < 3) stats.borderFail++;
-        continue;
+    // classify + pixel-confirm (F52: the same shared classifier the
+    // self-test fixtures exercise; gradient/sticky findings are measured
+    // from dedicated element screenshots, and a failing measured gradient
+    // ratio is a failure — no fallback-color exemption).
+    const classified = await classifyCollected(pg, collected, { fullImg: img, scale });
+    const violations = classified.violations.map((v) => {
+      if (v.elementShot) {
+        const elPath = path.join(SHOTS, `${stem}--el${v.auditId}.png`);
+        try { fs.writeFileSync(elPath, v.elementShot); } catch { /* best effort */ }
+        return { ...v, elementShot: path.relative(REPORTS, elPath) };
       }
-      // Gradient/image backgrounds: DOM math cannot know which gradient stop sits
-      // under the glyphs — measure the bg from rendered pixels (fg taken exactly
-      // from computed styles) and let THAT ratio decide. Solid backgrounds: DOM
-      // math is authoritative; a large pixel shortfall is flagged for review.
-      const gradientBg = f.bgSource !== 'solid';
-      const pixelAuthoritative = gradientBg;
-      const effPixel = gradientBg
-        ? pixelRatioBgOnly(img, f.bbox, scale, f.fg)
-        : pixel;
-      f.pixelRatio = effPixel;
-      const effRatio = gradientBg && effPixel != null ? effPixel : domRatio;
-      const domFail = effRatio < aaTh;
-      const pixelFail = effPixel != null && effPixel < aaTh;
-      // Gradient floors: when the element also paints a SOLID fallback
-      // color whose DOM ratio clears AA by a full point, a pixel reading
-      // below AA is a measurement conflict (fullPage captures mis-sample
-      // elements in sticky headers on very tall pages), not proof —
-      // downgrade to review. Genuine gradient failures keep failing:
-      // their solid-floor DOM ratio is marginal, so the guard never
-      // covers them.
-      const floorGuard = gradientBg && domRatio >= aaTh + 1;
-      let verdict = null, failSource = null;
-      if (domFail && !floorGuard) { verdict = 'fail-aa'; failSource = gradientBg ? 'pixel' : 'dom'; stats.textAaFail++; }
-      else if (domFail && floorGuard) { verdict = 'pixel-suspect'; failSource = 'pixel'; stats.pixelSuspect++; }
-      else if (!gradientBg && pixelFail && pixel < aaTh - 0.75) { verdict = 'pixel-suspect'; failSource = 'pixel'; stats.pixelSuspect++; }
-      else if (effRatio < aaaTh) { verdict = 'fail-aaa'; stats.textAaaOnlyFail++; }
-      if (verdict) {
-        violations.push({
-          ...f,
-          threshold: aaTh, aaaThreshold: aaaTh,
-          verdict, failSource: failSource || 'aaa',
-          pixelConfirmed: effPixel != null && effPixel < aaTh,
-          pixelSkipped: effPixel == null,
-        });
-      }
-    }
+      const { elementShot, ...rest } = v;
+      return rest;
+    });
+    const stats = classified.stats;
+    const borderAgg = new Map(classified.borders.map((b) => [`${b.fg.join(',')}|${b.bg.join(',')}`, b]));
     entry.stats = stats;
     entry.violations = violations;
     entry.borders = [...borderAgg.values()];
@@ -503,6 +640,124 @@ async function auditTask(browser, port, task, results) {
     entry.error = String(e).slice(0, 300);
     results.push(entry);
     process.stderr.write(`  ERR ${surface} ${route} [${theme}]: ${entry.error}\\n`);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------- self-test (F52)
+// `node audit.mjs --self-test` (and automatically before every gate/full
+// audit run): the classifier proves ITSELF against known-negative and
+// known-positive fixtures each run, instead of trusting a prior committed
+// report. Fixtures:
+//   (a) NEGATIVE — white text on an OPAQUE WHITE gradient with a BLACK
+//       background-color fallback MUST fail. The DOM ratio against the
+//       solid fallback is ~21:1 (≥ AA + 1 — the exact input the removed
+//       floorGuard downgraded to nonblocking pixel-suspect), while the
+//       rendered gradient measures 1:1. A pass here certifies the
+//       fallback-color exemption is really gone.
+//   (b) POSITIVE — dark text on a light gradient (≥ 4.5 rendered) must
+//       produce NO AA failure.
+//   (c) STICKY — the same pair inside position:sticky headers in the
+//       middle of a tall (~8k px) document: the bad header must still fail
+//       AND be measured via the scroll-aware element screenshot (not the
+//       fullPage crop whose bbox points at the wrong rows for sticky
+//       elements), with the measured ratio reflecting the rendered
+//       gradient (≈1:1), never the fallback.
+const SELF_TEST_ONLY = process.argv.includes('--self-test');
+const SELFTEST_REPORT = path.join(REPORTS, 'self-test.json');
+
+async function runSelfTest(browser) {
+  const results = [];
+  const check = (name, ok, detail = '') => {
+    results.push({ name, ok: !!ok, detail });
+    process.stderr.write(`  [self-test] ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}\n`);
+    return !!ok;
+  };
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    deviceScaleFactor: 1,
+    reducedMotion: 'reduce',
+  });
+  const pg = await ctx.newPage();
+  // Same measurement-environment nuke as auditTask (animations/transitions
+  // off, scroll anchoring off) so the self-test exercises the identical
+  // capture protocol the real pages get.
+  await pg.addInitScript(() => {
+    const s = document.createElement('style');
+    s.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;}html,body{overflow-anchor:none!important;}';
+    (document.head || document.documentElement).appendChild(s);
+  });
+  try {
+    // ---- (a) negative gradient: MUST fail-aa, pixel-confirmed
+    await pg.setContent(`<!doctype html><html><head><style>body{margin:0}</style></head><body>
+      <div id="neg" style="background-image:linear-gradient(#ffffff,#ffffff);background-color:#000000;color:#ffffff;padding:10px 16px;font-size:16px;">Deliberately unreadable white on white</div>
+    </body></html>`, { waitUntil: 'load' });
+    let collected = await pg.evaluate(COLLECTOR);
+    let cls = await classifyCollected(pg, collected);
+    const negFail = cls.violations.filter((v) => v.verdict === 'fail-aa');
+    const negFinding = collected.findings.find((f) => f.text && f.text.includes('Deliberately'));
+    check('negative fixture produces a fail-aa violation', negFail.length > 0,
+      `${negFail.length} fail-aa of ${cls.violations.length} violations`);
+    if (negFail.length > 0) {
+      const v = negFail[0];
+      check('negative fixture is pixel-confirmed', v.pixelConfirmed === true,
+        `pixelRatio=${v.pixelRatio} via ${v.measuredVia}`);
+      check('negative fixture measured the rendered gradient (≈1:1), not the fallback',
+        typeof v.pixelRatio === 'number' && v.pixelRatio < 2, `pixelRatio=${v.pixelRatio}`);
+      check('negative fixture is the floorGuard counterexample (DOM fallback ratio ≥ AA+1)',
+        v.ratio >= 4.5 + 1, `domRatio=${v.ratio}`);
+    }
+    check('collector found the negative fixture text', !!negFinding);
+
+    // ---- (b) positive gradient: NO AA failure
+    await pg.setContent(`<!doctype html><html><head><style>body{margin:0}</style></head><body>
+      <div id="pos" style="background-image:linear-gradient(#ffffff,#e8e8e8);color:#123257;padding:10px 16px;font-size:16px;">Comfortably readable on a gradient</div>
+    </body></html>`, { waitUntil: 'load' });
+    collected = await pg.evaluate(COLLECTOR);
+    cls = await classifyCollected(pg, collected);
+    const posFail = cls.violations.filter((v) => v.verdict === 'fail-aa');
+    check('positive gradient fixture has zero fail-aa violations', posFail.length === 0,
+      `${posFail.length} fail-aa; stats=${JSON.stringify(cls.stats)}`);
+    const posFinding = cls.violations.find((v) => v.text && v.text.includes('Comfortably'));
+    check('positive gradient was measured at all', !posFinding || typeof posFinding.pixelRatio === 'number',
+      posFinding ? `pixelRatio=${posFinding.pixelRatio} via ${posFinding.measuredVia}` : 'no violation recorded (passes clean)');
+
+    // ---- (c) sticky-header sampling correctness on a tall page
+    await pg.setContent(`<!doctype html><html><head><style>body{margin:0}</style></head><body>
+      <div style="height:6000px"></div>
+      <div style="height:600px;background:#f6f6f6">
+        <div id="sticky-bad" style="position:sticky;top:0;background-image:linear-gradient(#ffffff,#ffffff);background-color:#000000;color:#ffffff;padding:10px 16px;font-size:16px;">Sticky unreadable</div>
+        <div style="height:200px"></div>
+        <div id="sticky-good" style="position:sticky;top:48px;background-image:linear-gradient(#ffffff,#e8e8e8);color:#123257;padding:10px 16px;font-size:16px;">Sticky readable</div>
+      </div>
+      <div style="height:2000px"></div>
+    </body></html>`, { waitUntil: 'load' });
+    collected = await pg.evaluate(COLLECTOR);
+    cls = await classifyCollected(pg, collected);
+    const stickyBad = cls.violations.find((v) => v.text && v.text.includes('Sticky unreadable'));
+    const stickyGoodFail = cls.violations.find((v) => v.text && v.text.includes('Sticky readable') && v.verdict === 'fail-aa');
+    check('sticky bad header fails', !!stickyBad, stickyBad ? `verdict=${stickyBad.verdict} pixelRatio=${stickyBad.pixelRatio}` : 'no violation for the bad sticky header');
+    if (stickyBad) {
+      check('sticky bad header measured via the element screenshot (scroll-aware sampling)',
+        stickyBad.measuredVia === 'element', `measuredVia=${stickyBad.measuredVia}`);
+      check('sticky bad header measurement reflects the rendered gradient (≈1:1)',
+        typeof stickyBad.pixelRatio === 'number' && stickyBad.pixelRatio < 2, `pixelRatio=${stickyBad.pixelRatio}`);
+    }
+    check('sticky good header does not fail', !stickyGoodFail, stickyGoodFail ? `verdict=${stickyGoodFail.verdict}` : 'clean');
+    const stickyCollected = collected.findings.filter((f) => f.text && f.text.includes('Sticky'));
+    check('sticky fixtures are tagged sticky in the collector', stickyCollected.length === 2 && stickyCollected.every((f) => f.sticky === true));
+
+    const ok = results.every((r) => r.ok);
+    fs.mkdirSync(REPORTS, { recursive: true });
+    fs.writeFileSync(SELFTEST_REPORT, JSON.stringify({
+      generated: new Date().toISOString(),
+      ok,
+      fixtures: ['negative-white-on-white-gradient-must-fail', 'positive-gradient-passes', 'sticky-header-element-sampling'],
+      results,
+    }, null, 1));
+    process.stderr.write(`[self-test] ${ok ? 'PASS' : 'FAIL'} — ${results.filter((r) => r.ok).length}/${results.length} checks (${SELFTEST_REPORT})\n`);
+    return { ok, results };
   } finally {
     await ctx.close().catch(() => {});
   }
@@ -541,6 +796,20 @@ if (GATE) {
     const t0 = Date.now();
     const { server, port } = await startServer();
     const browser = await chromium.launch({ channel: 'chromium' });
+    // F52: the gate FIRST proves its own classifier against the negative
+    // fixtures (white-on-opaque-white-gradient MUST fail; a good gradient
+    // must pass; sticky headers must be measured via element screenshots).
+    // A self-test failure fails the gate outright — a gate that cannot
+    // classify known inputs cannot certify real pages.
+    process.stderr.write('[gate] running the classifier self-test fixtures first\n');
+    const selfTest = await runSelfTest(browser);
+    if (!selfTest.ok) {
+      await browser.close();
+      server.close();
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(), ok: false, selfTestFailed: true, selfTest: selfTest.results.filter(r => !r.ok) }, null, 1));
+      process.stderr.write(`[gate] FAIL — classifier self-test failed (${SELFTEST_REPORT}); real pages were not certified\n`);
+      process.exit(1);
+    }
     const results = [];
     let idx = 0;
     async function worker() {
@@ -555,26 +824,39 @@ if (GATE) {
     for (const run of results) {
       if (run.error) { failed.push({ surface: run.surface, page: run.page, theme: run.theme, error: run.error }); continue; }
       const aa = (run.violations || []).filter(v => v.verdict === 'fail-aa');
-      aaTotal += aa.reduce((a, v) => a + v.occurrences, 0);
+      aaTotal += aa.reduce((a, v) => a + (v.occurrences || 1), 0);
       if (aa.length) {
         failed.push({
           surface: run.surface, page: run.page, theme: run.theme,
           groups: aa.length,
-          occurrences: aa.reduce((a, v) => a + v.occurrences, 0),
+          occurrences: aa.reduce((a, v) => a + (v.occurrences || 1), 0),
           worst: Math.min(...aa.map(v => v.ratio)),
-          examples: aa.slice(0, 3).map(v => `${v.selector} "${(v.text || '').slice(0, 40)}" ${v.fg.join(',')} on ${v.bg.join(',')} @${v.ratio}`),
+          examples: aa.slice(0, 3).map(v => `${v.selector} "${(v.text || '').slice(0, 40)}" ${v.fg.join(',')} on ${v.bg.join(',')} @${v.ratio}${v.measuredVia === 'element' ? ` (element-measured ${v.pixelRatio})` : ''}`),
         });
       }
     }
     const seconds = ((Date.now() - t0) / 1000).toFixed(1);
     const ok = failed.length === 0 && aaTotal === 0;
-    fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(), ok, aaFailures: aaTotal, failedRuns: failed.length, seconds: Number(seconds), failed }, null, 1));
+    fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(), ok, selfTestPassed: true, aaFailures: aaTotal, failedRuns: failed.length, seconds: Number(seconds), failed }, null, 1));
     process.stderr.write(`[gate] ${ok ? 'PASS' : 'FAIL'} — AA failures: ${aaTotal} across ${failed.length} runs (${pages.length} pages, ${tasks.length} runs, ${seconds}s)\n`);
     if (!ok) for (const f of failed.slice(0, 20)) process.stderr.write(`[gate]   ${f.surface} ${f.page} [${f.theme}] ${f.groups} groups / ${f.occurrences} occurrences${f.examples && f.examples.length ? ' — e.g. ' + f.examples[0] : ' — ' + (f.error || '')}\n`);
     process.stderr.write(`[gate] report: ${reportPath}\n`);
     process.exit(ok ? 0 : 1);
   } catch (e) {
     console.error('[gate] audit crashed:', e);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------- self-test-only mode
+if (SELF_TEST_ONLY) {
+  try {
+    const browser = await chromium.launch({ channel: 'chromium' });
+    const selfTest = await runSelfTest(browser);
+    await browser.close();
+    process.exit(selfTest.ok ? 0 : 1);
+  } catch (e) {
+    console.error('[self-test] crashed:', e);
     process.exit(1);
   }
 }
@@ -589,6 +871,15 @@ if (GATE) {
 
   const { server, port } = await startServer();
   const browser = await chromium.launch({ channel: 'chromium' }); // full chromium: supports fullPage capture
+  // F52: prove the classifier against the negative fixtures BEFORE
+  // auditing real pages — the report is only meaningful if the tool can
+  // classify known-bad and known-good inputs correctly.
+  const selfTest = await runSelfTest(browser);
+  if (!selfTest.ok) {
+    await browser.close();
+    server.close();
+    process.exit(1);
+  }
   const results = [];
   let idx = 0;
   async function worker() {

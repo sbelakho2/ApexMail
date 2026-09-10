@@ -572,15 +572,56 @@ exit $_pc_rc') \
 # --- 8. WCAG AA contrast gate -----------------------------------------------------------
 # Pixel-confirmed contrast gate (tools/contrast-audit/gate.sh → audit.mjs
 # --gate): console + control-plane fixtures in all three themes plus the
-# marketing top-20, zero AA text failures required. Skips loudly (warn, not
-# fail) when the toolchain is absent so runners without playwright/chromium
-# cannot silently pass but also do not hard-block.
+# marketing top-20, zero AA text failures required. F52: the gate is
+# REQUIRED by default — missing node / gate script / playwright on a
+# required runner is a stage FAILURE (the ci_have_tool fail-closed
+# pattern), never a silent skip; the only opt-out is the explicit
+# CI_CONTRAST_GATE_CHECK=advisory. audit.mjs --gate additionally runs its
+# own classifier self-test fixtures BEFORE certifying real pages (a
+# white-on-opaque-white-gradient must fail, a good gradient must pass,
+# sticky headers must be measured via element screenshots), and gate.sh
+# persists an executed/skipped/failed execution record bound to the
+# reviewed revision next to the report
+# (tools/contrast-audit/reports/gate-execution.json).
+_contrast_gate_record() {
+    # F52: persist a result bound to the reviewed revision for the
+    # prerequisite outcomes where gate.sh itself never ran (it writes the
+    # executed/failed records on the paths it owns).
+    _cgr_status=$1
+    _cgr_detail=$2
+    _cgr_dir=$REPO_ROOT/tools/contrast-audit/reports
+    mkdir -p "$_cgr_dir" 2>/dev/null || return 0
+    _cgr_rev=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+    _cgr_dirty=false
+    [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 2>/dev/null)" ] && _cgr_dirty=true
+    printf '{\n "tool": "ci/stages/test.sh:run_contrast_gate",\n "gate": "wcag-aa-contrast",\n "revision": "%s",\n "dirtyWorkingTree": %s,\n "status": "%s",\n "detail": "%s",\n "recordedAt": "%s"\n}\n' \
+        "$_cgr_rev" "$_cgr_dirty" "$_cgr_status" "$_cgr_detail" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        >"$_cgr_dir/gate-execution.json" 2>/dev/null || true
+}
+
 run_contrast_gate() {
-    command -v node >/dev/null 2>&1 || { ci_warn "node missing — WCAG contrast gate skipped"; return "$CI_EXIT_OK"; }
-    [ -x "$REPO_ROOT/tools/contrast-audit/gate.sh" ] || { ci_warn "tools/contrast-audit/gate.sh missing — WCAG contrast gate skipped"; return "$CI_EXIT_OK"; }
-    [ -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ] || { ci_warn "tools/contrast-audit/node_modules missing — run '(cd tools/contrast-audit && npm install)'; WCAG contrast gate skipped"; return "$CI_EXIT_OK"; }
+    _cg_missing=''
+    command -v node >/dev/null 2>&1 || _cg_missing='node missing'
+    if [ -z "$_cg_missing" ] && [ ! -x "$REPO_ROOT/tools/contrast-audit/gate.sh" ]; then
+        _cg_missing='tools/contrast-audit/gate.sh missing'
+    fi
+    if [ -z "$_cg_missing" ] && [ ! -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ]; then
+        _cg_missing="tools/contrast-audit/node_modules (playwright) missing — run '(cd tools/contrast-audit && npm install)'"
+    fi
+    if [ -n "$_cg_missing" ]; then
+        if [ "${CI_CONTRAST_GATE_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: $_cg_missing — WCAG contrast gate skipped (CI_CONTRAST_GATE_CHECK=advisory)"
+            _contrast_gate_record skipped "$_cg_missing"
+            return "$CI_EXIT_OK"
+        fi
+        ci_err "$_cg_missing — WCAG contrast gate REQUIRED \
+(provision the browser toolchain via ci/install.sh, or set CI_CONTRAST_GATE_CHECK=advisory to disable this gate explicitly)"
+        _contrast_gate_record failed "$_cg_missing"
+        return "$CI_EXIT_FAIL"
+    fi
     (cd "$REPO_ROOT" && ci_check "WCAG AA contrast gate (tools/contrast-audit/gate.sh)" \
         sh tools/contrast-audit/gate.sh) || { ci_err "contrast gate FAILED — see tools/contrast-audit/reports/gate-report.json"; return "$CI_EXIT_FAIL"; }
+    return "$CI_EXIT_OK"
 }
 
 # --- 8b. Layout-spill + tag-balance gates ------------------------------------------------
