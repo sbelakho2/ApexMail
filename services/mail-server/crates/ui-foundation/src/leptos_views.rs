@@ -1459,22 +1459,22 @@ pub fn control_plane_home_page() -> String {
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
                         <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Tenants armed</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-surface-950">12</p>
-                        <p class="mt-1 text-xs text-surface-500">9 production, 3 launch window</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">9 production, 3 launch window</p>
                     </article>
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
                         <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Live incidents</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-warning-700">1</p>
-                        <p class="mt-1 text-xs text-surface-500">Queue latency breach in eu-central</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">Queue latency breach in eu-central</p>
                     </article>
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
                         <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Approvals pending</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-surface-950">7</p>
-                        <p class="mt-1 text-xs text-surface-500">Security + sales handoff backlog</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">Security + sales handoff backlog</p>
                     </article>
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
                         <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Expansion ARR</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-success-700">$196k</p>
-                        <p class="mt-1 text-xs text-surface-500">Weighted by confidence score</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">Weighted by confidence score</p>
                     </article>
                 </div>
                 <div class="mt-6 flex flex-wrap gap-3">
@@ -1632,22 +1632,22 @@ pub fn control_plane_sales_page() -> String {
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
-                            <p class="mt-1 text-xs text-surface-500">Weighted annual contract value</p>
+                            <p class="mt-1 text-xs text-surface-500 break-words">Weighted annual contract value</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Approvals queue</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p>
-                            <p class="mt-1 text-xs text-surface-500">7 high confidence, 4 review required</p>
+                            <p class="mt-1 text-xs text-surface-500 break-words">7 high confidence, 4 review required</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Campaigns live</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p>
-                            <p class="mt-1 text-xs text-surface-500">1,268 recipients in active cadence</p>
+                            <p class="mt-1 text-xs text-surface-500 break-words">1,268 recipients in active cadence</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Conversion pace</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
-                            <p class="mt-1 text-xs text-surface-500">From qualified to contract signature</p>
+                            <p class="mt-1 text-xs text-surface-500 break-words">From qualified to contract signature</p>
                         </article>
                     </div>
                 </div>
@@ -1669,7 +1669,7 @@ pub fn control_plane_sales_page() -> String {
                     <form method="get" action="/sales" role="search" class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                         <div class="min-w-0">
                             <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Triage Queue</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Lead inventory</h2>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight break-words">Lead inventory</h2>
                         </div>
                         <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)_auto]">
                             <div>
@@ -1691,10 +1691,10 @@ pub fn control_plane_sales_page() -> String {
                     </form>
 
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500">Across all active stages</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-500">No blockers, proposal eligible</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-500">DPA or procurement exception</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500">Weighted by buying intent + fit</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500 break-words">Across all active stages</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-500 break-words">No blockers, proposal eligible</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-500 break-words">DPA or procurement exception</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500 break-words">Weighted by buying intent + fit</p></div>
                     </div>
 
                     <form method="post" action="/web/admin/sales/leads/update" class="mt-6 block">
