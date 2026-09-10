@@ -981,13 +981,14 @@ html.dark :focus-visible {
   }
 
   /* Wide data tables (data locations, API params, comparisons) must scroll
-     inside their own box on narrow screens instead of spilling past the
-     viewport; desktop rendering is unchanged. */
-  @media (max-width: 767.98px) {
-    .prose table {
-      display: block;
-      overflow-x: auto;
-    }
+     inside their own box instead of spilling past the viewport. Previously
+     mobile-only — but the same nowrap-token tables (Default Backup/Replica,
+     Transfer Safeguard, German Nachweis columns) also overflowed the
+     max-w-3xl prose column at desktop widths, pushing cells past the
+     viewport edge, so the containment now applies at every width. */
+  .prose table {
+    display: block;
+    overflow-x: auto;
   }
 
   .prose th {
@@ -1863,12 +1864,19 @@ html.dark .ix { color: rgb(var(--brand-500)); }
 }
 
 
-/* ── Features page: 38 cards at 1-up on phones is endless — 2-up compact ── */
+/* ── Features page: 38 cards at 1-up on phones is endless — 2-up compact ──
+   The compact 2-up grid is kept, but the descriptions are NO LONGER
+   clamped: the old -webkit-line-clamp:2 + overflow:hidden silently cut
+   card text off after two lines (flagged as cut-off-text-y). Descriptions
+   now wrap to their full height, and long German compounds
+   (IP-Reputationsüberwachung) break instead of spilling past the card
+   (text-spills-box). min-width:0 lets the 1fr tracks shrink below the
+   unbreakable-word minimum. */
 @media (max-width: 640px) {
-  .features-grid .animate-in { padding: 0.75rem !important; }
+  .features-grid .animate-in { padding: 0.75rem !important; min-width: 0; }
   .features-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 0.5rem !important; }
-  .features-grid h4 { font-size: 12px; line-height: 1.3; }
-  .features-grid p { font-size: 11px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .features-grid h4 { font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
+  .features-grid p { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
   .features-grid .w-8 { width: 1.5rem; height: 1.5rem; }
   .features-grid .mb-4 { margin-bottom: 0.5rem; }
 }
