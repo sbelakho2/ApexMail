@@ -164,8 +164,9 @@ CREATE TABLE IF NOT EXISTS webhooks (
 CREATE TABLE IF NOT EXISTS invoices (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
-    amount_cents BIGINT NOT NULL,
-    customer_email TEXT
+    amount BIGINT NOT NULL DEFAULT 0,
+    billing_address TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS audit_logs (
     id TEXT PRIMARY KEY,
@@ -438,21 +439,23 @@ async fn erasure_is_scoped_to_the_data_subject() {
         .execute(&pool)
         .await
         .unwrap();
+    // F82: the subject's PII on an invoice lives in the immutable
+    // billing-address snapshot (there is no customer_email column).
     sqlx::query(
-        "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,100,$3)",
+        "INSERT INTO invoices (id, tenant_id, amount, billing_address)          VALUES ($1,$2,100,$3)",
     )
     .bind(short_id())
     .bind(&tenant)
-    .bind(&subject)
+    .bind(serde_json::json!({ "email": subject, "country": "EE" }).to_string())
     .execute(&pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,200,$3)",
+        "INSERT INTO invoices (id, tenant_id, amount, billing_address)          VALUES ($1,$2,200,$3)",
     )
     .bind(short_id())
     .bind(&tenant)
-    .bind(&other)
+    .bind(serde_json::json!({ "email": other, "country": "DE" }).to_string())
     .execute(&pool)
     .await
     .unwrap();
@@ -586,23 +589,24 @@ async fn erasure_is_scoped_to_the_data_subject() {
         "invoices must never be deleted on erasure"
     );
     let anon: String = sqlx::query_scalar(
-        "SELECT customer_email FROM invoices WHERE tenant_id = $1 AND customer_email LIKE 'erased+%'",
+        "SELECT billing_address FROM invoices WHERE tenant_id = $1 \
+         AND billing_address LIKE '%erased+%'",
     )
     .bind(&tenant)
     .fetch_one(&pool)
     .await
-    .expect("subject invoice email must be redacted");
+    .expect("subject invoice snapshot email must be redacted");
     assert!(!anon.contains(&subject));
     let other_invoice: String = sqlx::query_scalar(
-        "SELECT customer_email FROM invoices WHERE tenant_id = $1 AND customer_email = $2",
+        "SELECT billing_address FROM invoices WHERE tenant_id = $1 AND billing_address LIKE '%' || $2 || '%'",
     )
     .bind(&tenant)
     .bind(&other)
     .fetch_one(&pool)
     .await
     .unwrap_or_default();
-    assert_eq!(
-        other_invoice, other,
+    assert!(
+        other_invoice.contains(&other),
         "other customer's invoice must be untouched"
     );
 
@@ -927,15 +931,15 @@ async fn access_export_covers_all_stores_and_downloads() {
     .execute(&pool)
     .await
     .unwrap();
-    // Customer email stored MIXED-CASE: the export must still match it
-    // (F9 — LOWER() on both sides, like the erasure side) and the
-    // anonymized view must redact the mixed-case copy too.
+    // Snapshot email stored MIXED-CASE: the export must still match it
+    // case-insensitively through the billing-address snapshot (F82/F9) and
+    // the anonymized view must redact the mixed-case copy too.
     sqlx::query(
-        "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,42,$3)",
+        "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,42,$3)",
     )
     .bind(short_id())
     .bind(&tenant)
-    .bind(subject.to_uppercase())
+    .bind(serde_json::json!({ "email": subject.to_uppercase(), "country": "EE" }).to_string())
     .execute(&pool)
     .await
     .unwrap();
@@ -1019,7 +1023,7 @@ async fn access_export_covers_all_stores_and_downloads() {
     assert_eq!(
         data["invoices"].as_array().map(Vec::len),
         Some(1),
-        "the mixed-case invoice must MATCH the export query (LOWER on both sides)"
+        "the mixed-case snapshot email must MATCH the export resolution (case-insensitive)"
     );
     assert!(invoices.contains("erased+"));
 
@@ -2660,4 +2664,189 @@ async fn breach_workflow_tracks_lifecycle_and_deadlines() {
     let listed = notifier.list_for_tenant(&tenant, None).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, report.id);
+}
+
+// ── F82: invoice identity via the immutable billing snapshot ───────────────
+
+/// The finding's exact scenario: issue an invoice containing the subject's
+/// snapshot email, change the live billing address, request the export —
+/// the invoice must still be included (resolved through the immutable
+/// snapshot + the tenant identity relation, not a mutable column).
+#[tokio::test]
+async fn invoice_export_survives_live_address_change() {
+    let Some(pool) = test_pool("f82_snapshot", MAIN_SCHEMA).await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    let subject = format!("f82-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "access").await;
+
+    sqlx::query("INSERT INTO users (tenant_id, email, name, password_hash) VALUES ($1,$2,'S','h')")
+        .bind(&tenant)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,42,$3)",
+    )
+    .bind(short_id())
+    .bind(&tenant)
+    .bind(
+        serde_json::json!({ "email": subject, "country": "EE", "company_name": "Subject OÜ" })
+            .to_string(),
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let gdpr = automation(pool.clone());
+    gdpr.process_request(&req_id)
+        .await
+        .expect("access export succeeds against the snapshot model");
+
+    let (data,): (serde_json::Value,) =
+        sqlx::query_as("SELECT data FROM gdpr_exports WHERE request_id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let invoices = serde_json::to_string(&data["invoices"]).unwrap();
+    assert_eq!(
+        data["invoices"].as_array().map(Vec::len),
+        Some(1),
+        "the snapshot-owned invoice must be included in the export"
+    );
+    assert!(!invoices.contains(&subject), "export is anonymized");
+    assert!(invoices.contains("erased+"), "snapshot email redacted");
+    assert!(
+        invoices.contains("Subject OÜ"),
+        "the retained financial record itself survives"
+    );
+
+    pool.close().await;
+}
+
+/// An invoice whose snapshot carries a DIFFERENT email (e.g. a company
+/// bookkeeping address) and no subject-user relation stays out of the
+/// subject's export — the mapping is explicit, not whole-tenant.
+#[tokio::test]
+async fn invoice_export_excludes_non_subject_snapshots() {
+    let Some(pool) = test_pool("f82_exclusion", MAIN_SCHEMA).await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    let subject = format!("f82b-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "access").await;
+
+    // NO users row for the subject in this tenant, and the invoice snapshot
+    // points at a different address: not the subject's invoice.
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,42,$3)",
+    )
+    .bind(short_id())
+    .bind(&tenant)
+    .bind(serde_json::json!({ "email": "billing@corp.example", "country": "DE" }).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let gdpr = automation(pool.clone());
+    gdpr.process_request(&req_id).await.expect("export");
+    let (data,): (serde_json::Value,) =
+        sqlx::query_as("SELECT data FROM gdpr_exports WHERE request_id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        data["invoices"].as_array().map(Vec::len),
+        Some(0),
+        "an unrelated snapshot is not the subject's invoice"
+    );
+
+    pool.close().await;
+}
+
+/// Erasure inventory uses the SAME explicit mapping: only the snapshot
+/// carrying the subject's email is redacted; the row and the other
+/// invoice's snapshot survive untouched.
+#[tokio::test]
+async fn invoice_erasure_redacts_only_the_subject_snapshot() {
+    let Some(pool) = test_pool("f82_erasure", MAIN_SCHEMA).await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    let subject = format!("f82e-{}@x.com", Uuid::new_v4().simple());
+    let other = format!("other-{}@x.com", Uuid::new_v4().simple());
+
+    for email in [&subject, &other] {
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,50,$3)",
+        )
+        .bind(short_id())
+        .bind(&tenant)
+        .bind(serde_json::json!({ "email": email, "country": "EE" }).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let gdpr = automation(pool.clone());
+    let request = compliance::types::DataSubjectRequest {
+        id: Uuid::new_v4().to_string(),
+        tenant_id: tenant.clone(),
+        email: subject.clone(),
+        request_type: compliance::types::DataSubjectRequestType::Erasure,
+        verification_token_hash: "h".into(),
+        verified: true,
+        verified_at: None,
+        status: compliance::types::RequestStatus::Verified,
+        requested_at: chrono::Utc::now(),
+        processed_at: None,
+        completed_at: None,
+        expires_at: chrono::Utc::now(),
+        result: None,
+    };
+    let result = gdpr
+        .erase_store(
+            &request,
+            ErasureStore::AnonymizeInvoiceSnapshot { name: "invoices" },
+        )
+        .await;
+    assert_eq!(
+        result.status,
+        StoreErasureStatus::Anonymized,
+        "error was: {:?}",
+        result.error
+    );
+    assert_eq!(result.rows_affected, 1, "only the subject's snapshot");
+
+    let redacted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invoices WHERE tenant_id = $1 AND billing_address LIKE '%erased+%'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(redacted, 1);
+    let untouched: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invoices WHERE tenant_id = $1 AND billing_address LIKE '%' || $2 || '%'",
+    )
+    .bind(&tenant)
+    .bind(&other)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(untouched, 1, "the other invoice is untouched");
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 2, "financial records are retained, never deleted");
+
+    pool.close().await;
 }

@@ -80,7 +80,10 @@ pub struct SourceBreakdown {
 pub struct ActivationStats {
     pub total_activated: i64,
     pub activation_rate: f64,
-    pub avg_time_to_activate_hours: f64,
+    /// Average hours from signup to first actual send. `None` when no
+    /// tenant in the window has sent yet — never-sent is explicitly
+    /// distinct from zero elapsed time (F79).
+    pub avg_time_to_activate_hours: Option<f64>,
     pub activation_funnel: Vec<ActivationFunnelStage>,
 }
 
@@ -356,19 +359,9 @@ async fn get_growth_analytics(
         },
     ];
 
-    // Avg time to activate (first email sent minus tenant creation)
-    let avg_activation_hours: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT AVG(EXTRACT(EPOCH FROM (MIN(m.created_at) - t.created_at)) / 3600)
-         FROM tenants t
-         JOIN messages m ON m.tenant_id::text = t.id::text
-         WHERE t.created_at >= NOW() - $1::interval
-         GROUP BY t.id",
-    )
-    .bind(&interval)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    // Avg time to activate (first email sent minus tenant creation) — the
+    // shared, corrected per-tenant first-send query (F79).
+    let avg_time_to_activate = avg_time_to_first_send_hours(db, &interval).await?;
 
     // ─── Engagement ─────────────────────────────────────────────────────
     let dau: i64 = sqlx::query_scalar(
@@ -527,7 +520,7 @@ async fn get_growth_analytics(
             } else {
                 0.0
             },
-            avg_time_to_activate_hours: avg_activation_hours.and_then(|r| r.0).unwrap_or(0.0),
+            avg_time_to_activate_hours: avg_time_to_activate,
             activation_funnel,
         },
         engagement: EngagementMetrics {
@@ -563,6 +556,37 @@ async fn get_growth_analytics(
             avg_customer_lifetime_days: avg_lifetime_days.unwrap_or(0.0),
         },
     }))
+}
+
+/// F79: average time from signup to first ACTUAL send, shared by both
+/// endpoints. The first-send timestamp per tenant is computed in a
+/// subquery (nesting MIN inside AVG at one query level is invalid SQL —
+/// 42803), the outer SELECT then averages the per-tenant deltas, and the
+/// result is a typed `Option<f64>`: `None` means no tenant in the window
+/// has sent, which is explicitly distinct from a zero elapsed time. Query
+/// errors propagate as unavailable, never as a numerical zero.
+const AVG_TIME_TO_FIRST_SEND_SQL: &str = r#"
+    SELECT AVG(EXTRACT(EPOCH FROM (first_send - created_at)) / 3600)::double precision
+    FROM (
+        SELECT t.id AS tenant_id, t.created_at AS created_at,
+               MIN(m.created_at) AS first_send
+        FROM tenants t
+        JOIN messages m ON m.tenant_id::text = t.id::text
+        WHERE t.created_at >= NOW() - $1::interval
+          AND m.status IN ('sent', 'delivered')
+        GROUP BY t.id, t.created_at
+    ) first_sends
+"#;
+
+async fn avg_time_to_first_send_hours(
+    db: &sqlx::PgPool,
+    interval: &str,
+) -> Result<Option<f64>, ApiError> {
+    let avg: Option<Option<f64>> = sqlx::query_scalar(AVG_TIME_TO_FIRST_SEND_SQL)
+        .bind(interval)
+        .fetch_optional(db)
+        .await?;
+    Ok(avg.flatten())
 }
 
 async fn get_signup_timeline(
@@ -635,18 +659,7 @@ async fn get_activation_funnel(
     .await
     .unwrap_or(0);
 
-    let avg_activation: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT AVG(EXTRACT(EPOCH FROM (MIN(m.created_at) - t.created_at)) / 3600)
-         FROM tenants t
-         JOIN messages m ON m.tenant_id::text = t.id::text
-         WHERE t.created_at >= NOW() - $1::interval
-         GROUP BY t.id",
-    )
-    .bind(&interval)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    let avg_time_to_activate = avg_time_to_first_send_hours(db, &interval).await?;
 
     Ok(Json(ActivationStats {
         total_activated: email_sent,
@@ -655,7 +668,7 @@ async fn get_activation_funnel(
         } else {
             0.0
         },
-        avg_time_to_activate_hours: avg_activation.and_then(|r| r.0).unwrap_or(0.0),
+        avg_time_to_activate_hours: avg_time_to_activate,
         activation_funnel: vec![
             ActivationFunnelStage {
                 stage: "Signed up".into(),
@@ -823,5 +836,106 @@ mod tests {
         // hardcoded 14.0-day constant anywhere in the SQL.
         assert!(AVG_TRIAL_TO_PAID_SQL.contains("trial_end - created_at"));
         assert!(!AVG_TRIAL_TO_PAID_SQL.contains("14"));
+    }
+
+    // ── F79: corrected first-send aggregate ────────────────────────────
+
+    #[test]
+    fn first_send_aggregate_is_not_nested() {
+        // Nesting MIN inside AVG at one query level is rejected by
+        // PostgreSQL with 42803. The MIN must live in a subquery and only
+        // the outer level may aggregate.
+        let outer = AVG_TIME_TO_FIRST_SEND_SQL
+            .split("FROM (")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !outer.contains("MIN("),
+            "no aggregate may be nested in the outer AVG: {outer}"
+        );
+        assert!(
+            AVG_TIME_TO_FIRST_SEND_SQL.contains("MIN(m.created_at) AS first_send"),
+            "the per-tenant first send is computed in the subquery"
+        );
+        // Typed float result.
+        assert!(AVG_TIME_TO_FIRST_SEND_SQL.contains(")::double precision"));
+        // The metric is FIRST ACTUAL SEND: the status filter matches the
+        // activation funnel's definition of a sent message.
+        assert!(AVG_TIME_TO_FIRST_SEND_SQL.contains("m.status IN ('sent', 'delivered')"));
+    }
+
+    /// Seed two tenants with different first-send delays and multiple
+    /// messages: the exact expected average comes back, and never-sent
+    /// tenants (and no-data windows) are distinct from zero. Canonical
+    /// schema via the production migrator; gated on TEST_DATABASE_URL.
+    #[tokio::test]
+    async fn avg_time_to_first_send_matches_exact_expectation() {
+        let Some(pool) =
+            migrator::test_support::fresh_canonical_pool("growth_f79", "first_send").await
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        let seed = |days_before: i64, delay_hours: i64, sent: bool, label: &str| {
+            let pool = pool.clone();
+            let label = label.to_string();
+            async move {
+                // Canonical tenant ids are VARCHAR(26) (ULID domain).
+                let suffix = uuid::Uuid::new_v4().simple().to_string();
+                let tenant = format!("t{}", &suffix[..25]);
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, created_at) \
+                     VALUES ($1, $2, NOW() - make_interval(days => $3::int))",
+                )
+                .bind(&tenant)
+                .bind(&label)
+                .bind(days_before)
+                .execute(&pool)
+                .await
+                .unwrap();
+                if sent {
+                    for i in 0..3 {
+                        sqlx::query(
+                            "INSERT INTO messages (tenant_id, from_address, from_email, to_addresses, to_emails, subject, status, created_at) \
+                             VALUES ($1, 'a@apex.example', 'a@apex.example', '{}', '[]'::jsonb, 's', 'sent', \
+                                     NOW() - make_interval(days => $2::int) + make_interval(hours => $3::int))",
+                        )
+                        .bind(&tenant)
+                        .bind(days_before)
+                        .bind(delay_hours + i) // later duplicates must not move the MIN
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    }
+                }
+                tenant
+            }
+        };
+
+        // Tenant A: sent 6h after signup. Tenant B: sent 18h after signup.
+        // Tenant C: never sent — excluded from the average, NOT counted as 0.
+        seed(5, 6, true, "f79-a").await;
+        seed(5, 18, true, "f79-b").await;
+        seed(5, 0, false, "f79-c").await;
+
+        let avg = avg_time_to_first_send_hours(&pool, "30 days")
+            .await
+            .unwrap();
+        let avg = avg.expect("two tenants sent; the average is defined");
+        assert!(
+            (avg - 12.0).abs() < 0.01,
+            "average of 6h and 18h is 12h, got {avg}"
+        );
+
+        // A window containing ONLY the never-sent tenant: a zero-width
+        // window excludes the older tenants, leaving just f79-c (no sends).
+        let none = avg_time_to_first_send_hours(&pool, "0 days").await.unwrap();
+        assert!(
+            none.is_none(),
+            "never-sent tenants must not render as a zero elapsed time"
+        );
+
+        pool.close().await;
     }
 }

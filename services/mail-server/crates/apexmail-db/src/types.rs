@@ -278,14 +278,36 @@ pub struct StatusPageIncidentUpdate {
     pub created_at: DateTime<Utc>,
 }
 
-// ─── ISP Warmup Schedules ──────────────────────────────────────
+// ─── ISP Warmup (two explicit models, F87) ──────────────────────
 
+/// ISP warmup PROFILE (catalog row in `isp_warmup_templates`, migration
+/// 042): MX patterns plus the ordered daily-volume schedule a pool warmup
+/// is instantiated from. One row per ISP.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct IspWarmupSchedule {
+pub struct IspWarmupProfile {
     pub id: String,
     pub isp_name: String,
     pub mx_patterns: serde_json::Value,
     pub warmup_schedule: serde_json::Value,
+    pub notes: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Per-pool/day warmup EXECUTION row (`isp_warmup_schedules`, migration
+/// 042): one row per (pool_id, day) with target/actual volume and status.
+/// Deliberately carries NO profile columns — the ISP definition lives in
+/// [`IspWarmupProfile`].
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct IspWarmupExecution {
+    pub id: String,
+    pub pool_id: String,
+    pub day: i32,
+    pub target_volume: i64,
+    pub actual_volume: Option<i64>,
+    pub status: String,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -404,8 +426,8 @@ mod tests {
     }
 
     #[test]
-    fn test_isp_warmup_schedule() {
-        let s = IspWarmupSchedule {
+    fn test_isp_warmup_profile() {
+        let s = IspWarmupProfile {
             id: "isp_test".into(),
             isp_name: "Gmail".into(),
             mx_patterns: serde_json::json!(["*.google.com"]),

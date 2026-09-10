@@ -288,6 +288,27 @@ impl CampaignManager {
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
+        // F85: create the campaign's initial optimization arm through the
+        // production campaign workflow — the canonical campaign_arms store
+        // (migration 197) is populated by its producer, never by ad-hoc
+        // writes. ensure_arms is idempotent; the lazy redis pool is only
+        // touched by selection/cache paths, not by arm creation.
+        let autopilot_redis = deadpool_redis::Config::from_url(
+            crate::config::SalesConfig::default().redis_url.clone(),
+        )
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        .map_err(|e| SalesError::Database(format!("autopilot redis pool: {e}")))?;
+        analytics::campaign_autopilot::CampaignAutopilot::new(self.db.clone(), autopilot_redis)
+            .ensure_arms(
+                &campaign.tenant_id,
+                &campaign.id.to_string(),
+                std::slice::from_ref(&campaign.template_id),
+            )
+            .await
+            .map_err(|e| {
+                SalesError::Database(format!("campaign arm initialization failed: {e}"))
+            })?;
+
         Ok(campaign)
     }
 

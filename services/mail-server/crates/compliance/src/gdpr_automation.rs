@@ -625,30 +625,59 @@ impl GdprAutomation {
 
         // Invoices — retained for statutory reasons; export an anonymized
         // view (subject PII textually replaced with a redaction marker).
-        // F9: LOWER() on BOTH sides — writers are inconsistent about email
-        // case and an exact match silently misses rows the erasure side
-        // (which always matches case-insensitively) would redact.
-        let invoices: Result<Vec<(serde_json::Value,)>, sqlx::Error> = sqlx::query_as(
-            "SELECT row_to_json(i) FROM invoices i
-             WHERE tenant_id = $1 AND LOWER(customer_email) = LOWER($2)",
+        //
+        // F82: subject ownership is resolved through the CANONICAL invoice
+        // identity — the immutable billing-address snapshot's email and the
+        // customer/tenant identity relation (the subject being a user of the
+        // invoice's tenant). There is no customer_email column; querying it
+        // failed with 42703 and the old handler misclassified that schema
+        // error as an optional-store skip, silently dropping the subject's
+        // invoices from the export. The snapshot text is parsed in Rust so a
+        // malformed legacy snapshot can never abort the whole export with a
+        // JSON cast error. Invoices are a REQUIRED canonical store: any
+        // error (including 42P01/42703) fails the export visibly and the
+        // request keeps its retry work instead of reporting a partial skip.
+        let subject_is_tenant_user: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM users u              WHERE u.tenant_id::text = $1 AND LOWER(u.email) = LOWER($2))",
         )
         .bind(tid)
         .bind(email)
-        .fetch_all(&self.db)
-        .await;
-        match invoices {
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| format!("DB error (invoices identity): {e}"))?;
+
+        let invoice_rows: Result<Vec<(serde_json::Value, Option<String>)>, sqlx::Error> =
+            sqlx::query_as(
+                "SELECT row_to_json(i), i.billing_address FROM invoices i WHERE tenant_id = $1",
+            )
+            .bind(tid)
+            .fetch_all(&self.db)
+            .await;
+        match invoice_rows {
             Ok(rows) => {
                 let marker = redact_marker(email);
-                let vals: Vec<serde_json::Value> = rows
-                    .into_iter()
-                    .map(|(v,)| anonymize_json_text(v, email, &marker))
-                    .collect();
+                let email_lower = email.to_lowercase();
+                let mut vals: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+                for (row, snapshot_raw) in rows {
+                    let snapshot_email_matches = snapshot_raw
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .and_then(|snap| {
+                            snap.get("email")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                        })
+                        .is_some_and(|snap_email| snap_email.to_lowercase() == email_lower);
+                    if subject_is_tenant_user || snapshot_email_matches {
+                        vals.push(anonymize_json_text(row, email, &marker));
+                    }
+                }
                 stores.push(StoreExportResult::included("invoices", vals.len()));
                 data.insert("invoices".into(), serde_json::Value::Array(vals));
             }
-            Err(e) if is_missing_store(&e) => {
-                stores.push(StoreExportResult::skipped("invoices", &e));
-            }
+            // F82: REQUIRED store — a schema error is NOT an optional-store
+            // skip. Failing keeps the request's retry work; the export is
+            // visibly incomplete rather than quietly missing invoices.
             Err(e) => return Err(format!("DB error (invoices): {e}")),
         }
 
@@ -816,7 +845,10 @@ impl GdprAutomation {
         let tid = &request.tenant_id;
         let email = &request.email;
         // Anonymize variants report `anonymized`, not `deleted`.
-        let expect_anonymized = matches!(store, AnonymizeMessageContent | AnonymizeUserTombstone);
+        let expect_anonymized = matches!(
+            store,
+            AnonymizeMessageContent | AnonymizeUserTombstone | AnonymizeInvoiceSnapshot { .. }
+        );
 
         let result: Result<u64, sqlx::Error> = match store {
             TableBySubjectEmail {
@@ -880,6 +912,85 @@ impl GdprAutomation {
                 .execute(&self.db)
                 .await
                 .map(|r| r.rows_affected())
+            }
+            AnonymizeInvoiceSnapshot { name: _ } => {
+                // F82: redact the subject's email inside the immutable
+                // billing-address snapshot JSON. The snapshot text is
+                // parsed/serialized in Rust (a malformed legacy snapshot is
+                // skipped, never a SQL JSON-cast abort), and only snapshots
+                // actually addressed to the subject are rewritten. The
+                // financial record itself is RETAINED (statutory).
+                let email_lower = email.to_lowercase();
+                let rows: Vec<(String, Option<String>)> = match sqlx::query_as(
+                    "SELECT id::text, billing_address FROM invoices WHERE tenant_id = $1",
+                )
+                .bind(tid)
+                .fetch_all(&self.db)
+                .await
+                {
+                    Ok(rows) => rows,
+                    // F82: invoices are a REQUIRED canonical store — a
+                    // schema error fails the erasure visibly; it is not an
+                    // optional-store skip.
+                    Err(e) => {
+                        return StoreErasureResult {
+                            store: store.name(),
+                            status: StoreErasureStatus::Failed,
+                            rows_affected: 0,
+                            error: Some(format!("required store: {e}")),
+                        };
+                    }
+                };
+                let marker = redact_marker(email);
+                let mut updated: u64 = 0;
+                let mut failure: Option<sqlx::Error> = None;
+                for (invoice_id, snapshot_raw) in rows {
+                    let Some(raw) = snapshot_raw.as_deref() else {
+                        continue;
+                    };
+                    let Ok(mut snapshot) = serde_json::from_str::<serde_json::Value>(raw) else {
+                        continue; // malformed legacy snapshot: skip safely
+                    };
+                    let matches_subject = snapshot
+                        .get("email")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|e| e.to_lowercase() == email_lower);
+                    if !matches_subject {
+                        continue;
+                    }
+                    if let Some(obj) = snapshot.as_object_mut() {
+                        obj.insert("email".into(), serde_json::Value::String(marker.clone()));
+                    }
+                    match sqlx::query(
+                        "UPDATE invoices SET billing_address = $2, updated_at = NOW() \
+                         WHERE id::text = $1",
+                    )
+                    .bind(invoice_id)
+                    .bind(snapshot.to_string())
+                    .execute(&self.db)
+                    .await
+                    {
+                        Ok(r) => updated += r.rows_affected(),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    return StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::Failed,
+                        rows_affected: 0,
+                        error: Some(e.to_string()),
+                    };
+                }
+                return StoreErasureResult {
+                    store: store.name(),
+                    status: StoreErasureStatus::Anonymized,
+                    rows_affected: updated,
+                    error: None,
+                };
             }
             AnonymizeSubjectEmail {
                 name: _,
@@ -1970,6 +2081,12 @@ pub enum ErasureStore {
         table: &'static str,
         columns: &'static [&'static str],
     },
+    /// F82: invoices — statutory records whose SUBJECT PII lives in the
+    /// immutable `billing_address` snapshot JSON. The snapshot's email is
+    /// rewritten with the redaction marker (row preserved); the financial
+    /// record itself is retained. Schema errors here FAIL the erasure:
+    /// invoices are a required canonical store, not an optional one.
+    AnonymizeInvoiceSnapshot { name: &'static str },
     /// F1: canonical message content (migration 073). The subject's copy is
     /// anonymized — recipients arrays, subject line and bodies are redacted
     /// while the row (a statutory sending record) survives. Deleting the row
@@ -2000,6 +2117,7 @@ impl ErasureStore {
             Self::SessionsByUserEmail => "sessions",
             Self::AiChatByUserEmail => "ai_chat_messages",
             Self::AnonymizeSubjectEmail { name, .. } => name,
+            Self::AnonymizeInvoiceSnapshot { name } => name,
             Self::AnonymizeMessageContent => "messages",
             Self::AnonymizeUserTombstone => "users",
             Self::ClickHouseEvents => "clickhouse_events",
@@ -2081,13 +2199,11 @@ pub fn erasure_stores() -> Vec<ErasureStore> {
             reason: "retained: opt-out enforcement (CAN-SPAM/GDPR legitimate interest)",
         },
         // A-3: billing records have statutory retention — anonymize, never
-        // delete. The deployed invoices schema carries no email columns
-        // today; candidate columns are redacted where they exist.
-        AnonymizeSubjectEmail {
-            name: "invoices",
-            table: "invoices",
-            columns: &["customer_email", "billing_email", "email"],
-        },
+        // delete. F82: the subject's PII on an invoice lives in the
+        // immutable billing_address SNAPSHOT (there is no customer_email
+        // column; querying one failed with 42703). The snapshot's email is
+        // redacted in place; the financial record survives.
+        AnonymizeInvoiceSnapshot { name: "invoices" },
         // A-4: tenant-owned resources with no per-subject ownership column —
         // deleting them would destroy unrelated users' data.
         Retained {
@@ -2922,6 +3038,9 @@ mod tests {
                         "{name} anonymization needs candidate columns"
                     );
                 }
+                ErasureStore::AnonymizeInvoiceSnapshot { .. } => {
+                    /* scoped via the billing-address snapshot email (F82) */
+                }
                 ErasureStore::AnonymizeMessageContent => { /* canonical messages store */ }
                 ErasureStore::AnonymizeUserTombstone => { /* canonical users store */ }
                 ErasureStore::ClickHouseEvents => { /* best-effort analytics purge */ }
@@ -2938,6 +3057,7 @@ mod tests {
                 ErasureStore::SessionsByUserEmail => "sessions",
                 ErasureStore::AiChatByUserEmail => "ai_chat_messages",
                 ErasureStore::AnonymizeSubjectEmail { name, .. } => *name,
+                ErasureStore::AnonymizeInvoiceSnapshot { name } => *name,
                 ErasureStore::AnonymizeMessageContent => "messages",
                 ErasureStore::AnonymizeUserTombstone => "users",
                 ErasureStore::ClickHouseEvents => "clickhouse_events",
@@ -2980,10 +3100,11 @@ mod tests {
             );
         }
 
-        // Invoices are anonymized (A-3), never deleted.
+        // Invoices are anonymized through the billing-address snapshot
+        // (A-3, F82), never deleted.
         assert!(stores.iter().any(|s| matches!(
             s,
-            ErasureStore::AnonymizeSubjectEmail { name, .. } if *name == "invoices"
+            ErasureStore::AnonymizeInvoiceSnapshot { name } if *name == "invoices"
         )));
 
         for tenant_resource in ["api_keys", "webhooks", "suppression_list"] {

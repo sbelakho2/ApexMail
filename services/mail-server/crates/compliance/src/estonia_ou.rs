@@ -17,9 +17,11 @@
 //! ## Estonia-Specific Tax Rules
 //!
 //! - **Corporate income tax**: 0% on reinvested profits. Only distributed
-//!   profits (dividends) are taxed at 20/80 rate (20% of gross dividend).
-//!   From 2025: 22/78 applies to certain distributed amounts.
-//! - **VAT (Käibemaks)**: 24% standard rate (since July 1, 2025).
+//!   profits (dividends) are taxed. Until end-2024 the split was 80/20;
+//!   from 2025-01-01 it is 78/22, i.e. a NET-to-tax fraction of 22/78 —
+//!   see `tax_policy::dividend_tax_on_net` (F81).
+//! - **VAT (Käibemaks)**: 24% standard rate (since July 1, 2025) — all
+//!   rates resolved date-effectively through `tax_policy` (F81).
 //! - **Social tax (Sotsiaalmaks)**: 33% on gross salary, declared via TSD.
 //! - **Unemployment insurance**: 1.6% employee + 0.8% employer.
 //! - **Funded pension (II sammas)**: 2% employee (mandatory for born ≥1983).
@@ -34,6 +36,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::registry_monitor::{NoticeStatus, ScheduledRegistryMonitor};
+use crate::tax_policy;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,9 +56,14 @@ pub const SOCIAL_TAX_RATE: f64 = 0.33;
 pub const UNEMPLOYMENT_INSURANCE_EMPLOYER: f64 = 0.008;
 /// Unemployment insurance — employee share.
 pub const UNEMPLOYMENT_INSURANCE_EMPLOYEE: f64 = 0.016;
-/// Funded pension (II pillar) — employee contribution.
+/// Funded pension (II pillar) — LEGACY default. The actual rate is an
+/// employee-specific 2/4/6% choice recorded per payment period
+/// (payroll_records.funded_pension_rate, migration 199); this constant is
+/// only a documentation anchor, computations use the recorded input (F81).
 pub const FUNDED_PENSION_RATE: f64 = 0.02;
-/// Income tax rate on distributed dividends (20/80 = 25% of net).
+/// LEGACY reference fraction for the pre-2025 20/80 dividend split.
+/// Computations use the date-effective `tax_policy::dividend_tax_on_net`
+/// (22/78 from 2025-01-01) applied to the NET distribution (F81).
 pub const DIVIDEND_TAX_RATE: f64 = 0.20;
 
 // ---------------------------------------------------------------------------
@@ -73,16 +81,7 @@ pub enum SubmissionType {
 }
 
 impl SubmissionType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AnnualReport => "annual_report",
-            Self::VatDeclaration => "vat_declaration",
-            Self::IncomeTax => "income_tax",
-            Self::SocialTax => "social_tax",
-            Self::StatisticalReport => "statistical_report",
-        }
-    }
-
+    #[allow(clippy::should_implement_trait)] // inherent parser kept for API stability
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "annual_report" => Some(Self::AnnualReport),
@@ -91,6 +90,16 @@ impl SubmissionType {
             "social_tax" => Some(Self::SocialTax),
             "statistical_report" => Some(Self::StatisticalReport),
             _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AnnualReport => "annual_report",
+            Self::VatDeclaration => "vat_declaration",
+            Self::IncomeTax => "income_tax",
+            Self::SocialTax => "social_tax",
+            Self::StatisticalReport => "statistical_report",
         }
     }
 
@@ -333,6 +342,10 @@ pub struct VatDeclaration {
     pub input_vat: VatInputBreakdown,
     pub summary: VatSummary,
     pub data_quality: DataQualityNote,
+    /// F81: an incomplete return is explicitly NOT READY for filing —
+    /// never presented as a complete statutory declaration.
+    pub ready_for_filing: bool,
+    pub incomplete_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +454,10 @@ pub struct EmployeeTaxRecord {
     pub unemployment_insurance_employer_cents: i64,
     pub unemployment_insurance_employee_cents: i64,
     pub funded_pension_cents: i64,
+    /// The employee-specific II-pillar rate applied (F81). `None` means
+    /// participation was unknown for the period: the record is incomplete,
+    /// not silently computed at an assumed rate.
+    pub funded_pension_rate: Option<f64>,
     pub income_tax_withheld_cents: i64,
     pub net_salary_cents: i64,
 }
@@ -511,32 +528,40 @@ impl ComplianceCalendar {
         month: Option<u32>,
     ) -> NaiveDate {
         match deadline_type {
-            SubmissionType::AnnualReport => {
-                NaiveDate::from_ymd_opt(year + 1, 6, 30)
-                    .unwrap_or_else(|| NaiveDate::from_ymd_opt(year + 1, 6, 30).unwrap())
-            }
+            SubmissionType::AnnualReport => NaiveDate::from_ymd_opt(year + 1, 6, 30)
+                .unwrap_or_else(|| NaiveDate::from_ymd_opt(year + 1, 6, 30).unwrap()),
             SubmissionType::VatDeclaration => {
                 let m = month.unwrap_or(1);
-                let (y, next_m) = if m == 12 { (year + 1, 1) } else { (year, m + 1) };
+                let (y, next_m) = if m == 12 {
+                    (year + 1, 1)
+                } else {
+                    (year, m + 1)
+                };
                 NaiveDate::from_ymd_opt(y, next_m, 20)
                     .unwrap_or_else(|| NaiveDate::from_ymd_opt(y, next_m, 20).unwrap())
             }
             SubmissionType::IncomeTax => {
                 let m = month.unwrap_or(1);
-                let (y, next_m) = if m == 12 { (year + 1, 1) } else { (year, m + 1) };
+                let (y, next_m) = if m == 12 {
+                    (year + 1, 1)
+                } else {
+                    (year, m + 1)
+                };
                 NaiveDate::from_ymd_opt(y, next_m, 10)
                     .unwrap_or_else(|| NaiveDate::from_ymd_opt(y, next_m, 10).unwrap())
             }
             SubmissionType::SocialTax => {
                 let m = month.unwrap_or(1);
-                let (y, next_m) = if m == 12 { (year + 1, 1) } else { (year, m + 1) };
+                let (y, next_m) = if m == 12 {
+                    (year + 1, 1)
+                } else {
+                    (year, m + 1)
+                };
                 NaiveDate::from_ymd_opt(y, next_m, 10)
                     .unwrap_or_else(|| NaiveDate::from_ymd_opt(y, next_m, 10).unwrap())
             }
-            SubmissionType::StatisticalReport => {
-                NaiveDate::from_ymd_opt(year + 1, 7, 1)
-                    .unwrap_or_else(|| NaiveDate::from_ymd_opt(year + 1, 7, 1).unwrap())
-            }
+            SubmissionType::StatisticalReport => NaiveDate::from_ymd_opt(year + 1, 7, 1)
+                .unwrap_or_else(|| NaiveDate::from_ymd_opt(year + 1, 7, 1).unwrap()),
         }
     }
 
@@ -656,8 +681,7 @@ impl ComplianceCalendar {
             {
                 let (ps, pe) =
                     Self::calculate_period(SubmissionType::StatisticalReport, year, None);
-                let due =
-                    Self::calculate_due_date(SubmissionType::StatisticalReport, year, None);
+                let due = Self::calculate_due_date(SubmissionType::StatisticalReport, year, None);
                 let id = Uuid::new_v4();
                 sqlx::query(
                     r#"INSERT INTO compliance_deadlines
@@ -853,8 +877,9 @@ impl EstoniaOuCompliance {
         year: i32,
         month: Option<u32>,
     ) -> Result<Vec<RevenueSource>, anyhow::Error> {
-        let has_invoices =
-            crate::table_exists_fn(&self.db, "invoices").await.unwrap_or(false);
+        let has_invoices = crate::table_exists_fn(&self.db, "invoices")
+            .await
+            .unwrap_or(false);
 
         if !has_invoices {
             return Ok(vec![]);
@@ -911,8 +936,9 @@ impl EstoniaOuCompliance {
     ) -> Result<Vec<ExpenseCategory>, anyhow::Error> {
         let mut expenses = Vec::new();
 
-        let has_invoices =
-            crate::table_exists_fn(&self.db, "invoices").await.unwrap_or(false);
+        let has_invoices = crate::table_exists_fn(&self.db, "invoices")
+            .await
+            .unwrap_or(false);
 
         if has_invoices {
             if let Ok(Some(row)) = sqlx::query_as::<_, ExpenseRow>(
@@ -936,8 +962,9 @@ impl EstoniaOuCompliance {
             }
         }
 
-        let has_operating_costs =
-            crate::table_exists_fn(&self.db, "operating_costs").await.unwrap_or(false);
+        let has_operating_costs = crate::table_exists_fn(&self.db, "operating_costs")
+            .await
+            .unwrap_or(false);
 
         if has_operating_costs {
             let rows = sqlx::query_as::<_, CostRow>(
@@ -980,16 +1007,22 @@ impl EstoniaOuCompliance {
         year: i32,
         month: Option<u32>,
     ) -> Result<Vec<EmployeeTaxRecord>, anyhow::Error> {
-        let has_payroll =
-            crate::table_exists_fn(&self.db, "payroll_records").await.unwrap_or(false);
+        let has_payroll = crate::table_exists_fn(&self.db, "payroll_records")
+            .await
+            .unwrap_or(false);
 
         if !has_payroll {
             return Ok(vec![]);
         }
 
+        // F81: the payment period and the per-employee pension/exemption
+        // inputs drive the calculation — rates come from the date-effective
+        // tax policy, never from one permanent constant.
         let rows = if let Some(m) = month {
             sqlx::query_as::<_, PayrollRow>(
-                "SELECT employee_name, personal_code, gross_salary_cents
+                "SELECT employee_name, personal_code, gross_salary_cents,
+                        funded_pension_rate, pension_exemption,
+                        unemployment_insurance_exemption, pay_period
                  FROM payroll_records
                  WHERE EXTRACT(YEAR FROM pay_period) = $1
                    AND EXTRACT(MONTH FROM pay_period) = $2",
@@ -1000,7 +1033,9 @@ impl EstoniaOuCompliance {
             .await?
         } else {
             sqlx::query_as::<_, PayrollRow>(
-                "SELECT employee_name, personal_code, gross_salary_cents
+                "SELECT employee_name, personal_code, gross_salary_cents,
+                        funded_pension_rate, pension_exemption,
+                        unemployment_insurance_exemption, pay_period
                  FROM payroll_records
                  WHERE EXTRACT(YEAR FROM pay_period) = $1",
             )
@@ -1013,12 +1048,38 @@ impl EstoniaOuCompliance {
             .into_iter()
             .map(|r| {
                 let gross = r.gross_salary_cents;
-                let social_tax = (gross as f64 * SOCIAL_TAX_RATE).round() as i64;
-                let unemp_er = (gross as f64 * UNEMPLOYMENT_INSURANCE_EMPLOYER).round() as i64;
-                let unemp_ee = (gross as f64 * UNEMPLOYMENT_INSURANCE_EMPLOYEE).round() as i64;
-                let pension = (gross as f64 * FUNDED_PENSION_RATE).round() as i64;
+                let period_date = r.pay_period.date_naive();
+                let social_tax =
+                    (gross as f64 * tax_policy::social_tax_rate(period_date)).round() as i64;
+                let unemp_er = if r.unemployment_insurance_exemption {
+                    0
+                } else {
+                    (gross as f64 * tax_policy::unemployment_insurance_employer_rate(period_date))
+                        .round() as i64
+                };
+                let unemp_ee = if r.unemployment_insurance_exemption {
+                    0
+                } else {
+                    (gross as f64 * tax_policy::unemployment_insurance_employee_rate(period_date))
+                        .round() as i64
+                };
+                // Employee-specific II-pillar choice (2/4/6%, or 0% when
+                // exempt). None = participation UNKNOWN: the pension
+                // contribution stays 0 but the record is flagged so the
+                // declaration is explicitly not-ready — a rate is never
+                // silently assumed.
+                let pension_rate = if r.pension_exemption {
+                    Some(0.0)
+                } else {
+                    r.funded_pension_rate
+                };
+                let pension = pension_rate
+                    .map(|rate| (gross as f64 * rate).round() as i64)
+                    .unwrap_or(0);
                 let taxable = gross - unemp_ee - pension;
-                let income_tax = (taxable as f64 * 0.20).round() as i64;
+                let income_tax = (taxable as f64
+                    * tax_policy::income_tax_withheld_rate(period_date))
+                .round() as i64;
                 let net = gross - unemp_ee - pension - income_tax;
                 EmployeeTaxRecord {
                     employee_name: r.employee_name,
@@ -1028,6 +1089,7 @@ impl EstoniaOuCompliance {
                     unemployment_insurance_employer_cents: unemp_er,
                     unemployment_insurance_employee_cents: unemp_ee,
                     funded_pension_cents: pension,
+                    funded_pension_rate: pension_rate,
                     income_tax_withheld_cents: income_tax,
                     net_salary_cents: net,
                 }
@@ -1043,10 +1105,9 @@ impl EstoniaOuCompliance {
         year: i32,
         month: Option<u32>,
     ) -> Result<Vec<DividendDistribution>, anyhow::Error> {
-        let has_dividends =
-            crate::table_exists_fn(&self.db, "dividend_distributions")
-                .await
-                .unwrap_or(false);
+        let has_dividends = crate::table_exists_fn(&self.db, "dividend_distributions")
+            .await
+            .unwrap_or(false);
 
         if !has_dividends {
             return Ok(vec![]);
@@ -1078,11 +1139,16 @@ impl EstoniaOuCompliance {
             .into_iter()
             .map(|r| {
                 let amount = r.amount_cents;
-                let tax = ((amount as f64) * (DIVIDEND_TAX_RATE)).round() as i64;
+                // F81: the recorded amount is the NET distribution; the CIT
+                // due is the applicable NET-TO-TAX FRACTION on the
+                // distribution date (20/80 until end-2024, 22/78 from
+                // 2025-01-01) — not a gross-amount percentage constant.
+                let fraction = tax_policy::dividend_tax_on_net(r.distribution_date);
+                let tax = ((amount as f64) * fraction).round() as i64;
                 DividendDistribution {
                     recipient: r.recipient,
                     amount_cents: amount,
-                    tax_rate: DIVIDEND_TAX_RATE,
+                    tax_rate: fraction,
                     tax_amount_cents: tax,
                     distribution_date: r.distribution_date,
                 }
@@ -1096,7 +1162,7 @@ impl EstoniaOuCompliance {
     fn build_data_quality<T: AsRef<str>>(
         has_invoices: bool,
         has_payroll: bool,
-        has_dividends: bool,
+        _has_dividends: bool,
         missing: &[T],
     ) -> DataQualityNote {
         let has_sufficient = has_invoices || has_payroll;
@@ -1120,28 +1186,26 @@ impl EstoniaOuCompliance {
 
     /// Generate an Annual Report (Majandusaasta aruanne) for a fiscal year.
     pub async fn generate_annual_report(&self, year: i32) -> Result<AnnualReport, anyhow::Error> {
-        let has_invoices =
-            crate::table_exists_fn(&self.db, "invoices").await.unwrap_or(false);
-        let has_payroll =
-            crate::table_exists_fn(&self.db, "payroll_records").await.unwrap_or(false);
-        let has_dividends =
-            crate::table_exists_fn(&self.db, "dividend_distributions")
-                .await
-                .unwrap_or(false);
+        let has_invoices = crate::table_exists_fn(&self.db, "invoices")
+            .await
+            .unwrap_or(false);
+        let has_payroll = crate::table_exists_fn(&self.db, "payroll_records")
+            .await
+            .unwrap_or(false);
+        let has_dividends = crate::table_exists_fn(&self.db, "dividend_distributions")
+            .await
+            .unwrap_or(false);
 
         let revenue = self.query_revenue(year, None).await?;
         let expenses = self.query_expenses(year, None).await?;
-        let employees = self.query_employees(year, None).await?;
+        let _employees = self.query_employees(year, None).await?;
 
         let total_revenue: i64 = revenue.iter().map(|s| s.amount_cents).sum();
         let total_expenses: i64 = expenses.iter().map(|e| e.amount_cents).sum();
         let net_profit = total_revenue - total_expenses;
 
-        let (period_start, period_end) = ComplianceCalendar::calculate_period(
-            SubmissionType::AnnualReport,
-            year,
-            None,
-        );
+        let (period_start, period_end) =
+            ComplianceCalendar::calculate_period(SubmissionType::AnnualReport, year, None);
 
         let mut missing = Vec::new();
         if !has_invoices {
@@ -1230,50 +1294,160 @@ impl EstoniaOuCompliance {
         Ok(report)
     }
 
-    /// Generate a VAT Declaration (Käibedeklaratsioon) for a month.
+    /// Generate a VAT Declaration (Käibedeklaratsioon) for a month from
+    /// ACTUAL invoice tax snapshots (F81): output VAT is the sum of the
+    /// invoices' own `vat_total` values classified as domestic / reverse
+    /// charge / export from their immutable billing snapshots, in EUR only;
+    /// the displayed standard rate is the date-effective policy rate for the
+    /// month. Deductible input VAT requires an explicit input-tax record —
+    /// an assumed percentage of operating costs is never invented.
     pub async fn generate_vat_declaration(
         &self,
         year: i32,
         month: u32,
     ) -> Result<VatDeclaration, anyhow::Error> {
-        let has_invoices =
-            crate::table_exists_fn(&self.db, "invoices").await.unwrap_or(false);
+        let has_invoices = crate::table_exists_fn(&self.db, "invoices")
+            .await
+            .unwrap_or(false);
         let mut missing = Vec::new();
         if !has_invoices {
             missing.push("invoices table");
         }
 
-        let revenue = self.query_revenue(year, Some(month)).await?;
-        let total_revenue: i64 = revenue.iter().map(|s| s.amount_cents).sum();
-        let tx_count: i64 = revenue.iter().map(|s| s.invoice_count).sum();
+        // Date-effective standard rate for the declared month.
+        let month_start = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_else(|| {
+            Utc::now()
+                .date_naive()
+                .with_day(1)
+                .unwrap_or(Utc::now().date_naive())
+        });
+        let vat_rate = tax_policy::vat_standard_rate(month_start);
+        let vat_rate_percent = (vat_rate * 100.0).round() as i32;
 
-        let output_vat = ((total_revenue * EST_VAT_RATE as i64) + 50) / 100;
+        // F81: classify each EUR invoice of the month from its tax snapshot
+        // and billing address snapshot. Non-EUR invoices are excluded with
+        // an explicit reason (no persisted conversion provenance).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Class {
+            Domestic,
+            ReverseCharge,
+            EuVatDue,
+            Export,
+        }
 
-        let has_operating =
-            crate::table_exists_fn(&self.db, "operating_costs").await.unwrap_or(false);
-        let input_vat_cents = if has_operating {
-            let row = sqlx::query_as::<_, VatInputRow>(
-                "SELECT COALESCE(SUM(amount_cents), 0) AS total_cents
-                 FROM operating_costs
-                 WHERE EXTRACT(YEAR FROM incurred_at) = $1
-                   AND EXTRACT(MONTH FROM incurred_at) = $2",
+        #[allow(clippy::type_complexity)] // one flat query projection
+        let invoice_rows: Vec<(i64, i64, Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT COALESCE(subtotal, 0)::bigint, COALESCE(vat_total, 0)::bigint, \
+             UPPER(currency), COALESCE(billing_country, ''), billing_address \
+             FROM invoices \
+             WHERE EXTRACT(YEAR FROM issued_at) = $1 \
+               AND EXTRACT(MONTH FROM issued_at) = $2 \
+               AND status = 'paid'",
             )
             .bind(year as f64)
             .bind(month as f64)
-            .fetch_optional(&self.db)
-            .await?;
-            let total_costs = row.map(|r| r.total_cents).unwrap_or(0);
-            ((total_costs * EST_VAT_RATE as i64) + 50) / 100
-        } else {
-            0
-        };
+            .fetch_all(&self.db)
+            .await
+            .unwrap_or_default();
 
+        let mut domestic_subtotal: i64 = 0;
+        let mut domestic_output_vat: i64 = 0;
+        let mut domestic_count: i64 = 0;
+        let mut reverse_subtotal: i64 = 0;
+        let mut reverse_count: i64 = 0;
+        let mut eu_vat_due_subtotal: i64 = 0;
+        let mut eu_vat_due_vat: i64 = 0;
+        let mut eu_vat_due_count: i64 = 0;
+        let mut export_subtotal: i64 = 0;
+        let mut export_count: i64 = 0;
+        let mut non_eur_invoices: i64 = 0;
+
+        for (subtotal, vat_total, currency, country, billing_address) in invoice_rows {
+            if currency.as_deref() != Some("EUR") {
+                non_eur_invoices += 1;
+                continue;
+            }
+            let country = country.unwrap_or_default();
+            // Reverse charge (KMS §14) requires a valid customer VAT number
+            // in the IMMUTABLE billing snapshot; without one, EE VAT is due.
+            let snapshot_vat_number = billing_address
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|snap| {
+                    snap.get("vat_number")
+                        .and_then(|v| v.as_str())
+                        .map(|v| !v.trim().is_empty())
+                })
+                .unwrap_or(false);
+            let class = if country == "EE" || country.is_empty() {
+                Class::Domestic
+            } else if crate::financial_analytics::is_eu_country(&country) {
+                if snapshot_vat_number {
+                    Class::ReverseCharge
+                } else {
+                    Class::EuVatDue
+                }
+            } else {
+                Class::Export
+            };
+            match class {
+                Class::Domestic => {
+                    domestic_subtotal += subtotal;
+                    domestic_output_vat += vat_total;
+                    domestic_count += 1;
+                }
+                Class::ReverseCharge => {
+                    reverse_subtotal += subtotal;
+                    reverse_count += 1;
+                }
+                Class::EuVatDue => {
+                    eu_vat_due_subtotal += subtotal;
+                    eu_vat_due_vat += vat_total;
+                    eu_vat_due_count += 1;
+                }
+                Class::Export => {
+                    export_subtotal += subtotal;
+                    export_count += 1;
+                }
+            }
+        }
+        // EU supplies without a VAT number are charged EE VAT and join the
+        // domestic output figures (KMS §14 (5)).
+        domestic_subtotal += eu_vat_due_subtotal;
+        domestic_output_vat += eu_vat_due_vat;
+        domestic_count += eu_vat_due_count;
+
+        // Input VAT: from EXPLICIT eligible input-tax records only. The
+        // canonical chain has no input-tax store, so deductible input VAT is
+        // zero — multiplying total operating costs by the VAT rate (the old
+        // behavior) fabricated a deduction.
+        let input_vat_cents: i64 = 0;
+
+        let output_vat = domestic_output_vat;
         let net_vat = output_vat - input_vat_cents;
         let due = ComplianceCalendar::calculate_due_date(
             SubmissionType::VatDeclaration,
             year,
             Some(month),
         );
+
+        // F81: the return is ready for filing only when every box is backed
+        // by complete source data.
+        let mut incomplete_reasons = Vec::new();
+        if !has_invoices {
+            incomplete_reasons.push("invoices table absent — no source records".into());
+        }
+        if non_eur_invoices > 0 {
+            incomplete_reasons.push(format!(
+                "{non_eur_invoices} invoice(s) in a non-EUR currency excluded:                  no currency-conversion provenance is persisted"
+            ));
+        }
+        incomplete_reasons.push(
+            "deductible input VAT is 0: no eligible input-tax store exists in the              canonical schema".into(),
+        );
+        let ready_for_filing =
+            has_invoices && non_eur_invoices == 0 && incomplete_reasons.len() <= 1;
 
         Ok(VatDeclaration {
             company_name: COMPANY_NAME.into(),
@@ -1282,31 +1456,35 @@ impl EstoniaOuCompliance {
             tax_month: month,
             generated_at: Utc::now(),
             domestic_sales: VatCategory {
-                taxable_amount_cents: total_revenue,
-                vat_rate: EST_VAT_RATE,
+                taxable_amount_cents: domestic_subtotal,
+                vat_rate: vat_rate_percent,
                 vat_amount_cents: output_vat,
-                transaction_count: tx_count,
-                description: "Domestic (EE) sales — 24% VAT".into(),
+                transaction_count: domestic_count,
+                description: format!(
+                    "Domestic (EE) sales incl. EU B2C — output VAT from invoice tax                      snapshots (standard rate {vat_rate_percent}% in force)"
+                ),
             },
             intra_eu_supplies: VatCategory {
-                taxable_amount_cents: 0,
+                taxable_amount_cents: reverse_subtotal,
                 vat_rate: 0,
                 vat_amount_cents: 0,
-                transaction_count: 0,
-                description: "Intra-EU supplies (reverse charge, 0% VAT)".into(),
+                transaction_count: reverse_count,
+                description: "Intra-EU B2B supplies (reverse charge, 0% EE VAT)"
+                    .into(),
             },
             exports: VatCategory {
-                taxable_amount_cents: 0,
+                taxable_amount_cents: export_subtotal,
                 vat_rate: 0,
                 vat_amount_cents: 0,
-                transaction_count: 0,
-                description: "Exports outside EU (0% VAT)".into(),
+                transaction_count: export_count,
+                description: "Exports outside EU (0% EE VAT)".into(),
             },
             input_vat: VatInputBreakdown {
                 domestic_purchases: VatInputLine {
                     amount_cents: 0,
-                    vat_amount_cents: input_vat_cents,
-                    description: "Domestic purchases — deductible input VAT".into(),
+                    vat_amount_cents: 0,
+                    description: "Domestic purchases — no input-tax store;                                   deductible VAT requires eligible records"
+                        .into(),
                 },
                 intra_eu_acquisitions: VatInputLine {
                     amount_cents: 0,
@@ -1333,6 +1511,8 @@ impl EstoniaOuCompliance {
                 false,
                 &missing,
             ),
+            ready_for_filing,
+            incomplete_reasons,
         })
     }
 
@@ -1343,10 +1523,9 @@ impl EstoniaOuCompliance {
         month: u32,
     ) -> Result<IncomeTaxDeclaration, anyhow::Error> {
         let dividends = self.query_dividends(year, Some(month)).await?;
-        let has_dividends =
-            crate::table_exists_fn(&self.db, "dividend_distributions")
-                .await
-                .unwrap_or(false);
+        let has_dividends = crate::table_exists_fn(&self.db, "dividend_distributions")
+            .await
+            .unwrap_or(false);
         let mut missing = Vec::new();
         if !has_dividends {
             missing.push("dividend_distributions table");
@@ -1355,16 +1534,13 @@ impl EstoniaOuCompliance {
         let total_dividend: i64 = dividends.iter().map(|d| d.amount_cents).sum();
         let total_tax: i64 = dividends.iter().map(|d| d.tax_amount_cents).sum();
 
-        let due = ComplianceCalendar::calculate_due_date(
-            SubmissionType::IncomeTax,
-            year,
-            Some(month),
-        );
+        let due =
+            ComplianceCalendar::calculate_due_date(SubmissionType::IncomeTax, year, Some(month));
 
         let note = if dividends.is_empty() {
-            "No dividend distributions this period. Estonia taxes only distributed profits at 20/80 rate."
+            "No dividend distributions this period. Estonia taxes only distributed profits."
         } else {
-            "Dividend distributions detected. Tax calculated at 20/80 rate per TuMS §50."
+            "Dividend distributions detected. Tax calculated with the date-effective              net-to-tax fraction per TuMS §50 (22/78 from 2025-01-01)."
         };
 
         Ok(IncomeTaxDeclaration {
@@ -1398,8 +1574,9 @@ impl EstoniaOuCompliance {
         month: u32,
     ) -> Result<SocialTaxDeclaration, anyhow::Error> {
         let employees = self.query_employees(year, Some(month)).await?;
-        let has_payroll =
-            crate::table_exists_fn(&self.db, "payroll_records").await.unwrap_or(false);
+        let has_payroll = crate::table_exists_fn(&self.db, "payroll_records")
+            .await
+            .unwrap_or(false);
         let mut missing = Vec::new();
         if !has_payroll {
             missing.push("payroll_records table");
@@ -1416,19 +1593,13 @@ impl EstoniaOuCompliance {
             .map(|e| e.unemployment_insurance_employee_cents)
             .sum();
         let total_pension: i64 = employees.iter().map(|e| e.funded_pension_cents).sum();
-        let total_income_tax: i64 = employees
-            .iter()
-            .map(|e| e.income_tax_withheld_cents)
-            .sum();
+        let total_income_tax: i64 = employees.iter().map(|e| e.income_tax_withheld_cents).sum();
         let total_employer = total_social + total_unemp_er;
 
         let employee_count = employees.len() as i32;
 
-        let due = ComplianceCalendar::calculate_due_date(
-            SubmissionType::SocialTax,
-            year,
-            Some(month),
-        );
+        let due =
+            ComplianceCalendar::calculate_due_date(SubmissionType::SocialTax, year, Some(month));
 
         let note = if employees.is_empty() {
             "No employment records for this period. If there are team members, add payroll_records."
@@ -1469,8 +1640,9 @@ impl EstoniaOuCompliance {
     ) -> Result<StatisticalReport, anyhow::Error> {
         let revenue = self.query_revenue(year, None).await?;
         let employees = self.query_employees(year, None).await?;
-        let has_invoices =
-            crate::table_exists_fn(&self.db, "invoices").await.unwrap_or(false);
+        let has_invoices = crate::table_exists_fn(&self.db, "invoices")
+            .await
+            .unwrap_or(false);
 
         let total_revenue: i64 = revenue.iter().map(|s| s.amount_cents).sum();
         let mut missing = Vec::new();
@@ -1515,11 +1687,16 @@ impl EstoniaOuCompliance {
     /// Format: `{type}-{year}-{period}-{company-slug}-{registry_code}.pdf`
     ///
     /// Examples:
-///   - `annual-report-2025-bel-consulting-ou-16588745.pdf`
-///   - `vat-declaration-2026-01-bel-consulting-ou-16588745.pdf`
-///   - `income-tax-declaration-2026-01-bel-consulting-ou-16588745.pdf`
-///   - `social-tax-declaration-2026-01-bel-consulting-ou-16588745.pdf`
-    pub fn build_file_name(st: SubmissionType, year: i32, month: Option<u32>, extension: &str) -> String {
+    ///   - `annual-report-2025-bel-consulting-ou-16588745.pdf`
+    ///   - `vat-declaration-2026-01-bel-consulting-ou-16588745.pdf`
+    ///   - `income-tax-declaration-2026-01-bel-consulting-ou-16588745.pdf`
+    ///   - `social-tax-declaration-2026-01-bel-consulting-ou-16588745.pdf`
+    pub fn build_file_name(
+        st: SubmissionType,
+        year: i32,
+        month: Option<u32>,
+        extension: &str,
+    ) -> String {
         let company_slug = COMPANY_NAME
             .to_lowercase()
             .replace(' ', "-")
@@ -1553,8 +1730,18 @@ impl EstoniaOuCompliance {
     /// Build a human-readable period label.
     pub fn build_period_label(st: SubmissionType, year: i32, month: Option<u32>) -> String {
         let month_names = [
-            "January", "February", "March", "April", "May", "June",
-            "July", "August", "September", "October", "November", "December",
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
         ];
 
         match st {
@@ -1587,7 +1774,7 @@ impl EstoniaOuCompliance {
         let generated_at = Utc::now().to_rfc3339();
 
         let json_str = serde_json::to_string_pretty(document_json).unwrap_or_default();
-        let json_bytes = json_str.as_bytes();
+        let _json_bytes = json_str.as_bytes();
 
         // Build a minimal PDF 1.4 document
         let mut pdf = Vec::new();
@@ -1626,17 +1813,14 @@ impl EstoniaOuCompliance {
         let content_bytes = content.into_bytes();
 
         // Content stream object
-        let content_stream_offset = pdf.len();
-        pdf.extend(format!(
-            "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n\
-               /Contents 5 0 R /Resources << /Font << /F1 6 0 R >> >> >>\nendobj\n"
-        ).as_bytes());
+        let _content_stream_offset = pdf.len();
+        let page_object = "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n\
+               /Contents 5 0 R /Resources << /Font << /F1 6 0 R >> >> >>\nendobj\n";
+        pdf.extend(page_object.as_bytes());
 
         // Object 5: Content stream data
         let obj5_offset = pdf.len();
-        pdf.extend(format!(
-            "5 0 obj\n<< /Length {} >>\nstream\n", content_bytes.len()
-        ).as_bytes());
+        pdf.extend(format!("5 0 obj\n<< /Length {} >>\nstream\n", content_bytes.len()).as_bytes());
         pdf.extend(&content_bytes);
         pdf.extend(b"\nendstream\nendobj\n");
 
@@ -1678,10 +1862,13 @@ impl EstoniaOuCompliance {
         );
         let metadata_bytes = metadata_xml.as_bytes();
 
-        pdf.extend(format!(
-            "7 0 obj\n<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n",
-            metadata_bytes.len()
-        ).as_bytes());
+        pdf.extend(
+            format!(
+                "7 0 obj\n<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n",
+                metadata_bytes.len()
+            )
+            .as_bytes(),
+        );
         pdf.extend(metadata_bytes);
         pdf.extend(b"\nendstream\nendobj\n");
 
@@ -1698,9 +1885,10 @@ impl EstoniaOuCompliance {
         pdf.extend(format!("{:010} 00000 n \n", obj7_offset).as_bytes());
 
         // Trailer
-        pdf.extend(format!(
-            "trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
-        ).as_bytes());
+        pdf.extend(
+            format!("trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n")
+                .as_bytes(),
+        );
 
         pdf
     }
@@ -1721,7 +1909,7 @@ impl EstoniaOuCompliance {
         let mut csv = String::new();
 
         // Header metadata
-        csv.push_str(&format!("\"Key\",\"Value\"\n"));
+        csv.push_str("\"Key\",\"Value\"\n");
         csv.push_str(&format!("\"document_type\",\"{}\"\n", st.as_str()));
         csv.push_str(&format!("\"file_name\",\"{}\"\n", file_name));
         csv.push_str(&format!("\"company_name\",\"{}\"\n", COMPANY_NAME));
@@ -1781,7 +1969,11 @@ impl EstoniaOuCompliance {
         let mut hasher = Sha256::new();
         hasher.update(pdf_data);
         hasher.update(csv_data.as_bytes());
-        hasher.update(serde_json::to_string(json_data).unwrap_or_default().as_bytes());
+        hasher.update(
+            serde_json::to_string(json_data)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         let result = hasher.finalize();
         hex::encode(result)
     }
@@ -1857,7 +2049,8 @@ impl EstoniaOuCompliance {
         month: Option<u32>,
         document_json: &serde_json::Value,
     ) -> Result<Uuid, anyhow::Error> {
-        self.persist_submission_with_formats(st, year, month, document_json).await
+        self.persist_submission_with_formats(st, year, month, document_json)
+            .await
     }
 
     /// Get a submission with all format data for download.
@@ -1943,7 +2136,7 @@ impl EstoniaOuCompliance {
         )
         .bind(today)
         .bind(month)
-            .fetch_one(&self.db)
+        .fetch_one(&self.db)
         .await
         .unwrap_or(0);
 
@@ -2128,7 +2321,10 @@ impl EstoniaOuCompliance {
 
                 created.push(ComplianceDeadline {
                     id,
-                    deadline_type: format!("registry_{}", notice.notice_id.to_lowercase().replace('-', "_")),
+                    deadline_type: format!(
+                        "registry_{}",
+                        notice.notice_id.to_lowercase().replace('-', "_")
+                    ),
                     label: notice.title.clone(),
                     period_start: NaiveDate::from_ymd_opt(notice.due_date.year(), 1, 1).unwrap(),
                     period_end: NaiveDate::from_ymd_opt(notice.due_date.year(), 12, 31).unwrap(),
@@ -2230,7 +2426,10 @@ fn flatten_json_to_csv(csv: &mut String, prefix: &str, value: &serde_json::Value
                 };
 
                 match v {
-                    serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) | serde_json::Value::String(_) => {
+                    serde_json::Value::Null
+                    | serde_json::Value::Bool(_)
+                    | serde_json::Value::Number(_)
+                    | serde_json::Value::String(_) => {
                         csv.push_str(&format!("\"{}\",\"{}\"\n", key, csv_escape_value(v)));
                     }
                     serde_json::Value::Array(arr) => {
@@ -2290,6 +2489,11 @@ struct PayrollRow {
     employee_name: String,
     personal_code: Option<String>,
     gross_salary_cents: i64,
+    /// Employee's II-pillar choice for the period (2/4/6%; NULL = unknown).
+    funded_pension_rate: Option<f64>,
+    pension_exemption: bool,
+    unemployment_insurance_exemption: bool,
+    pay_period: chrono::DateTime<Utc>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2297,11 +2501,6 @@ struct DividendRow {
     recipient: String,
     amount_cents: i64,
     distribution_date: NaiveDate,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct VatInputRow {
-    total_cents: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -2379,6 +2578,7 @@ impl From<SubmissionRow> for ComplianceSubmission {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code)] // full row contract; individual reports read subsets
 struct SubmissionListRow {
     id: Uuid,
     submission_type: String,
@@ -2506,31 +2706,21 @@ mod tests {
 
     #[test]
     fn due_date_vat_declaration() {
-        let due = ComplianceCalendar::calculate_due_date(
-            SubmissionType::VatDeclaration,
-            2026,
-            Some(1),
-        );
+        let due =
+            ComplianceCalendar::calculate_due_date(SubmissionType::VatDeclaration, 2026, Some(1));
         assert_eq!(due, NaiveDate::from_ymd_opt(2026, 2, 20).unwrap());
     }
 
     #[test]
     fn due_date_vat_declaration_december() {
-        let due = ComplianceCalendar::calculate_due_date(
-            SubmissionType::VatDeclaration,
-            2025,
-            Some(12),
-        );
+        let due =
+            ComplianceCalendar::calculate_due_date(SubmissionType::VatDeclaration, 2025, Some(12));
         assert_eq!(due, NaiveDate::from_ymd_opt(2026, 1, 20).unwrap());
     }
 
     #[test]
     fn due_date_income_tax() {
-        let due = ComplianceCalendar::calculate_due_date(
-            SubmissionType::IncomeTax,
-            2026,
-            Some(3),
-        );
+        let due = ComplianceCalendar::calculate_due_date(SubmissionType::IncomeTax, 2026, Some(3));
         assert_eq!(due, NaiveDate::from_ymd_opt(2026, 4, 10).unwrap());
     }
 
@@ -2550,6 +2740,7 @@ mod tests {
             unemployment_insurance_employer_cents: 800,
             unemployment_insurance_employee_cents: 1600,
             funded_pension_cents: 2000,
+            funded_pension_rate: Some(0.02),
             income_tax_withheld_cents: 19280,
             net_salary_cents: 77120,
         };

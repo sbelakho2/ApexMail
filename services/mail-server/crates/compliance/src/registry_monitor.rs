@@ -166,10 +166,7 @@ impl RegistryMonitor {
                     status: NoticeStatus::Pending,
                     responsible_party: notice.responsible_party.clone(),
                     evidence_location: None,
-                    notes: Some(format!(
-                        "Recurring from parent notice {}",
-                        notice.notice_id
-                    )),
+                    notes: Some(format!("Recurring from parent notice {}", notice.notice_id)),
                     created_at: Utc::now(),
                     completed_at: None,
                 });
@@ -522,7 +519,9 @@ mod tests {
 
         let titles: Vec<&str> = all.iter().map(|n| n.title.as_str()).collect();
         assert!(titles.iter().any(|t| t.contains("Annual Report Filing")));
-        assert!(titles.iter().any(|t| t.contains("Contact Person Verification")));
+        assert!(titles
+            .iter()
+            .any(|t| t.contains("Contact Person Verification")));
         assert!(titles.iter().any(|t| t.contains("VAT Declaration")));
         assert!(titles.iter().any(|t| t.contains("Social Tax Declaration")));
         assert!(titles.iter().any(|t| t.contains("Statistical Report")));

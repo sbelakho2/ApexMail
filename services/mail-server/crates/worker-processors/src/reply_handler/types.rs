@@ -179,11 +179,57 @@ pub struct InboundMessage {
     #[sqlx(rename = "bodyHtml")]
     pub body_html: Option<String>,
     pub headers: Option<serde_json::Value>,
+    /// F67: the inbound reply's RFC 5322 Message-ID — the stable
+    /// provider/inbound event identity for the analytics handoff.
+    #[sqlx(rename = "messageIdHeader")]
+    pub message_id_header: Option<String>,
     #[sqlx(rename = "receivedAt")]
     pub received_at: DateTime<Utc>,
     #[sqlx(rename = "processedAt")]
     pub processed_at: Option<DateTime<Utc>>,
     pub classification: Option<String>,
+}
+
+impl InboundMessage {
+    /// F67: header lookup with case-insensitive names (the canonical
+    /// headers JSONB uses arbitrary casing; auto-reply detection keys on
+    /// lowercase canonical header names).
+    pub fn header(&self, name: &str) -> Option<String> {
+        let target = name.to_ascii_lowercase();
+        self.headers
+            .as_ref()?
+            .as_object()?
+            .iter()
+            .find_map(|(k, v)| {
+                if k.to_ascii_lowercase() == target {
+                    v.as_str().map(str::to_string)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// F67: the headers auto-reply detection inspects, as a lowercase map.
+    pub fn analytics_headers(&self) -> std::collections::HashMap<String, String> {
+        let mut selected = std::collections::HashMap::new();
+        for name in [
+            "auto-submitted",
+            "x-auto-response-suppress",
+            "precedence",
+            "x-auto-reply",
+        ] {
+            if let Some(value) = self.header(name) {
+                selected.insert(name.to_string(), value);
+            }
+        }
+        selected
+    }
+
+    /// F67: In-Reply-To from the canonical headers JSON (there is no
+    /// dedicated column on inbound_messages).
+    pub fn in_reply_to(&self) -> Option<String> {
+        self.header("in-reply-to")
+    }
 }
 
 /// Processed reply result.

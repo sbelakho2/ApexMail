@@ -30,3 +30,38 @@ fn migration_168_defines_contact_persons() {
         "migration 168 must drop the compliance_deadlines.submission_id FK"
     );
 }
+
+// ── F81: canonical payroll tax inputs ─────────────────────────────────────
+
+const MIGRATION_199: &str = include_str!("../../../migrations/199_payroll_tax_inputs.sql");
+
+#[test]
+fn migration_199_defines_payroll_records_with_per_employee_tax_inputs() {
+    assert!(
+        MIGRATION_199.contains("CREATE TABLE IF NOT EXISTS payroll_records"),
+        "migration 199 must create payroll_records"
+    );
+
+    // query_employees selects the per-period inputs the date-effective
+    // policy consumes: the employee's II-pillar choice and the exemption
+    // flags. The pension rate must be constrained to the legal choices
+    // (0/2/4/6%) with NULL = participation unknown.
+    assert!(
+        MIGRATION_199.contains("funded_pension_rate               DOUBLE PRECISION"),
+        "per-employee pension choice column"
+    );
+    assert!(
+        MIGRATION_199.contains("funded_pension_rate IN (0.0, 0.02, 0.04, 0.06)"),
+        "pension rate constrained to the legal choices"
+    );
+    assert!(MIGRATION_199.contains("pension_exemption                 BOOLEAN"));
+    assert!(MIGRATION_199.contains("unemployment_insurance_exemption  BOOLEAN"));
+
+    // Rates themselves are NOT stored as constants here — they come from
+    // the versioned date-effective tax policy module per payment period.
+    assert!(MIGRATION_199.contains("pay_period                        TIMESTAMPTZ NOT NULL"));
+    assert!(
+        MIGRATION_199.contains("idx_payroll_records_period"),
+        "per-period lookup index"
+    );
+}
