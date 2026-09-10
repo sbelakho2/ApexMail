@@ -175,6 +175,38 @@ pub fn encode_tracking_id(payload: &TrackingPayload) -> Result<String, &'static 
     Ok(URL_SAFE_NO_PAD.encode(&combined))
 }
 
+// ── F13: server-owned unsubscribe link (v2 token) ────────────────────────────
+
+/// F13: build the unsubscribe identity/link for ONE outgoing copy, using the
+/// tracking-service's v2 token codec (`generate_unsubscribe_token_with_message`)
+/// with SERVER-OWNED identity — the persisted tenant id, the originating
+/// message id, and this copy's envelope recipient. The token's
+/// authenticated envelope IS the persisted attribution: activating the link
+/// later names exactly this message even after a newer send to the same
+/// recipient (the legacy latest-message lookup could misattribute).
+///
+/// * Returns `None` (and the send proceeds unchanged) when the shared
+///   `TRACKING_SECRET_KEY` is not configured — suppression NEVER depends on
+///   attribution success; the recipient's unsubscribe still works through
+///   the legacy token paths.
+/// * The URL feeds the `List-Unsubscribe` header (plus
+///   `List-Unsubscribe-Post: Yes` — the tracking-service serves RFC 8058
+///   one-click POST on the same route) and `{{unsubscribe_url}}`
+///   placeholders in the caller's HTML/text bodies.
+/// * The sales-autopilot unsubscribe format is deliberately separate and is
+///   not touched here.
+pub fn unsubscribe_link(job: &EmailJob, config: &TrackingConfig) -> Option<(String, String)> {
+    let secret = config.secret_key.as_ref()?;
+    let codec = tracking_service::codec::TrackingCodec::new(secret);
+    let token = codec
+        .generate_unsubscribe_token_with_message(&job.tenant_id, &job.to, &job.message_id)
+        .ok()?;
+    let base = config.base_url.trim_end_matches('/');
+    let path = config.unsubscribe_path.trim_end_matches('/');
+    let url = format!("{base}{path}/{token}");
+    Some((token, url))
+}
+
 /// Lazily compiled CSS selector for `<body>` elements.
 static BODY_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("body").expect("`body` is a valid CSS selector"));
@@ -516,6 +548,7 @@ mod tests {
             headers: None,
             attachments: None,
             campaign_id: None,
+            message_category: "marketing".to_string(),
             tags: None,
             metadata: None,
             scheduled_at: None,
@@ -530,6 +563,7 @@ mod tests {
             base_url: "https://track.example.com".to_string(),
             open_pixel_path: "/o".to_string(),
             click_redirect_path: "/c".to_string(),
+            unsubscribe_path: "/u".to_string(),
             secret_key: None,
         }
     }

@@ -83,7 +83,15 @@ const RESERVED_METADATA_KEYS: [&str; 4] = [
 /// field. They are either derived from validated fields (From/To/Cc/Subject/
 /// Message-ID), filtered by the worker, or owned by the platform. Mirrors
 /// the worker's PROTECTED_HEADERS set plus the dedicated `reply_to` field.
-const PROTECTED_CUSTOM_HEADERS: [&str; 26] = [
+///
+/// F74: the ENTIRE `X-ApexMail-*` namespace is additionally reserved
+/// case-insensitively (see `validate_send_options`) — the three historical
+/// exact spellings blocked here previously left the legacy aliases
+/// (`X-ApexMail-MessageId`, `X-ApexMail-TenantId`) settable by callers,
+/// and those aliases were then trusted by SES bounce/complaint handling as
+/// tenant authority. Identity headers are generated exclusively by the
+/// worker from authenticated persisted job context.
+const PROTECTED_CUSTOM_HEADERS: [&str; 23] = [
     "from",
     "to",
     "cc",
@@ -99,9 +107,6 @@ const PROTECTED_CUSTOM_HEADERS: [&str; 26] = [
     "received",
     "received-spf",
     "authentication-results",
-    "x-apexmail-message-id",
-    "x-apexmail-tenant-id",
-    "x-apexmail-campaign-id",
     "x-originating-ip",
     "x-mailer",
     "mime-version",
@@ -165,6 +170,14 @@ pub struct SendMessageRequest {
     /// Queue priority (1–10, default 5) — orders worker claims.
     #[serde(default)]
     pub priority: Option<i32>,
+    /// F55: message category, validated and normalized SERVER-SIDE (see
+    /// `apexmail_lib::email_headers::message_category`). Carried through
+    /// enqueue (`messages.message_category`) and dispatch
+    /// (`email_queue.message_category`); the worker enforces
+    /// `subscription_preferences` for non-exempt categories alongside
+    /// global suppression. Default: `marketing`.
+    #[serde(default)]
+    pub category: Option<String>,
     // ── F48: advertised by the SDK but NOT implemented anywhere in the
     // persistence/queue/transport stack. Accepted here ONLY so they can be
     // rejected with an explicit 422 naming the field — never silently
@@ -625,6 +638,15 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
                         }
                         continue;
                     }
+                    // F74: the whole internal namespace is reserved,
+                    // case-insensitively — every spelling, not just the
+                    // three historical ones.
+                    if apexmail_lib::email_headers::is_reserved_internal_header(name) {
+                        errors.push(format!(
+                            "header '{name}' uses the reserved X-ApexMail-* namespace and cannot be set by clients"
+                        ));
+                        continue;
+                    }
                     if name.is_empty()
                         || name.len() > 998
                         || name
@@ -651,6 +673,16 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
         if !(QUEUE_PRIORITY_MIN..=QUEUE_PRIORITY_MAX).contains(&priority) {
             errors.push(format!(
                 "priority must be between {QUEUE_PRIORITY_MIN} and {QUEUE_PRIORITY_MAX}"
+            ));
+        }
+    }
+
+    // F55: the category is SERVER-OWNED — validated and normalized here,
+    // never persisted raw.
+    if let Some(category) = body.category.as_deref() {
+        if apexmail_lib::email_headers::message_category::validate(category).is_none() {
+            errors.push(format!(
+                "category must be 1–100 characters of letters, digits, '-', '_' or spaces (received '{category}')"
             ));
         }
     }
@@ -714,19 +746,32 @@ fn queue_priority_of(body: &SendMessageRequest) -> i32 {
         .unwrap_or(QUEUE_PRIORITY_DEFAULT)
 }
 
+/// F55: the normalized server-owned category for the insert (validated
+/// beforehand; defaults to `marketing`).
+fn message_category_of(body: &SendMessageRequest) -> String {
+    body.category
+        .as_deref()
+        .and_then(apexmail_lib::email_headers::message_category::validate)
+        .unwrap_or_else(|| apexmail_lib::email_headers::message_category::MARKETING.to_string())
+}
+
 /// F26: the MIME header object stored on every email_queue copy. The
-/// original To/Cc header values are stored SEPARATELY from the envelope
-/// destination (`"to"`/`to_addresses`), so each per-recipient copy can show
-/// the full visible recipient list while delivering to exactly one envelope
-/// recipient. Bcc is intentionally absent — it exists only in the delivery
-/// data (the per-recipient queue rows), never in a visible header. Custom
-/// caller headers ride along under `custom`, and `reply_to` gets its own
-/// key (F48).
+/// original To/Cc header values are stored as ARRAYS OF MAILBOX STRINGS,
+/// SEPARATELY from the envelope destination (`"to"`/`to_addresses`), so
+/// each per-recipient copy can show the full visible recipient list while
+/// delivering to exactly one envelope recipient — and the transports build
+/// `Address::new_list` mailbox entries instead of one malformed
+/// angle-bracket mailbox wrapping a comma-joined string. Legacy rows with
+/// the comma-joined string form are parsed explicitly by the worker's
+/// `split_mime_headers`. Bcc is intentionally absent — it exists only in
+/// the delivery data (the per-recipient queue rows), never in a visible
+/// header. Custom caller headers ride along under `custom`, and
+/// `reply_to` gets its own key (F48).
 fn mime_headers_for(body: &SendMessageRequest) -> Result<serde_json::Value, Vec<String>> {
     let mut map = serde_json::Map::new();
-    map.insert("to".into(), serde_json::json!(body.to.join(", ")));
+    map.insert("to".into(), serde_json::json!(body.to));
     if let Some(cc) = body.cc.as_ref().filter(|cc| !cc.is_empty()) {
-        map.insert("cc".into(), serde_json::json!(cc.join(", ")));
+        map.insert("cc".into(), serde_json::json!(cc));
     }
     if let Some(reply_to) = body.reply_to.as_ref().filter(|r| !r.is_empty()) {
         map.insert("reply_to".into(), serde_json::json!(reply_to));
@@ -1140,6 +1185,7 @@ async fn insert_message_and_queue(
     let mime_headers = mime_headers_for(body).unwrap_or(serde_json::json!({}));
     let queue_attachments = queue_attachments_of(body);
     let queue_priority = queue_priority_of(body);
+    let message_category = message_category_of(body);
     let reply_to = body.reply_to.as_deref().filter(|r| !r.is_empty());
 
     // Store the idempotency key in the dedicated `idempotency_key` column (not
@@ -1158,8 +1204,8 @@ async fn insert_message_and_queue(
     let result = sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
          subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key,
-         reply_to, headers, attachments)
-         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         reply_to, headers, attachments, message_category)
+         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
          ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
     )
     .bind(&message_id)
@@ -1190,6 +1236,8 @@ async fn insert_message_and_queue(
     // audit row records what recipients actually saw (F26).
     .bind(&mime_headers)
     .bind(&queue_attachments)
+    // F55: the validated server-owned category (migration 187).
+    .bind(&message_category)
     .execute(&mut **tx)
     .await?;
 
@@ -1208,7 +1256,7 @@ async fn insert_message_and_queue(
             "INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
                 \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at,
-                reply_to, headers, attachments
+                reply_to, headers, attachments, message_category
              ) VALUES ",
         );
         let mut param_idx = 1u32;
@@ -1236,18 +1284,19 @@ async fn insert_message_and_queue(
                 param_idx + 11,
                 param_idx + 12,
             );
-            let (i_prio, i_reply, i_hdr, i_att) = (
+            let (i_prio, i_reply, i_hdr, i_att, i_cat) = (
                 param_idx + 13,
                 param_idx + 14,
                 param_idx + 15,
                 param_idx + 16,
+                param_idx + 17,
             );
             query.push_str(&format!(
                 "(${i_id}::uuid, ${i_msg}::uuid, ${i_ten}, ${i_dom}::uuid, ${i_from}, ARRAY[${i_rcpt}], ${i_subj}, \
                  ${i_from}, ${i_rcpt}, ${i_html}, ${i_text}, ${i_tags}, ${i_meta}, ${i_sched}, ${i_prio}, 'pending', \
-                 ${i_created}, ${i_created}, ${i_reply}, ${i_hdr}, ${i_att})"
+                 ${i_created}, ${i_created}, ${i_reply}, ${i_hdr}, ${i_att}, ${i_cat})"
             ));
-            param_idx += 17;
+            param_idx += 18;
         }
 
         let mut q = sqlx::query(&query);
@@ -1269,7 +1318,8 @@ async fn insert_message_and_queue(
                 .bind(queue_priority)
                 .bind(reply_to)
                 .bind(&mime_headers)
-                .bind(&queue_attachments);
+                .bind(&queue_attachments)
+                .bind(&message_category);
         }
         q.execute(&mut **tx).await?;
     }
@@ -2659,6 +2709,7 @@ mod tests {
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -2761,6 +2812,7 @@ mod tests {
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -2798,6 +2850,7 @@ mod tests {
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -2821,6 +2874,7 @@ mod tests {
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -2844,6 +2898,7 @@ mod tests {
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -2876,6 +2931,7 @@ mod tests {
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -2998,6 +3054,7 @@ Bcc: victim@example.com"@example.com"#
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -3050,6 +3107,7 @@ Bcc: victim@example.com"@example.com"#
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -3073,6 +3131,7 @@ Bcc: victim@example.com"@example.com"#
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -3101,6 +3160,7 @@ Bcc: victim@example.com"@example.com"#
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -3137,6 +3197,7 @@ Bcc: victim@example.com"@example.com"#
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         };
@@ -3293,6 +3354,7 @@ Bcc: victim@example.com"@example.com"#
             headers: None,
             attachments: None,
             priority: None,
+            category: None,
             template_id: None,
             template_data: None,
         }
@@ -3552,20 +3614,94 @@ Bcc: victim@example.com"@example.com"#
     #[test]
     fn mime_headers_preserve_visible_to_cc_and_never_bcc() {
         let mut body = options_request();
+        body.to = vec!["to@example.com".into(), "second@example.com".into()];
         body.cc = Some(vec!["cc@example.com".into()]);
         body.bcc = Some(vec!["bcc@example.com".into()]);
         body.reply_to = Some("reply@example.com".into());
         body.headers = Some(serde_json::json!({"X-Custom": "v"}));
 
         let headers = mime_headers_for(&body).unwrap();
-        assert_eq!(headers["to"], serde_json::json!("to@example.com"));
-        assert_eq!(headers["cc"], serde_json::json!("cc@example.com"));
+        // F26: STRUCTURED mailbox arrays — the transports build
+        // Address::new_list entries from them; a comma-joined string would
+        // be wrapped by mail-builder into one malformed mailbox.
+        assert_eq!(
+            headers["to"],
+            serde_json::json!(["to@example.com", "second@example.com"])
+        );
+        assert_eq!(headers["cc"], serde_json::json!(["cc@example.com"]));
         assert_eq!(headers["reply_to"], serde_json::json!("reply@example.com"));
         assert_eq!(headers["custom"], serde_json::json!({"X-Custom": "v"}));
         assert!(
             headers.get("bcc").is_none(),
             "Bcc must never appear in the visible MIME headers (F26)"
         );
+    }
+
+    // ── F74: reserved internal header namespace ─────────────────────
+
+    #[test]
+    fn reserved_namespace_headers_are_rejected_in_every_spelling() {
+        for name in [
+            "X-ApexMail-Message-ID",
+            "x-apexmail-message-id",
+            "X-ApexMail-MessageId",
+            "X-APExmail-TenantId",
+            "x-apexmail-campaign-id",
+            "X-ApexMail-Anything-Else",
+        ] {
+            let mut body = options_request();
+            body.headers = Some(serde_json::json!({ name: "forged"}));
+            let errors = validate_send_options(&body);
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("reserved X-ApexMail-* namespace")),
+                "header '{name}' must be rejected by the namespace reservation: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_custom_headers_still_pass_the_namespace_gate() {
+        let mut body = options_request();
+        body.headers = Some(serde_json::json!({"X-My-App-Tag": "welcome"}));
+        let errors = validate_send_options(&body);
+        assert!(
+            errors.is_empty(),
+            "ordinary custom headers stay accepted: {errors:?}"
+        );
+    }
+
+    // ── F55: server-owned message category ──────────────────────────
+
+    #[test]
+    fn category_is_normalized_and_invalid_values_rejected() {
+        let mut body = options_request();
+        body.category = Some("  MARKETING ".into());
+        assert!(validate_send_options(&body).is_empty());
+        assert_eq!(message_category_of(&body), "marketing");
+
+        body.category = Some("transactional".into());
+        assert_eq!(message_category_of(&body), "transactional");
+
+        body.category = Some("newsletter_2026".into());
+        assert_eq!(message_category_of(&body), "newsletter_2026");
+
+        assert_eq!(
+            message_category_of(&options_request()),
+            "marketing",
+            "absent category defaults to marketing"
+        );
+
+        body.category = Some("bad\ncategory".into());
+        let errors = validate_send_options(&body);
+        assert!(
+            errors.iter().any(|e| e.contains("category must be")),
+            "control characters must be rejected: {errors:?}"
+        );
+
+        body.category = Some("x".repeat(101));
+        assert!(!validate_send_options(&body).is_empty());
     }
 
     #[test]

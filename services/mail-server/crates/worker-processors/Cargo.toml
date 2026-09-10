@@ -47,6 +47,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
 apexmail-lib = { path = "../apexmail-lib" }
+# F13: the shared unsubscribe-token codec — the outgoing pipeline generates
+# v2 tokens with the SAME codec the tracking-service verifies them with.
+tracking-service = { path = "../tracking-service" }
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 
@@ -94,6 +97,3 @@ aws-sdk-sesv2.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"
-# C: cross-crate round-trip tests — worker-encoded tracking tokens must
-# decode with the tracking-service codec under the same secret.
-tracking-service = { path = "../tracking-service" }

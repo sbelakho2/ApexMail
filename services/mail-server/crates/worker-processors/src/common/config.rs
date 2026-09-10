@@ -191,6 +191,10 @@ pub struct TrackingConfig {
     /// zeroized; `None` means unset (token encoding is refused then, see
     /// `email::tracking`).
     pub secret_key: Option<Zeroizing<String>>,
+    /// F13: the tracking-service's unsubscribe route (`/u/:token`), used to
+    /// build the List-Unsubscribe URL. Defaults to the service's own
+    /// `TRACKING_UNSUBSCRIBE_PATH` default (`/u`).
+    pub unsubscribe_path: String,
 }
 
 impl TrackingConfig {
@@ -224,6 +228,11 @@ impl TrackingConfig {
             base_url,
             open_pixel_path: "/o".to_string(),
             click_redirect_path: "/c".to_string(),
+            unsubscribe_path: std::env::var("TRACKING_UNSUBSCRIBE_PATH")
+                .ok()
+                .map(|v| v.trim().trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "/u".to_string()),
             secret_key,
         }
     }

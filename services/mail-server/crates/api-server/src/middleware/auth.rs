@@ -296,11 +296,17 @@ impl FromRequestParts<AppState> for AuthUser {
 
         match mechanism {
             AuthMechanism::ApiKey => {
-                authenticate_api_key(&credential, parts.uri.path(), on_control_plane_host, state)
-                    .await
+                authenticate_api_key(
+                    &credential,
+                    &parts.method,
+                    parts.uri.path(),
+                    on_control_plane_host,
+                    state,
+                )
+                .await
             }
             AuthMechanism::BearerToken | AuthMechanism::SessionCookie => {
-                authenticate_jwt(&credential, state).await
+                authenticate_jwt(&credential, &parts.method, parts.uri.path(), state).await
             }
         }
     }
@@ -310,6 +316,7 @@ impl FromRequestParts<AppState> for AuthUser {
 
 async fn authenticate_api_key(
     key: &str,
+    request_method: &Method,
     request_path: &str,
     on_control_plane_host: bool,
     state: &AppState,
@@ -347,7 +354,8 @@ async fn authenticate_api_key(
         // Tenant policy (F18): the cached identity does not carry the
         // tenant's CURRENT status, so the centralized gate runs on every
         // hit too.
-        enforce_tenant_not_restricted(state, &cached.tenant_id).await?;
+        enforce_tenant_not_restricted(state, &cached.tenant_id, request_method, request_path)
+            .await?;
         if let Some(api_key_id) = cached.api_key_id.as_deref() {
             touch_api_key_last_used(api_key_id, &hmac_hash, state).await?;
         }
@@ -357,7 +365,8 @@ async fn authenticate_api_key(
     if legacy_hash != hmac_hash {
         if let Ok(cached) = lookup_cached_api_key(&legacy_hash, state).await {
             enforce_api_key_tenant_binding(&cached, request_path)?;
-            enforce_tenant_not_restricted(state, &cached.tenant_id).await?;
+            enforce_tenant_not_restricted(state, &cached.tenant_id, request_method, request_path)
+                .await?;
             if let Some(api_key_id) = cached.api_key_id.as_deref() {
                 touch_api_key_last_used(api_key_id, &legacy_hash, state).await?;
             }
@@ -404,6 +413,7 @@ async fn authenticate_api_key(
                     // the fast HMAC path — typically once per key creation).
                     return authenticate_api_key_argon2_fallback(
                         key,
+                        request_method,
                         &state.db,
                         request_path,
                         state,
@@ -439,7 +449,8 @@ async fn authenticate_api_key(
     // Tenant policy (F18): an API key belonging to a suspended (or
     // otherwise restricted) tenant must stop authenticating, on the DB
     // path just like on the cache-hit path above.
-    enforce_tenant_not_restricted(state, &auth_user.tenant_id).await?;
+    enforce_tenant_not_restricted(state, &auth_user.tenant_id, request_method, request_path)
+        .await?;
 
     // Re-hash legacy SHA-256 key on successful authentication (upgrade to Argon2id)
     if used_legacy_hash {
@@ -487,6 +498,7 @@ const API_KEY_ARGON2_FALLBACK_SCAN_LIMIT: i32 = 500;
 
 async fn authenticate_api_key_argon2_fallback(
     key: &str,
+    request_method: &Method,
     db: &sqlx::PgPool,
     request_path: &str,
     state: &AppState,
@@ -564,7 +576,8 @@ async fn authenticate_api_key_argon2_fallback(
 
         enforce_api_key_tenant_binding(&auth_user, request_path)?;
         // Tenant policy (F18) on the legacy-hash fallback path too.
-        enforce_tenant_not_restricted(state, &auth_user.tenant_id).await?;
+        enforce_tenant_not_restricted(state, &auth_user.tenant_id, request_method, request_path)
+            .await?;
 
         // Upgrade: re-hash to HMAC-SHA256 for fast future lookups
         let new_hash =
@@ -980,9 +993,18 @@ pub(crate) async fn invalidate_tenant_status_cache(tenant_id: &str, state: &AppS
 /// user-status cache) and invalidated by every control-plane status
 /// write; an unreachable Redis degrades to the authoritative DB row.
 /// Unknown tenants and DB errors fail CLOSED.
+///
+/// F18 (recovery access): authentication is separated from operation
+/// authorization — a SUSPENDED tenant keeps authenticated access to the
+/// narrow billing-recovery allowlist ([`is_billing_recovery_request`]) so
+/// the customer can view invoices, update payment methods and enter the
+/// billing portal to clear the suspension. Everything else (send, keys,
+/// domains, ...) stays blocked: those requests fail this gate.
 pub(crate) async fn enforce_tenant_not_restricted(
     state: &AppState,
     tenant_id: &str,
+    request_method: &Method,
+    request_path: &str,
 ) -> Result<(), ApiError> {
     // The static control-plane key carries the "system" sentinel tenant id,
     // which has no tenants row and is governed by its own gates.
@@ -995,10 +1017,55 @@ pub(crate) async fn enforce_tenant_not_restricted(
         return Ok(());
     }
 
+    // F18: suspended tenants keep the billing-recovery operations only.
+    // Pending/closed/other statuses authenticate nothing.
+    if status == "suspended" && is_billing_recovery_request(request_method, request_path) {
+        tracing::info!(
+            tenant_id = %tenant_id,
+            method = %request_method,
+            path = %request_path,
+            "billing-recovery access granted for suspended tenant"
+        );
+        return Ok(());
+    }
+
     tracing::warn!(tenant_id = %tenant_id, tenant_status = %status, "authentication refused for restricted tenant");
     Err(ApiError::Unauthorized(format!(
         "workspace is {status} — access is restricted"
     )))
+}
+
+/// F18: the narrow billing-recovery allowlist. Each entry is an exact HTTP
+/// method plus a path PREFIX matched against the request path:
+///
+/// * view invoices (list/detail/PDF/XML exports) — `GET /v1/billing/invoices…`
+/// * enter the billing portal (payment-method management happens inside
+///   the Stripe-hosted portal) — `POST /v1/billing/portal`
+/// * pay/reactivate through checkout — `POST /v1/billing/checkout`
+/// * view the current subscription — `GET /v1/billing/subscription`
+///
+/// Deliberately NOT included: message sending, API-key minting, domain and
+/// DNS mutations, contact operations — those stay blocked while suspended.
+const BILLING_RECOVERY_ALLOWLIST: [(&Method, &str); 4] = [
+    (&http::Method::GET, "/v1/billing/invoices"),
+    (&http::Method::POST, "/v1/billing/portal"),
+    (&http::Method::POST, "/v1/billing/checkout"),
+    (&http::Method::GET, "/v1/billing/subscription"),
+];
+
+/// F18: does this request fall inside the billing-recovery allowlist?
+/// Prefix matching keeps the invoice detail/export sub-paths covered; no
+/// other route family matches.
+pub(crate) fn is_billing_recovery_request(method: &http::Method, path: &str) -> bool {
+    BILLING_RECOVERY_ALLOWLIST
+        .iter()
+        .any(|(allowed_method, prefix)| {
+            method == allowed_method
+                && (path == *prefix
+                    || path
+                        .strip_prefix(*prefix)
+                        .is_some_and(|rest| rest.starts_with('/')))
+        })
 }
 
 async fn tenant_status_for_auth(state: &AppState, tenant_id: &str) -> Result<String, ApiError> {
@@ -1051,7 +1118,12 @@ pub(crate) fn claims_typ_is_session(typ: Option<&str>) -> bool {
 /// status recheck, session-revocation registry, and the absolute session
 /// lifetime ceiling. Shared by `require_auth` and the session
 /// introspection endpoint so the two can never disagree.
-pub(crate) async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
+pub(crate) async fn authenticate_jwt(
+    token: &str,
+    request_method: &Method,
+    request_path: &str,
+    state: &AppState,
+) -> Result<AuthUser, ApiError> {
     // Check token blacklist
     if is_token_blacklisted(token, state).await? {
         return Err(ApiError::Unauthorized("token has been revoked".into()));
@@ -1127,10 +1199,11 @@ pub(crate) async fn authenticate_jwt(token: &str, state: &AppState) -> Result<Au
     }
 
     // Tenant policy (F18): the USER being active is not enough — a session
-    // under a suspended (or otherwise restricted) tenant must stop
-    // authenticating across the API and SSR surfaces alike. This is the
-    // same centralized gate the API key path enforces.
-    enforce_tenant_not_restricted(state, &tenant_id).await?;
+    // under a restricted tenant must stop authenticating across the API and
+    // SSR surfaces alike. This is the same centralized gate the API key path
+    // enforces; the billing-recovery allowlist keeps the narrowly defined
+    // recovery operations reachable for suspended tenants.
+    enforce_tenant_not_restricted(state, &tenant_id, request_method, request_path).await?;
 
     // Live scope narrowing: the token's scopes are the user's scopes AT
     // LOGIN; the role may have changed since. Recompute the effective set
@@ -1408,6 +1481,91 @@ pub async fn enforce_tenant_header_binding(
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    // ── F18: billing-recovery allowlist for suspended tenants ──────────
+
+    #[test]
+    fn billing_recovery_allowlist_admits_only_the_narrow_set() {
+        use axum::http::Method;
+
+        // View invoices (list + detail + PDF/XML exports).
+        for path in [
+            "/v1/billing/invoices",
+            "/v1/billing/invoices/in_123",
+            "/v1/billing/invoices/in_123/pdf",
+            "/v1/billing/invoices/in_123/xml",
+        ] {
+            assert!(
+                is_billing_recovery_request(&Method::GET, path),
+                "GET {path} must be recoverable"
+            );
+        }
+        // Billing portal + checkout (payment-method updates happen inside
+        // the Stripe-hosted portal).
+        assert!(is_billing_recovery_request(
+            &Method::POST,
+            "/v1/billing/portal"
+        ));
+        assert!(is_billing_recovery_request(
+            &Method::POST,
+            "/v1/billing/checkout"
+        ));
+        assert!(is_billing_recovery_request(
+            &Method::GET,
+            "/v1/billing/subscription"
+        ));
+    }
+
+    #[test]
+    fn billing_recovery_allowlist_blocks_mutations_and_foreign_routes() {
+        use axum::http::Method;
+
+        // Send/key/domain mutations stay blocked.
+        for (method, path) in [
+            (&Method::POST, "/v1/messages"),
+            (&Method::POST, "/v1/messages/batch"),
+            (&Method::POST, "/v1/keys"),
+            (&Method::POST, "/v1/domains"),
+            (&Method::DELETE, "/v1/domains/d_1"),
+            (&Method::GET, "/v1/messages"),
+            (&Method::GET, "/v1/contacts"),
+        ] {
+            assert!(
+                !is_billing_recovery_request(method, path),
+                "{method} {path} must NOT be recoverable"
+            );
+        }
+        // Prefix confusion: a path that merely STARTS with the prefix
+        // string is not admitted (only the exact route or sub-paths).
+        assert!(!is_billing_recovery_request(
+            &Method::GET,
+            "/v1/billing/invoices-mutations"
+        ));
+        assert!(!is_billing_recovery_request(
+            &Method::POST,
+            "/v1/billing/invoices"
+        ));
+        // Other billing operations stay blocked while suspended.
+        assert!(!is_billing_recovery_request(
+            &Method::POST,
+            "/v1/billing/switch-plan"
+        ));
+        assert!(!is_billing_recovery_request(
+            &Method::POST,
+            "/v1/billing/cancel"
+        ));
+    }
+
+    #[test]
+    fn tenant_status_policy_distinguishes_auth_from_recovery() {
+        // Only ACTIVE authenticates generally; the recovery path is keyed
+        // on the explicit "suspended" status inside
+        // enforce_tenant_not_restricted (pending stays fully blocked).
+        assert!(tenant_status_permits_auth("active"));
+        assert!(!tenant_status_permits_auth("suspended"));
+        assert!(!tenant_status_permits_auth("pending"));
+        assert!(!tenant_status_permits_auth("closed"));
+    }
 
     #[test]
     fn test_api_key_hashing() {
@@ -2204,7 +2362,7 @@ mod tests {
             .expect("sign session jwt");
 
             // Before the demotion the wildcard scope stands.
-            let auth_user = authenticate_jwt(&token, &state)
+            let auth_user = authenticate_jwt(&token, &Method::GET, "/v1/session/test", &state)
                 .await
                 .expect("pre-demotion auth must succeed");
             assert!(auth_user.scopes.contains(&"*".to_string()));
@@ -2217,7 +2375,7 @@ mod tests {
                 .expect("demote user");
             invalidate_user_status_cache(&user_id.to_string(), &tenant, &state).await;
 
-            let demoted = authenticate_jwt(&token, &state)
+            let demoted = authenticate_jwt(&token, &Method::GET, "/v1/session/test", &state)
                 .await
                 .expect("post-demotion auth must still identify the user");
             assert!(
@@ -2331,7 +2489,7 @@ mod tests {
         };
         let token = sign_session(&state, &tenant_id, &user_id).await;
 
-        authenticate_jwt(&token, &state)
+        authenticate_jwt(&token, &Method::GET, "/v1/session/test", &state)
             .await
             .expect("active tenant authenticates");
 
@@ -2342,7 +2500,7 @@ mod tests {
             .expect("suspend tenant");
         invalidate_tenant_status_cache(&tenant_id, &state).await;
 
-        match authenticate_jwt(&token, &state).await {
+        match authenticate_jwt(&token, &Method::GET, "/v1/session/test", &state).await {
             Err(ApiError::Unauthorized(message)) => assert!(
                 message.contains("suspended"),
                 "expected a suspension-specific denial, got {message}"
@@ -2357,7 +2515,7 @@ mod tests {
             .await
             .expect("resume tenant");
         invalidate_tenant_status_cache(&tenant_id, &state).await;
-        authenticate_jwt(&token, &state)
+        authenticate_jwt(&token, &Method::GET, "/v1/session/test", &state)
             .await
             .expect("resumed tenant authenticates again");
 
