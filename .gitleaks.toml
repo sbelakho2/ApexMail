@@ -58,7 +58,7 @@ paths = [
     # synthetic unsubscribe-token fixture (F39 tests — base64url-shaped
     # string that never was a credential; defused at HEAD and this entry
     # keeps the historical commit that introduced it clean).
-    "^services/mail-server/crates/tracking-service/src/templates\.rs$",
+    '^services/mail-server/crates/tracking-service/src/templates\.rs$',
     # Example/template files carry placeholders by design; deployment docs
     # show placeholder PEM bodies.
     "(^|/)[.]env[^/]*[.]example$",
