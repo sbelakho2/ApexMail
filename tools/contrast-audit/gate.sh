@@ -8,8 +8,14 @@
 #   * a curated top-20 of the built marketing pages, both themes
 # and requires ZERO AA text failures (any page load error also fails).
 #
-# Prerequisites (the gate degrades to a loud skip when they are missing, so
-# a bare runner without browsers cannot silently pass):
+# F52: before certifying real pages, the audit runs its CLASSIFIER SELF-TEST
+# (white text on an opaque white gradient with a black fallback MUST fail;
+# a passing gradient must pass; sticky headers must be measured via element
+# screenshots) — a gate that cannot classify known inputs cannot certify
+# anything, so a self-test failure fails the gate outright.
+#
+# Prerequisites (missing tooling FAILS the gate — a required gate can never
+# pass without execution):
 #   * node + tools/contrast-audit/node_modules (npm install in that dir)
 #   * playwright's chromium (channel "chromium"; `npx playwright install chromium`)
 #   * tools/contrast-audit/fixtures/ — exported when absent via
@@ -17,8 +23,12 @@
 #   * apps/marketing-zola/public/ — built when absent via `zola build`
 #
 # Report: tools/contrast-audit/reports/gate-report.json
+# Execution record (F52): tools/contrast-audit/reports/gate-execution.json —
+#   an executed/skipped/failed result bound to the reviewed git revision,
+#   written next to the report.
 # Full-surface audit (all 116 marketing pages, writes violations.json):
 #   node tools/contrast-audit/audit.mjs
+# Self-test only: node tools/contrast-audit/audit.mjs --self-test
 # =============================================================================
 set -eu
 
@@ -53,5 +63,39 @@ if [ ! -d "$HERE/node_modules/playwright" ]; then
     exit 1
 fi
 
+# --- run + persist the execution record (F52) -----------------------------------------
+# The record is bound to the reviewed revision (HEAD, plus a dirty flag so
+# uncommitted working-tree runs are not mistaken for clean-revision runs)
+# and written next to the gate report, whatever the outcome.
+REV=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+DIRTY_COUNT=$(git -C "$REPO" status --porcelain=v1 2>/dev/null | wc -l | tr -d '[:space:]')
+STATUS_DIRTY=false
+[ "${DIRTY_COUNT:-0}" -gt 0 ] 2>/dev/null && STATUS_DIRTY=true
+mkdir -p "$HERE/reports"
+
+write_execution_record() {
+    # $1 = status (executed | failed), $2 = detail
+    node -e '
+const fs = require("fs");
+const [file, revision, status, dirty, detail] = process.argv.slice(1);
+fs.writeFileSync(file, JSON.stringify({
+  tool: "tools/contrast-audit/gate.sh",
+  gate: "wcag-aa-contrast",
+  revision,
+  dirtyWorkingTree: dirty === "true",
+  status,
+  detail: detail || "",
+  recordedAt: new Date().toISOString(),
+}, null, 1) + "\n");
+' "$HERE/reports/gate-execution.json" "$REV" "$1" "$STATUS_DIRTY" "${2:-}"
+}
+
 cd "$HERE"
-exec node audit.mjs --gate
+GATE_RC=0
+node audit.mjs --gate || GATE_RC=$?
+if [ "$GATE_RC" -eq 0 ]; then
+    write_execution_record executed ""
+else
+    write_execution_record failed "audit exit code $GATE_RC (see reports/gate-report.json and reports/self-test.json)"
+fi
+exit "$GATE_RC"

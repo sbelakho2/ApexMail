@@ -32,6 +32,63 @@ def _validate_email(email: str, field: str) -> None:
         raise ValidationError(f'Invalid "{field}" email format: {email}')
 
 
+def _bare_address(value: Any) -> Optional[str]:
+    """Extract the bare addr-spec from any accepted mailbox form (F48).
+
+    ``"addr"`` and ``"Name <addr>"`` display strings, and
+    ``{"email": ..., "name": ...}`` dicts all yield the bare address, so
+    validation always targets the addr-spec — exactly the acceptance rule
+    of the API's structured mailbox parser (never a formatted display name
+    or a dict). Malformed forms (unclosed/multiple mailboxes, trailing
+    text) return ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        email = value.get("email") or value.get("address")
+        return str(email) if email else None
+    raw = str(value).strip()
+    open_at = raw.rfind("<")
+    if open_at != -1:
+        # Display form: must close at the very end, with exactly one
+        # mailbox (the API parser rejects the same malformed shapes).
+        if not raw.endswith(">"):
+            return None
+        prefix = raw[:open_at]
+        if "<" in prefix or ">" in prefix:
+            return None
+        return raw[open_at + 1 : -1].strip()
+    if ">" in raw:
+        return None
+    return raw
+
+
+# F48 shared contract (packages/contract/send-contract.json): integers 1-10
+# and the documented named levels, mapped by the API to queue integers 7/5/3.
+_PRIORITY_NAMED_LEVELS = {"high": 7, "normal": 5, "low": 3}
+
+
+def _validate_priority(priority: Any) -> Union[int, str]:
+    """Validate priority per the F48 shared contract: an integer 1-10 or one
+    of the documented named levels "high"/"normal"/"low" (case-insensitive,
+    canonicalized to lowercase). Returns the exact wire form the API
+    deserializer accepts — anything else raises before a request is sent."""
+    contract = (
+        'priority must be an integer between 1 and 10 or one of the named levels '
+        '"high"/"normal"/"low" (mapped to 7/5/3)'
+    )
+    if isinstance(priority, bool) or not isinstance(priority, (int, str)):
+        raise ValidationError(f"{contract} — received {priority!r}")
+    if isinstance(priority, int):
+        if not 1 <= priority <= 10:
+            raise ValidationError(f"{contract} — received the out-of-range integer {priority}")
+        return priority
+    level = priority.strip().lower()
+    if level in _PRIORITY_NAMED_LEVELS:
+        return level
+    raise ValidationError(f"{contract} — received '{priority}'")
+
+
 def _validate_id(resource_id: str, resource_name: str) -> None:
     """FIX-500-291: Validate resource ID format."""
     if not resource_id or not _ID_REGEX.match(resource_id):
@@ -52,7 +109,12 @@ def _validate_recipients(value: Any, field: str, *, required: bool = False) -> N
     for recipient in recipients:
         if not isinstance(recipient, str):
             raise ValidationError(f'"{field}" must be a string or list of strings')
-        _validate_email(recipient, field)
+        # F48: validate the extracted bare addr-spec — display-name strings
+        # ("Name <addr>") are accepted forms, like the API's mailbox parser.
+        bare = _bare_address(recipient)
+        if not bare:
+            raise ValidationError(f'Invalid "{field}" email format: {recipient}')
+        _validate_email(bare, field)
 
 
 def _normalize_tags(tags: Any) -> Optional[list[str]]:
@@ -161,6 +223,7 @@ def build_send_payload(
     headers: Optional[dict[str, str]] = None,
     scheduled_at: Optional[Union[str, datetime]] = None,
     metadata: Optional[dict[str, Any]] = None,
+    priority: Optional[Union[int, str]] = None,
 ) -> dict[str, Any]:
     """Serialize a send body for the messages send API.
 
@@ -168,7 +231,9 @@ def build_send_payload(
     silently (F48): from/to/cc/bcc/reply_to go out as address strings with
     display names preserved as ``"Name <addr>"`` forms, tags as a string
     list, attachments/headers/priority/template fields under their
-    documented snake_case names.
+    documented snake_case names. Priority follows the shared contract — an
+    integer 1-10 or a named level "high"/"normal"/"low" (API queue integers
+    7/5/3); anything else raises before a request is sent.
     """
     payload: dict[str, Any] = {
         "from": _serialize_address(from_) or (from_ if isinstance(from_, str) else str(from_)),
@@ -203,24 +268,32 @@ def build_send_payload(
         )
     if metadata:
         payload["metadata"] = metadata
+    if priority is not None:
+        payload["priority"] = _validate_priority(priority)
 
     return payload
 
 
 def _validate_batch_email(email: dict[str, Any], index: int) -> None:
-    from_value = email.get("from") or email.get("from_")
-    if not from_value:
+    # F48: the extracted bare addr-spec is what gets validated — sender
+    # dicts and display-name strings are accepted forms, never validated
+    # as-is.
+    from_bare = _bare_address(email.get("from") or email.get("from_"))
+    if not from_bare:
         raise ValidationError(f'Email at index {index}: "from" is required')
-    if isinstance(from_value, dict):
-        from_value = from_value.get("email")
-    if not from_value or not isinstance(from_value, str):
-        raise ValidationError(f'Email at index {index}: "from" must be a string')
-    _validate_email(from_value, "from")
+    _validate_email(from_bare, "from")
 
     _validate_recipients(_coerce_recipient_list(email.get("to")), "to", required=True)
     for optional_field in ("cc", "bcc"):
         if email.get(optional_field) is not None:
             _validate_recipients(_coerce_recipient_list(email.get(optional_field)), optional_field)
+    if email.get("reply_to") is not None:
+        reply_to_bare = _bare_address(email.get("reply_to"))
+        if not reply_to_bare:
+            raise ValidationError(f'Email at index {index}: "reply_to" must be an email address')
+        _validate_email(reply_to_bare, "reply_to")
+    if email.get("priority") is not None:
+        _validate_priority(email.get("priority"))
 
     subject = email.get("subject")
     if not subject:
@@ -242,7 +315,7 @@ def _normalize_batch_message(email: dict[str, Any]) -> dict[str, Any]:
     """Build the wire body for one batch message with the same serialization
     as send() — display names preserved as "Name <addr>", snake_case
     scheduled_at, tags as a string list, and every accepted option
-    (reply_to, attachments, headers) forwarded (F48)."""
+    (reply_to, attachments, headers, priority) forwarded (F48)."""
     payload = build_send_payload(
         from_=email.get("from") or email.get("from_"),
         to=email.get("to"),
@@ -257,6 +330,7 @@ def _normalize_batch_message(email: dict[str, Any]) -> dict[str, Any]:
         headers=email.get("headers"),
         scheduled_at=email.get("scheduled_at") or email.get("scheduledAt"),
         metadata=email.get("metadata"),
+        priority=email.get("priority"),
     )
     return payload
 
@@ -309,6 +383,7 @@ class EmailsResource:
         headers: Optional[dict[str, str]] = None,
         scheduled_at: Optional[Union[str, datetime]] = None,
         metadata: Optional[dict[str, Any]] = None,
+        priority: Optional[Union[int, str]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendEmailResponse:
         """
@@ -317,10 +392,13 @@ class EmailsResource:
         Every accepted option is serialized (F48): from/to/cc/bcc/reply_to
         go out as address strings with display names preserved as
         ``"Name <addr>"`` forms, tags as a string list, and attachments /
-        custom headers under their documented snake_case field names.
+        custom headers / priority under their documented snake_case field
+        names. Priority follows the shared contract — an integer 1-10 or a
+        named level "high"/"normal"/"low" (API queue integers 7/5/3).
 
         Args:
-            from_: Sender email address (or {"email": ..., "name": ...})
+            from_: Sender email address, ``{"email": ..., "name": ...}`` or
+                a "Name <addr>" display string
             to: Recipient email address(es)
             subject: Email subject
             html: HTML body content
@@ -334,26 +412,39 @@ class EmailsResource:
             headers: Custom email headers
             scheduled_at: ISO 8601 datetime or datetime object for scheduled sending
             metadata: Custom metadata
+            priority: Queue priority — integer 1-10 or "high"/"normal"/"low"
             idempotency_key: Idempotency key for safe retries
 
         Returns:
             SendEmailResponse with email ID and status
         """
-        # FIX-500-287: Validate email formats
-        _validate_email(from_, "from")
+        # FIX-500-287 + F48: validate the extracted BARE addr-spec from
+        # dict/string display forms — never a dict or a formatted display
+        # name.
+        from_bare = _bare_address(from_)
+        if not from_bare:
+            raise ValidationError('"from" must be an email address or {"email": ..., "name": ...}')
+        _validate_email(from_bare, "from")
         recipients = to if isinstance(to, list) else [to]
-        for r in recipients:
-            if isinstance(r, str):
-                _validate_email(r, "to")
-            elif isinstance(r, dict):
-                _validate_email(str(r.get("email", "")), "to")
+        for recipient in recipients:
+            if isinstance(recipient, (str, dict)):
+                recipient_bare = _bare_address(recipient)
+                if not recipient_bare:
+                    raise ValidationError(f'Invalid "to" email format: {recipient}')
+                _validate_email(recipient_bare, "to")
             else:
                 raise ValidationError('"to" must be a string or list of strings')
         if reply_to is not None:
-            reply_to_bare = _coerce_recipient_list(reply_to)
+            reply_to_bare = _bare_address(reply_to)
             if not reply_to_bare:
                 raise ValidationError('"reply_to" must be an email address or {"email": ...}')
-            _validate_email(reply_to_bare[0], "reply_to")
+            _validate_email(reply_to_bare, "reply_to")
+        if cc is not None:
+            _validate_recipients(_coerce_recipient_list(cc), "cc")
+        if bcc is not None:
+            _validate_recipients(_coerce_recipient_list(bcc), "bcc")
+        if priority is not None:
+            _validate_priority(priority)
 
         # FIX-500-288: Body presence check
         if not html and not text:
@@ -377,6 +468,7 @@ class EmailsResource:
             headers=headers,
             scheduled_at=scheduled_at,
             metadata=metadata,
+            priority=priority,
         )
 
         # FIX-500-CRITICAL + SDK-B: thread idempotency_key to the HTTP client
@@ -502,28 +594,41 @@ class AsyncEmailsResource:
         headers: Optional[dict[str, str]] = None,
         scheduled_at: Optional[Union[str, datetime]] = None,
         metadata: Optional[dict[str, Any]] = None,
+        priority: Optional[Union[int, str]] = None,
         idempotency_key: Optional[str] = None,
     ) -> SendEmailResponse:
         """Send an email asynchronously.
 
         See the sync resource's docstring: every accepted option is
-        serialized — reply_to/attachments/headers reach the wire and display
-        names survive as "Name <addr>" forms (F48).
+        serialized — reply_to/attachments/headers/priority reach the wire
+        and display names survive as "Name <addr>" forms (F48). Validation
+        targets the extracted bare addr-spec from dict/string display
+        forms.
         """
-        _validate_email(from_, "from")
+        from_bare = _bare_address(from_)
+        if not from_bare:
+            raise ValidationError('"from" must be an email address or {"email": ..., "name": ...}')
+        _validate_email(from_bare, "from")
         recipients = to if isinstance(to, list) else [to]
-        for r in recipients:
-            if isinstance(r, str):
-                _validate_email(r, "to")
-            elif isinstance(r, dict):
-                _validate_email(str(r.get("email", "")), "to")
+        for recipient in recipients:
+            if isinstance(recipient, (str, dict)):
+                recipient_bare = _bare_address(recipient)
+                if not recipient_bare:
+                    raise ValidationError(f'Invalid "to" email format: {recipient}')
+                _validate_email(recipient_bare, "to")
             else:
                 raise ValidationError('"to" must be a string or list of strings')
         if reply_to is not None:
-            reply_to_bare = _coerce_recipient_list(reply_to)
+            reply_to_bare = _bare_address(reply_to)
             if not reply_to_bare:
                 raise ValidationError('"reply_to" must be an email address or {"email": ...}')
-            _validate_email(reply_to_bare[0], "reply_to")
+            _validate_email(reply_to_bare, "reply_to")
+        if cc is not None:
+            _validate_recipients(_coerce_recipient_list(cc), "cc")
+        if bcc is not None:
+            _validate_recipients(_coerce_recipient_list(bcc), "bcc")
+        if priority is not None:
+            _validate_priority(priority)
 
         if not html and not text:
             raise ValidationError('Either "html" or "text" body is required')
@@ -546,6 +651,7 @@ class AsyncEmailsResource:
             headers=headers,
             scheduled_at=scheduled_at,
             metadata=metadata,
+            priority=priority,
         )
 
         data = await self._client._request(

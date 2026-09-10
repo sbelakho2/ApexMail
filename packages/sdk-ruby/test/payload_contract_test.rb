@@ -261,6 +261,98 @@ request = transport.send(:build_request, "POST", URI.parse("https://api.apexmail
                          { a: 1 }, "key\r\n injected")
 expect("idempotency key control characters stripped", request["X-Idempotency-Key"] == "key injected")
 
+# ── F48: shared send contract — packages/contract/send-contract.json ───────
+# The SAME fixture file drives the api-server contract tests and every SDK
+# serialization suite, so the wire forms this SDK emits can never drift from
+# what the API deserializer accepts.
+
+contract_path = File.expand_path("../../contract/send-contract.json", __dir__)
+contract_fixture =
+  begin
+    require "json"
+    JSON.parse(File.read(contract_path))
+  rescue StandardError => e
+    nil
+  end
+if contract_fixture.nil?
+  expect("shared contract fixture loads", false, "cannot read #{contract_path}: #{$ERROR_INFO || e}")
+else
+  contract_fixture["priority"]["cases"].each do |case_data|
+    description = case_data["description"]
+    input = case_data["input"]
+    ruby_value =
+      case input["type"]
+      when "int" then input["value"]
+      when "named" then input["value"]
+      when "bool" then input["value"]
+      when "float" then input["value"]
+      end
+
+    t = RecordingTransport.new
+    emails = ApexMail::EmailsAPI.new(t)
+    if case_data["valid"]
+      emails.send_email(
+        from: "hello@example.com", to: "user@example.com", subject: "Hi", text: "Hello",
+        priority: ruby_value
+      )
+      expect("priority case '#{description}' serializes the contract wire form",
+             t.calls[0][:body][:priority] == case_data["wire"])
+    else
+      rejected = false
+      begin
+        emails.send_email(
+          from: "hello@example.com", to: "user@example.com", subject: "Hi", text: "Hello",
+          priority: ruby_value
+        )
+      rescue ArgumentError
+        rejected = true
+      end
+      expect("priority case '#{description}' is rejected client-side", rejected)
+    end
+  end
+
+  contract_fixture["mailbox"]["cases"].each do |case_data|
+    next unless case_data["valid"]
+
+    description = case_data["description"]
+    display_name = case_data["display_name"]
+    addr_spec = case_data["addr_spec"]
+
+    # Structured inputs serialize to the canonical display form.
+    t = RecordingTransport.new
+    emails = ApexMail::EmailsAPI.new(t)
+    from = { email: addr_spec }
+    from[:name] = display_name if display_name
+    emails.send_email(from: from, to: [addr_spec], subject: "Hi", text: "Hello")
+    expected = display_name ? "#{display_name} <#{addr_spec}>" : addr_spec
+    expect("mailbox case '#{description}' preserves the display form",
+           t.calls[0][:body][:from] == expected)
+  end
+
+  # Raw display-name STRINGS are accepted and validated against the bare
+  # addr-spec — exactly what the API's mailbox parser accepts (F48).
+  t = RecordingTransport.new
+  emails = ApexMail::EmailsAPI.new(t)
+  emails.send_email(
+    from: "Ada Lovelace <ada@example.com>",
+    to: ["Bob <bob@example.com>", "carol@example.com"],
+    subject: "Hi", text: "Hello"
+  )
+  expect("display-name string from is accepted", t.calls[0][:body][:from] == "Ada Lovelace <ada@example.com>")
+  expect("display-name string to entries are accepted",
+         t.calls[0][:body][:to] == ["Bob <bob@example.com>", "carol@example.com"])
+
+  rejected = false
+  begin
+    ApexMail::EmailsAPI.new(RecordingTransport.new).send_email(
+      from: "Ada <not-an-email>", to: "user@example.com", subject: "Hi", text: "Hello"
+    )
+  rescue ArgumentError
+    rejected = true
+  end
+  expect("invalid addr-spec inside a display form is rejected", rejected)
+end
+
 # ── Summary ────────────────────────────────────────────────────────────────
 
 if $failed.zero?

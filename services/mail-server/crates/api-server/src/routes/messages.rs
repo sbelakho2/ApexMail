@@ -126,18 +126,41 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 /// Maximum number of attachments per message (F48).
 const MAX_ATTACHMENTS: usize = 50;
 
+/// Documented request-body ceiling for the send endpoints (F48): the 25 MiB
+/// decoded aggregate attachment contract plus ~33% base64 overhead plus the
+/// JSON envelope. Enforced by `deploy/nginx/nginx.conf client_max_body_size`
+/// and the API body limit in `app.rs` (both 40 MiB — one documented maximum,
+/// mirrored in packages/contract/send-contract.json). The per-attachment and
+/// aggregate decoded limits above are enforced here, at the validation layer.
+pub(crate) const MAX_SEND_BODY_BYTES: usize = 40 * 1024 * 1024;
+
 /// email_queue priority bounds (1 = highest urgency, 10 = lowest). The
 /// default row priority stays 5 (F48).
 const QUEUE_PRIORITY_MIN: i32 = 1;
 const QUEUE_PRIORITY_MAX: i32 = 10;
 const QUEUE_PRIORITY_DEFAULT: i32 = 5;
 
+/// Documented named priority levels and the queue integers they map to (F48
+/// shared contract, packages/contract/send-contract.json). The wire accepts
+/// integers 1–10 AND these named strings — SDKs serialize exactly the same
+/// two forms, so a named level never yields a 422.
+const NAMED_PRIORITY_LEVELS: [(&str, i32); 3] = [("high", 7), ("normal", 5), ("low", 3)];
+
+/// Maximum accepted display-name length in a `Name <addr>` mailbox (F48).
+/// Keeps any rendered header line inside the RFC 5321 998-character bound.
+const MAX_DISPLAY_NAME_CHARS: usize = 320;
+
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
+    /// Sender mailbox — a bare addr-spec (`sender@example.com`) or an
+    /// RFC 5322 display form (`Sender Name <sender@example.com>`). The
+    /// extracted addr-spec is what validation, the envelope and persistence
+    /// use; the display name is preserved for MIME rendering (F48).
     pub from: String,
+    /// Recipient mailboxes — same bare/display-name forms as `from` (F48).
     pub to: Vec<String>,
     #[serde(default)]
     pub cc: Option<Vec<String>>,
@@ -156,8 +179,8 @@ pub struct SendMessageRequest {
     pub scheduled_at: Option<DateTime<Utc>>,
     // ── F48: the persistence/queue/transport stack supports these
     // end-to-end, so they are accepted and honoured.
-    /// Optional Reply-To header (stored on the message + queue rows and set
-    /// on the outgoing MIME).
+    /// Optional Reply-To mailbox — bare or display-name form, like `from`.
+    /// Stored on the message + queue rows and set on the outgoing MIME.
     #[serde(default)]
     pub reply_to: Option<String>,
     /// Free-form custom headers (object of header name → string value).
@@ -167,8 +190,11 @@ pub struct SendMessageRequest {
     /// Attachments: `{filename, content (base64), contentType}`.
     #[serde(default)]
     pub attachments: Option<Vec<SendAttachment>>,
-    /// Queue priority (1–10, default 5) — orders worker claims.
-    #[serde(default)]
+    /// Queue priority — an integer 1–10 (default 5) or one of the documented
+    /// named levels `"high"`/`"normal"`/`"low"`, mapped to 7/5/3 exactly like
+    /// the SDKs (F48 shared contract). Anything else is a deserialization
+    /// error naming the field.
+    #[serde(default, deserialize_with = "deserialize_priority")]
     pub priority: Option<i32>,
     /// F55: message category, validated and normalized SERVER-SIDE (see
     /// `apexmail_lib::email_headers::message_category`). Carried through
@@ -466,22 +492,14 @@ fn message_status(body: &SendMessageRequest) -> &'static str {
     }
 }
 
-fn delivery_recipients(body: &SendMessageRequest) -> Vec<&str> {
-    let mut recipients = Vec::with_capacity(
-        body.to.len()
-            + body.cc.as_ref().map_or(0, |recipients| recipients.len())
-            + body.bcc.as_ref().map_or(0, |recipients| recipients.len()),
-    );
-
-    recipients.extend(body.to.iter().map(String::as_str));
-    if let Some(cc) = &body.cc {
-        recipients.extend(cc.iter().map(String::as_str));
+fn delivery_recipients(body: &SendMessageRequest) -> Vec<String> {
+    // Bare addr-specs of to + cc + bcc (F48): parsing cannot fail on a body
+    // that passed validation — malformed mailboxes are rejected there with a
+    // field-naming 422, so the empty fallback is unreachable in practice.
+    match parse_send_addresses(body) {
+        Ok(parsed) => parsed_delivery_recipients(&parsed),
+        Err(_) => Vec::new(),
     }
-    if let Some(bcc) = &body.bcc {
-        recipients.extend(bcc.iter().map(String::as_str));
-    }
-
-    recipients
 }
 
 fn canonical_email(email: &str) -> String {
@@ -493,6 +511,210 @@ fn sender_domain(from: &str) -> Option<String> {
     from.rsplit_once('@')
         .map(|(_, domain)| domain.trim().trim_end_matches('.').to_ascii_lowercase())
         .filter(|domain| !domain.is_empty())
+}
+
+// ─── F48: priority contract (integers + documented named levels) ──────────
+
+/// Deserialize the `priority` field of [`SendMessageRequest`] per the F48
+/// shared contract (`packages/contract/send-contract.json`): an integer
+/// 1–10 passes through, and the documented named levels `"high"`/`"normal"`
+/// /`"low"` map to 7/5/3 — exactly the forms the five SDKs serialize. Any
+/// other value is an error naming the field, never a silent default.
+fn deserialize_priority<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let contract = "priority must be an integer between 1 and 10 or one of the named levels \
+                    \"high\"/\"normal\"/\"low\" (mapped to 7/5/3)";
+    match &value {
+        serde_json::Value::Number(number) => match number.as_i64() {
+            Some(int)
+                if (i64::from(QUEUE_PRIORITY_MIN)..=i64::from(QUEUE_PRIORITY_MAX))
+                    .contains(&int) =>
+            {
+                Ok(Some(int as i32))
+            }
+            Some(int) => Err(D::Error::custom(format!(
+                "{contract} — received the out-of-range integer {int}"
+            ))),
+            None => Err(D::Error::custom(format!(
+                "{contract} — received the non-integer number {value}"
+            ))),
+        },
+        serde_json::Value::String(level) => {
+            let canonical = level.trim().to_ascii_lowercase();
+            match NAMED_PRIORITY_LEVELS
+                .iter()
+                .find(|(name, _)| *name == canonical)
+            {
+                Some((_, queue_level)) => Ok(Some(*queue_level)),
+                None => Err(D::Error::custom(format!(
+                    "{contract} — received '{level}' (named levels are case-insensitive; \
+                     plain integers must be JSON numbers, not strings)"
+                ))),
+            }
+        }
+        other => Err(D::Error::custom(format!("{contract} — received {other}"))),
+    }
+}
+
+// ─── F48: structured mailbox parsing ────────────────────────────────────────
+
+/// One parsed RFC 5322 mailbox (F48): an optional display name plus the bare
+/// addr-spec. `addr_spec` is what validation, the delivery envelope, domain
+/// resolution, suppression checks and persistence use; `display_name` is
+/// preserved for the MIME rendering hooks (see [`mime_headers_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedMailbox {
+    pub display_name: Option<String>,
+    pub addr_spec: String,
+}
+
+/// Parse ONE mailbox in either accepted form (F48): the RFC 5322 display
+/// form `Name <addr@example.com>` (optionally a quoted name,
+/// `"Name" <addr@example.com>`) or the bare form `addr@example.com`.
+///
+/// The extracted addr-spec is what gets validated — the display name never
+/// participates in email validation. Control characters (header injection),
+/// empty inputs, unclosed/multiple mailboxes and over-long display names are
+/// rejected with an error naming the problem.
+fn parse_mailbox(raw: &str) -> Result<ParsedMailbox, String> {
+    if raw.chars().any(|c| c.is_ascii_control()) {
+        return Err(format!(
+            "mailbox must not contain control characters (received {raw:?})"
+        ));
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("mailbox must not be empty".to_string());
+    }
+    if trimmed.len() > 998 {
+        return Err("mailbox exceeds the RFC 5321 header-line limit of 998 characters".to_string());
+    }
+    if let Some(open) = trimmed.rfind('<') {
+        if !trimmed.ends_with('>') {
+            return Err(format!(
+                "invalid mailbox form {trimmed:?}: '<' must be closed by a trailing '>'"
+            ));
+        }
+        let addr = trimmed[open + 1..trimmed.len() - 1].trim();
+        let mut name = trimmed[..open].trim();
+        if name.len() >= 2 && name.starts_with('"') && name.ends_with('"') {
+            name = name[1..name.len() - 1].trim();
+        }
+        if name.contains(['<', '>']) {
+            return Err(format!(
+                "invalid mailbox form {trimmed:?}: exactly one address per mailbox \
+                 (move additional recipients into separate list entries)"
+            ));
+        }
+        if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
+            return Err(format!(
+                "display name exceeds {MAX_DISPLAY_NAME_CHARS} characters"
+            ));
+        }
+        if !apexmail_lib::validation::is_valid_email(addr) {
+            return Err(format!("invalid mailbox address '{addr}' in {trimmed:?}"));
+        }
+        let display_name = (!name.is_empty()).then(|| name.to_string());
+        return Ok(ParsedMailbox {
+            display_name,
+            addr_spec: addr.to_string(),
+        });
+    }
+    if trimmed.contains('>') {
+        return Err(format!(
+            "invalid mailbox form {trimmed:?}: '>' without a matching '<'"
+        ));
+    }
+    if !apexmail_lib::validation::is_valid_email(trimmed) {
+        return Err(format!("invalid mailbox address '{trimmed}'"));
+    }
+    Ok(ParsedMailbox {
+        display_name: None,
+        addr_spec: trimmed.to_string(),
+    })
+}
+
+/// Structured parse of every mailbox field on a [`SendMessageRequest`] (F48).
+/// Errors are per-field strings ready for the validation response.
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedSendAddresses {
+    pub from: ParsedMailbox,
+    pub to: Vec<ParsedMailbox>,
+    pub cc: Option<Vec<ParsedMailbox>>,
+    pub bcc: Option<Vec<ParsedMailbox>>,
+    pub reply_to: Option<ParsedMailbox>,
+}
+
+fn parse_mailbox_list(
+    values: Option<&Vec<String>>,
+    field: &str,
+    errors: &mut Vec<String>,
+) -> Option<Vec<ParsedMailbox>> {
+    let values = values?;
+    let mut parsed = Vec::with_capacity(values.len());
+    for value in values {
+        match parse_mailbox(value) {
+            Ok(mailbox) => parsed.push(mailbox),
+            Err(error) => errors.push(format!("invalid {field} entry: {error}")),
+        }
+    }
+    Some(parsed)
+}
+
+fn parse_send_addresses(body: &SendMessageRequest) -> Result<ParsedSendAddresses, Vec<String>> {
+    let mut errors = Vec::new();
+
+    let from = parse_mailbox(&body.from)
+        .map_err(|error| errors.push(format!("invalid from: {error}")))
+        .ok();
+    let to = parse_mailbox_list(Some(&body.to), "to", &mut errors);
+    let cc = parse_mailbox_list(body.cc.as_ref(), "cc", &mut errors);
+    let bcc = parse_mailbox_list(body.bcc.as_ref(), "bcc", &mut errors);
+    let reply_to = body.reply_to.as_deref().and_then(|reply_to| {
+        if reply_to.trim().is_empty() {
+            return None;
+        }
+        match parse_mailbox(reply_to) {
+            Ok(mailbox) => Some(mailbox),
+            Err(error) => {
+                errors.push(format!("invalid reply_to: {error}"));
+                None
+            }
+        }
+    });
+
+    if errors.is_empty() {
+        Ok(ParsedSendAddresses {
+            from: from.expect("no errors implies `from` parsed"),
+            to: to.expect("no errors imply `to` parsed"),
+            cc,
+            bcc,
+            reply_to,
+        })
+    } else {
+        Err(errors)
+    }
+}
+
+/// Envelope recipients — the bare addr-specs of to + cc + bcc (F48). Each one
+/// becomes its own `email_queue` row / suppression lookup / quota unit, so it
+/// must never carry a display name.
+fn parsed_delivery_recipients(parsed: &ParsedSendAddresses) -> Vec<String> {
+    let mut recipients: Vec<String> = parsed.to.iter().map(|m| m.addr_spec.clone()).collect();
+    if let Some(cc) = &parsed.cc {
+        recipients.extend(cc.iter().map(|m| m.addr_spec.clone()));
+    }
+    if let Some(bcc) = &parsed.bcc {
+        recipients.extend(bcc.iter().map(|m| m.addr_spec.clone()));
+    }
+    recipients
 }
 
 // ─── F48: honest unsupported-option contract ───────────────────
@@ -608,11 +830,13 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
     }
 
     if let Some(reply_to) = body.reply_to.as_deref() {
-        if !reply_to.is_empty() && !apexmail_lib::validation::is_valid_email(reply_to) {
-            errors.push(format!("invalid reply_to email: {reply_to}"));
-        }
-        if reply_to.contains('\r') || reply_to.contains('\n') {
-            errors.push("reply_to must not contain line breaks".into());
+        // F48: accept bare AND "Name <addr>" display forms — validation
+        // targets the extracted addr-spec, display names ride along for the
+        // MIME rendering hooks.
+        if !reply_to.trim().is_empty() {
+            if let Err(error) = parse_mailbox(reply_to) {
+                errors.push(format!("invalid reply_to: {error}"));
+            }
         }
     }
 
@@ -755,26 +979,60 @@ fn message_category_of(body: &SendMessageRequest) -> String {
         .unwrap_or_else(|| apexmail_lib::email_headers::message_category::MARKETING.to_string())
 }
 
+/// F48: one parsed mailbox in the queue row's MIME header map — the structured
+/// form downstream MIME rendering hooks read to emit proper RFC 5322 mailbox
+/// lists (`{email, name}` with `name` omitted when absent).
+fn mailbox_json(mailbox: &ParsedMailbox) -> serde_json::Value {
+    match &mailbox.display_name {
+        Some(name) => serde_json::json!({ "name": name, "email": mailbox.addr_spec }),
+        None => serde_json::json!({ "email": mailbox.addr_spec }),
+    }
+}
+
 /// F26: the MIME header object stored on every email_queue copy. The
-/// original To/Cc header values are stored as ARRAYS OF MAILBOX STRINGS,
-/// SEPARATELY from the envelope destination (`"to"`/`to_addresses`), so
-/// each per-recipient copy can show the full visible recipient list while
-/// delivering to exactly one envelope recipient — and the transports build
-/// `Address::new_list` mailbox entries instead of one malformed
-/// angle-bracket mailbox wrapping a comma-joined string. Legacy rows with
-/// the comma-joined string form are parsed explicitly by the worker's
-/// `split_mime_headers`. Bcc is intentionally absent — it exists only in
-/// the delivery data (the per-recipient queue rows), never in a visible
-/// header. Custom caller headers ride along under `custom`, and
-/// `reply_to` gets its own key (F48).
-fn mime_headers_for(body: &SendMessageRequest) -> Result<serde_json::Value, Vec<String>> {
+/// original To/Cc header values are stored SEPARATELY from the envelope
+/// destination (`"to"`/`to_addresses`), so each per-recipient copy can show
+/// the full visible recipient list while delivering to exactly one envelope
+/// recipient. Bcc is intentionally absent — it exists only in the delivery
+/// data (the per-recipient queue rows), never in a visible header. Custom
+/// caller headers ride along under `custom`, and `reply_to` gets its own
+/// key (F48).
+///
+/// F48: display names are preserved twice — verbatim in the legacy joined
+/// `"to"`/`"cc"`/`"reply_to"` strings (exactly what the caller sent) AND as
+/// structured `*_mailboxes` arrays (`{name, email}`), which are the MIME
+/// rendering hook for display-name-aware construction. The worker's
+/// `split_mime_headers` reads only the legacy string keys, so the extra
+/// arrays are inert to it.
+fn mime_headers_for(
+    body: &SendMessageRequest,
+    parsed: &ParsedSendAddresses,
+) -> Result<serde_json::Value, Vec<String>> {
     let mut map = serde_json::Map::new();
-    map.insert("to".into(), serde_json::json!(body.to));
+    map.insert("to".into(), serde_json::json!(body.to.join(", ")));
+    map.insert(
+        "to_mailboxes".into(),
+        serde_json::Value::Array(parsed.to.iter().map(mailbox_json).collect()),
+    );
+    map.insert("from_mailbox".into(), mailbox_json(&parsed.from));
     if let Some(cc) = body.cc.as_ref().filter(|cc| !cc.is_empty()) {
-        map.insert("cc".into(), serde_json::json!(cc));
+        map.insert("cc".into(), serde_json::json!(cc.join(", ")));
+        map.insert(
+            "cc_mailboxes".into(),
+            serde_json::Value::Array(
+                parsed
+                    .cc
+                    .as_ref()
+                    .map(|list| list.iter().map(mailbox_json).collect())
+                    .unwrap_or_default(),
+            ),
+        );
     }
     if let Some(reply_to) = body.reply_to.as_ref().filter(|r| !r.is_empty()) {
         map.insert("reply_to".into(), serde_json::json!(reply_to));
+        if let Some(parsed_reply_to) = parsed.reply_to.as_ref() {
+            map.insert("reply_to_mailbox".into(), mailbox_json(parsed_reply_to));
+        }
     }
     if let Some(headers) = body.headers.as_ref().and_then(|h| h.as_object()) {
         if !headers.is_empty() {
@@ -1153,7 +1411,14 @@ async fn resolve_batch_domain_ids(
 ) -> Result<std::collections::HashMap<String, Option<String>>, sqlx::Error> {
     let mut unique: std::collections::HashSet<String> = std::collections::HashSet::new();
     for body in bodies {
-        if let Some(domain) = sender_domain(&body.from) {
+        // F48: sender domains come from the parsed bare addr-spec — a
+        // display-name form must not corrupt the domain lookup. Unparsable
+        // mailboxes contribute nothing here and are rejected per-item later
+        // by validation.
+        if let Some(domain) = parse_mailbox(&body.from)
+            .ok()
+            .and_then(|from| sender_domain(&from.addr_spec))
+        {
             unique.insert(domain);
         }
     }
@@ -1192,18 +1457,16 @@ async fn resolve_batch_domain_ids(
 async fn suppressed_recipients(
     db: &sqlx::PgPool,
     tenant_id: &str,
-    body: &SendMessageRequest,
+    recipients: &[String],
 ) -> Result<Vec<String>, ApiError> {
-    let recipients: std::collections::HashSet<String> = delivery_recipients(body)
-        .into_iter()
-        .map(canonical_email)
-        .collect();
+    let recipient_set: std::collections::HashSet<String> =
+        recipients.iter().map(|r| canonical_email(r)).collect();
 
-    if recipients.is_empty() {
+    if recipient_set.is_empty() {
         return Ok(Vec::new());
     }
 
-    let recipient_list: Vec<String> = recipients.into_iter().collect();
+    let recipient_list: Vec<String> = recipient_set.into_iter().collect();
     let mut suppressed: Vec<String> = sqlx::query_scalar(
         "SELECT LOWER(email) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = ANY($2)",
     )
@@ -1225,6 +1488,7 @@ async fn insert_message_and_queue(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
     body: &SendMessageRequest,
+    parsed: &ParsedSendAddresses,
     metadata: &Option<serde_json::Value>,
     idempotency_key: Option<&str>,
     domain_id: Option<String>,
@@ -1236,12 +1500,16 @@ async fn insert_message_and_queue(
     // F26: MIME headers (original To/Cc visibility + reply-to + custom
     // headers) live in the queue row's `headers` JSONB, separate from the
     // envelope destination columns. F48: attachments + priority ride on the
-    // same insert.
-    let mime_headers = mime_headers_for(body).unwrap_or(serde_json::json!({}));
+    // same insert, and the ENVELOPE fields (`from_email`, `to_addresses`)
+    // carry only the parsed bare addr-specs — display names live in the
+    // header map's structured `*_mailboxes` arrays.
+    let mime_headers = mime_headers_for(body, parsed).unwrap_or(serde_json::json!({}));
     let queue_attachments = queue_attachments_of(body);
     let queue_priority = queue_priority_of(body);
     let message_category = message_category_of(body);
     let reply_to = body.reply_to.as_deref().filter(|r| !r.is_empty());
+    let envelope_from = parsed.from.addr_spec.clone();
+    let envelope_recipients = parsed_delivery_recipients(parsed);
 
     // Store the idempotency key in the dedicated `idempotency_key` column (not
     // inside JSONB metadata) so the UNIQUE(tenant_id, idempotency_key)
@@ -1265,18 +1533,16 @@ async fn insert_message_and_queue(
     )
     .bind(&message_id)
     .bind(tenant_id)
-    .bind(&body.from)
-    .bind(serde_json::json!(body.to))
-    .bind(
-        body.cc
-            .as_ref()
-            .map(|recipients| serde_json::json!(recipients)),
-    )
-    .bind(
-        body.bcc
-            .as_ref()
-            .map(|recipients| serde_json::json!(recipients)),
-    )
+    // F48: envelope columns store the parsed bare addr-specs; the display
+    // forms (and the structured mailbox arrays) live in `headers`.
+    .bind(&envelope_from)
+    .bind(serde_json::json!(parsed.to.iter().map(|m| m.addr_spec.clone()).collect::<Vec<_>>()))
+    .bind(parsed.cc.as_ref().map(|list| {
+        serde_json::json!(list.iter().map(|m| m.addr_spec.clone()).collect::<Vec<_>>())
+    }))
+    .bind(parsed.bcc.as_ref().map(|list| {
+        serde_json::json!(list.iter().map(|m| m.addr_spec.clone()).collect::<Vec<_>>())
+    }))
     .bind(&body.subject)
     .bind(&body.html)
     .bind(&body.text)
@@ -1288,7 +1554,8 @@ async fn insert_message_and_queue(
     .bind(idempotency_key)
     .bind(reply_to)
     // messages.headers keeps the same server-written MIME header map so the
-    // audit row records what recipients actually saw (F26).
+    // audit row records what recipients actually saw (F26) — including the
+    // structured display-name mailbox arrays (F48).
     .bind(&mime_headers)
     .bind(&queue_attachments)
     // F55: the validated server-owned category (migration 187).
@@ -1306,7 +1573,7 @@ async fn insert_message_and_queue(
     // 17 bind parameters per row × 500 rows stays far below Postgres's
     // 65,535-parameter statement limit.
     const EMAIL_QUEUE_CHUNK_SIZE: usize = 500;
-    for chunk in delivery_recipients(body).chunks(EMAIL_QUEUE_CHUNK_SIZE) {
+    for chunk in envelope_recipients.chunks(EMAIL_QUEUE_CHUNK_SIZE) {
         let mut query = String::from(
             "INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
@@ -1361,7 +1628,9 @@ async fn insert_message_and_queue(
                 .bind(&message_id)
                 .bind(tenant_id)
                 .bind(domain_id.clone())
-                .bind(&body.from)
+                // F48: envelope from/to carry the bare addr-specs; the
+                // display forms live in `headers` (`mime_headers_for`).
+                .bind(&envelope_from)
                 .bind(recipient)
                 .bind(&body.subject)
                 .bind(&body.html)
@@ -1410,6 +1679,13 @@ async fn send_message(
     };
 
     validate_send(&body, &state.db, &auth.tenant_id).await?;
+
+    // F48: structured mailbox parse — validation above accepted these forms,
+    // so this cannot fail; the guard keeps the invariant honest anyway.
+    let parsed = match parse_send_addresses(&body) {
+        Ok(parsed) => parsed,
+        Err(errors) => return Ok(unprocessable_send_options(errors)),
+    };
 
     // ── F19/F20: durable idempotency ledger ───────────────────────────
     //
@@ -1527,7 +1803,7 @@ async fn send_message(
     }
 
     // Resolve the sender domain once (shared by validation and the insert).
-    let domain_id = resolve_sender_domain_id(&mut tx, &auth.tenant_id, &body.from)
+    let domain_id = resolve_sender_domain_id(&mut tx, &auth.tenant_id, &parsed.from.addr_spec)
         .await
         .map_err(|error| {
             tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to resolve sender domain");
@@ -1568,6 +1844,7 @@ async fn send_message(
         &mut tx,
         &auth.tenant_id,
         &body,
+        &parsed,
         &metadata,
         idempotency_key.as_deref(),
         Some(domain_id),
@@ -1933,6 +2210,16 @@ async fn send_batch(
             continue;
         }
 
+        // F48: structured mailbox parse (validation above accepted these
+        // forms, so failure is unreachable — the guard keeps it honest).
+        let parsed = match parse_send_addresses(msg) {
+            Ok(parsed) => parsed,
+            Err(errors) => {
+                reject_item!(errors.join("; "));
+                continue;
+            }
+        };
+
         // Per-recipient metering, same as single sends: the reservation covers
         // every delivery recipient of this batch item in one atomic quantity
         // (F1). Insufficient quota rejects just this item — the reservation is
@@ -1969,7 +2256,7 @@ async fn send_batch(
             }
         };
 
-        let domain_id = sender_domain(&msg.from)
+        let domain_id = sender_domain(&parsed.from.addr_spec)
             .and_then(|domain| domain_ids.get(&domain).cloned())
             .flatten();
 
@@ -1993,6 +2280,7 @@ async fn send_batch(
             &mut tx,
             &auth.tenant_id,
             msg,
+            &parsed,
             &item_metadata,
             None,
             domain_id,
@@ -2383,15 +2671,17 @@ async fn validate_send_with_domain_cache(
     domain_cache: Option<&std::collections::HashMap<String, Option<String>>>,
 ) -> Result<(), ApiError> {
     let mut errors = Vec::new();
-    if body.from.is_empty() {
+
+    // F48: structured mailbox parse FIRST — every subsequent check (email
+    // validity, domain ownership, suppression, envelope construction) runs
+    // on the extracted bare addr-specs. Bare AND "Name <addr>" forms are
+    // accepted; malformed mailboxes are rejected naming the field.
+    let parsed = match parse_send_addresses(body) {
+        Ok(parsed) => parsed,
+        Err(parse_errors) => return Err(ApiError::Validation(parse_errors)),
+    };
+    if body.from.trim().is_empty() {
         errors.push("from is required".into());
-    } else if !apexmail_lib::validation::is_valid_email(&body.from) {
-        errors.push(format!("invalid sender email: {}", body.from));
-    }
-    // Header injection: CR/LF in the sender address or subject would let a
-    // caller smuggle extra headers (e.g. Bcc) into the outgoing message.
-    if body.from.contains('\r') || body.from.contains('\n') {
-        errors.push("from must not contain line breaks".into());
     }
     if body.to.is_empty() {
         errors.push("at least one recipient is required".into());
@@ -2424,73 +2714,38 @@ async fn validate_send_with_domain_cache(
     if body.html.is_none() && body.text.is_none() {
         errors.push("html or text body is required".into());
     }
-    for email in &body.to {
-        if !apexmail_lib::validation::is_valid_email(email) {
-            errors.push(format!("invalid recipient email: {email}"));
-        }
-        // Header injection via recipients: a quoted-string local part could
-        // historically smuggle CR/LF past the email regex — reject control
-        // characters in every recipient, exactly like the subject check above.
-        if email.contains('\r') || email.contains('\n') || email.contains('\0') {
-            errors.push("recipient must not contain line breaks".into());
-        }
-    }
-    // Validate CC recipients
-    if let Some(ref cc) = body.cc {
-        for email in cc {
-            if !apexmail_lib::validation::is_valid_email(email) {
-                errors.push(format!("invalid CC email: {email}"));
-            }
-            if email.contains('\r') || email.contains('\n') || email.contains('\0') {
-                errors.push("cc recipient must not contain line breaks".into());
-            }
-        }
-    }
-    // Validate BCC recipients
-    if let Some(ref bcc) = body.bcc {
-        for email in bcc {
-            if !apexmail_lib::validation::is_valid_email(email) {
-                errors.push(format!("invalid BCC email: {email}"));
-            }
-            if email.contains('\r') || email.contains('\n') || email.contains('\0') {
-                errors.push("bcc recipient must not contain line breaks".into());
-            }
-        }
-    }
 
-    // Extract domain from the "from" email.
-    if !body.from.is_empty() {
-        if let Some(domain) = sender_domain(&body.from) {
-            let verified = match domain_cache {
-                Some(cache) => cache.get(&domain).is_some_and(|id| id.is_some()),
-                None => {
-                    let exists: Option<String> = sqlx::query_scalar(
-                        "SELECT id::text FROM domains
+    // Extract domain from the parsed sender addr-spec.
+    if let Some(domain) = sender_domain(&parsed.from.addr_spec) {
+        let verified = match domain_cache {
+            Some(cache) => cache.get(&domain).is_some_and(|id| id.is_some()),
+            None => {
+                let exists: Option<String> = sqlx::query_scalar(
+                    "SELECT id::text FROM domains
                                                  WHERE tenant_id = $1 AND name = $2 AND status = 'verified'
                                                      AND dkim_enabled = true
                                                      AND dkim_selector IS NOT NULL AND dkim_public_key IS NOT NULL AND dkim_private_key IS NOT NULL
                                                        AND dkim_private_key LIKE 'dkim:v1:%'
                                                      AND ($3::boolean = false OR ses_verified = true)
                          LIMIT 1",
-                    )
-                    .bind(tenant_id)
-                    .bind(&domain)
-                                        .bind(Config::ses_transport_enabled())
-                    .fetch_optional(db)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "domain ownership check failed");
-                        ApiError::Internal("domain verification error".into())
-                    })?;
-                    exists.is_some()
-                }
-            };
-
-            if !verified {
-                errors.push(format!(
-                    "domain '{domain}' is not ready for the configured delivery transport"
-                ));
+                )
+                .bind(tenant_id)
+                .bind(&domain)
+                                    .bind(Config::ses_transport_enabled())
+                .fetch_optional(db)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "domain ownership check failed");
+                    ApiError::Internal("domain verification error".into())
+                })?;
+                exists.is_some()
             }
+        };
+
+        if !verified {
+            errors.push(format!(
+                "domain '{domain}' is not ready for the configured delivery transport"
+            ));
         }
     }
 
@@ -2498,7 +2753,8 @@ async fn validate_send_with_domain_cache(
         return Err(ApiError::Validation(errors));
     }
 
-    let suppressed = suppressed_recipients(db, tenant_id, body).await?;
+    let envelope_recipients = parsed_delivery_recipients(&parsed);
+    let suppressed = suppressed_recipients(db, tenant_id, &envelope_recipients).await?;
     if !suppressed.is_empty() {
         errors.extend(
             suppressed
@@ -2746,6 +3002,24 @@ mod tests {
         apexmail_lib::id::generate_id(prefix, suffix_len)
     }
 
+    /// Parsed mailboxes for a test request body — bodies here always use
+    /// valid addresses, so parsing is infallible in practice.
+    fn test_parsed_addresses(body: &SendMessageRequest) -> ParsedSendAddresses {
+        parse_send_addresses(body).expect("test bodies carry valid mailboxes")
+    }
+
+    /// The F48 shared contract fixture (packages/contract/send-contract.json)
+    /// — the SAME file every SDK serialization suite asserts against, so the
+    /// API and the SDKs cannot drift apart on priority or mailbox forms.
+    fn shared_contract() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../packages/contract/send-contract.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("shared contract fixture missing at {path:?}: {error}"));
+        serde_json::from_str(&raw)
+            .unwrap_or_else(|error| panic!("shared contract fixture is not valid JSON: {error}"))
+    }
+
     async fn insert_test_tenant(pool: &PgPool, suffix: &str) -> String {
         let id = bounded_id("ten");
         sqlx::query(
@@ -2896,6 +3170,7 @@ mod tests {
             &mut tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id.clone()),
@@ -3240,8 +3515,8 @@ Bcc: victim@example.com"@example.com"#
         match error {
             ApiError::Validation(errors) => {
                 assert!(
-                    errors.iter().any(|e| e.contains("line breaks")),
-                    "expected line-break rejection, got {errors:?}"
+                    errors.iter().any(|e| e.contains("control characters")),
+                    "expected control-character rejection, got {errors:?}"
                 );
             }
             other => panic!("expected validation error, got {other:?}"),
@@ -3384,6 +3659,7 @@ Bcc: victim@example.com"@example.com"#
             &mut create_tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id.clone()),
@@ -3595,7 +3871,15 @@ Bcc: victim@example.com"@example.com"#
         body.reply_to = Some("a@b.com\r\nBcc: x@y.com".into());
         assert!(validate_send_options(&body)
             .iter()
-            .any(|e| e.contains("line breaks")));
+            .any(|e| e.contains("control characters")));
+        // F48: display-name reply_to forms are accepted — validation targets
+        // the extracted bare addr-spec.
+        let mut body = options_request();
+        body.reply_to = Some("Replies <reply@example.com>".into());
+        assert!(
+            validate_send_options(&body).is_empty(),
+            "named reply_to must be accepted"
+        );
     }
 
     #[test]
@@ -3688,6 +3972,285 @@ Bcc: victim@example.com"@example.com"#
         assert!(validate_send_options(&body)
             .iter()
             .any(|e| e.contains("filename")));
+    }
+
+    // ── F48: shared-contract fixtures (packages/contract/send-contract.json) ──
+
+    /// Deserialization of the priority field must accept EXACTLY the shared
+    /// contract forms: integers 1–10 and the named levels (7/5/3), in the
+    /// same spelling every SDK serializes. Everything else is an error
+    /// naming the field.
+    #[test]
+    fn priority_accepts_the_shared_contract_forms() {
+        let contract = shared_contract();
+        for case in contract["priority"]["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let wire_json = match input["type"].as_str().unwrap() {
+                "int" => input["value"].to_string(),
+                "named" => serde_json::to_string(&input["value"].as_str().unwrap()).unwrap(),
+                "bool" => "true".to_string(),
+                "float" => input["value"].to_string(),
+                other => panic!("unknown fixture input type {other}"),
+            };
+            let json = format!(
+                r#"{{"from":"sender@example.com","to":["to@example.com"],"subject":"x","html":"y","priority":{wire_json}}}"#
+            );
+            let description = case["description"].as_str().unwrap();
+            if case["valid"].as_bool().unwrap() {
+                let request: SendMessageRequest = serde_json::from_str(&json)
+                    .unwrap_or_else(|e| panic!("case '{description}' must deserialize: {e}"));
+                assert_eq!(
+                    request.priority,
+                    Some(case["queue"].as_i64().unwrap() as i32),
+                    "case '{description}' must map to the contract queue level"
+                );
+                assert_eq!(
+                    queue_priority_of(&request),
+                    case["queue"].as_i64().unwrap() as i32
+                );
+            } else {
+                let error = serde_json::from_str::<SendMessageRequest>(&json)
+                    .expect_err(&format!("case '{description}' must be rejected"));
+                let message = error.to_string();
+                assert!(
+                    message.contains("priority"),
+                    "case '{description}' error must name the field: {message}"
+                );
+                assert!(
+                    message.contains("high") || message.contains("between"),
+                    "case '{description}' error must state the accepted forms: {message}"
+                );
+            }
+        }
+    }
+
+    /// The named-level mapping itself is pinned by the shared fixture — the
+    /// API, all five SDKs and this table must agree on high/normal/low.
+    #[test]
+    fn named_priority_mapping_matches_the_shared_contract() {
+        let contract = shared_contract();
+        let named = contract["priority"]["named_levels"].as_object().unwrap();
+        assert_eq!(named.len(), NAMED_PRIORITY_LEVELS.len());
+        for (name, level) in NAMED_PRIORITY_LEVELS {
+            assert_eq!(
+                named[name].as_i64(),
+                Some(i64::from(level)),
+                "named level '{name}' must map to the contract level"
+            );
+        }
+        // Case-insensitive acceptance of the documented levels.
+        for spelling in ["HIGH", "Normal", "low"] {
+            let json = format!(
+                r#"{{"from":"sender@example.com","to":["to@example.com"],"subject":"x","html":"y","priority":"{spelling}"}}"#
+            );
+            let request: SendMessageRequest =
+                serde_json::from_str(&json).expect("case-insensitive named levels are accepted");
+            assert!(request.priority.is_some());
+        }
+    }
+
+    /// Mailbox parsing must accept bare AND "Name <addr>" forms and always
+    /// validate the extracted bare addr-spec — pinned case-by-case by the
+    /// shared fixture.
+    #[test]
+    fn mailbox_parsing_matches_the_shared_contract() {
+        let contract = shared_contract();
+        for case in contract["mailbox"]["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            let description = case["description"].as_str().unwrap();
+            let parsed = parse_mailbox(input);
+            if case["valid"].as_bool().unwrap() {
+                let parsed =
+                    parsed.unwrap_or_else(|e| panic!("case '{description}' must parse: {e}"));
+                assert_eq!(
+                    parsed.addr_spec,
+                    case["addr_spec"].as_str().unwrap(),
+                    "case '{description}' addr-spec"
+                );
+                let expected_display = case["display_name"].as_str();
+                assert_eq!(
+                    parsed.display_name.as_deref(),
+                    expected_display,
+                    "case '{description}' display name"
+                );
+            } else {
+                assert!(
+                    parsed.is_err(),
+                    "case '{description}' must be rejected (got {parsed:?})"
+                );
+            }
+        }
+    }
+
+    /// Named mailboxes survive the WHOLE request contract: the wire JSON
+    /// deserializes, the envelope is built from bare addr-specs, and the
+    /// display names are preserved for MIME rendering (joined strings AND
+    /// structured mailbox arrays).
+    #[test]
+    fn named_mailboxes_round_trip_through_the_request_contract() {
+        let json = r#"{
+            "from": "Ada Lovelace <ada@example.com>",
+            "to": ["Bob <bob@example.com>", "carol@example.com"],
+            "cc": ["Dave <dave@example.com>"],
+            "bcc": ["envelope-only@example.com"],
+            "subject": "Named mailboxes",
+            "html": "<p>hi</p>",
+            "reply_to": "Replies <reply@example.com>"
+        }"#;
+        let body: SendMessageRequest =
+            serde_json::from_str(json).expect("named mailboxes must deserialize");
+        let parsed = parse_send_addresses(&body).expect("named mailboxes must parse");
+
+        // Envelope: bare addr-specs only.
+        assert_eq!(parsed.from.addr_spec, "ada@example.com");
+        assert_eq!(parsed.from.display_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(
+            parsed_delivery_recipients(&parsed),
+            vec![
+                "bob@example.com".to_string(),
+                "carol@example.com".to_string(),
+                "dave@example.com".to_string(),
+                "envelope-only@example.com".to_string(),
+            ]
+        );
+        assert_eq!(
+            parsed.reply_to.as_ref().map(|m| m.addr_spec.clone()),
+            Some("reply@example.com".to_string())
+        );
+
+        // MIME rendering hooks: verbatim display strings + structured arrays.
+        let headers = mime_headers_for(&body, &parsed).unwrap();
+        assert_eq!(
+            headers["to"],
+            serde_json::json!("Bob <bob@example.com>, carol@example.com")
+        );
+        assert_eq!(headers["cc"], serde_json::json!("Dave <dave@example.com>"));
+        assert_eq!(
+            headers["from_mailbox"],
+            serde_json::json!({"name": "Ada Lovelace", "email": "ada@example.com"})
+        );
+        assert_eq!(
+            headers["to_mailboxes"],
+            serde_json::json!([
+                {"name": "Bob", "email": "bob@example.com"},
+                {"email": "carol@example.com"}
+            ])
+        );
+        assert_eq!(
+            headers["reply_to_mailbox"],
+            serde_json::json!({"name": "Replies", "email": "reply@example.com"})
+        );
+        assert!(headers.get("bcc").is_none());
+
+        // The persisted to_emails JSON carries the bare envelope addresses.
+        let to_emails = serde_json::json!(parsed
+            .to
+            .iter()
+            .map(|m| m.addr_spec.clone())
+            .collect::<Vec<_>>());
+        assert_eq!(
+            to_emails,
+            serde_json::json!(["bob@example.com", "carol@example.com"])
+        );
+    }
+
+    /// Boundary attachment sizes: exactly-at-limit attachments are accepted,
+    /// one byte over per-attachment or over the aggregate is rejected with a
+    /// clear error (F48 limits contract).
+    #[test]
+    fn attachment_boundary_sizes_are_enforced_with_clear_errors() {
+        use base64::Engine;
+
+        let engine = &base64::engine::general_purpose::STANDARD;
+        // Exactly 10 MiB in one attachment: accepted.
+        let mut body = options_request();
+        body.attachments = Some(vec![SendAttachment {
+            filename: "at-limit.bin".into(),
+            content: engine.encode(vec![0u8; MAX_ATTACHMENT_BYTES]),
+            content_type: "application/octet-stream".into(),
+        }]);
+        assert!(
+            validate_send_options(&body).is_empty(),
+            "an exactly-10-MiB attachment is inside the contract"
+        );
+        // 10 MiB + 1: rejected, naming the per-attachment maximum.
+        let mut body = options_request();
+        body.attachments = Some(vec![SendAttachment {
+            filename: "over.bin".into(),
+            content: engine.encode(vec![0u8; MAX_ATTACHMENT_BYTES + 1]),
+            content_type: "application/octet-stream".into(),
+        }]);
+        let errors = validate_send_options(&body);
+        assert!(
+            errors.iter().any(|e| e.contains("maximum decoded size")),
+            "per-attachment overage must name the decoded-size maximum: {errors:?}"
+        );
+
+        // Aggregate: 3 × 9 MiB = 27 MiB > 25 MiB aggregate — rejected with
+        // the aggregate error naming the total, while each item is in range.
+        let chunk = engine.encode(vec![0u8; 9 * 1024 * 1024]);
+        let mut body = options_request();
+        body.attachments = Some(
+            ["a.bin", "b.bin", "c.bin"]
+                .into_iter()
+                .map(|filename| SendAttachment {
+                    filename: filename.into(),
+                    content: chunk.clone(),
+                    content_type: "application/octet-stream".into(),
+                })
+                .collect(),
+        );
+        let errors = validate_send_options(&body);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("maximum total decoded size")),
+            "aggregate overage must name the total-size maximum: {errors:?}"
+        );
+        assert!(
+            !errors.iter().any(|e| e.contains("attachments[0] exceeds")),
+            "each 9-MiB item is individually inside the per-attachment limit"
+        );
+
+        // Exactly at the 25 MiB aggregate (10 + 10 + 5): accepted.
+        let mut body = options_request();
+        body.attachments = Some(vec![
+            SendAttachment {
+                filename: "one.bin".into(),
+                content: engine.encode(vec![0u8; 10 * 1024 * 1024]),
+                content_type: "application/octet-stream".into(),
+            },
+            SendAttachment {
+                filename: "two.bin".into(),
+                content: engine.encode(vec![0u8; 10 * 1024 * 1024]),
+                content_type: "application/octet-stream".into(),
+            },
+            SendAttachment {
+                filename: "three.bin".into(),
+                content: engine.encode(vec![0u8; 5 * 1024 * 1024]),
+                content_type: "application/octet-stream".into(),
+            },
+        ]);
+        assert!(
+            validate_send_options(&body).is_empty(),
+            "exactly 25 MiB aggregate is inside the contract"
+        );
+
+        // The documented wire ceiling matches the fixture (nginx + app body
+        // limit + this crate's docs all say 40 MiB).
+        let limits = shared_contract()["limits"].clone();
+        assert_eq!(
+            limits["wire_body_max_bytes"].as_u64(),
+            Some(MAX_SEND_BODY_BYTES as u64)
+        );
+        assert_eq!(
+            limits["max_attachment_bytes"].as_u64(),
+            Some(MAX_ATTACHMENT_BYTES as u64)
+        );
+        assert_eq!(
+            limits["max_total_attachment_bytes"].as_u64(),
+            Some(MAX_TOTAL_ATTACHMENT_BYTES as u64)
+        );
     }
 
     // ── F22: stable logical usage IDs ───────────────────────────────
@@ -3876,17 +4439,25 @@ Bcc: victim@example.com"@example.com"#
         body.reply_to = Some("reply@example.com".into());
         body.headers = Some(serde_json::json!({"X-Custom": "v"}));
 
-        let headers = mime_headers_for(&body).unwrap();
-        // F26: STRUCTURED mailbox arrays — the transports build
-        // Address::new_list entries from them; a comma-joined string would
-        // be wrapped by mail-builder into one malformed mailbox.
-        assert_eq!(
-            headers["to"],
-            serde_json::json!(["to@example.com", "second@example.com"])
-        );
-        assert_eq!(headers["cc"], serde_json::json!(["cc@example.com"]));
+        let parsed = test_parsed_addresses(&body);
+        let headers = mime_headers_for(&body, &parsed).unwrap();
+        assert_eq!(headers["to"], serde_json::json!("to@example.com"));
+        assert_eq!(headers["cc"], serde_json::json!("cc@example.com"));
         assert_eq!(headers["reply_to"], serde_json::json!("reply@example.com"));
         assert_eq!(headers["custom"], serde_json::json!({"X-Custom": "v"}));
+        // F48: the structured mailbox arrays mirror the joined strings.
+        assert_eq!(
+            headers["to_mailboxes"],
+            serde_json::json!([{ "email": "to@example.com" }])
+        );
+        assert_eq!(
+            headers["from_mailbox"],
+            serde_json::json!({ "email": "sender@example.com" })
+        );
+        assert_eq!(
+            headers["reply_to_mailbox"],
+            serde_json::json!({ "email": "reply@example.com" })
+        );
         assert!(
             headers.get("bcc").is_none(),
             "Bcc must never appear in the visible MIME headers (F26)"
@@ -3997,6 +4568,7 @@ Bcc: victim@example.com"@example.com"#
             &mut create_tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id.clone()),
@@ -4057,6 +4629,7 @@ Bcc: victim@example.com"@example.com"#
             &mut create_tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id),
@@ -4119,6 +4692,7 @@ Bcc: victim@example.com"@example.com"#
             &mut tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id.clone()),
@@ -4154,6 +4728,7 @@ Bcc: victim@example.com"@example.com"#
             &mut tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id),
@@ -4201,6 +4776,7 @@ Bcc: victim@example.com"@example.com"#
             &mut create_tx,
             &tenant_id,
             &body,
+            &test_parsed_addresses(&body),
             &body.metadata,
             None,
             Some(domain_id),
@@ -4225,6 +4801,107 @@ Bcc: victim@example.com"@example.com"#
             assert_eq!(headers["cc"], serde_json::json!("cc@example.com"));
             assert!(headers.get("bcc").is_none());
             assert_eq!(reply_to.as_deref(), Some("reply@example.com"));
+        }
+    }
+
+    // ── F48 (DB): named mailboxes — bare envelope, preserved display names ──
+
+    #[tokio::test]
+    async fn named_mailboxes_enqueue_bare_envelope_and_display_headers() {
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "named_mailboxes_enqueue_bare_envelope_and_display_headers",
+        )
+        .await
+        else {
+            return;
+        };
+
+        let tenant_id = insert_test_tenant(&pool, "message-named").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
+
+        // Every mailbox field uses a display form — exactly what the SDKs
+        // serialize for named addresses.
+        let mut body = options_request();
+        body.from = format!("Ada Lovelace <ada@{unique_domain}>");
+        body.to = vec!["Bob <bob@example.com>".into(), "carol@example.com".into()];
+        body.cc = Some(vec!["Dave <dave@example.com>".into()]);
+        body.bcc = Some(vec!["envelope-only@example.com".into()]);
+        body.reply_to = Some("Replies <reply@example.com>".into());
+        let parsed = test_parsed_addresses(&body);
+
+        let mut tx = pool.begin().await.expect("begin");
+        let persisted = insert_message_and_queue(
+            &mut tx,
+            &tenant_id,
+            &body,
+            &parsed,
+            &body.metadata,
+            None,
+            Some(domain_id),
+        )
+        .await
+        .expect("persist")
+        .expect("fresh insert");
+        tx.commit().await.expect("commit");
+
+        // The parent row stores the BARE sender addr-spec...
+        let from_email: (String,) = sqlx::query_as(
+            "SELECT from_email FROM messages WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&persisted.id)
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("parent");
+        assert_eq!(from_email.0, format!("ada@{unique_domain}"));
+
+        // ...and every queue copy delivers to ONE bare envelope recipient,
+        // while the visible header map keeps the display forms and the
+        // structured mailbox arrays.
+        let rows: Vec<(String, serde_json::Value, Option<String>)> = sqlx::query_as(
+            "SELECT \"to\", headers, reply_to FROM email_queue WHERE message_id = $1::uuid ORDER BY \"to\"",
+        )
+        .bind(&persisted.id)
+        .fetch_all(&pool)
+        .await
+        .expect("queue rows");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter().map(|(to, _, _)| to.clone()).collect::<Vec<_>>(),
+            vec![
+                "bob@example.com".to_string(),
+                "carol@example.com".to_string(),
+                "dave@example.com".to_string(),
+                "envelope-only@example.com".to_string(),
+            ],
+            "envelope destinations must be bare addr-specs"
+        );
+        for (_envelope_to, headers, reply_to) in &rows {
+            assert_eq!(
+                headers["to"],
+                serde_json::json!("Bob <bob@example.com>, carol@example.com"),
+                "the visible To keeps the caller's display forms"
+            );
+            assert_eq!(
+                headers["to_mailboxes"],
+                serde_json::json!([
+                    {"name": "Bob", "email": "bob@example.com"},
+                    {"email": "carol@example.com"}
+                ]),
+                "structured mailbox arrays preserve display names for MIME rendering"
+            );
+            assert_eq!(
+                headers["from_mailbox"],
+                serde_json::json!({"name": "Ada Lovelace", "email": format!("ada@{unique_domain}")})
+            );
+            assert_eq!(headers["cc_mailboxes"][0]["name"], "Dave");
+            assert!(headers.get("bcc").is_none());
+            assert_eq!(
+                reply_to.as_deref(),
+                Some("Replies <reply@example.com>"),
+                "reply_to keeps its display form for the MIME header"
+            );
         }
     }
 }

@@ -2944,14 +2944,34 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
         match value {
             Some(serde_json::Value::Array(items)) => items
                 .iter()
-                .filter_map(|item| item.as_str())
-                .filter_map(Mailbox::parse)
+                .filter_map(|item| {
+                    // F48 structured form: {"email": ..., "name": ...} — the
+                    // exact caller-authored mailbox, no re-parsing loss.
+                    if let Some(obj) = item.as_object() {
+                        let email = obj.get("email").and_then(|e| e.as_str())?;
+                        let name = obj.get("name").and_then(|n| n.as_str());
+                        return Some(Mailbox {
+                            name: name.map(str::to_string),
+                            email: email.to_string(),
+                        });
+                    }
+                    // F26 legacy array-of-strings form.
+                    item.as_str().and_then(Mailbox::parse)
+                })
                 .collect(),
             Some(serde_json::Value::String(joined)) if !joined.is_empty() => {
                 Mailbox::parse_list(joined)
             }
             _ => Vec::new(),
         }
+    };
+    // F48: prefer the structured *_mailboxes arrays over the joined string.
+    let mailboxes_or_legacy = |structured: &str, legacy: &str| -> Vec<Mailbox> {
+        let structured = mailbox_field(obj.get(structured));
+        if !structured.is_empty() {
+            return structured;
+        }
+        mailbox_field(obj.get(legacy))
     };
 
     let str_field = |key: &str| {
@@ -2960,11 +2980,25 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
             .filter(|v| !v.is_empty())
             .and_then(Mailbox::parse)
     };
+    // F48: the structured reply_to_mailbox object is authoritative when
+    // present; the joined string remains the legacy fallback.
+    let reply_to_field = || -> Option<Mailbox> {
+        obj.get("reply_to_mailbox")
+            .and_then(|v| v.as_object())
+            .and_then(|o| {
+                let email = o.get("email").and_then(|e| e.as_str())?;
+                Some(Mailbox {
+                    name: o.get("name").and_then(|n| n.as_str()).map(str::to_string),
+                    email: email.to_string(),
+                })
+            })
+            .or_else(|| str_field("reply_to"))
+    };
 
     SplitMimeHeaders {
-        mime_to: mailbox_field(obj.get("to")),
-        mime_cc: mailbox_field(obj.get("cc")),
-        reply_to: str_field("reply_to"),
+        mime_to: mailboxes_or_legacy("to_mailboxes", "to"),
+        mime_cc: mailboxes_or_legacy("cc_mailboxes", "cc"),
+        reply_to: reply_to_field(),
         custom: obj
             .get("custom")
             .and_then(|v| v.as_object())

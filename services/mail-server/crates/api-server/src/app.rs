@@ -717,9 +717,18 @@ pub fn build_app(state: AppState) -> Router {
         // recorded duration is accurate end-to-end.
         .layer(axum::middleware::from_fn(metrics::metrics_middleware))
         .layer(CompressionLayer::new())
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        // F48: one documented request-body maximum — 40 MiB — sized for the
+        // advertised 25 MiB decoded aggregate attachment contract plus ~33%
+        // base64 overhead plus the JSON envelope (deploy/nginx/nginx.conf
+        // client_max_body_size and packages/contract/send-contract.json
+        // mirror this number). The send routes additionally enforce the
+        // per-attachment 10 MiB and aggregate 25 MiB DECODED limits at the
+        // validation layer (routes/messages.rs). NOTE (F19, separate stream):
+        // the idempotency middleware's own body buffer is intentionally NOT
+        // touched here.
+        .layer(DefaultBodyLimit::max(routes::messages::MAX_SEND_BODY_BYTES))
         .layer(RequestBodyLimitLayer::new(
-            10 * 1024 * 1024, /* 10 MB general limit */
+            routes::messages::MAX_SEND_BODY_BYTES, /* 40 MiB documented maximum (F48) */
         ))
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
         // F65: the default TraceLayer span records the FULL request URI —
