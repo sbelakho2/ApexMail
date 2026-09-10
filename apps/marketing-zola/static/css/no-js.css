@@ -224,7 +224,9 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
 }
 .billing-pill:hover { color: rgb(var(--surface-950)); }
 .billing-pill:has(input:checked) {
-  background-color: rgb(var(--surface-950));
+  /* Theme-stable literals: --surface-950 flips to near-white in dark
+     mode, which put white text on a white pill (contrast 1.04). */
+  background-color: #18181b;
   color: #fff;
 }
 /* Keyboard focus on the radio rings its pill, mirroring the mobile

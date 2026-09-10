@@ -193,7 +193,7 @@
 
   /* Brand gradient — applied to primary buttons, headings, and accent elements.
      Restored to the red brand scale (#DC2626 → #991B1B). */
-  --brand-gradient: linear-gradient(135deg, #b91c1c, #7f1d1d);
+  --brand-gradient: linear-gradient(135deg, #a81818, #7f1d1d);
 
   /* Theme transition speed */
   --theme-transition-duration: 200ms;
@@ -873,7 +873,7 @@ html.dark :focus-visible {
     align-items: center;
     justify-content: center;
     @apply px-6 py-3 text-white font-semibold rounded-lg border border-brand-700 transition-premium tracking-tight text-sm;
-    background-color: rgb(var(--brand-600));
+    background-color: rgb(var(--brand-700));
     background-image: var(--brand-gradient);
     min-height: 44px;
   }
@@ -1713,7 +1713,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .term-run .btn-primary { height: 36px; padding: 0 14px; font-size: 12.5px; }
 .term-run-note {
   font: 500 11px var(--font-mono, ui-monospace, Menlo, monospace);
-  color: #71717a; letter-spacing: 0.02em;
+  color: #a1a1aa; letter-spacing: 0.02em;
 }
 
 /* ── Stats band: mono display values over point-meters ── */
@@ -1727,7 +1727,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   font: 700 26px var(--font-mono, ui-monospace, Menlo, monospace);
   letter-spacing: -0.02em; margin: 8px 0 10px;
 }
-.stats-v-dim { color: rgb(var(--surface-400)); }
+.stats-v-dim { color: rgb(var(--surface-500)); }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .stats-v-dim { color: rgb(var(--surface-600)); }
+}
+html.dark .stats-v-dim { color: rgb(var(--surface-600)); }
 
 /* ── Arc labels: the shackle crown before every mono section label ── */
 .k-arc-label {
