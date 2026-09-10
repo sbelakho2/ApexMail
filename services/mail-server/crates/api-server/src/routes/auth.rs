@@ -4624,7 +4624,11 @@ mod tests {
             ),
             "shared keyed HMAC hashing on every surface"
         );
-        assert_eq!(stored_expiry, minted.expires_at, "expiry persisted (F46)");
+        // Postgres TIMESTAMPTZ keeps microseconds; compare against the
+        // in-memory value truncated to the same precision.
+        let submicro_nanos = i64::from(chrono::Timelike::nanosecond(&minted.expires_at) % 1_000);
+        let expected_expiry = minted.expires_at - ChronoDuration::nanoseconds(submicro_nanos);
+        assert_eq!(stored_expiry, expected_expiry, "expiry persisted (F46)");
 
         // Escalation through the shared path still fails.
         let restricted = AuthUser {
