@@ -1628,7 +1628,7 @@ pub fn control_plane_sales_page() -> String {
                     <h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Operator console: Sales Cockpit</h1>
                     <span data-sample-data class="mt-3 inline-flex items-center rounded-sm border border-brand-400/40 bg-brand-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-brand-100">Sample data</span>
                     <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>. Every action below is a plain server-rendered form post — no scripts.</p>
-                    <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
@@ -1746,7 +1746,7 @@ pub fn control_plane_sales_page() -> String {
                             <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Outreach inventory</h2>
                         </div>
                     </div>
-                    <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4 text-xs">
+                    <div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4 text-xs">
                         <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Qualify</p><p class="mt-2 text-2xl font-bold text-white">63</p><p class="mt-1 text-surface-500">Intent verified</p></article>
                         <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Security</p><p class="mt-2 text-2xl font-bold text-white">29</p><p class="mt-1 text-surface-500">Questionnaire + legal</p></article>
                         <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Proposal</p><p class="mt-2 text-2xl font-bold text-white">18</p><p class="mt-1 text-surface-500">Commercial package sent</p></article>
@@ -2353,9 +2353,9 @@ pub fn web_dashboard_page() -> String {
 <span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Last 30 days</span>\
 </div>\
 <div class=\"px-8 pt-6 pb-2 flex flex-col items-center justify-center text-center\">{DNA_DASH}<div class=\"py-14 flex flex-col items-center justify-center text-center\">\
-<div class=\"flex items-center gap-8 pb-6\">{DNA}</div>\
 <p class=\"text-xs text-surface-500 mt-2 max-w-xs leading-relaxed\">Once you send your first campaign, detailed metrics and performance charts will appear here.</p>\
 <a href=\"/campaigns/new\" class=\"mt-6 inline-flex items-center justify-center px-6 py-2.5 rounded-xl bg-primary text-white text-xs font-bold hover:bg-brand-700 transition-all active:scale-[0.98]\">Create Campaign</a>\
+</div>\
 </div>\
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
