@@ -30,7 +30,7 @@ public final class Emails {
         Object replyTo,
         Object attachments,
         Object tags,
-        String priority,
+        Object priority,
         Map<String, String> headers,
         Map<String, Object> metadata,
         String scheduledAt,
@@ -96,8 +96,8 @@ public final class Emails {
             if (tags != null) {
                 body.put("tags", Emails.coerceTagList(tags));
             }
-            if (priority != null && !priority.isBlank()) {
-                body.put("priority", priority);
+            if (priority != null) {
+                body.put("priority", Emails.normalizePriority(priority));
             }
             if (headers != null) {
                 body.put("headers", headers);
@@ -205,6 +205,45 @@ public final class Emails {
     }
 
     /**
+     * Normalizes/validates a priority input per the F48 shared contract
+     * (packages/contract/send-contract.json): an integer 1-10 passes through
+     * as an Integer, and the named levels "high"/"normal"/"low"
+     * (case-insensitive) map to/passthrough as the canonical lowercase
+     * strings the API deserializer maps to queue integers 7/5/3. Anything
+     * else — including integers out of range and unknown strings — is an
+     * IllegalArgumentException naming the contract, BEFORE the request
+     * leaves the client.
+     */
+    static Object normalizePriority(Object priority) {
+        String contract = "priority must be an integer between 1 and 10 or one of the named levels "
+            + "\"high\"/\"normal\"/\"low\" (mapped to 7/5/3)";
+        if (priority == null) {
+            return null;
+        }
+        if (priority instanceof Integer || priority instanceof Long || priority instanceof Short || priority instanceof Byte) {
+            int level = ((Number) priority).intValue();
+            if (level < 1 || level > 10) {
+                throw new IllegalArgumentException(contract + " — received the out-of-range integer " + level);
+            }
+            return level;
+        }
+        if (priority instanceof Number) {
+            throw new IllegalArgumentException(contract + " — received the non-integer number " + priority);
+        }
+        if (priority instanceof Boolean) {
+            throw new IllegalArgumentException(contract + " — received the boolean " + priority);
+        }
+        String level = String.valueOf(priority).trim();
+        switch (level.toLowerCase(java.util.Locale.ROOT)) {
+            case "high": return "high";
+            case "normal": return "normal";
+            case "low": return "low";
+            default:
+                throw new IllegalArgumentException(contract + " — received '" + level + "'");
+        }
+    }
+
+    /**
      * Send a single email.
      *
      * <p>Required keys: {@code from}, {@code to}, {@code subject} plus at
@@ -255,7 +294,7 @@ public final class Emails {
             params.containsKey("replyTo") ? params.get("replyTo") : params.get("reply_to"),
             params.get("attachments"),
             params.get("tags"),
-            str(params, "priority"),
+            params.get("priority"),
             castStringMap(params.get("headers")),
             castStringObjectMap(params.get("metadata")),
             str(params, "scheduledAt", "scheduled_at"),
@@ -365,9 +404,9 @@ public final class Emails {
         if (message.get("tags") != null) {
             body.put("tags", coerceTagList(message.get("tags")));
         }
-        String priority = firstString(message, "priority");
-        if (priority != null && !priority.isBlank()) {
-            body.put("priority", priority);
+        Object priority = first(message, "priority");
+        if (priority != null) {
+            body.put("priority", normalizePriority(priority));
         }
         Object headers = first(message, "headers");
         if (headers != null) {

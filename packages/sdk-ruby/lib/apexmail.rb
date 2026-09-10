@@ -417,7 +417,9 @@ module ApexMail
     # @option options [String, Hash] :reply_to  (display-name aware)
     # @option options [Array<Hash>] :attachments  ({filename:, content:, contentType:})
     # @option options [Hash] :headers  Custom email headers
-    # @option options [String] :priority
+    # @option options [Integer, String] :priority  Queue priority: integer
+    #   1-10 or a named level "high"/"normal"/"low" (API queue integers
+    #   7/5/3 — F48 shared contract, packages/contract/send-contract.json)
     # @option options [String] :template_id
     # @option options [Hash] :template_data
     # @option options [Array<String, Hash>] :tags  (flattened to strings)
@@ -516,13 +518,40 @@ module ApexMail
         text:          text,
         attachments:   fetch_option(options, :attachments),
         headers:       fetch_option(options, :headers),
-        priority:      fetch_option(options, :priority),
+        priority:      normalize_priority(fetch_option(options, :priority)),
         template_id:   fetch_option(options, :template_id),
         template_data: fetch_option(options, :template_data),
         tags:          normalize_tags(options[:tags]),
         scheduled_at:  options[:scheduled_at] || options["scheduledAt"],
         metadata:      options[:metadata],
       })
+    end
+
+    # F48 shared contract (packages/contract/send-contract.json): priority is
+    # an integer 1-10 (kept as an integer on the wire — the API deserializer
+    # takes JSON numbers, not numeric strings) or one of the documented named
+    # levels "high"/"normal"/"low" (case-insensitive, canonicalized to
+    # lowercase; the API maps them to queue integers 7/5/3). Anything else is
+    # rejected client-side with an error naming the contract.
+    def normalize_priority(priority)
+      return nil if priority.nil?
+      contract = 'priority must be an integer between 1 and 10 or one of the named levels ' \
+                 '"high"/"normal"/"low" (mapped to 7/5/3)'
+      case priority
+      when Integer
+        raise ArgumentError, "#{contract} — received the out-of-range integer #{priority}" unless (1..10).cover?(priority)
+        priority
+      when String
+        case priority.strip.downcase
+        when 'high' then 'high'
+        when 'normal' then 'normal'
+        when 'low' then 'low'
+        else
+          raise ArgumentError, "#{contract} — received '#{priority}'"
+        end
+      else
+        raise ArgumentError, "#{contract} — received #{priority.inspect}"
+      end
     end
 
     # Reads an option by symbol or string key (F48 options may arrive from
@@ -588,7 +617,20 @@ module ApexMail
     end
 
     def extract_email(recipient)
-      recipient.is_a?(Hash) ? recipient[:email] || recipient['email'] : recipient
+      return recipient[:email] || recipient['email'] if recipient.is_a?(Hash)
+      bare_address(recipient.to_s)
+    end
+
+    # F48: strip an RFC 5322 display-name form to its bare addr-spec
+    # ("Name <a@b.c>" → "a@b.c") so validation targets the address — the
+    # same acceptance rule as the API's mailbox parser.
+    def bare_address(value)
+      value = value.to_s.strip
+      open = value.rindex('<')
+      return value unless open
+      close = value.rindex('>')
+      return '' if close.nil? || close < open
+      value[(open + 1)...close].to_s.strip
     end
 
     def normalize_send_params(params)

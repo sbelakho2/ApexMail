@@ -1,0 +1,47 @@
+{
+  "contract": "ApexMail send-message shared contract (audit F48). One fixture set consumed by all five SDK serialization suites (sdk-go, sdk-java, sdk-php, sdk-python, sdk-ruby) and the api-server contract tests (services/mail-server/crates/api-server/src/routes/messages.rs). The wire target is SendMessageRequest in messages.rs (serde deny_unknown_fields): every case here must serialize/validate identically everywhere.",
+  "priority": {
+    "integer_min": 1,
+    "integer_max": 10,
+    "named_levels": { "high": 7, "normal": 5, "low": 3 },
+    "named_levels_note": "Named levels are accepted on the wire as the strings \"high\"/\"normal\"/\"low\" and map to queue integers 7/5/3 identically in the API deserializer and every SDK. Integers 1-10 pass through as integers.",
+    "cases": [
+      { "description": "named level high",    "input": { "type": "named", "value": "high" },   "wire": "high",   "queue": 7,  "valid": true },
+      { "description": "named level normal",  "input": { "type": "named", "value": "normal" }, "wire": "normal", "queue": 5,  "valid": true },
+      { "description": "named level low",     "input": { "type": "named", "value": "low" },    "wire": "low",    "queue": 3,  "valid": true },
+      { "description": "integer minimum",     "input": { "type": "int", "value": 1 },  "wire": 1,  "queue": 1,  "valid": true },
+      { "description": "integer default",     "input": { "type": "int", "value": 5 },  "wire": 5,  "queue": 5,  "valid": true },
+      { "description": "integer maximum",     "input": { "type": "int", "value": 10 }, "wire": 10, "queue": 10, "valid": true },
+      { "description": "integer below range", "input": { "type": "int", "value": 0 },  "valid": false },
+      { "description": "integer above range", "input": { "type": "int", "value": 11 }, "valid": false },
+      { "description": "unknown named level", "input": { "type": "named", "value": "urgent" }, "valid": false },
+      { "description": "empty named level",   "input": { "type": "named", "value": "" },  "valid": false },
+      { "description": "boolean is not a priority", "input": { "type": "bool", "value": true }, "valid": false },
+      { "description": "fractional number",   "input": { "type": "float", "value": 4.5 }, "valid": false }
+    ]
+  },
+  "mailbox": {
+    "note": "Mailbox fields (from, to, cc, bcc, reply_to) accept RFC 5322 \"Name <addr>\" display forms AND bare addr-specs. Validation always targets the extracted bare addr-spec; display names are preserved for MIME rendering. SDKs that accept structured {email, name} inputs serialize them to the same \"Name <addr>\" wire form.",
+    "cases": [
+      { "description": "display-name form",              "input": "Ada Lovelace <ada@example.com>",    "valid": true, "addr_spec": "ada@example.com", "display_name": "Ada Lovelace" },
+      { "description": "quoted display-name form",       "input": "\"Ada Lovelace\" <ada@example.com>", "valid": true, "addr_spec": "ada@example.com", "display_name": "Ada Lovelace" },
+      { "description": "bare address",                   "input": "ada@example.com",                   "valid": true, "addr_spec": "ada@example.com", "display_name": null },
+      { "description": "whitespace-padded named form",   "input": "  Ada <ada@example.com> ",          "valid": true, "addr_spec": "ada@example.com", "display_name": "Ada" },
+      { "description": "empty display name",             "input": "<ada@example.com>",                 "valid": true, "addr_spec": "ada@example.com", "display_name": null },
+      { "description": "invalid addr-spec in named form","input": "Ada <not-an-email>",                "valid": false },
+      { "description": "invalid bare input",             "input": "not-an-email",                      "valid": false },
+      { "description": "missing angle close",            "input": "Ada <ada@example.com",              "valid": false },
+      { "description": "two mailboxes in one field",     "input": "Ada <ada@example.com>, Bob <bob@example.com>", "valid": false },
+      { "description": "trailing text after addr-spec",  "input": "Ada <ada@example.com> trailing",    "valid": false },
+      { "description": "empty input",                    "input": "",                                  "valid": false },
+      { "description": "header-injection attempt",       "input": "Ada <a@b.com>\r\nBcc: x@y.com",     "valid": false }
+    ]
+  },
+  "limits": {
+    "max_attachment_bytes": 10485760,
+    "max_total_attachment_bytes": 26214400,
+    "max_attachments": 50,
+    "wire_body_max_bytes": 41943040,
+    "wire_body_max_note": "40 MiB documented request ceiling (deploy/nginx/nginx.conf client_max_body_size + the API body limit): the advertised 25 MiB decoded aggregate attachment contract plus ~33% base64 overhead plus the JSON envelope. Per-attachment 10 MiB decoded and the 25 MiB aggregate are enforced at the API validation layer (messages.rs validate_send_options)."
+  }
+}

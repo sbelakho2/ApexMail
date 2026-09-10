@@ -830,6 +830,117 @@ type EmailAddress struct {
 	Name  string `json:"name,omitempty"`
 }
 
+// Priority named levels and their queue integers — the F48 shared contract
+// (packages/contract/send-contract.json), identical to the API's mapping in
+// api-server/src/routes/messages.rs (NAMED_PRIORITY_LEVELS). Every SDK
+// serializes these exact forms, so a named level never yields a 422.
+const (
+	priorityNamedHigh   = "high"
+	priorityNamedNormal = "normal"
+	priorityNamedLow    = "low"
+)
+
+var (
+	// PriorityHigh maps the named level "high" to queue integer 7.
+	PriorityHigh = SendPriority{named: priorityNamedHigh, level: 7, set: true}
+	// PriorityNormal maps the named level "normal" to queue integer 5.
+	PriorityNormal = SendPriority{named: priorityNamedNormal, level: 5, set: true}
+	// PriorityLow maps the named level "low" to queue integer 3.
+	PriorityLow = SendPriority{named: priorityNamedLow, level: 3, set: true}
+)
+
+// PriorityInt returns a SendPriority for an integer queue level. The API
+// accepts 1-10; any other integer is an error naming the contract.
+func PriorityInt(level int) (SendPriority, error) {
+	if level < 1 || level > 10 {
+		return SendPriority{}, fmt.Errorf("apexmail: priority must be an integer between 1 and 10 or one of the named levels %q/%q/%q (got %d)",
+			priorityNamedHigh, priorityNamedNormal, priorityNamedLow, level)
+	}
+	return SendPriority{level: level, set: true}, nil
+}
+
+// PriorityNamed returns a SendPriority for a documented named level
+// ("high"/"normal"/"low", case-insensitive).
+func PriorityNamed(level string) (SendPriority, error) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case priorityNamedHigh:
+		return PriorityHigh, nil
+	case priorityNamedNormal:
+		return PriorityNormal, nil
+	case priorityNamedLow:
+		return PriorityLow, nil
+	default:
+		return SendPriority{}, fmt.Errorf("apexmail: priority must be an integer between 1 and 10 or one of the named levels %q/%q/%q (got %q)",
+			priorityNamedHigh, priorityNamedNormal, priorityNamedLow, level)
+	}
+}
+
+// SendPriority is the send priority (F48 shared contract): an integer 1-10
+// or one of the documented named levels "high"/"normal"/"low" (queue
+// integers 7/5/3). It marshals to exactly the form the API accepts — the
+// named string for named levels, a JSON number for integers — and
+// unmarshals both forms (plus integers encoded as strings, for older
+// integrations).
+type SendPriority struct {
+	named string
+	level int
+	set   bool
+}
+
+// IsZero reports whether no priority was set (the field is then omitted
+// from the wire body entirely).
+func (p SendPriority) IsZero() bool { return !p.set }
+
+// QueueLevel returns the queue integer the API persists: 7/5/3 for the
+// named levels, the integer itself otherwise.
+func (p SendPriority) QueueLevel() int { return p.level }
+
+// String renders the priority for logs and errors.
+func (p SendPriority) String() string {
+	if !p.set {
+		return ""
+	}
+	if p.named != "" {
+		return p.named
+	}
+	return strconv.Itoa(p.level)
+}
+
+// MarshalJSON serializes the exact wire form the API accepts (F48).
+func (p SendPriority) MarshalJSON() ([]byte, error) {
+	if !p.set {
+		return []byte("null"), nil
+	}
+	if p.named != "" {
+		return json.Marshal(p.named)
+	}
+	return json.Marshal(p.level)
+}
+
+// UnmarshalJSON accepts integers, the named levels, and integer strings.
+func (p *SendPriority) UnmarshalJSON(data []byte) error {
+	var asInt int
+	if err := json.Unmarshal(data, &asInt); err == nil {
+		normalized, err := PriorityInt(asInt)
+		if err != nil {
+			return err
+		}
+		*p = normalized
+		return nil
+	}
+	var asString string
+	if err := json.Unmarshal(data, &asString); err != nil {
+		return fmt.Errorf("apexmail: priority must be an integer between 1 and 10 or one of the named levels %q/%q/%q",
+			priorityNamedHigh, priorityNamedNormal, priorityNamedLow)
+	}
+	normalized, err := PriorityNamed(asString)
+	if err != nil {
+		return err
+	}
+	*p = normalized
+	return nil
+}
+
 // Attachment represents an email attachment.
 type Attachment struct {
 	Filename    string `json:"filename"`
@@ -870,7 +981,7 @@ type SendEmailRequest struct {
 	TemplateData interface{}       `json:"template_data,omitempty"` // wire: snake_case
 	Attachments  []Attachment      `json:"attachments,omitempty"`
 	Tags         []string          `json:"tags,omitempty"`
-	Priority     string            `json:"priority,omitempty"`
+	Priority     SendPriority      `json:"priority,omitempty"` // wire: int 1-10 or named level (F48 contract)
 	Headers      map[string]string `json:"headers,omitempty"`
 	ScheduledAt  string            `json:"scheduled_at,omitempty"` // wire: snake_case
 	Metadata     interface{}       `json:"metadata,omitempty"`
@@ -893,7 +1004,7 @@ type sendMessagePayload struct {
 	TemplateData interface{}       `json:"template_data,omitempty"`
 	Attachments  []Attachment      `json:"attachments,omitempty"`
 	Tags         []string          `json:"tags,omitempty"`
-	Priority     string            `json:"priority,omitempty"`
+	Priority     *SendPriority     `json:"priority,omitempty"` // int 1-10 or named level, exactly as the API accepts (F48)
 	Headers      map[string]string `json:"headers,omitempty"`
 	Metadata     interface{}       `json:"metadata,omitempty"`
 	ScheduledAt  string            `json:"scheduled_at,omitempty"`
@@ -915,7 +1026,7 @@ func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
 		TemplateData: r.TemplateData,
 		Attachments:  r.Attachments,
 		Tags:         r.Tags,
-		Priority:     r.Priority,
+		Priority:     sendPriorityPtr(r.Priority),
 		Headers:      r.Headers,
 		Metadata:     r.Metadata,
 		ScheduledAt:  r.ScheduledAt,
@@ -924,6 +1035,15 @@ func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
 		payload.To = []string{}
 	}
 	return json.Marshal(payload)
+}
+
+// sendPriorityPtr keeps an unset priority OFF the wire entirely (omitting
+// the field lets the server apply its default queue level of 5).
+func sendPriorityPtr(p SendPriority) *SendPriority {
+	if p.IsZero() {
+		return nil
+	}
+	return &p
 }
 
 // formatEmailAddress serializes one address with its display name

@@ -409,11 +409,11 @@ class PayloadContractTest {
 
     // ── Harness ───────────────────────────────────────────────────────────
 
-    private static String flatSendResponse() {
+    static String flatSendResponse() {
         return "{\"id\":\"msg_1\",\"status\":\"queued\",\"created_at\":\"2026-08-29T00:00:00Z\"}";
     }
 
-    private static ApexMailClient client(RecordingHttpClient http) {
+    static ApexMailClient client(RecordingHttpClient http) {
         return new ApexMailClient(
             "am_test_0123456789abcdef",
             "https://api.apexmail.test",
@@ -422,13 +422,13 @@ class PayloadContractTest {
     }
 
     /** Records the last request and replies with a canned 200 body. */
-    private static final class RecordingHttpClient extends HttpClient {
+    static final class RecordingHttpClient extends HttpClient {
         private final String responseBody;
         private HttpRequest lastRequest;
         private String lastRequestBody = "";
         private String lastPath;
 
-        private RecordingHttpClient(String responseBody) {
+        RecordingHttpClient(String responseBody) {
             this.responseBody = responseBody;
         }
 

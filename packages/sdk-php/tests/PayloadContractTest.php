@@ -333,6 +333,115 @@ final class PayloadContractTest extends TestCase
         $this->assertSame('GET', $request['method']);
         $this->assertSame('/v1/domains/dom_1', $request['path']);
     }
+
+    // ── F48: shared send contract — packages/contract/send-contract.json ────
+
+    /**
+     * The SAME fixture file drives the api-server contract tests and every
+     * SDK serialization suite, so the wire forms this SDK emits can never
+     * drift from what the API deserializer accepts.
+     *
+     * @return array{priority: array<string, mixed>, mailbox: array<string, mixed>}
+     */
+    private static function sharedContract(): array
+    {
+        $path = __DIR__ . '/../../contract/send-contract.json';
+        $decoded = json_decode((string) file_get_contents($path), true);
+        if (!is_array($decoded)) {
+            self::fail("shared contract fixture missing/invalid at {$path}");
+        }
+        return $decoded;
+    }
+
+    public function testPriorityWireFormsMatchTheSharedFixture(): void
+    {
+        foreach (self::sharedContract()['priority']['cases'] as $case) {
+            $description = $case['description'];
+            $input = $case['input'];
+
+            $phpValue = match ($input['type']) {
+                'int' => (int) $input['value'],
+                'named' => (string) $input['value'],
+                'bool' => (bool) $input['value'],
+                'float' => (float) $input['value'],
+                default => self::fail("unknown fixture input type {$input['type']}"),
+            };
+
+            $client = $this->recordingClient();
+            if ($case['valid']) {
+                $client->emails->send([
+                    'from'     => 'hello@example.com',
+                    'to'       => 'user@example.com',
+                    'subject'  => 'Hi',
+                    'text'     => 'Hello',
+                    'priority' => $phpValue,
+                ]);
+                $this->assertSame(
+                    $case['wire'],
+                    $client->requests[0]['body']['priority'],
+                    "case '{$description}' must serialize to the contract wire form",
+                );
+            } else {
+                try {
+                    $client->emails->send([
+                        'from'     => 'hello@example.com',
+                        'to'       => 'user@example.com',
+                        'subject'  => 'Hi',
+                        'text'     => 'Hello',
+                        'priority' => $phpValue,
+                    ]);
+                    $this->fail("case '{$description}' must be rejected client-side");
+                } catch (\InvalidArgumentException $error) {
+                    $this->assertStringContainsString(
+                        'priority must be',
+                        $error->getMessage(),
+                        "case '{$description}' error must name the contract",
+                    );
+                }
+            }
+        }
+    }
+
+    public function testNamedMailboxesMatchTheSharedFixture(): void
+    {
+        foreach (self::sharedContract()['mailbox']['cases'] as $case) {
+            $input = $case['input'];
+            if (!$case['valid']) {
+                continue;
+            }
+            // Structured inputs serialize to the canonical display form.
+            $client = $this->recordingClient();
+            $client->emails->send([
+                'from'    => ['email' => $case['addr_spec'], 'name' => $case['display_name'] ?? ''],
+                'to'      => [$case['addr_spec']],
+                'subject' => 'Hi',
+                'text'    => 'Hello',
+            ]);
+            $body = $client->requests[0]['body'];
+            if (!empty($case['display_name'])) {
+                $this->assertSame(
+                    "{$case['display_name']} <{$case['addr_spec']}>",
+                    $body['from'],
+                    "case '{$case['description']}' must preserve the display name",
+                );
+            } else {
+                $this->assertSame($case['addr_spec'], $body['from']);
+            }
+        }
+
+        // Raw display-name STRINGS pass through for validation of the bare
+        // addr-spec — exactly what the API's mailbox parser accepts.
+        $client = $this->recordingClient();
+        $client->emails->send([
+            'from'    => 'Ada Lovelace <ada@example.com>',
+            'to'      => ['Bob <bob@example.com>', 'carol@example.com'],
+            'subject' => 'Hi',
+            'text'    => 'Hello',
+        ]);
+        $body = $client->requests[0]['body'];
+        $this->assertSame('Ada Lovelace <ada@example.com>', $body['from']);
+        $this->assertSame(['Bob <bob@example.com>', 'carol@example.com'], $body['to']);
+    }
 }
 
 /**

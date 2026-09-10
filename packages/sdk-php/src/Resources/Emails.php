@@ -33,7 +33,10 @@ class Emails
      *   @type string|array  $reply_to        Reply-To address (display-name aware)
      *   @type array         $attachments     [{filename, content, contentType}, ...]
      *   @type array         $headers         Custom email headers
-     *   @type string        $priority
+     *   @type int|string    $priority        Queue priority: integer 1-10 or a
+     *                                        named level "high"/"normal"/"low"
+     *                                        (API queue integers 7/5/3 — F48
+     *                                        shared contract)
      *   @type string        $template_id
      *   @type array         $template_data
      *   @type array         $tags            List of strings (or {name, value} maps, flattened)
@@ -176,13 +179,54 @@ class Emails
             'text'          => $params['text'] ?? null,
             'attachments'   => $params['attachments'] ?? null,
             'headers'       => $params['headers'] ?? null,
-            'priority'      => $params['priority'] ?? null,
+            'priority'      => $this->normalizePriority($params['priority'] ?? null),
             'template_id'   => $templateId,
             'template_data' => $templateData,
             'tags'          => $tags,
             'scheduled_at'  => $scheduledAt,
             'metadata'      => $params['metadata'] ?? null,
         ], static fn ($v) => $v !== null && $v !== []);
+    }
+
+    /**
+     * F48 shared contract (packages/contract/send-contract.json): priority is
+     * an integer 1-10 (kept as an int on the wire — the API deserializer
+     * takes JSON numbers, not numeric strings) or one of the documented
+     * named levels "high"/"normal"/"low" (case-insensitive, canonicalized to
+     * lowercase; the API maps them to queue integers 7/5/3). Anything else is
+     * rejected client-side with an error naming the contract.
+     */
+    private function normalizePriority(mixed $priority): int|string|null
+    {
+        if ($priority === null) {
+            return null;
+        }
+        if (is_bool($priority)) {
+            throw new \InvalidArgumentException(self::priorityContract() . " — received the boolean " . var_export($priority, true));
+        }
+        if (is_int($priority)) {
+            if ($priority < 1 || $priority > 10) {
+                throw new \InvalidArgumentException(self::priorityContract() . " — received the out-of-range integer {$priority}");
+            }
+            return $priority;
+        }
+        if (is_float($priority) || (is_string($priority) && ctype_digit($priority))) {
+            throw new \InvalidArgumentException(self::priorityContract() . ' — plain integers must be PHP ints, not numeric strings/floats');
+        }
+        if (!is_string($priority)) {
+            throw new \InvalidArgumentException(self::priorityContract() . ' — received ' . get_debug_type($priority));
+        }
+        $level = strtolower(trim($priority));
+        return match ($level) {
+            'high', 'normal', 'low' => $level,
+            default => throw new \InvalidArgumentException(self::priorityContract() . " — received '{$priority}'"),
+        };
+    }
+
+    private static function priorityContract(): string
+    {
+        return 'priority must be an integer between 1 and 10 or one of the named levels '
+            . '"high"/"normal"/"low" (mapped to 7/5/3)';
     }
 
     /**
@@ -272,10 +316,35 @@ class Emails
 
         foreach ($list as $recipient) {
             $email = is_array($recipient) ? ($recipient['email'] ?? null) : $recipient;
-            if (!$email || !$this->isValidEmail((string) $email)) {
+            if (!is_string($email)) {
+                throw new \InvalidArgumentException("Invalid \"{$field}\" email format: " . var_export($email, true));
+            }
+            // F48: validate the extracted BARE addr-spec — "Name <addr>"
+            // display strings are accepted exactly like the API's mailbox
+            // parser accepts them.
+            $bare = $this->bareAddress($email);
+            if (!$bare || !$this->isValidEmail($bare)) {
                 throw new \InvalidArgumentException("Invalid \"{$field}\" email format: {$email}");
             }
         }
+    }
+
+    /**
+     * Strip an RFC 5322 display-name form to its bare addr-spec
+     * ("Name <a@b.c>" → "a@b.c"); bare strings pass through unchanged.
+     */
+    private function bareAddress(string $value): string
+    {
+        $value = trim($value);
+        $open = strrpos($value, '<');
+        if ($open !== false) {
+            $close = strrpos($value, '>');
+            if ($close === false || $close < $open) {
+                return '';
+            }
+            return trim(substr($value, $open + 1, $close - $open - 1));
+        }
+        return $value;
     }
 
     private function isValidEmail(string $email): bool

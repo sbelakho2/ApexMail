@@ -285,5 +285,118 @@ class AnalyticsEndpointContract(unittest.TestCase):
             self.resource.volume(interval="fortnight")
 
 
+# ── F48: shared send contract — packages/contract/send-contract.json ────────
+#
+# The SAME fixture file drives the api-server contract tests and every SDK
+# serialization suite, so the wire forms this SDK emits can never drift
+# from what the API deserializer accepts.
+
+import json as _json  # noqa: E402
+
+from apexmail.exceptions import ValidationError as ContractValidationError  # noqa: E402
+from apexmail.resources.emails import (  # noqa: E402
+    EmailsResource,
+    _bare_address,
+    _validate_priority,
+)
+
+CONTRACT_PATH = pathlib.Path(__file__).resolve().parents[2] / "contract" / "send-contract.json"
+
+
+class SharedSendContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.contract = _json.loads(CONTRACT_PATH.read_text())
+
+    def _fixture_value(self, case: dict) -> object:
+        input_spec = case["input"]
+        if input_spec["type"] == "int":
+            return int(input_spec["value"])
+        return input_spec["value"]
+
+    def test_priority_wire_forms_match_the_fixture(self) -> None:
+        for case in self.contract["priority"]["cases"]:
+            description = case["description"]
+            value = self._fixture_value(case)
+            if case["valid"]:
+                # The validator returns the exact wire form; the payload
+                # builder puts it on the wire unchanged.
+                self.assertEqual(case["wire"], _validate_priority(value), description)
+                payload = build_send_payload(
+                    from_="hello@example.com",
+                    to="user@example.com",
+                    subject="Hi",
+                    text="Hello",
+                    priority=value,
+                )
+                self.assertEqual(case["wire"], payload["priority"], description)
+            else:
+                with self.assertRaises(ContractValidationError, msg=description):
+                    _validate_priority(value)
+
+    def test_named_levels_map_like_the_api(self) -> None:
+        for level, queue in self.contract["priority"]["named_levels"].items():
+            self.assertEqual(queue, {"high": 7, "normal": 5, "low": 3}[level])
+        # Case-insensitive canonicalization to the exact wire spelling.
+        self.assertEqual("high", _validate_priority("HIGH"))
+
+    def test_mailbox_extraction_matches_the_fixture(self) -> None:
+        for case in self.contract["mailbox"]["cases"]:
+            description = case["description"]
+            extracted = _bare_address(case["input"])
+            if case["valid"]:
+                self.assertEqual(case["addr_spec"], extracted, description)
+            else:
+                self.assertFalse(
+                    extracted and extracted == case.get("addr_spec"),
+                    f"case '{description}' must not validate",
+                )
+                with self.assertRaises(ContractValidationError, msg=description):
+                    EmailsResource(FakeClient()).send(
+                        from_=case["input"],
+                        to=["user@example.com"],
+                        subject="Hi",
+                        text="Hello",
+                    )
+
+    def test_sender_dict_and_display_string_validate_the_bare_address(self) -> None:
+        # The reported defect: a documented {"email": ..., "name": ...} sender
+        # was passed straight to a regex expecting str (TypeError).
+        client = FakeClient()
+        EmailsResource(client).send(
+            from_={"email": "ada@example.com", "name": "Ada Lovelace"},
+            to=["Bob <bob@example.com>", "carol@example.com"],
+            subject="Hi",
+            text="Hello",
+            reply_to={"email": "reply@example.com", "name": "Replies"},
+            priority="high",
+        )
+        payload = client.calls[0]["json"]
+        self.assertEqual("Ada Lovelace <ada@example.com>", payload["from"])
+        self.assertEqual(["Bob <bob@example.com>", "carol@example.com"], payload["to"])
+        self.assertEqual("Replies <reply@example.com>", payload["reply_to"])
+        self.assertEqual("high", payload["priority"])
+
+        # A display-name STRING sender is validated the same way.
+        client = FakeClient()
+        EmailsResource(client).send(
+            from_="Ada Lovelace <ada@example.com>",
+            to="user@example.com",
+            subject="Hi",
+            text="Hello",
+            priority=3,
+        )
+        payload = client.calls[0]["json"]
+        self.assertEqual("Ada Lovelace <ada@example.com>", payload["from"])
+        self.assertEqual(3, payload["priority"])
+
+        # ...and an invalid addr-spec inside any form is still rejected.
+        for bad in ("Ada <not-an-email>", "not-an-email"):
+            with self.assertRaises(ContractValidationError):
+                EmailsResource(FakeClient()).send(
+                    from_=bad, to="user@example.com", subject="Hi", text="Hello"
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
