@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn file_parsing() {
         let path =
-            std::env::temp_dir().join(format!("kiwi-risk-classifier-{}.txt", std::process::id()));
+            std::env::temp_dir().join(format!("kiwi-risk-classifier-{}.txt", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::write(&path, "# comment\n\n203.0.113.0/24, hosting, proxy\n198.51.100.0/24,tor\n192.0.2.0/24,blocked\n").unwrap();
         let classifier = CidrNetworkClassifier::from_file(path.to_str().unwrap()).unwrap();
         let flags = classifier.classify("203.0.113.7".parse().unwrap());
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn file_parsing_errors() {
-        let path = std::env::temp_dir().join(format!(
+        let path = std::env::temp_dir().join(format!( // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             "kiwi-risk-classifier-bad-{}.txt",
             std::process::id()
         ));

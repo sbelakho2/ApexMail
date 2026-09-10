@@ -68,7 +68,7 @@ fn generated_section(worker_src: &str) -> String {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = env::args().collect(); // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
     let check = args.iter().any(|a| a == "--check");
 
     // tools/embed-worker -> packages/kiwicaptcha-wasm

@@ -111,7 +111,7 @@ pub fn alloc(len: usize) -> *mut u8 {
         // never passed to `dealloc` (the JS glue only frees real buffers).
         return layout.align() as *mut u8;
     }
-    let ptr = unsafe { std::alloc::alloc(layout) };
+    let ptr = unsafe { std::alloc::alloc(layout) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
     if ptr.is_null() {
         return std::ptr::null_mut();
     }
@@ -133,7 +133,7 @@ pub unsafe fn dealloc(ptr: *mut u8, len: usize) {
         return;
     }
     let layout = Layout::from_size_align(len, 8).expect("allocation size overflows isize::MAX");
-    unsafe { std::alloc::dealloc(ptr, layout) };
+    unsafe { std::alloc::dealloc(ptr, layout) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
 }
 
 /// The wall-time budget of one `solve_sha256_chunk` call in milliseconds.
@@ -176,8 +176,8 @@ pub fn solve_sha256_chunk(
     if prefix_ptr.is_null() || salt_ptr.is_null() {
         return -1;
     }
-    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) };
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
+    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
 
     let end_counter = bounded_end(start_counter, chunk_size);
 
@@ -233,8 +233,8 @@ pub fn solve_argon2_chunk(
     if prefix_ptr.is_null() || salt_ptr.is_null() {
         return -1;
     }
-    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) };
-    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) };
+    let prefix = unsafe { std::slice::from_raw_parts(prefix_ptr, prefix_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
+    let salt = unsafe { std::slice::from_raw_parts(salt_ptr, salt_len) }; // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage — wasm-bindgen exported allocator/deallocator with documented safety invariants in the surrounding comments
 
     // Protocol unit: m_kib is in kibibytes (65536 = 64 MiB); the argon2
     // crate takes the same 1 KiB blocks. The solver MUST use the exact

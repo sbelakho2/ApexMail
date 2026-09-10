@@ -62,7 +62,7 @@
              sandbox executor — the request really queues, the worker
              really attempts delivery, the result page shows the live
              status and latency. #}
-          <form method="POST" action="https://api.apexmail.ee/explorer/exec" class="term-run">
+          <form method="POST" action="https://api.apexmail.ee/explorer/exec" class="term-run"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
             <input type="hidden" name="lane" value="send">
             <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Sent with control.&lt;/h1&gt;"}'>
             <button type="submit" class="btn-primary">

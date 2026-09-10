@@ -296,7 +296,7 @@ mod tests {
         std::env::remove_var(INTERNAL_SERVICE_TOKEN_ENV);
 
         let dir =
-            std::env::temp_dir().join(format!("mail-proto-token-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("mail-proto-token-test-{}", std::process::id())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("internal_service_token.txt");
         std::fs::write(

@@ -3,7 +3,7 @@ name = "ato-protection"
 version = "0.1.0"
 edition.workspace = true
 description = "Account Takeover Protection — behavioral biometrics, impossible travel detection, session fingerprinting, and adaptive MFA"
-license = "MIT"
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was "MIT" — scaffolding drift; the product is proprietary per the root LICENSE)
 
 [dependencies]
 tokio = { workspace = true, features = ["full"] }

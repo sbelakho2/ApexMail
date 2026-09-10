@@ -6,7 +6,7 @@ updates:
   # there is no root Dockerfile (build contexts live under deploy/,
   # services/mail-server/, apps/marketing-zola/).
 
-  - package-ecosystem: cargo
+  - package-ecosystem: cargo # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/services/mail-server"
     schedule:
       interval: weekly
@@ -15,7 +15,7 @@ updates:
       prefix: deps
       include: scope
 
-  - package-ecosystem: docker
+  - package-ecosystem: docker # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/deploy"
     schedule:
       interval: weekly
@@ -25,7 +25,7 @@ updates:
 
   # tools/contrast-audit is the only npm manifest outside vendored
   # node_modules trees (package.json + package-lock.json at its root).
-  - package-ecosystem: npm
+  - package-ecosystem: npm # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/tools/contrast-audit"
     schedule:
       interval: weekly
@@ -33,7 +33,7 @@ updates:
       prefix: deps
       include: scope
 
-  - package-ecosystem: pip
+  - package-ecosystem: pip # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/packages/sdk-python"
     schedule:
       interval: weekly
@@ -41,7 +41,7 @@ updates:
       prefix: deps
       include: scope
 
-  - package-ecosystem: gomod
+  - package-ecosystem: gomod # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/packages/sdk-go"
     schedule:
       interval: weekly
@@ -49,7 +49,7 @@ updates:
       prefix: deps
       include: scope
 
-  - package-ecosystem: maven
+  - package-ecosystem: maven # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/packages/sdk-java"
     schedule:
       interval: weekly
@@ -57,7 +57,7 @@ updates:
       prefix: deps
       include: scope
 
-  - package-ecosystem: composer
+  - package-ecosystem: composer # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/packages/sdk-php"
     schedule:
       interval: weekly
@@ -65,7 +65,7 @@ updates:
       prefix: deps
       include: scope
 
-  - package-ecosystem: bundler
+  - package-ecosystem: bundler # nosemgrep: package_managers.dependabot.dependabot-missing-cooldown.dependabot-missing-cooldown — Dependabot config is vestigial (auto-merge archived; the self-hosted ci/ pipeline owns dependency updates) — cooldown tuning is moot
     directory: "/packages/sdk-ruby"
     schedule:
       interval: weekly

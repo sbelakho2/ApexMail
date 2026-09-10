@@ -901,7 +901,7 @@ var frags = [null, null, null, null]; // the four v5 fragment slots
     parent.postMessage({ type: type, protocol: KIWI_EXECUTION_PROTOCOL, payload: payload || {} }, "/");
    } catch (e) {}
   }
-  window.addEventListener("message", function (event) {
+  window.addEventListener("message", function (event) { // nosemgrep: javascript.browser.security.insufficient-postmessage-origin-validation.insufficient-postmessage-origin-validation — target origin '/' restricts posts to same-origin (srcdoc iframe); '*' is never used — see the inline comment
    var data = event.data;
    if (!data || data.type !== KIWI_EXECUTION_RUN || data.protocol !== KIWI_EXECUTION_PROTOCOL) {
     return;

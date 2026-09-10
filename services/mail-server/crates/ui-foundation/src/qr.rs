@@ -751,7 +751,7 @@ mod tests {
     fn encodes_and_round_trips_payloads() {
         let urls = [
             "otpauth://totp/ApexMail:ops@apexmail.ee?secret=JBSWY3DPEHPK3PXP&issuer=ApexMail",
-            "otpauth://totp/ApexMail:a.very-long.username%40example.co.uk?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=SHA256&digits=8&period=30&issuer=ApexMail%20Console",
+            "otpauth://totp/ApexMail:a.very-long.username%40example.co.uk?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&algorithm=SHA256&digits=8&period=30&issuer=ApexMail%20Console", // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
             "https://apexmail.ee/verify?token=short",
             "x",
             "ünicode-päyload-õ",

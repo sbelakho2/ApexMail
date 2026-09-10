@@ -14,9 +14,14 @@
 #   sudo ci/install.sh check          verify the install (dry, no changes)
 #
 # What the full install does:
-#   1. apt deps: git curl jq python3 ca-certificates rsync openssl bc file
-#   2. cargo toolchain + cargo-audit + sqlx-cli when missing (PATH-aware);
-#      gitleaks + trivy as pinned release binaries in /usr/local/bin
+#   1. apt deps: git curl jq python3 python3-venv ca-certificates rsync
+#      openssl bc file
+#   2. cargo toolchain + cargo-audit + sqlx-cli + cargo-nextest +
+#      cargo-deny + cargo-machete + cargo-llvm-cov (+ the
+#      llvm-tools-preview rustup component) when missing (PATH-aware);
+#      gitleaks + trivy as pinned release binaries in /usr/local/bin;
+#      semgrep from pip into /opt/semgrep-venv (symlinked into
+#      /usr/local/bin)
 #   3. /etc/apexmail/pipeline.conf   (host overrides: CI_DEPLOY_DIR, env file)
 #   4. systemd units: apexmail-pipeline.service (oneshot)
 #                     apexmail-pipeline.timer   (every 5 minutes)
@@ -51,6 +56,9 @@ install_apt_deps() {
     for p in git curl jq python3 ca-certificates rsync openssl bc file; do
         have "$p" || _missing="$_missing $p"
     done
+    # python3-venv is a package, not a command — check it via dpkg (needed
+    # by the semgrep venv recipe below).
+    dpkg -s python3-venv >/dev/null 2>&1 || _missing="$_missing python3-venv"
     [ -n "$_missing" ] || { log "apt deps already present"; return 0; }
     log "installing apt deps:$_missing"
     export DEBIAN_FRONTEND=noninteractive
@@ -155,10 +163,54 @@ install_cargo_tools() {
     else
         log "cargo-nextest present"
     fi
+    # REQUIRED gates since the 2026-09-10 enterprise coverage expansion
+    # (test stage fails closed on the host when these are missing):
+    if ! have cargo-deny; then
+        log "installing cargo-deny (advisories/bans/sources/licenses gate)"
+        cargo install cargo-deny --locked
+    else
+        log "cargo-deny present: $(cargo deny --version)"
+    fi
+    if ! have cargo-machete; then
+        log "installing cargo-machete (unused-dependency gate)"
+        cargo install cargo-machete --locked
+    else
+        log "cargo-machete present"
+    fi
+    if ! have cargo-llvm-cov; then
+        log "installing cargo-llvm-cov (coverage ratchet gate)"
+        cargo install cargo-llvm-cov --locked
+    else
+        log "cargo-llvm-cov present"
+    fi
+    # llvm-cov needs the llvm-tools-preview toolchain component.
+    if rustup component list --installed 2>/dev/null | grep -q '^llvm-tools-preview'; then
+        log "llvm-tools-preview component present"
+    else
+        log "adding llvm-tools-preview rustup component (cargo-llvm-cov prerequisite)"
+        rustup component add llvm-tools-preview
+    fi
     # Optional but recommended gates (warn-only when absent):
-    for t in cargo-deny cargo-machete cargo-vet cargo-outdated; do
+    for t in cargo-vet cargo-outdated; do
         have "$t" || log "OPTIONAL: cargo install $t --locked  (gate currently skipped)"
     done
+}
+
+# semgrep — REQUIRED SAST lane (security stage) since 2026-09-10. Installed
+# into a dedicated venv (keeps pip off the system python; the symlink puts
+# it on PATH for the pipeline's non-interactive shells). Version drift is
+# acceptable within 1.176.x; re-triage findings after any major bump.
+install_semgrep() {
+    have semgrep && { log "semgrep present: $(semgrep --version | head -1)"; return 0; }
+    _sg_venv=/opt/semgrep-venv
+    if [ ! -x "$_sg_venv/bin/semgrep" ]; then
+        log "creating semgrep venv at $_sg_venv (needs python3-venv — see install_apt_deps)"
+        python3 -m venv "$_sg_venv"
+        "$_sg_venv/bin/pip" install --upgrade pip >/dev/null
+        "$_sg_venv/bin/pip" install semgrep
+    fi
+    ln -sf "$_sg_venv/bin/semgrep" /usr/local/bin/semgrep
+    log "semgrep installed: $(semgrep --version | head -1)"
 }
 
 # Pinned single-file release binaries. gitleaks/trivy publish tarballs; these
@@ -303,7 +355,7 @@ do_check() {
     for c in git curl jq python3 docker openssl; do
         have "$c" && log "ok: $c" || { log "MISSING: $c"; _bad=1; }
     done
-    for c in cargo cargo-audit sqlx gitleaks trivy zola; do
+    for c in cargo cargo-audit sqlx cargo-nextest cargo-deny cargo-machete cargo-llvm-cov gitleaks trivy semgrep zola; do
         if have "$c"; then log "ok: $c"; else log "optional-missing: $c (gate degrades, see ci/README.md)"; fi
     done
     # SDK-lane / static-lint toolchains (test stage; REQUIRED lanes, so a
@@ -334,6 +386,7 @@ case "${1:-all}" in
         install_cargo_tools
         install_gitleaks
         install_trivy
+        install_semgrep
         install_zola
         install_hadolint
         install_etc_conf

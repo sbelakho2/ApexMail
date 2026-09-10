@@ -319,7 +319,7 @@ cmd_run() {
 # enforcement, lock exclusivity.
 cmd_selftest() {
     _sf_fail=0
-    ci_info "selftest (1/7): syntax + shellcheck of every ci/ script"
+    ci_info "selftest (1/8): syntax + shellcheck of every ci/ script"
     for f in "$CI_DIR/pipeline.sh" "$CI_DIR/lib.sh" "$CI_DIR/check-pr.sh" \
              "$CI_DIR/install.sh" "$CI_DIR"/stages/*.sh "$CI_DIR"/units/*.sh; do
         [ -f "$f" ] || continue
@@ -338,14 +338,14 @@ cmd_selftest() {
         ci_warn "shellcheck not installed — syntax-only check"
     fi
 
-    ci_info "selftest (2/7): stage contract (exists, executable, defines stage_main)"
+    ci_info "selftest (2/8): stage contract (exists, executable, defines stage_main)"
     for st in $(printf '%s' "$CI_STAGES" | tr ',' ' '); do
         s="$CI_DIR/stages/$st.sh"
         [ -x "$s" ] || { ci_err "missing/not executable: $s"; _sf_fail=1; }
         grep -q 'stage_main' "$s" 2>/dev/null || { ci_err "no stage_main in $s"; _sf_fail=1; }
     done
 
-    ci_info "selftest (3/7): test-stage lane contract (lanes + flags present)"
+    ci_info "selftest (3/8): test-stage lane contract (lanes + flags present)"
     # The SDK/satellite/static-lint lanes (F-wave enterprise coverage): the
     # lane functions must exist in the test stage and their required-by-
     # default flags in pipeline.conf — checked the same way the stage
@@ -362,13 +362,51 @@ cmd_selftest() {
     [ -f "$REPO_ROOT/.hadolint.yaml" ] \
         || { ci_err ".hadolint.yaml missing (hadolint gate config)"; _sf_fail=1; }
 
-    ci_info "selftest (4/7): full dry-run through the real runner"
+    # 2026-09-10 enterprise lanes: the artifacts the new gates depend on must
+    # exist and be well-formed — checked statically so the selftest stays
+    # infrastructure-free, exactly like the sections around it.
+    ci_info "selftest (3/8): enterprise-lane artifacts (coverage baseline, migration lint, deny/trivy triage)"
+    _base=$CI_ROOT/coverage-baseline.txt
+    if [ ! -f "$_base" ]; then
+        ci_err "missing ci/coverage-baseline.txt (coverage ratchet gate)"
+        _sf_fail=1
+    else
+        _base_v=$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$_base" | head -n 1)
+        case $_base_v in
+            ''|*[!0-9.]*) ci_err "invalid baseline '$_base_v' in $_base (expected a single float)"; _sf_fail=1 ;;
+        esac
+    fi
+    [ -f "$REPO_ROOT/services/mail-server/deny.toml" ] \
+        || { ci_err "missing services/mail-server/deny.toml (cargo-deny licenses gate)"; _sf_fail=1; }
+    [ -f "$REPO_ROOT/trivy-secret.yaml" ] \
+        || { ci_err "missing trivy-secret.yaml (trivy fs secret triage)"; _sf_fail=1; }
+    [ -f "$REPO_ROOT/.trivyignore" ] \
+        || { ci_err "missing .trivyignore (trivy vulnerability triage)"; _sf_fail=1; }
+    for _flag in CI_SEMGREP_CHECK CI_TRIVY_FS_CHECK CI_COVERAGE_CHECK CI_MIGRATION_LINT_CHECK; do
+        grep -q "{$_flag:=" "$CI_ROOT/pipeline.conf" 2>/dev/null \
+            || { ci_err "pipeline.conf does not define $_flag"; _sf_fail=1; }
+    done
+    if command -v python3 >/dev/null 2>&1; then
+        # Syntax-check the migration linter, then RUN it: it is a pure static
+        # check over the tracked SQL chain (~1s, no infrastructure), so the
+        # selftest proves the lane end-to-end.
+        python3 -m py_compile "$REPO_ROOT/tools/migration_lint.py" 2>/dev/null \
+            || { ci_err "tools/migration_lint.py does not compile"; _sf_fail=1; }
+        if ! python3 "$REPO_ROOT/tools/migration_lint.py" >/dev/null 2>&1; then
+            ci_err "migration SQL lint reports violations (run: python3 tools/migration_lint.py)"
+            _sf_fail=1
+        fi
+    else
+        ci_warn "python3 missing — migration-lint selftest skipped"
+    fi
+
+    ci_info "selftest (4/8): full dry-run through the real runner"
     if ! "$CI_DIR/pipeline.sh" run --dry-run --stages "$CI_STAGES" --lock-wait 10; then
         ci_err "dry-run pipeline run failed"
         _sf_fail=1
     fi
 
-    ci_info "selftest (5/7): manifest + per-stage logs of the dry run are valid"
+    ci_info "selftest (5/8): manifest + per-stage logs of the dry run are valid"
     _latest=$(cd "$RUNS_DIR" 2>/dev/null && \
         ls -1d [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]* 2>/dev/null \
         | sort -r | head -1 || true)
@@ -386,7 +424,7 @@ cmd_selftest() {
         done
     fi
 
-    ci_info "selftest (6/7): timeout wrapper stops a runaway command"
+    ci_info "selftest (6/8): timeout wrapper stops a runaway command"
     _sf_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
     printf '#!/bin/sh\nsleep 30\n' >"$_sf_tmp/slow.sh"
     chmod +x "$_sf_tmp/slow.sh"
@@ -401,7 +439,7 @@ cmd_selftest() {
     fi
     rm -rf "$_sf_tmp"
 
-    ci_info "selftest (7/7): run lock excludes a concurrent holder"
+    ci_info "selftest (7/8): run lock excludes a concurrent holder"
     if ci_lock_acquire selftest 0; then
         if CI_ROOT="$CI_DIR" sh -c '. "$CI_ROOT/lib.sh"; ci_lock_acquire selftest 1' >/dev/null 2>&1; then
             # With flock both acquires share fd 9 in THIS process; only the

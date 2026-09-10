@@ -311,6 +311,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "num-bigint",
  "rand",
  "serde",
  "serde_json",

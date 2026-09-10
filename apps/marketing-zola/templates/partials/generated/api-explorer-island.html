@@ -54,7 +54,7 @@
       <span class="font-mono text-xs text-surface-300 break-all">/v1/messages?limit=20</span>
       <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
     </div>
-    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 border-t border-surface-800 px-4 py-4 sm:px-6">
+    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 border-t border-surface-800 px-4 py-4 sm:px-6"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
       <input type="hidden" name="lane" value="messages">
       <input type="hidden" name="body" value="">
       <p class="text-[11px] text-surface-500">Delivery stream and lifecycle lookup — the sandbox tenant's own messages, including everything you sent above.</p>
@@ -69,7 +69,7 @@
       <span class="font-mono text-xs text-surface-300 break-all">/v1/domains</span>
       <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
     </div>
-    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 border-t border-surface-800 px-4 py-4 sm:px-6">
+    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 border-t border-surface-800 px-4 py-4 sm:px-6"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
       <input type="hidden" name="lane" value="domains">
       <input type="hidden" name="body" value="">
       <p class="text-[11px] text-surface-500">Identity posture and DNS verification status for the sandbox tenant's domains.</p>

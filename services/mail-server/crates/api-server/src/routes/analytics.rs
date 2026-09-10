@@ -1179,7 +1179,7 @@ mod tests {
         let _guard = EXPORT_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
         let dir =
-            std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("EXPORT_STORAGE_PATH", &dir);
 

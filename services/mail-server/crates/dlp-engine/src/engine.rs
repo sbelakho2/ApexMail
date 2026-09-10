@@ -446,7 +446,7 @@ mod tests {
     fn test_api_key_detection() {
         let engine = DlpEngine::new();
         let verdict = engine.scan_body(
-            "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy",
+            "Here is the production key: sk_live_4eC39HqLyjWDarjtT1zdp7dc please deploy", // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key — Stripe's public documentation example key (sk_live_4eC39HqLyjWDarjtT1zdp7dc) used as DLP detection-test corpus — the code that FINDS such keys
         );
         // Should detect high-entropy secret
         assert!(verdict.risk_score > 0.0, "Should detect API key");

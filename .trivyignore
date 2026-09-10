@@ -65,3 +65,22 @@ CVE-2026-45186   # go — not reachable
 CVE-2026-6732    # openssl — same class
 CVE-2026-58471   # wget heap overflow — build-time tool, never executed at runtime
 CVE-2026-58472   # wget code execution — same
+
+# 2026-09-10 — trivy fs (source-tree) scan triage. The fs lane is NEW; these
+# are source/lockfile findings, not runtime-image ones.
+#
+# rustls-webpki 0.101.7 (GHSA-82j2-j2ch-gfr8 = RUSTSEC-2026-0104) — the SAME
+# advisory already reviewed in the authoritative Rust lanes (CI_CARGO_AUDIT_
+# IGNORES in ci/pipeline.conf AND services/mail-server/deny.toml): 0.101.x is
+# pinned by rustls 0.22 semver; the 0.103.x copy rustls 0.23 uses IS patched
+# (0.103.13). Do-Not-Serve-CRL exposure absent. Revisit on the rustls upgrade.
+GHSA-82j2-j2ch-gfr8   # rustls-webpki CRL panic — reviewed, see deny.toml lockstep
+
+# jackson (packages/sdk-java/pom.xml, 2.17.1) — the Java SDK EXAMPLE shipped
+# under packages/, not deployed product code (no Java service runs in the
+# ApexMail stack). Fixes exist (2.18.8) but SDK version bumps are a product
+# decision, tracked as follow-up: bump jackson-* to 2.18.8 in the next
+# sdk-java release and DELETE these three lines.
+GHSA-r7wm-3cxj-wff9   # jackson-core maxNumberLength bypass (sdk-java example)
+CVE-2026-54512        # jackson-databind arbitrary code execution (sdk-java example)
+CVE-2026-54513        # jackson-databind security bypass (sdk-java example)

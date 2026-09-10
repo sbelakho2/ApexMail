@@ -241,10 +241,11 @@ PmScTyfBMj4Ej4fcpQ==\n\
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "apexmail-ai-embeddings-ca-{}-{unique}.pem",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            .join(format!(
+                "apexmail-ai-embeddings-ca-{}-{unique}.pem",
+                std::process::id()
+            ));
         std::fs::write(&path, contents).expect("write test CA");
         path
     }

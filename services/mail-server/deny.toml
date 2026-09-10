@@ -50,12 +50,23 @@ ignore = [
     # Pulled in by older rustls 0.22.x. The 0.103.x version used by rustls
     # 0.23.x is updated to 0.103.13. Remaining 0.101.x advisories cannot be
     # updated due to semver constraints. Tracked in #DEP-04.
-    # NOTE: RUSTSEC-2026-0097 removed — no crate matches it anymore.
-    # NOTE: aws-lc-sys advisories (RUSTSEC-2026-0044 through 0048) removed
-    # — `cargo update` resolved them to non-vulnerable versions.
     "RUSTSEC-2026-0098",  # rustls-webpki: Name constraints for URI names
     "RUSTSEC-2026-0099",  # rustls-webpki: Wildcard name constraints
     "RUSTSEC-2026-0104",  # rustls-webpki: CRL parsing reachable panic
+
+    # ── quick-xml <0.41 (RUSTSEC-2026-0194/0195) — LOCKSTEP with
+    #    ci/pipeline.conf CI_CARGO_AUDIT_IGNORES (same justification there).
+    # Five transitive copies <0.41 via the typst 0.14 ecosystem
+    # (calamine/citationberg/plist) and mail-auth 0.4 (via mail-send 0.4).
+    # The direct workspace copy IS patched (0.41). Revisit on typst 0.15 /
+    # mail-send 0.6.
+    "RUSTSEC-2026-0194",  # quick-xml: quadratic duplicate-attribute parsing
+    "RUSTSEC-2026-0195",  # quick-xml: unbounded NsReader allocation DoS
+
+    # ── h2 0.3.x (RUSTSEC-2026-0258) ─────────────────────────────────
+    # Transitive via aws-smithy-http-client (AWS SDK); no fixed 0.3.x
+    # exists; our h2 0.4 copy IS patched (>=0.4.16). Revisit on SDK refresh.
+    "RUSTSEC-2026-0258",
 
     # ── Unmaintained crates (reviewed, low impact) ───────────────────────
     # bincode (RUSTSEC-2025-0141) — used for internal serialization in
@@ -86,6 +97,20 @@ ignore = [
     # Pulled in by leptos_router for reactive navigation cache. Assessed: no
     # UB in current usage patterns. Tracked in #DEP-11.
     "RUSTSEC-2026-0002",
+
+    # ── 2026-09-10 deny-lane sync (new advisory DB entries, triaged) ────
+    # ttf-parser 0.25 (RUSTSEC-2026-0192) and rustybuzz (RUSTSEC-2026-0206)
+    # are unmaintained entries in the typst 0.14 / pdf-renderer
+    # (dev-dependency evaluation) font stack — same treatment as the other
+    # typst-ecosystem unmaintained entries above. Revisit on typst upgrade.
+    "RUSTSEC-2026-0192",  # ttf-parser unmaintained (typst stack)
+    "RUSTSEC-2026-0206",  # rustybuzz unmaintained (typst stack)
+    # scc 2.4.0 (RUSTSEC-2026-0205) — unsound Array::insert double-free,
+    # reachable ONLY via serial_test 3.4 → integration-tests (test-only).
+    # serial_test pins scc 2.x; the fix (>=3.8.4) needs a serial_test
+    # release against scc 3. The panic-in-compare precondition never occurs
+    # with serial_test's standard key types. Revisit on serial_test upgrade.
+    "RUSTSEC-2026-0205",
 ]
 
 # ── Duplicate version tracking ───────────────────────────────────────────────
@@ -165,28 +190,57 @@ skip-tree = [
 
 [licenses]
 # ── Allowed licenses ────────────────────────────────────────────────────────
-# Only the following SPDX license identifiers are permitted for third-party
-# dependencies. This covers the standard open-source licenses in the Rust
-# ecosystem.
+# Inventory-driven allow list: exactly the SPDX expressions the workspace
+# lockfile actually resolves to (`cargo deny list`, 2026-09-10 sweep over
+# ~1500 locked crates). Every genuinely-permissive license found in the
+# inventory is listed; anything NOT listed fails `cargo deny check licenses`
+# fail-closed, so a newly introduced GPL/AGPL/SSPL/unknown-license
+# dependency breaks the build until it is consciously reviewed here.
+# (Two historical entries — "OpenSSL" and "LicenseRef-Adobe-Glyph" — were
+# dropped: no locked crate carries them today. Re-add ONLY with a
+# justification if a future inventory needs them.)
 allow = [
-    "0BSD",                    # BSD Zero Clause
-    "Apache-2.0",              # Apache License 2.0
-    "Apache-2.0 WITH LLVM-exception",  # LLVM Exception
-    "BSD-2-Clause",            # BSD 2-Clause
-    "BSD-3-Clause",            # BSD 3-Clause
-    "BSL-1.0",                 # Boost Software License
-    "CC0-1.0",                 # Creative Commons Zero v1.0 Universal
-    "CDLA-Permissive-2.0",     # Community Data License Agreement
-    "ISC",                     # ISC License
-    "MIT",                     # MIT License
-    "MIT-0",                   # MIT No Attribution
-    "MPL-2.0",                 # Mozilla Public License 2.0
-    "OpenSSL",                 # OpenSSL License
-    "Unicode-3.0",             # Unicode License v3
-    "Unlicense",               # The Unlicense
-    "Zlib",                    # zlib License
-    "LicenseRef-Adobe-Glyph",  # Adobe Glyph (used by font-rs)
+    "0BSD",                    # BSD Zero Clause (3 crates)
+    "Apache-2.0",              # Apache License 2.0 (638 crates)
+    "Apache-2.0 WITH LLVM-exception",  # LLVM Exception (9 crates)
+    "BSD-2-Clause",            # BSD 2-Clause (5 crates)
+    "BSD-3-Clause",            # BSD 3-Clause (12 crates)
+    "BSL-1.0",                 # Boost Software License (3 crates)
+    "CC0-1.0",                 # Creative Commons Zero v1.0 (5 crates)
+    "CDLA-Permissive-2.0",     # Community Data License Agreement (2 crates)
+    "ISC",                     # ISC License (19 crates)
+    "MIT",                     # MIT License (745 crates)
+    "MIT-0",                   # MIT No Attribution (3 crates)
+    "MPL-2.0",                 # Mozilla Public License 2.0 (6 crates — file-level copyleft, per-file compliance OK)
+    "Unicode-3.0",             # Unicode License v3 (39 crates)
+    "Unlicense",               # The Unlicense (9 crates)
+    "Zlib",                    # zlib License (13 crates)
+    # First-party only: the workspace root sets license = "LicenseRef-PROPRIETARY"
+    # (inherited by every crates/* member). A registry crate would have to
+    # literally declare this id to pass — treat any such occurrence as a
+    # review event, not a silent pass.
+    "LicenseRef-PROPRIETARY",
 ]
+
+# ── Scoped exceptions (reviewed weak-copyleft, per-crate) ──────────────────
+# LGPL-2.1-or-later is NOT in the general allow list — ApexMail is a
+# proprietary product and weak-copyleft licenses are accepted only as
+# narrow, justified, crate-scoped exceptions below. Never widen this to a
+# blanket allow.
+[[licenses.exceptions]]
+# r-efi 5.3.0 / 6.0.0 — LGPL-2.1-or-later EFI API bindings, pulled into
+# Cargo.lock by getrandom 0.3.x/0.4.x. getrandom declares it as
+#   [target.'cfg(all(target_os = "uefi", getrandom_backend = "efi_rng"))'.dependencies]
+# (verified in the vendored manifests): the crate is compiled ONLY for UEFI
+# targets with the efi_rng backend explicitly enabled. ApexMail ships
+# Linux (debian:bookworm-slim docker images) and macOS dev builds — no
+# distributed binary ever links r-efi code, so LGPL redistribution
+# obligations are never triggered. Cargo.lock is target-agnostic, which is
+# the only reason cargo-deny sees it at all. REVISIT if a UEFI target is
+# ever added: at that point the exception must be re-reviewed with counsel
+# (static LGPL linking requires relinkable object files or dynamic linking).
+allow = ["LGPL-2.1-or-later"]
+crate = "r-efi"
 
 # ── Private / workspace crate handling ─────────────────────────────────────
 # Workspace crates inherit `license = "PROPRIETARY"` (or no license field)

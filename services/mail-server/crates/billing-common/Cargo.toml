@@ -1,6 +1,7 @@
 [package]
 name = "billing-common"
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 description = "Shared billing logic (VAT rates, proration, audit, CSV) for billing-service and api-server"
 

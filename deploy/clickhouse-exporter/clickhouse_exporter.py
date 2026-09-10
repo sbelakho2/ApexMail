@@ -49,7 +49,7 @@ def clickhouse_request(scrape_uri, query):
     if password:
         request.add_header("X-ClickHouse-Key", password)
 
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with urllib.request.urlopen(request, timeout=5) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         return response.read().decode("utf-8")
 
 

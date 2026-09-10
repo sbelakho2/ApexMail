@@ -187,7 +187,7 @@ fn transform(glue_raw: &str) -> String {
 }
 
 fn main() {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1); // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
     let pkg_dir = args.next().unwrap_or_else(|| "pkg".to_string());
     let out_file = args
         .next()

@@ -3,7 +3,7 @@ name = "waf-engine"
 version = "0.1.0"
 edition = "2021"
 description = "Pure-Rust Web Application Firewall: AST-based SQLi/XSS prevention, OWASP CRS-compatible rule engine, zero-copy payload inspection"
-license = "PROPRIETARY"
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "PROPRIETARY")
 
 [features]
 default = ["core"]

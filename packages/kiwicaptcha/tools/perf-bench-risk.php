@@ -283,7 +283,7 @@ function runRedisPhase(int $workers, int $perWorker, string $prefix, string $nam
         $outFiles[] = $outFile;
         $cmd = [PHP_BINARY, __FILE__, '--worker', (string) $id, $outFile, $prefix, $namespace, (string) $perWorker, $url];
         $pipes = [];
-        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes); // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
         if (!is_resource($proc)) {
             fwrite(STDERR, "perf-bench-risk: cannot spawn worker $id\n");
             exit(1);
@@ -430,7 +430,7 @@ if ($redisMode) {
     exit(0);
 }
 
-$secret = '0123456789abcdef0123456789abcdef';
+$secret = '0123456789abcdef0123456789abcdef'; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
 $storage = new ArrayStorage();
 $issuer = new Issuer(new Config(
     secretKey: $secret,

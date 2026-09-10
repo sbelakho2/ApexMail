@@ -544,7 +544,7 @@ mod tests {
             "rto_target_secs": 300,
             "unexpected": true
         }"#;
-        let path = std::env::temp_dir().join(format!("ha-config-{}.json", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("ha-config-{}.json", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::write(&path, json).unwrap();
         let err = Config::from_file(&path).unwrap_err();
         let _ = std::fs::remove_file(&path);

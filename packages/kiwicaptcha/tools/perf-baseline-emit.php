@@ -127,7 +127,7 @@ function perf_baseline_emit(string $file, array $path, array $values): void
         throw new RuntimeException(sprintf('perf-baseline: cannot write %s', $tmp));
     }
     if (!rename($tmp, $file)) {
-        @unlink($tmp);
+        @unlink($tmp); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
         throw new RuntimeException(sprintf('perf-baseline: cannot replace %s', $file));
     }
 }

@@ -351,7 +351,7 @@ mod tests {
     fn job_index_is_capped_and_running_jobs_are_never_evicted() {
         // Regression: finished jobs were never removed from the in-memory
         // map, so it grew for the process's lifetime.
-        let dir = std::env::temp_dir().join(format!("ai-train-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("ai-train-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let config = AiConfig {
             checkpoint_path: dir.display().to_string(),

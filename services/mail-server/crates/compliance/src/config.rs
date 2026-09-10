@@ -439,7 +439,7 @@ mod tests {
     // ── I-4: audit signing key persistence ─────────────────────
 
     fn temp_key_file(name: &str) -> std::path::PathBuf {
-        let mut path = std::env::temp_dir();
+        let mut path = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         path.push(format!("{}-{}", name, std::process::id()));
         let _ = std::fs::remove_file(&path);
         path

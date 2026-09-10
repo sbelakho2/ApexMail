@@ -1,0 +1,15 @@
+# ApexMail workspace line-coverage baseline (ratchet) — read by
+# ci/stages/test.sh run_coverage_gate after `cargo llvm-cov nextest
+# --workspace` (lcov artifact lands in the run dir). BELOW this number =
+# stage FAILURE; at-or-above = PASS and the measured value is printed.
+#
+# The file holds ONE float (percent). Comments (#) and blank lines are
+# ignored; the first non-comment line is the value.
+#
+# 0.0 is the SEED: the first run on the deploy host measures the real
+# workspace line coverage and the operator commits that number here (in the
+# same change, note the measured value in the commit message). From then on
+# the gate is a pure ratchet: raise it in the SAME PR as the tests that
+# earned the increase — that is a PR-positive action; lowering it requires a
+# deliberate, reviewed justification.
+0.0

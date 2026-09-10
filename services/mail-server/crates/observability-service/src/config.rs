@@ -556,7 +556,7 @@ mod tests {
         let _guard = env_guard();
 
         std::env::remove_var("INTERNAL_SERVICE_TOKEN");
-        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token.txt");
         std::fs::write(&path, "file-secret-token\n").unwrap();
@@ -577,7 +577,7 @@ mod tests {
     fn test_secret_file_takes_precedence_over_env_variable() {
         let _guard = env_guard();
 
-        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token.txt");
         std::fs::write(&path, "file-secret-wins\n").unwrap();

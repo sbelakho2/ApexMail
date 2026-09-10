@@ -452,10 +452,10 @@ echo "\nStub server integration\n";
 $stubPort = 18123;
 $recordFile = sys_get_temp_dir() . '/apexmail_php_sdk_stub_headers.jsonl';
 $counterFile = sys_get_temp_dir() . '/apexmail_php_sdk_stub_counter';
-@unlink($recordFile);
-@unlink($counterFile);
+@unlink($recordFile); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
+@unlink($counterFile); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
 
-$proc = proc_open(
+$proc = proc_open( // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
     [PHP_BINARY, '-S', "127.0.0.1:{$stubPort}", __DIR__ . '/stub_server.php'],
     [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']],
     $pipes
@@ -513,7 +513,7 @@ if ($stubReady) {
             $resp['results'][1]['error'] === 'invalid recipient' && !isset($resp['results'][1]['id']));
 
         // SDK-B: same idempotency key across retries of one send.
-        @unlink($recordFile);
+        @unlink($recordFile); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
         $client = stub_client(2);
         $resp = $client->request('POST', '/flaky500', ['from' => 'a@example.com'], 'stub-fixed-key');
         expect('flaky send succeeds after retry', $resp['id'] === 'msg_after_retry');
@@ -523,7 +523,7 @@ if ($stubReady) {
             $messages[0]['idempotency'] === 'stub-fixed-key' && $messages[1]['idempotency'] === 'stub-fixed-key');
 
         // SDK-B: two logical sends get different auto keys.
-        @unlink($recordFile);
+        @unlink($recordFile); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
         $client = stub_client(0);
         $client->request('POST', '/v1/messages', ['a' => 1], \ApexMail\Client::uuid4());
         $client->request('POST', '/v1/messages', ['a' => 2], \ApexMail\Client::uuid4());

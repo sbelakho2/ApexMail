@@ -358,7 +358,7 @@ function runPhase(string $phase, int $workers, int $perWorker, string $prefix, s
             $cmd[] = $poolFile;
         }
         $pipes = [];
-        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $proc = proc_open($cmd, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes); // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
         if (!is_resource($proc)) {
             fwrite(STDERR, "perf-load: cannot spawn worker $id\n");
             exit(1);

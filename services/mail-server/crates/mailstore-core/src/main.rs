@@ -307,10 +307,11 @@ mod tests {
     fn load_encryption_key_rejects_group_readable_file() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = std::env::temp_dir().join(format!(
-            "apexmail-mailstore-test-key-{}-bad",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            .join(format!(
+                "apexmail-mailstore-test-key-{}-bad",
+                std::process::id()
+            ));
         std::fs::write(&path, b"0123456789abcdef0123456789abcdef").expect("write test key");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
             .expect("set test key mode");
@@ -326,10 +327,11 @@ mod tests {
     fn load_encryption_key_accepts_0600_file() {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = std::env::temp_dir().join(format!(
-            "apexmail-mailstore-test-key-{}-good",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            .join(format!(
+                "apexmail-mailstore-test-key-{}-good",
+                std::process::id()
+            ));
         std::fs::write(&path, b"0123456789abcdef0123456789abcdef\n").expect("write test key");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("set test key mode");

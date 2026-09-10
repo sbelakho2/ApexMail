@@ -1672,7 +1672,7 @@ mod tests {
     #[test]
     fn test_google_token_exchange_response_deserialize() {
         // Verify GoogleTokenExchangeResponse can be deserialized from JSON.
-        let json = r#"{"id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0"}"#;
+        let json = r#"{"id_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0"}"#; // nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token — truncated dummy token in a serde deserialization test
         let parsed: GoogleTokenExchangeResponse = serde_json::from_str(json).unwrap();
         assert!(parsed.id_token.is_some());
         assert!(parsed.id_token.unwrap().starts_with("eyJ"));

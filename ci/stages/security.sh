@@ -7,8 +7,8 @@
 #                            cargo-outdated report is produced advisory-only
 #   * cargo-vet.yml        — cargo vet when supply-chain/config.toml exists
 #   * rust-check.yml       — gitleaks secret scan (same .gitleaks.toml);
-#                            semgrep SAST is NOT replicated (see README —
-#                            optional `ci/security-extras.sh` hooks welcome)
+#                            semgrep SAST (p/default + p/rust, REQUIRED —
+#                            2026-09-10 expansion, was advisory)
 #   * deploy.yml           — Trivy image scans (api-server + mta; the scan
 #                            after a build runs in the images stage, this run
 #                            re-scans existing images pre-deploy) and the Syft
@@ -103,16 +103,71 @@ cargo_vet() {
     (cd "$WS" && ci_check "cargo vet --locked" cargo vet --locked)
 }
 
-# --- Semgrep SAST (rust-check.yml SAST job — advisory) ----------------------------------
-# The declared-lane coverage is gitleaks + cargo-audit + Trivy; Semgrep adds
-# taint-flow rulesets on top. Advisory (as the GitHub SAST job was
-# continue-on-error) and loud-skips when the tool is absent — install with
-# `pip install semgrep` (ci/install.sh does not pin it; version drift between
-# hosts is acceptable for an advisory lane).
+# --- Semgrep SAST (rust-check.yml SAST job — now REQUIRED) ------------------------------
+# Enterprise coverage expansion (2026-09-10): the lane was advisory with a
+# plain warn-skip when semgrep was absent, which meant the deploy host could
+# ship without ANY SAST gate. Now fail-closed on the deploy host via
+# ci_have_tool (warn-and-skip stays for dev machines — the framework's own
+# missing-tool policy) and CI_SEMGREP_CHECK=required by default; every
+# finding must be fixed or triaged with a targeted inline
+# `# nosemgrep: <rule-id>` comment carrying a justification, so the lane
+# exits 0 honestly. `advisory` remains available for a bounded triage
+# window. Scan set: repo code dirs — the vendored/generated trees
+# (marketing build output, node_modules, cargo target, vendored libs, .git)
+# are excluded: they are not reviewable product code and drown the signal.
+# .github/workflows-archive is excluded too: archived, never-executed
+# workflow YAML (the validate stage enforces .github/workflows/ stays
+# empty), so findings there are inert by construction.
+# Host pin: semgrep 1.176.x (ci/install.sh venv recipe).
 semgrep_sast() {
-    command -v semgrep >/dev/null 2>&1 || { ci_warn "semgrep missing — SAST lane skipped (advisory; pip install semgrep)"; return "$CI_EXIT_OK"; }
-    (cd "$REPO_ROOT" && ci_check_advisory "semgrep SAST (p/default, p/rust)" \
-        semgrep scan --config p/default --config p/rust --error --quiet)
+    ci_have_tool semgrep || return "$CI_EXIT_OK"
+    _sg_rc=0
+    (cd "$REPO_ROOT" && ci_check "semgrep SAST (p/default, p/rust)" \
+        semgrep scan --config p/default --config p/rust --error --quiet \
+            --exclude apps/marketing-zola/public \
+            --exclude node_modules --exclude target --exclude vendor \
+            --exclude .github/workflows-archive) || _sg_rc=$?
+    if [ "$_sg_rc" -eq 0 ]; then
+        return "$CI_EXIT_OK"
+    fi
+    if [ "${CI_SEMGREP_CHECK:-required}" = advisory ]; then
+        ci_warn "ADVISORY: semgrep reported findings (CI_SEMGREP_CHECK=advisory) — fix the code or add targeted '# nosemgrep: <rule-id>' justifications"
+        return "$CI_EXIT_OK"
+    fi
+    ci_err "FAIL: semgrep findings above — fix the code or add targeted \
+'# nosemgrep: <rule-id>' comments with justifications for false positives"
+    return "$CI_EXIT_FAIL"
+}
+
+# --- Trivy filesystem scan (new lane — REQUIRED) -----------------------------------------
+# Source-tree vulnerability + secret scan of the working tree
+# (vulnerability DB over manifests/lockfiles + secret patterns), gated on
+# CRITICAL/HIGH exactly like the image lanes. Vendored/generated dirs are
+# skipped (not reviewable product code; the marketing build output is
+# scanned as SOURCE templates by gitleaks + the template-leak gate).
+# Triage lives in $REPO_ROOT/.trivyignore (vulnerability IDs) and
+# $REPO_ROOT/trivy-secret.yaml (secret allow-rules) — every entry in either
+# must carry a justification comment (same contract as the image lanes).
+# CI_TRIVY_FS_CHECK=required; advisory exists for a bounded triage window.
+trivy_fs_scan() {
+    ci_have_tool trivy || return "$CI_EXIT_OK"
+    _tf_rc=0
+    (cd "$REPO_ROOT" && ci_check "trivy fs (vuln+secret, $CI_TRIVY_SEVERITY)" \
+        trivy fs --severity "$CI_TRIVY_SEVERITY" --scanners vuln,secret \
+            --skip-dirs node_modules,target,public,vendor,.git \
+            --ignorefile "$REPO_ROOT/.trivyignore" \
+            --secret-config "$REPO_ROOT/trivy-secret.yaml" \
+            --exit-code 1 .) || _tf_rc=$?
+    if [ "$_tf_rc" -eq 0 ]; then
+        return "$CI_EXIT_OK"
+    fi
+    if [ "${CI_TRIVY_FS_CHECK:-required}" = advisory ]; then
+        ci_warn "ADVISORY: trivy fs reported findings (CI_TRIVY_FS_CHECK=advisory) — triage in .trivyignore with justifications"
+        return "$CI_EXIT_OK"
+    fi
+    ci_err "FAIL: trivy fs findings above — upgrade the dependency or add a \
+justified .trivyignore entry (revisit on every feed refresh)"
+    return "$CI_EXIT_FAIL"
 }
 
 # --- Trivy image scans (deploy.yml scan steps) -------------------------------------------
@@ -237,6 +292,7 @@ stage_main() {
     semgrep_sast
     migration_validation
     trivy_images
+    trivy_fs_scan
     cargo_outdated
     ci_info "security: all gates green"
     return "$CI_EXIT_OK"

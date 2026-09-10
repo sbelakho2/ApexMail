@@ -3,7 +3,7 @@ name = "ddos-protection"
 version = "0.1.0"
 edition = "2021"
 description = "Multi-layer DDoS protection for ApexMail"
-license = "MIT"
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was "MIT" — scaffolding drift; the product is proprietary per the root LICENSE)
 
 [features]
 default = ["core"]
