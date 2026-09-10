@@ -397,6 +397,15 @@
     color: rgb(var(--foreground));
   }
 
+  /* The active nav cell is solid brand — its white label must survive the
+     blanket sidebar link rule above (unlayered CSS outranks the Tailwind
+     text-white utility, which painted zinc-on-red in dark themes). */
+  .apex-console-sidebar a.apex-nav-cell.is-active,
+  .apex-cp-sidebar a.apex-nav-cell.is-active {
+    background: rgb(var(--primary));
+    color: #fff;
+  }
+
   .apex-console-sidebar .text-surface-500,
   .apex-console-sidebar .text-\[10px\],
   .apex-cp-sidebar .text-white\/40 {
@@ -2179,8 +2188,18 @@
 }
 .apex-receipt > div { display: flex; align-items: center; gap: 9px; }
 .apex-receipt .apex-r-arc { flex-shrink: 0; }
-.apex-receipt .ok { color: rgb(var(--success)); font-weight: 700; }
+.apex-receipt .ok { color: rgb(var(--success-700)); font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .apex-receipt .ok { color: rgb(var(--success-400)); }
+}
+html.dark .apex-receipt .ok { color: rgb(var(--success-400)); }
 .apex-receipt .on { color: rgb(var(--primary)); font-weight: 700; }
+/* Dark receipts sit on zinc-950 where --primary (220,38,38) is sub-AA —
+   step to brand-300 (252,165,165) there. */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .apex-receipt .on { color: rgb(var(--brand-300)); }
+}
+html.dark .apex-receipt .on { color: rgb(var(--brand-300)); }
 
 /* ARCH on inputs/auth fields (the crown at the top of every field). */
 .apex-input {

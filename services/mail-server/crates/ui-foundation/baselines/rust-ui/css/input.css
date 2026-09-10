@@ -110,6 +110,12 @@
   --background: 250 250 250;
   --foreground: 9 9 11;
 
+  /* Card surface: elevated panel above the section background.
+     Light: pure white over zinc-50 sections. Dark (overridden in the
+     dark block): near-black over zinc-950 sections. Hardcoded #fff
+     card backgrounds washed out under dark-mode token text. */
+  --card: 255 255 255;
+
   /* Surfaces — Zinc palette for neutral, industrial feel (Light Mode) */
   --surface-50: 250 250 250;
   --surface-100: 244 244 245;
@@ -174,20 +180,20 @@
   --space-16: 64px;
 
   /* Radius — "Premium" overhaul (audit 1.1). The previous 2px/4px/6px/8px
-     scale produced "legacy industrial" corners; the new scale is softer and
-     matches the rounded-2xl (12px) standard from the design reference.
-     Because rounded-sm/-md/-lg/-xl all bind to these variables, this single
-     edit propagates to all 471 rounded-sm call-sites without a class rename.
-     A new --radius-2xl (16px) is added for cards. */
+     scale produced "legacy industrial" corners; the new scale is softer.
+     Doctrine (design audit item 7): one CARD radius — rounded-lg (12px) —
+     for .apex-card and every swept card container; rounded-sm (6px) stays
+     the chip/badge radius. --radius-xl and --radius-2xl are now distinct
+     steps (16/20px) instead of the accidental 16/16 duplication. */
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
-  --radius-2xl: 16px;
+  --radius-2xl: 20px;
 
   /* Brand gradient — applied to primary buttons, headings, and accent elements.
      Restored to the red brand scale (#DC2626 → #991B1B). */
-  --brand-gradient: linear-gradient(135deg, #dc2626, #991b1b);
+  --brand-gradient: linear-gradient(135deg, #a81818, #7f1d1d);
 
   /* Theme transition speed */
   --theme-transition-duration: 200ms;
@@ -203,6 +209,7 @@
   :root:not(.light) {
     --background: 9 9 11;
     --foreground: 250 250 250;
+    --card: 16 16 18;
     --surface-50: 9 9 11;
     --surface-100: 24 24 27;
     --surface-200: 39 39 42;
@@ -220,6 +227,7 @@
 html.dark {
   --background: 9 9 11;
   --foreground: 250 250 250;
+  --card: 16 16 18;
   --surface-50: 9 9 11;
   --surface-100: 24 24 27;
   --surface-200: 39 39 42;
@@ -231,6 +239,96 @@ html.dark {
   --surface-800: 228 228 231;
   --surface-900: 244 244 245;
   --surface-950: 250 250 250;
+}
+
+/* ── WCAG 2.1 AA contrast fixes (light theme) ───────────────────────────
+   Every color below is an EXISTING step of the zinc neutral / brand red /
+   success / warning / info scales — no new hues. In light mode:
+     - muted text: zinc-400 (#a1a1aa, 2.46-2.56:1 on light surfaces) and
+       zinc-500 (4.35:1 on zinc-100) step to zinc-600 (#52525b, ~7:1);
+     - brand-500 as text (3.8:1 on white) steps to brand-600, and
+       brand-500/600 on light red tints (4.4:1) step to brand-700;
+     - success-600 (3.3:1) → success-700, info-600 (3.4:1) → info-700,
+       warning-600 (2.9:1 on white, 2.7:1 on amber tints) → warning-800.
+   The html.dark block above/below and the prefers-color-scheme: dark
+   block further down (equal or higher specificity, later in the file)
+   keep the dark values, so these rules are light-only in effect. */
+.text-surface-400 { color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important; }
+.text-surface-500 { color: rgb(82 82 91 / var(--tw-text-opacity, 1)) !important; }
+.text-brand-500 { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
+.text-red-500 { color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important; }
+.text-success-600 { color: rgb(21 128 61 / var(--tw-text-opacity, 1)) !important; }
+.text-info-600 { color: rgb(14 116 144 / var(--tw-text-opacity, 1)) !important; }
+.text-warning-600 { color: rgb(146 64 14 / var(--tw-text-opacity, 1)) !important; }
+
+/* brand-600 on light red-tinted surfaces (bg-brand-50/100) is
+   4.4:1 — step to brand-700 (>= 5.3:1 on those tints). Both the
+   descendant and the same-element (chip) shapes occur in templates. */
+.bg-brand-50 .text-brand-600,
+.bg-brand-100 .text-brand-600,
+.bg-brand-50.text-brand-600,
+.bg-brand-100.text-brand-600 {
+  color: rgb(185 28 28 / var(--tw-text-opacity, 1)) !important;
+}
+
+/* Permanently-dark surfaces: bg-surface-950/900/800 and .code-block keep
+   near-black backgrounds in BOTH themes, so muted text inside them stays
+   zinc-400, red accents step to brand-400, and children that inherit the
+   page foreground get zinc-100 instead of zinc-950 (which was 1.1:1 on
+   these panels in light mode). Same values the dark blocks use. */
+.bg-surface-950 .text-surface-400,
+.bg-surface-950 .text-surface-500,
+.bg-surface-950 .text-surface-600,
+.bg-surface-900 .text-surface-400,
+.bg-surface-900 .text-surface-500,
+.bg-surface-900 .text-surface-600,
+.bg-surface-800 .text-surface-400,
+.bg-surface-800 .text-surface-500,
+.bg-surface-800 .text-surface-600,
+.code-block .text-surface-400,
+.code-block .text-surface-500,
+.code-block .text-surface-600 {
+  color: rgb(161 161 170 / var(--tw-text-opacity, 1)) !important;
+}
+
+.bg-surface-950 .text-brand-500,
+.bg-surface-950 .text-brand-600,
+.bg-surface-900 .text-brand-500,
+.bg-surface-900 .text-brand-600,
+.bg-surface-800 .text-brand-500,
+.bg-surface-800 .text-brand-600,
+.code-block .text-brand-500,
+.code-block .text-brand-600 {
+  color: rgb(248 113 113 / var(--tw-text-opacity, 1)) !important;
+}
+
+.bg-surface-950,
+.bg-surface-900,
+.bg-surface-800,
+.code-block {
+  color: rgb(244 244 245);
+}
+
+/* .prose pins h1-h4/strong to zinc-950 explicitly; inside the
+   permanently-dark panels that is 1.1:1 — repin them to zinc-100. */
+.bg-surface-950 h1, .bg-surface-950 h2, .bg-surface-950 h3, .bg-surface-950 h4,
+.bg-surface-950 strong, .bg-surface-950 th,
+.bg-surface-900 h1, .bg-surface-900 h2, .bg-surface-900 h3, .bg-surface-900 h4,
+.bg-surface-900 strong, .bg-surface-900 th,
+.bg-surface-800 h1, .bg-surface-800 h2, .bg-surface-800 h3, .bg-surface-800 h4,
+.bg-surface-800 strong, .bg-surface-800 th,
+.code-block h1, .code-block h2, .code-block h3, .code-block h4,
+.code-block strong, .code-block th {
+  color: rgb(244 244 245);
+}
+
+/* Placeholder text is muted text and must clear AA (the UA default
+   54%-gray is 2.5:1 on white). The token flips per theme:
+   zinc-600 light / zinc-400 dark. */
+input::placeholder,
+textarea::placeholder {
+  color: rgb(var(--surface-600));
+  opacity: 1;
 }
 
 .apex-brand-mark {
@@ -251,22 +349,12 @@ html.dark .apex-brand-mark {
   color: #fff !important;
 }
 
-/* Override hardcoded bg-white to respect dark mode via CSS variables.
-   This catches all 140+ instances across templates without modifying each one.
-   !important is needed to override Tailwind's ! modifier (!bg-white) in pricing/card.html */
-html.dark .bg-white {
-  background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1)) !important;
-}
-html.dark .bg-white\/95 {
-  background-color: rgb(var(--surface-50) / 0.95) !important;
-}
-html.dark .bg-white\/80 {
-  background-color: rgb(var(--surface-50) / 0.8) !important;
-}
-html.dark .bg-white\/5 {
-  background-color: rgb(var(--surface-50) / 0.05) !important;
-}
-
+/* Dark-mode overrides for legacy utility classes.
+   The templates were migrated to the zinc token utilities
+   (bg-surface-50 etc. — design audit item 16), which flip per theme via
+   the CSS variables and need no patching; only the deliberate
+   always-white inverse CTA (!bg-white in pricing/card.html) still rides
+   the [class~="!bg-white"] rules further down. */
 html.dark .bg-brand-50 {
   background-color: rgb(69 10 10 / var(--tw-bg-opacity, 0.72)) !important;
 }
@@ -300,7 +388,6 @@ html.dark .bg-info-50 {
 html.dark .bg-danger-50 {
   background-color: rgb(127 29 29 / var(--tw-bg-opacity, 0.35)) !important;
 }
-html.dark .from-white,
 html.dark .from-surface-50,
 html.dark .from-surface-100 {
   --tw-gradient-from: rgb(9 9 11 / 1) var(--tw-gradient-from-position) !important;
@@ -312,7 +399,6 @@ html.dark .from-brand-50 {
   --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
   --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
 }
-html.dark .via-white,
 html.dark .via-surface-50,
 html.dark .via-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 0) var(--tw-gradient-to-position) !important;
@@ -322,7 +408,6 @@ html.dark .via-brand-50 {
   --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
   --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
 }
-html.dark .to-white,
 html.dark .to-surface-50,
 html.dark .to-surface-100 {
   --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
@@ -379,6 +464,23 @@ html.dark .border-surface-900,
 html.dark .border-surface-800 {
   border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
 }
+html.dark .text-brand-500,
+html.dark .text-brand-600,
+html.dark .text-red-500 {
+  color: rgb(248 113 113 / var(--tw-text-opacity, 1)) !important;
+}
+/* Dark counterpart of the red-tint scope above: bg-brand-50/100 become
+   deep red in dark, so the text steps to brand-300 (>= 9:1). */
+html.dark .bg-brand-50 .text-brand-500,
+html.dark .bg-brand-100 .text-brand-500,
+html.dark .bg-brand-50 .text-brand-600,
+html.dark .bg-brand-100 .text-brand-600,
+html.dark .bg-brand-50.text-brand-500,
+html.dark .bg-brand-100.text-brand-500,
+html.dark .bg-brand-50.text-brand-600,
+html.dark .bg-brand-100.text-brand-600 {
+  color: rgb(252 165 165 / var(--tw-text-opacity, 1)) !important;
+}
 html.dark .text-brand-700 {
   color: rgb(var(--brand-300) / var(--tw-text-opacity, 1)) !important;
 }
@@ -393,6 +495,9 @@ html.dark .text-warning-800 {
 html.dark .text-success-600,
 html.dark .text-success-700 {
   color: rgb(var(--success-300) / var(--tw-text-opacity, 1)) !important;
+}
+html.dark .text-info-600 {
+  color: rgb(34 211 238 / var(--tw-text-opacity, 1)) !important;
 }
 html.dark .text-info-700 {
   color: rgb(var(--info-400) / var(--tw-text-opacity, 1)) !important;
@@ -422,19 +527,6 @@ html.dark .cookie-consent-banner {
     background-color: rgb(var(--brand-600)) !important;
     border-color: rgb(var(--brand-500)) !important;
     color: #fff !important;
-  }
-
-  .bg-white {
-    background-color: rgb(var(--surface-50) / var(--tw-bg-opacity, 1)) !important;
-  }
-  .bg-white\/95 {
-    background-color: rgb(var(--surface-50) / 0.95) !important;
-  }
-  .bg-white\/80 {
-    background-color: rgb(var(--surface-50) / 0.8) !important;
-  }
-  .bg-white\/5 {
-    background-color: rgb(var(--surface-50) / 0.05) !important;
   }
 
   .bg-brand-50 {
@@ -470,7 +562,6 @@ html.dark .cookie-consent-banner {
   .bg-danger-50 {
     background-color: rgb(127 29 29 / var(--tw-bg-opacity, 0.35)) !important;
   }
-  .from-white,
   .from-surface-50,
   .from-surface-100 {
     --tw-gradient-from: rgb(9 9 11 / 1) var(--tw-gradient-from-position) !important;
@@ -482,7 +573,6 @@ html.dark .cookie-consent-banner {
     --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
     --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to) !important;
   }
-  .via-white,
   .via-surface-50,
   .via-surface-100 {
     --tw-gradient-to: rgb(9 9 11 / 0) var(--tw-gradient-to-position) !important;
@@ -492,7 +582,6 @@ html.dark .cookie-consent-banner {
     --tw-gradient-to: rgb(69 10 10 / 0) var(--tw-gradient-to-position) !important;
     --tw-gradient-stops: var(--tw-gradient-from), rgb(69 10 10 / 0.42) var(--tw-gradient-via-position), var(--tw-gradient-to) !important;
   }
-  .to-white,
   .to-surface-50,
   .to-surface-100 {
     --tw-gradient-to: rgb(9 9 11 / 1) var(--tw-gradient-to-position) !important;
@@ -549,6 +638,23 @@ html.dark .cookie-consent-banner {
   .border-surface-800 {
     border-color: rgb(63 63 70 / var(--tw-border-opacity, 1)) !important;
   }
+  .text-brand-500,
+  .text-brand-600,
+  .text-red-500 {
+    color: rgb(248 113 113 / var(--tw-text-opacity, 1)) !important;
+  }
+  /* Dark counterpart of the light red-tint scope (bg-brand-50/100 are
+     deep red here): step to brand-300. */
+  .bg-brand-50 .text-brand-500,
+  .bg-brand-100 .text-brand-500,
+  .bg-brand-50 .text-brand-600,
+  .bg-brand-100 .text-brand-600,
+  .bg-brand-50.text-brand-500,
+  .bg-brand-100.text-brand-500,
+  .bg-brand-50.text-brand-600,
+  .bg-brand-100.text-brand-600 {
+    color: rgb(252 165 165 / var(--tw-text-opacity, 1)) !important;
+  }
   .text-brand-700 {
     color: rgb(var(--brand-300) / var(--tw-text-opacity, 1)) !important;
   }
@@ -563,6 +669,9 @@ html.dark .cookie-consent-banner {
   .text-success-600,
   .text-success-700 {
     color: rgb(var(--success-300) / var(--tw-text-opacity, 1)) !important;
+  }
+  .text-info-600 {
+    color: rgb(34 211 238 / var(--tw-text-opacity, 1)) !important;
   }
   .text-info-700 {
     color: rgb(var(--info-400) / var(--tw-text-opacity, 1)) !important;
@@ -662,10 +771,11 @@ html.dark :focus-visible {
     @apply font-display text-[20px] md:text-[24px] font-bold leading-[1.1] tracking-normal;
   }
 
-  /* Core UI elements from Style Guide. rounded-2xl per audit 1.1
-     (cards standardized on 12px corners — the design-reference standard). */
+  /* Core UI elements from Style Guide. Radius doctrine (design audit
+     item 7): cards are standardized on rounded-lg (12px) — the single
+     card radius across .apex-card and the swept template cards. */
   .apex-card {
-    @apply bg-surface-50 border border-surface-200 rounded-2xl transition-premium;
+    @apply bg-surface-50 border border-surface-200 rounded-lg transition-premium;
   }
 
   .apex-card:hover {
@@ -712,9 +822,11 @@ html.dark :focus-visible {
 }
 
 @layer components {
-  /* Premium transitions — explicit properties only (no `all`) per premium-experience-spec.md §3 */
+  /* Premium transitions — explicit properties only (no `all`) per premium-experience-spec.md §3.
+     `filter` is in the list so the btn hover `filter: brightness(0.9)` eases
+     instead of snapping (design audit item 2). */
   .transition-premium {
-    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-property: color, background-color, border-color, box-shadow, transform, filter;
     transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
     transition-duration: 200ms;
   }
@@ -748,42 +860,74 @@ html.dark :focus-visible {
       0 0 1px rgb(0 0 0 / 0.04);
   }
 
-  .container-marketing {
-    @apply max-w-[1200px] mx-auto px-4 md:px-6 lg:px-8;
-  }
-
   /* Removed .honest-surface and .premium-card — they were unused duplicates
      of .apex-card (same recipe, different names). Templates use .apex-card. */
 
   .btn-primary {
+    /* inline-flex, not the <a> default inline: vertical padding on an
+       inline box bleeds over the neighbouring text line (the pricing
+       teaser's volume copy collided with its own button), and
+       w-full/mt-* utilities are ignored. Flex centering makes the
+       label+arrow pairs align in every context. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     @apply px-6 py-3 text-white font-semibold rounded-lg border border-brand-700 transition-premium tracking-tight text-sm;
-    background: var(--brand-gradient);
+    background-color: rgb(var(--brand-700));
+    background-image: var(--brand-gradient);
     min-height: 44px;
   }
   .btn-primary:hover {
     filter: brightness(0.9);
   }
 
+  /* The inverse (white) CTA variant: `background-color` cannot override the
+     brand-gradient `background-image` above, so the gradient kept painting
+     under the zinc-950 text (pixel-confirmed AA failure). Drop the image. */
+  .btn-primary.\!bg-white,
+  .btn-primary.\!bg-surface-100 {
+    background-image: none;
+  }
+
   .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     @apply px-6 py-3 border border-surface-200 hover:border-surface-950 hover:bg-surface-50 bg-surface-50 text-surface-950 font-semibold rounded-lg transition-premium tracking-tight text-sm;
     min-height: 44px;
   }
 
-  .btn-accent {
-    @apply px-6 py-3 text-white font-semibold rounded-lg border border-brand-700 transition-premium tracking-tight text-sm;
-    background: var(--brand-gradient);
-    min-height: 44px;
+  /* ── Button size scale (design audit item 10) ───────────────────
+     Padding/type only — the 44px minimum target height from the base
+     layer applies to every variant, so --sm never shrinks below it. */
+  .btn-primary--lg,
+  .btn-secondary--lg {
+    @apply px-8 py-4 text-base;
+    min-height: 52px;
   }
-  .btn-accent:hover {
-    filter: brightness(0.9);
+  .btn-primary--sm,
+  .btn-secondary--sm {
+    @apply px-4 py-2 text-xs;
   }
 
-  /* Heading gradient — applied to marketing page headings */
-  .heading-gradient {
-    background: var(--brand-gradient);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
+  /* ── Button variants absorbed from private grammars (item 10) ──
+     .btn-primary--invert replaces the pricing-CTA "solid near-black"
+     button; .btn-secondary--invert replaces the 404 page's dark-surface
+     outline buttons. The invert primary is pinned to the literal
+     near-black zinc (like the dark-mode farm rules) — rgb(var(--surface-950))
+     would flip to white in dark mode and put white text on white. */
+  .btn-primary--invert {
+    @apply px-6 py-3 text-white font-semibold rounded-lg border border-surface-950 hover:border-brand-700 transition-premium tracking-tight text-sm;
+    background-color: rgb(9 9 11);
+    min-height: 44px;
+  }
+  .btn-primary--invert:hover {
+    background-color: rgb(var(--brand-700));
+  }
+
+  .btn-secondary--invert {
+    @apply px-6 py-3 border border-surface-700 bg-transparent text-surface-100 font-semibold rounded-lg hover:border-surface-500 hover:bg-surface-900 hover:text-surface-100 transition-premium tracking-tight text-sm;
+    min-height: 44px;
   }
 
   /* Apex Style Prose — for technical documentation and legal pages */
@@ -826,29 +970,54 @@ html.dark :focus-visible {
     @apply pl-6 border-l-4 border-brand-600 italic text-surface-500 my-8;
   }
 
+  /* Grid children default to min-width:auto, so long code lines and
+     unbreakable tokens blow out their track (the item's min-content wins).
+     Zero the automatic minimum so tracks can shrink and the inner
+     overflow-x:auto surfaces (pre, tables) do their job. */
+  .grid > * { min-width: 0; }
+
   .prose table {
     @apply w-full text-left border-collapse border border-surface-200 my-8;
   }
 
+  /* Wide data tables (data locations, API params, comparisons) must scroll
+     inside their own box instead of spilling past the viewport. Previously
+     mobile-only — but the same nowrap-token tables (Default Backup/Replica,
+     Transfer Safeguard, German Nachweis columns) also overflowed the
+     max-w-3xl prose column at desktop widths, pushing cells past the
+     viewport edge, so the containment now applies at every width. */
+  .prose table {
+    display: block;
+    overflow-x: auto;
+  }
+
   .prose th {
-    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[10px] font-bold tracking-widest text-surface-400;
+    @apply px-4 py-3 bg-surface-100 border border-surface-200 text-[11px] font-bold tracking-widest text-surface-600;
   }
 
   .prose td {
     @apply px-4 py-3 border border-surface-200 text-[13px] text-surface-600;
   }
 
-  /* Button loading state — replaces text with CSS spinner */
+  /* Unbreakable tokens (hostnames, region ids) and long German compounds
+     (Auftragsverarbeitung) must wrap instead of pushing cells, headings,
+     and paragraphs past the viewport. */
+  .prose h1, .prose h2, .prose h3, .prose h4, .prose p,
+  .prose td, .prose th, .prose code {
+    overflow-wrap: anywhere;
+  }
+
+  /* Button loading state — replaces text with CSS spinner.
+     (.btn-accent was deleted with the button consolidation, audit item 10:
+     it was a byte-identical duplicate of .btn-primary.) */
   .btn-primary[data-loading="true"],
-  .btn-secondary[data-loading="true"],
-  .btn-accent[data-loading="true"] {
+  .btn-secondary[data-loading="true"] {
     @apply relative pointer-events-none;
     color: transparent !important;
   }
 
   .btn-primary[data-loading="true"]::before,
-  .btn-secondary[data-loading="true"]::before,
-  .btn-accent[data-loading="true"]::before {
+  .btn-secondary[data-loading="true"]::before {
     content: '';
     position: absolute;
     left: 50%;
@@ -872,45 +1041,6 @@ html.dark :focus-visible {
     border-top-color: rgb(var(--surface-900));
   }
 
-  .btn-accent[data-loading="true"]::before {
-    border-color: rgba(255, 255, 255, 0.3);
-    border-top-color: white;
-  }
-
-  /* Button icon-only variant */
-  .btn--icon {
-    @apply px-3 py-3 inline-flex items-center justify-center;
-    min-width: 44px;
-    min-height: 44px;
-  }
-
-  /* 12-Column Grid System (Style Guide v2) */
-  .grid-12 {
-    display: grid;
-    grid-template-columns: repeat(12, 1fr);
-    gap: 16px;
-  }
-
-  @screen sm {
-    .grid-12 { gap: 16px; }
-  }
-  @screen lg {
-    .grid-12 { gap: 24px; }
-  }
-
-  .col-span-1 { grid-column: span 1 / span 1; }
-  .col-span-2 { grid-column: span 2 / span 2; }
-  .col-span-3 { grid-column: span 3 / span 3; }
-  .col-span-4 { grid-column: span 4 / span 4; }
-  .col-span-5 { grid-column: span 5 / span 5; }
-  .col-span-6 { grid-column: span 6 / span 6; }
-  .col-span-7 { grid-column: span 7 / span 7; }
-  .col-span-8 { grid-column: span 8 / span 8; }
-  .col-span-9 { grid-column: span 9 / span 9; }
-  .col-span-10 { grid-column: span 10 / span 10; }
-  .col-span-11 { grid-column: span 11 / span 11; }
-  .col-span-12 { grid-column: span 12 / span 12; }
-
   /* Button active state */
   .btn-primary:active {
     transform: scale(0.97);
@@ -920,34 +1050,6 @@ html.dark :focus-visible {
   .btn-secondary:active {
     transform: scale(0.97);
     @apply bg-surface-100 border-surface-400;
-  }
-
-  .btn-accent:active {
-    transform: scale(0.97);
-    @apply bg-accent-700;
-  }
-
-  /* Form variant classes */
-  .input--error {
-    border-color: rgb(var(--destructive));
-  }
-  .input--error:focus {
-    border-color: rgb(var(--destructive));
-    box-shadow: 0 0 0 3px rgb(var(--destructive) / 0.1);
-  }
-  .input--success {
-    border-color: rgb(var(--success));
-  }
-  .input--success:focus {
-    border-color: rgb(var(--success));
-    box-shadow: 0 0 0 3px rgb(var(--success) / 0.1);
-  }
-  .input--warning {
-    border-color: rgb(var(--warning));
-  }
-  .input--warning:focus {
-    border-color: rgb(var(--warning));
-    box-shadow: 0 0 0 3px rgb(var(--warning) / 0.1);
   }
 
   .section-title {
@@ -969,56 +1071,141 @@ html.dark :focus-visible {
     word-break: break-word;
   }
 
-  .nav-link {
-    @apply text-surface-300 hover:text-white transition-colors relative;
+  /* ── Form components (design audit item 9) ───────────────────
+     .input-text — the site's text/select input: 44px target height
+     (matching the button floor), font-medium, tabular numerals for the
+     volume/count fields it serves. Replaces the six hand-copied input
+     grammars in the pricing calculator.
+     .input-range — the calculator slider. The previous global
+     input[type='range'] pseudo-element paint silently overrode the
+     template's utility classes (double-styling bug); the paint now lives
+     on this opt-in class built from the token scale. */
+  .input-text {
+    @apply rounded-lg border border-surface-200 bg-surface-50 px-3 text-sm text-surface-950 font-medium tabular-nums transition-premium;
+    min-height: 44px;
+  }
+  .input-text:focus {
+    @apply outline-none border-brand-500 ring-1 ring-brand-500;
   }
 
-  .nav-link::after {
-    content: '';
-    position: absolute;
-    bottom: -4px;
-    left: 0;
-    width: 0;
-    height: 2px;
-    background: rgb(var(--primary));
-    transition: width 0.3s ease;
+  .input-range {
+    @apply w-full cursor-pointer appearance-none bg-transparent;
+    min-height: 44px;
+  }
+  .input-range::-webkit-slider-runnable-track {
+    @apply h-2 rounded-full bg-surface-200;
+  }
+  .input-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
+    margin-top: -10px;
+  }
+  .input-range::-moz-range-track {
+    @apply h-2 rounded-full bg-surface-200;
+  }
+  .input-range::-moz-range-thumb {
+    @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
   }
 
-  .nav-link:hover::after {
-    width: 100%;
+  /* ── Callout (design audit item 18) ──────────────────────────
+     The unified note box replacing four hand-rolled grammars
+     (macros::sources_block, macros::methodology_note, the homepage
+     methodology citation, and the calculator notice boxes). */
+  .callout {
+    @apply p-4 sm:p-6 bg-surface-50 border border-surface-200 rounded-lg text-sm text-surface-600 leading-relaxed;
+  }
+  .callout--warning {
+    @apply bg-warning-50/30 border-warning-200 text-warning-700;
   }
 
+  /* A slim full-width bottom bar: the old 28rem corner card permanently
+     covered a quarter of short viewports over page text. The bar is page
+     chrome — one copy line with inline actions — and stops being an
+     obstruction instead of a dialog impersonating content. */
   .cookie-consent-banner {
     position: fixed;
-    right: 1.5rem;
-    bottom: 1.5rem;
+    left: 0;
+    right: 0;
+    bottom: 0;
     z-index: 40;
-    width: min(28rem, calc(100vw - 2rem));
-    border: 1px solid rgb(var(--surface-800));
+    border-top: 1px solid rgb(var(--surface-800));
     background: rgb(var(--surface-50));
-    padding: 1rem;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
+    padding: 0.625rem 1rem;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.07);
+  }
+
+  .cookie-consent-inner {
+    max-width: 80rem;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+  }
+
+  .cookie-consent-copy {
+    flex: 1 1 22rem;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .cookie-consent-heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgb(var(--surface-950));
+    white-space: nowrap;
+  }
+
+  .cookie-consent-dot {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    background: rgb(var(--brand-500));
+  }
+
+  #cookie-consent-copy {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgb(var(--surface-600));
+    min-width: 0;
   }
 
   .cookie-consent-actions {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
+  }
+
+  .cookie-consent-policy {
+    margin-left: 0.25rem;
+    white-space: nowrap;
   }
 
   .cookie-consent-button {
     display: inline-flex;
     min-width: 0;
-    min-height: 44px;
+    min-height: 36px;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-sm);
-    padding: 0.55rem 0.5rem;
+    padding: 0.4rem 0.75rem;
     text-align: center;
     font-size: 11px;
     font-weight: 700;
     line-height: 1.15;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
     transition: color 200ms cubic-bezier(0.23, 1, 0.32, 1), background-color 200ms cubic-bezier(0.23, 1, 0.32, 1), border-color 200ms cubic-bezier(0.23, 1, 0.32, 1);
   }
 
@@ -1044,17 +1231,34 @@ html.dark :focus-visible {
   }
 }
 
-@media (max-width: 479px) {
+@media (max-width: 639px) {
   .cookie-consent-banner {
-    right: 0.5rem;
-    bottom: 0.5rem;
-    left: 0.5rem;
-    width: auto;
-    padding: 0.625rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .cookie-consent-inner {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.625rem;
+  }
+
+  .cookie-consent-copy {
+    flex-basis: auto;
+  }
+
+  #cookie-consent-copy {
+    font-size: 11px;
   }
 
   .cookie-consent-actions {
+    display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cookie-consent-policy {
+    grid-column: 1 / -1;
+    text-align: center;
+    margin-left: 0;
   }
 
   .cookie-consent-button[data-cookie-consent-value="all"] {
@@ -1073,6 +1277,28 @@ html.dark :focus-visible {
 
   .animate-in-up {
     animation: slideUp 0.5s ease-out forwards;
+  }
+
+  /* Scroll-driven variant (design audit item 3): where animation timelines
+     are supported, the reveal is driven by the element's position in the
+     viewport instead of page load, so below-fold content animates when it
+     is actually seen. The load-timed rules above remain the fallback for
+     browsers without scroll timelines. `both` keeps the pre-entry state
+     hidden until the element enters the scroll range; elements already
+     inside the viewport at load render in their final state. */
+  @supports (animation-timeline: view()) {
+    @media (prefers-reduced-motion: no-preference) {
+      .animate-in {
+        animation: fadeIn linear both;
+        animation-timeline: view();
+        animation-range: entry 0% entry 70%;
+      }
+      .animate-in-up {
+        animation: slideUp linear both;
+        animation-timeline: view();
+        animation-range: entry 0% entry 70%;
+      }
+    }
   }
 
   .delay-100 {
@@ -1114,34 +1340,56 @@ html.dark :focus-visible {
   }
 }
 
-/* Apex Syntax Theme (Syntect/Giallo compatible) */
-.z-code { @apply text-surface-100 bg-surface-950; }
-.z-comment { @apply text-surface-500 italic; }
-.z-keyword { @apply text-brand-400 font-bold; }
-.z-string { @apply text-brand-200; }
-.z-constant { @apply text-brand-500; }
-.z-entity { @apply text-surface-100; }
-.z-support { @apply text-brand-400; }
-.z-variable { @apply text-surface-100; }
-.z-punctuation { @apply text-surface-400; }
+/* Apex Syntax Theme (Syntect/Giallo compatible).
+   Code blocks are near-black (bg-surface-950 via .prose pre / .code-block)
+   in BOTH themes, so the token mapping below uses the dark-appropriate
+   zinc/brand steps year-round. Every rule carries !important because the
+   build-time generated giallo.css (Zola's "github-light" palette) loads
+   AFTER this stylesheet and would otherwise repaint light-theme token
+   colors — dark blues/dark grays — onto the dark blocks (1.4-4.4:1). */
+.z-code { color: rgb(244 244 245) !important; background-color: rgb(9 9 11) !important; }
+.z-comment { color: rgb(161 161 170) !important; font-style: italic; }
+.z-keyword { color: rgb(248 113 113) !important; font-weight: 700; }
+.z-string { color: rgb(254 202 202) !important; }
+.z-constant { color: rgb(248 113 113) !important; }
+.z-entity { color: rgb(244 244 245) !important; }
+.z-support { color: rgb(248 113 113) !important; }
+.z-variable { color: rgb(244 244 245) !important; }
+.z-punctuation { color: rgb(161 161 170) !important; }
+.z-storage { color: rgb(248 113 113) !important; }
+.z-source { color: rgb(244 244 245) !important; }
+.z-meta { color: rgb(161 161 170) !important; }
+.z-markup { color: rgb(244 244 245) !important; }
+.z-invalid { color: rgb(248 113 113) !important; }
+.z-message { color: rgb(248 113 113) !important; }
+.z-brackethighlighter { color: rgb(161 161 170) !important; }
+.z-carriage-return { color: rgb(244 244 245) !important; background-color: rgb(220 38 38) !important; }
+.z-hl { background-color: rgb(24 24 27) !important; }
+.giallo-ln { color: rgb(161 161 170) !important; }
 
-/* Prism/Code highlighting (Manual/Legacy) */
+/* Prism/Code highlighting (Manual/Legacy) — same dark-block mapping. */
 .code-highlight {
-  @apply text-brand-500 font-bold;
+  color: rgb(248 113 113) !important;
+  font-weight: 700;
 }
 
 .code-string {
-  @apply text-brand-300;
+  color: rgb(252 165 165) !important;
 }
 
 .code-keyword {
-  @apply text-brand-400;
+  color: rgb(248 113 113) !important;
 }
 
 .code-comment {
-  @apply text-surface-500 italic;
+  color: rgb(161 161 170) !important;
+  font-style: italic;
 }
 
+/* Dark-theme re-assertions use the SAME brand/zinc steps as the base
+   mapping above (the indigo-era #93c5fd / #fde68a leftovers were removed
+   with the 2026-08-21 brand restore). Code blocks stay near-black in both
+   themes, so these values keep >= AA on rgb(9 9 10). */
 @media (prefers-color-scheme: dark) {
   .z-code {
     color: #f4f4f5 !important;
@@ -1154,10 +1402,10 @@ html.dark :focus-visible {
   .z-constant,
   .z-support,
   .z-keyword {
-    color: #93c5fd !important;
+    color: rgb(248 113 113) !important;
   }
   .z-string {
-    color: #fde68a !important;
+    color: rgb(254 202 202) !important;
   }
   .z-entity,
   .z-variable {
@@ -1176,10 +1424,10 @@ html.dark .z-punctuation {
 html.dark .z-constant,
 html.dark .z-support,
 html.dark .z-keyword {
-  color: #93c5fd !important;
+  color: rgb(248 113 113) !important;
 }
 html.dark .z-string {
-  color: #fde68a !important;
+  color: rgb(254 202 202) !important;
 }
 html.dark .z-entity,
 html.dark .z-variable {
@@ -1198,30 +1446,52 @@ html.dark .z-variable {
   }
 }
 
-/* Calculator slider */
-input[type='range'] {
-  -webkit-appearance: none;
-  appearance: none;
-  background: transparent;
+/* ── Form components (design audit item 9) ───────────────────
+   .input-text — the site's text/select input: 44px target height
+   (matching the button floor), font-medium, tabular numerals for the
+   volume/count fields it serves. Replaces the six hand-copied input
+   grammars in the pricing calculator.
+   .input-range — the calculator slider. The previous global
+   input[type='range'] pseudo-element paint silently overrode the
+   template's utility classes (double-styling bug); the paint now lives
+   on this opt-in class built from the token scale. */
+.input-text {
+  @apply rounded-lg border border-surface-200 bg-surface-50 px-3 text-sm text-surface-950 font-medium tabular-nums transition-premium;
+  min-height: 44px;
+}
+.input-text:focus {
+  @apply outline-none border-brand-500 ring-1 ring-brand-500;
 }
 
-input[type='range']::-webkit-slider-track {
-  @apply h-2 rounded-none bg-surface-700;
+.input-range {
+  @apply w-full cursor-pointer appearance-none bg-transparent;
+  min-height: 44px;
 }
-
-input[type='range']::-webkit-slider-thumb {
+.input-range::-webkit-slider-runnable-track {
+  @apply h-2 rounded-full bg-surface-200;
+}
+.input-range::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  @apply w-7 h-7 rounded-sm bg-brand-500 cursor-pointer shadow-premium border-2 border-white;
+  @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
   margin-top: -10px;
 }
-
-input[type='range']::-moz-range-track {
-  @apply h-2 rounded-none bg-surface-700;
+.input-range::-moz-range-track {
+  @apply h-2 rounded-full bg-surface-200;
+}
+.input-range::-moz-range-thumb {
+  @apply w-7 h-7 rounded-full bg-brand-500 border-2 border-white shadow-premium-sm cursor-pointer;
 }
 
-input[type='range']::-moz-range-thumb {
-  @apply w-7 h-7 rounded-sm bg-brand-500 cursor-pointer border-2 border-white shadow-premium;
+/* ── Callout (design audit item 18) ──────────────────────────
+   The unified note box replacing four hand-rolled grammars
+   (macros::sources_block, macros::methodology_note, the homepage
+   methodology citation, and the calculator notice boxes). */
+.callout {
+  @apply p-4 sm:p-6 bg-surface-50 border border-surface-200 rounded-lg text-sm text-surface-600 leading-relaxed;
+}
+.callout--warning {
+  @apply bg-warning-50/30 border-warning-200 text-warning-700;
 }
 
 /* Terminal animation */
@@ -1282,41 +1552,11 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
-/* Intersection observer triggered animations */
-.animate-on-scroll {
-  opacity: 0;
-  transform: translateY(20px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-}
-
-.animate-on-scroll.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 /* Status page refresh notice — used in status-overview-island.html */
 .status-refresh-notice {
   font-size: 0.75rem;
   line-height: 1rem;
   color: rgb(var(--surface-500));
-}
-
-/* Hover transitions (replaces motion whileHover) */
-.hover-lift {
-  transition: transform 0.2s ease-out, box-shadow 0.2s ease-out;
-}
-
-.hover-lift:hover {
-  transform: translateY(-4px);
-  @apply shadow-premium-hover;
-}
-
-.hover-scale {
-  transition: transform 0.15s ease-out;
-}
-
-.hover-scale:hover {
-  transform: scale(1.02);
 }
 
 .cursor-blink {
@@ -1334,3 +1574,448 @@ input[type='range']::-moz-range-thumb {
 
 
 
+
+/* ── Unified design language (2026-09-05): needle nav + receipt footer ──
+   The active nav link is the winning nonce: a solid slot among faint
+   siblings. Scoped to header/footer nav links carrying aria-current. */
+nav a[aria-current="page"],
+header a[aria-current="page"] {
+  background: rgb(var(--brand-500));
+  color: #fff !important;
+  border-radius: 4px;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+/* The mono micro-label system: shared with the widget + consoles. */
+.k-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+/* Receipt rows (challenge · work · proof) — the footer closes with one. */
+.k-receipt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.9;
+  color: rgb(var(--surface-500));
+}
+.k-receipt .ok { color: rgb(var(--brand-600)); font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .k-receipt,
+  :root:not(.light) .k-arc-label { color: rgb(var(--surface-600)); }
+  :root:not(.light) .k-receipt .ok { color: rgb(var(--brand-500)); }
+}
+html.dark .k-receipt,
+html.dark .k-arc-label { color: rgb(var(--surface-600)); }
+html.dark .k-receipt .ok { color: rgb(var(--brand-500)); }
+
+
+/* ── Spiral-Lock DNA v2 (2026-09-06) — the mark's geometry, platform-wide ── */
+:root {
+  --radius-arch-lg: 16px 16px 9px 9px;
+  --radius-arch-btn: 8px 8px 7px 7px;
+  --radius-arch-input: 9px 9px 7px 7px;
+}
+/* ARCH: every card/panel and button carries the shackle crown. */
+.apex-card, .card, [class*="rounded-2xl"] { border-radius: var(--radius-arch-lg) !important; }
+.btn-primary, .btn-secondary, button[class*="btn"] { border-radius: var(--radius-arch-btn) !important; }
+/* CONCENTRIC: focus is the spiral's two arms. */
+.btn-primary:focus-visible, .btn-secondary:focus-visible, a:focus-visible, button:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid rgb(var(--brand-500));
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px var(--surface-50, #fafafa), 0 0 0 6px var(--surface-300, #d4d4d8);
+}
+/* POINT: meters terminate in the found nonce. */
+.k-meter { position: relative; height: 2px; background: rgb(var(--surface-200)); border-radius: 2px; }
+.k-meter > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: rgb(var(--brand-500)); }
+.k-meter.k-ok > i { background: rgb(var(--success-500, 5 150 105)); }
+.k-meter > b { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%;
+  background: rgb(var(--brand-500)); border: 2px solid rgb(var(--surface-50)); transform: translate(-50%, -50%); }
+.k-meter.k-ok > b { background: rgb(var(--success-500, 5 150 105)); }
+/* ARC labels: the shackle crown before every mono section label. */
+.k-arc { color: rgb(var(--brand-500)); flex-shrink: 0; }
+/* WINDING receipts: arcs rotate stepwise down the rows. */
+.k-receipt div { display: flex; align-items: center; gap: 9px; }
+.k-receipt svg { flex-shrink: 0; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   v2 MARKETING COMPONENTS — implemented from the approved full-page preview
+   (docs/design/full-page-previews.html). Spiral-Lock DNA: slot / needle /
+   receipt / hairline / arch / point / mono-data.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── The checksum ribbon (hero): one solid slot among faint ── */
+.ribbon { display: flex; gap: 4px; }
+.ribbon span {
+  display: grid; place-items: center; min-width: 24px; height: 27px; padding: 0 4px;
+  border-radius: 6px 6px 5px 5px; /* ARCH */
+  background: rgb(var(--surface-200)); color: rgb(var(--surface-600));
+  font: 700 12px var(--font-mono, ui-monospace, Menlo, monospace);
+}
+.ribbon span.m { background: rgb(var(--brand-600)); color: #fff; }
+
+/* ── Themed card surface for the bg-card utility (inputs, badges, panels).
+      The class was used by templates but never defined — it rendered
+      transparent. Follows the --card token, so it flips in dark mode. ── */
+.bg-card { background-color: rgb(var(--card)); }
+
+/* ── Base DNA card: arch crown, hairline border, themed surface ──
+      Used by the features grid and pricing teaser. Previously ONLY the
+      .ledger-feat-scoped variant carried styling; the v3 homepage
+      restructure dropped that wrapper and every bare card-dna went
+      unstyled (no background, no border, no crown). Padding lives here
+      so a bare card-dna can never ship with content hugging its border;
+      utility overrides (p-6 on pricing) still win. */
+.card-dna {
+  border: 1px solid rgb(var(--surface-200));
+  border-radius: 16px 16px 9px 9px;
+  background: rgb(var(--card));
+  padding: 20px;
+  box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.05),
+              0 1px 3px rgb(9 9 11 / 0.03);
+}
+.card-dna:hover {
+  border-color: rgb(var(--brand-400));
+  box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.08),
+              0 4px 12px rgb(9 9 11 / 0.05);
+}
+/* ── The ledger index (01/02/…) — base rule so the numeral renders as
+      the small brand-mono index everywhere, never as body text. ── */
+.ix {
+  font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
+  /* brand-600 on light cards (brand-500 is 3.61 — sub-AA for 10px);
+     brand-500 returns in dark where it sits on zinc-950 at 5.2. */
+  letter-spacing: 0.16em; color: rgb(var(--brand-600));
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .ix { color: rgb(var(--brand-500)); }
+}
+html.dark .ix { color: rgb(var(--brand-500)); }
+/* The centered "All features →" exit under the features grid: the arc
+   label in the brand color (the eyebrow variant stays muted). Compound
+   selector beats the base .k-arc-label color regardless of order. */
+.k-arc-label--brand { color: rgb(var(--brand-600)); }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .k-arc-label--brand { color: rgb(var(--brand-500)); }
+}
+html.dark .k-arc-label--brand { color: rgb(var(--brand-500)); }
+.k-arc-label.features-see-all { color: rgb(var(--brand-600)); }
+.k-arc-label.features-see-all:hover { color: rgb(var(--brand-700)); }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .k-arc-label.features-see-all { color: rgb(var(--brand-500)); }
+  :root:not(.light) .k-arc-label.features-see-all:hover { color: rgb(var(--brand-400)); }
+}
+html.dark .k-arc-label.features-see-all { color: rgb(var(--brand-500)); }
+html.dark .k-arc-label.features-see-all:hover { color: rgb(var(--brand-400)); }
+
+/* ── The terminal panel (hero right column) ── */
+.term {
+  background: #101012; color: #e4e4e7;
+  border: 1px solid #27272a; border-radius: 16px 16px 9px 9px; /* ARCH-lg */
+  overflow: hidden; font: 12.5px/1.7 var(--font-mono, ui-monospace, Menlo, monospace);
+}
+.term-bar { display: flex; gap: 6px; align-items: center; padding: 9px 14px; border-bottom: 1px solid #27272a; color: #a1a1aa; }
+.term-bar b { font-weight: 600; letter-spacing: 0.1em; font-size: 10px; margin-left: 8px; }
+.term-dot { width: 9px; height: 9px; border-radius: 50%; background: #3f3f46; }
+.term-pre { padding: 18px; overflow-x: auto; margin: 0; white-space: pre; }
+.term-c { color: #8b8b96; } .term-k { color: #f87171; } .term-s { color: #34d399; }
+
+/* The trace, made real: run row inside the terminal panel. */
+.term-run {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+  padding: 14px 18px; border-top: 1px solid #27272a; background: #141416;
+}
+.term-run .btn-primary { height: 36px; padding: 0 14px; font-size: 12.5px; }
+.term-run-note {
+  font: 500 11px var(--font-mono, ui-monospace, Menlo, monospace);
+  color: #a1a1aa; letter-spacing: 0.02em;
+}
+
+/* ── Stats band: mono display values over point-meters ── */
+.stats {
+  display: grid; grid-template-columns: 1fr; gap: 1px; /* mobile: stacked */
+  background: rgb(var(--surface-200)); border: 1px solid rgb(var(--surface-200));
+  border-radius: 16px 16px 9px 9px; overflow: hidden; /* ARCH-lg */
+}
+.stats > div { background: rgb(var(--card)); padding: 20px 22px; }
+.stats-v {
+  font: 700 26px var(--font-mono, ui-monospace, Menlo, monospace);
+  letter-spacing: -0.02em; margin: 8px 0 10px;
+}
+.stats-v-dim { color: rgb(var(--surface-500)); }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .stats-v-dim { color: rgb(var(--surface-600)); }
+}
+html.dark .stats-v-dim { color: rgb(var(--surface-600)); }
+
+/* ── Arc labels: the shackle crown before every mono section label ── */
+.k-arc-label {
+  display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.16em; text-transform: uppercase;
+  /* surface-600: one step darker than the old 500 so 10px mono clears
+     AA on surface-100 cards too; the token flip keeps dark themes on
+     the light shade via the dark overrides below. */
+  color: rgb(var(--surface-600));
+}
+.k-arc-label::before {
+  content: ""; width: 17px; height: 11px; flex-shrink: 0;
+  background: currentColor; /* replaced below by mask for stroke look */
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 14' fill='none'%3E%3Cpath d='M4 12 A 9 9 0 0 1 20 12' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 14' fill='none'%3E%3Cpath d='M4 12 A 9 9 0 0 1 20 12' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  color: rgb(var(--brand-500));
+  background-color: rgb(var(--brand-500));
+}
+
+/* ── Slot nav (header): links as flip-cells; the active page is solid ── */
+.slot-nav { display: flex; gap: 4px; align-items: center; }
+.slot-nav a {
+  font: 600 11px var(--font-mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none;
+  color: rgb(var(--surface-600)); padding: 7px 10px;
+  border-radius: 6px 6px 5px 5px; /* ARCH */
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.slot-nav a:hover { color: rgb(var(--surface-950)); background: rgb(var(--surface-100)); }
+.slot-nav a.on, .slot-nav a[aria-current="page"] {
+  background: rgb(var(--brand-600)); color: #fff;
+}
+
+/* ── Ledger feature cards: hex tag slots + the red index ── */
+.ledger-feat { display: grid; grid-template-columns: 1fr; gap: 16px; }
+@media (min-width: 640px) {
+  .stats { grid-template-columns: repeat(3, 1fr); }
+  .ledger-feat { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 1024px) {
+  .ledger-feat { grid-template-columns: repeat(3, 1fr); }
+}
+.ledger-feat .card-dna {
+  border: 1px solid rgb(var(--surface-200)); border-radius: 16px 16px 9px 9px;
+  padding: 18px; background: rgb(var(--card));
+}
+.ledger-feat .ix {
+  font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
+  /* brand-600 on light cards (brand-500 is 3.61 — sub-AA for 10px);
+     brand-500 returns in dark where it sits on zinc-950 at 5.2. */
+  letter-spacing: 0.16em; color: rgb(var(--brand-600));
+}
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .ix { color: rgb(var(--brand-500)); }
+}
+html.dark .ix { color: rgb(var(--brand-500)); }
+.ledger-feat .tag-slots { display: flex; gap: 2px; }
+.ledger-feat .tag-slots span {
+  display: grid; place-items: center; min-width: 14px; height: 17px; padding: 0 3px;
+  border-radius: 4px; background: rgb(var(--surface-200)); color: rgb(var(--surface-600));
+  font: 600 9px var(--font-mono, ui-monospace, Menlo, monospace);
+}
+
+/* ── Split-flap pricing: digits as slots; recommended = the needle ── */
+.price-slot {
+  display: grid; place-items: center; min-width: 26px; height: 33px; border-radius: 6px 6px 5px 5px;
+  font: 700 22px var(--font-mono, ui-monospace, Menlo, monospace);
+  background: rgb(var(--surface-200)); color: rgb(var(--surface-950));
+}
+.price-slot.brand { background: rgb(var(--brand-500)); color: #fff; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOBILE COMPACTION (2026-09-06) — the desktop-first layout stacked into an
+   endless 14k-px column on phones. Compacted: section rhythm, hero, stats,
+   terminal, cards — everything breathes at phone width without ballooning.
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 640px) {
+  /* Section rhythm: py-20 (80px) is generous on a 640px-tall phone — halve it */
+  section[class*="py-20"] { padding-top: 2.5rem !important; padding-bottom: 2.5rem !important; }
+
+  /* Hero: compact */
+  .ribbon span { min-width: 20px; height: 23px; font-size: 10px; }
+  .term-pre { padding: 12px; font-size: 11px; line-height: 1.6; }
+  .term-pre code, .term-pre span { word-break: break-all; }
+
+  /* Stats: NOT three stacked bars — a tight 3-up row with smaller values */
+  .stats { grid-template-columns: repeat(3, 1fr) !important; }
+  .stats > div { padding: 12px 10px; }
+  .stats-v { font-size: 18px; margin: 4px 0 6px; }
+  .k-arc-label { font-size: 8.5px; letter-spacing: 0.1em; gap: 4px; }
+  .k-arc-label::before { width: 12px; height: 8px; }
+
+  /* Ledger cards: compact padding */
+  .ledger-feat .card-dna { padding: 12px; }
+  .ledger-feat .tag-slots span { min-width: 12px; height: 15px; font-size: 8px; }
+
+  /* Pricing slots: smaller digits */
+  .price-slot { min-width: 20px; height: 26px; font-size: 17px; }
+
+  /* Headers: h1/h2 clamp on phones */
+  h1 { font-size: clamp(34px, 9vw, 44px) !important; }
+  section h2 { font-size: clamp(28px, 8vw, 36px) !important; }
+
+  /* Cards: less desktop padding */
+  .apex-card { padding: 1.25rem !important; }
+  .apex-card[class*="p-10"] { padding: 1.25rem !important; }
+
+  /* Footer: tighten */
+  footer { padding-top: 2rem !important; padding-bottom: 2rem !important; }
+  .k-receipt { font-size: 10px; line-height: 1.8; }
+}
+
+
+/* ── Features page: 38 cards at 1-up on phones is endless — 2-up compact ──
+   The compact 2-up grid is kept, but the descriptions are NO LONGER
+   clamped: the old -webkit-line-clamp:2 + overflow:hidden silently cut
+   card text off after two lines (flagged as cut-off-text-y). Descriptions
+   now wrap to their full height, and long German compounds
+   (IP-Reputationsüberwachung) break instead of spilling past the card
+   (text-spills-box). min-width:0 lets the 1fr tracks shrink below the
+   unbreakable-word minimum. */
+@media (max-width: 640px) {
+  .features-grid .animate-in { padding: 0.75rem !important; min-width: 0; }
+  .features-grid { grid-template-columns: repeat(2, 1fr) !important; gap: 0.5rem !important; }
+  .features-grid h4 { font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; }
+  .features-grid p { font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+  .features-grid .w-8 { width: 1.5rem; height: 1.5rem; }
+  .features-grid .mb-4 { margin-bottom: 0.5rem; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CARD DNA VISIBILITY PASS (2026-09-07): the ledger cards and pricing
+   cards carried the DNA classes but they were nearly invisible — the hex
+   tags were too small, the arch crowns had no visual distinction, and the
+   cards read as flat bordered boxes. This pass makes the DNA VISIBLE:
+   arch crowns with a subtle brand-tinted halo, visible hex tags with
+   proper contrast, monospace data in slot cells, and proper card depth.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Numeric tokens (review 2026-09-08 §6/§57): ALL financial and
+      operational numerals are plain tabular lining figures with ZERO
+      tracking — the spaced APEXMAIL wordmark treatment must never leak
+      onto prices, percentages, counts, latencies or timestamps. ── */
+.price-value,
+.stats-v,
+.stats-v-dim,
+.metric,
+.usage-number,
+.tabular-nums {
+  letter-spacing: 0 !important;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+.price-value {
+  font: 700 30px var(--font-mono, ui-monospace, Menlo, monospace);
+  color: rgb(var(--surface-950));
+}
+.price-value--brand { color: rgb(var(--brand-500)); }
+
+/* ── Ledger cards: visible arch crown + depth + hex tags that read ── */
+.ledger-feat .card-dna {
+  border: 1px solid rgb(var(--surface-200));
+  border-radius: 16px 16px 9px 9px;
+  padding: 20px;
+  background: rgb(var(--card));
+  position: relative;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  /* ARCH halo: a subtle brand glow at the crown */
+  box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.06),
+              0 1px 3px rgb(9 9 11 / 0.03);
+}
+.ledger-feat .card-dna:hover {
+  border-color: rgb(var(--brand-400));
+  box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.1),
+              0 4px 12px rgb(9 9 11 / 0.06);
+}
+/* the index: large enough to read, mono, brand */
+.ledger-feat .ix {
+  font: 700 12px var(--font-mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.14em;
+  color: rgb(var(--brand-500));
+  background: rgb(var(--brand-500) / 0.07);
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+/* the hex tag slots: visible cells, not micro-text */
+.ledger-feat .tag-slots span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px; height: 20px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgb(var(--surface-100));
+  color: rgb(var(--surface-600));
+  font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
+  border: 1px solid rgb(var(--surface-200));
+}
+/* card headings and body */
+.ledger-feat h3 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; margin-top: 14px; }
+.ledger-feat p { font-size: 13px; line-height: 1.6; margin-top: 6px; }
+
+/* the "All features" link card */
+.ledger-feat .card-dna[class*="items-center"] {
+  min-height: 120px;
+  background: rgb(var(--brand-500) / 0.03);
+  border: 1px dashed rgb(var(--brand-400) / 0.4);
+}
+.ledger-feat .card-dna[class*="items-center"]:hover {
+  background: rgb(var(--brand-500) / 0.06);
+  border-color: rgb(var(--brand-500));
+}
+.ledger-feat .card-dna[class*="items-center"] a {
+  font: 700 13px var(--font-mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ── Pricing cards: arch crown + depth + slot digits that read ── */
+.card-dna[class*="outline"],
+.card-dna[style*="outline"] {
+  box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.08),
+              0 1px 3px rgb(9 9 11 / 0.03);
+}
+/* Was ".card-dna p-6" — a broken selector matching a nonexistent <p-6>
+   element; the intent was the compound utility class. */
+.card-dna.p-6 {
+  padding: 24px;
+}
+/* price-slot: bigger, bolder, more distinct */
+.price-slot {
+  min-width: 30px; height: 38px;
+  border-radius: 6px 6px 5px 5px;
+  font: 700 26px var(--font-mono, ui-monospace, Menlo, monospace);
+  background: rgb(var(--surface-200));
+  color: rgb(var(--surface-950));
+  border: 1px solid rgb(var(--surface-300));
+  box-shadow: 0 1px 2px rgb(9 9 11 / 0.05);
+}
+.price-slot.brand {
+  background: rgb(var(--brand-500));
+  color: #fff;
+  border-color: rgb(var(--brand-600));
+  box-shadow: 0 2px 6px rgb(var(--brand-500) / 0.3);
+}
+
+/* ── Tables: prevent unnecessary word breaks ── */
+table td, table th {
+  word-break: keep-all;
+  overflow-wrap: normal;
+  hyphens: none;
+  white-space: nowrap;
+}
+/* comparison tables: let the container scroll, not the words break */
+.overflow-x-auto table {
+  min-width: 600px;
+}
+
+/* ── CTA section: stop being 815px tall for a heading + 2 buttons ── */
+@media (min-width: 641px) {
+  section[class*="relative overflow-hidden"][class*="py-20"]:has(.btn-primary--lg):not(:has(.term)) {
+    padding-top: 4rem !important;
+    padding-bottom: 4rem !important;
+  }
+}
+
+/* ── Feature grid gap tightening ── */
+.ledger-feat { gap: 20px; }
+@media (max-width: 640px) { .ledger-feat { gap: 12px; } }

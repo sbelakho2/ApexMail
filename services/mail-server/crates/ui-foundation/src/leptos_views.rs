@@ -3611,7 +3611,7 @@ pub fn control_plane_dashboard_page() -> String {
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">worker</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">queue</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">billing</span>
-        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500 text-white">all nominal</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500" style="color:#09090b">all nominal</span>
     </section>
 
     <!-- WINDING receipt (mark DNA): the platform's proof line under the

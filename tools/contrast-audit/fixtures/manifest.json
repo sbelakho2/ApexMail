@@ -1541,44 +1541,22 @@
       }
     },
     {
-      "id": "marketing-case-studies-desktop",
+      "id": "marketing-email-logs-desktop",
       "surface": "marketing",
-      "route": "/case-studies",
-      "htmlFile": "marketing-case-studies.html",
-      "snapshotFile": "marketing-case-studies-desktop.png",
+      "route": "/email-logs",
+      "htmlFile": "marketing-email-logs.html",
+      "snapshotFile": "marketing-email-logs-desktop.png",
       "viewport": {
         "width": 1440,
         "height": 900
       }
     },
     {
-      "id": "marketing-case-studies-mobile",
+      "id": "marketing-email-logs-mobile",
       "surface": "marketing",
-      "route": "/case-studies",
-      "htmlFile": "marketing-case-studies.html",
-      "snapshotFile": "marketing-case-studies-mobile.png",
-      "viewport": {
-        "width": 390,
-        "height": 844
-      }
-    },
-    {
-      "id": "marketing-forensic-desktop",
-      "surface": "marketing",
-      "route": "/forensic",
-      "htmlFile": "marketing-forensic.html",
-      "snapshotFile": "marketing-forensic-desktop.png",
-      "viewport": {
-        "width": 1440,
-        "height": 900
-      }
-    },
-    {
-      "id": "marketing-forensic-mobile",
-      "surface": "marketing",
-      "route": "/forensic",
-      "htmlFile": "marketing-forensic.html",
-      "snapshotFile": "marketing-forensic-mobile.png",
+      "route": "/email-logs",
+      "htmlFile": "marketing-email-logs.html",
+      "snapshotFile": "marketing-email-logs-mobile.png",
       "viewport": {
         "width": 390,
         "height": 844
@@ -1959,44 +1937,22 @@
       }
     },
     {
-      "id": "marketing-zola-case-studies-desktop",
+      "id": "marketing-zola-email-logs-desktop",
       "surface": "marketing-zola",
-      "route": "/case-studies",
-      "htmlFile": "marketing-zola-case-studies.html",
-      "snapshotFile": "marketing-zola-case-studies-desktop.png",
+      "route": "/email-logs",
+      "htmlFile": "marketing-zola-email-logs.html",
+      "snapshotFile": "marketing-zola-email-logs-desktop.png",
       "viewport": {
         "width": 1440,
         "height": 900
       }
     },
     {
-      "id": "marketing-zola-case-studies-mobile",
+      "id": "marketing-zola-email-logs-mobile",
       "surface": "marketing-zola",
-      "route": "/case-studies",
-      "htmlFile": "marketing-zola-case-studies.html",
-      "snapshotFile": "marketing-zola-case-studies-mobile.png",
-      "viewport": {
-        "width": 390,
-        "height": 844
-      }
-    },
-    {
-      "id": "marketing-zola-forensic-desktop",
-      "surface": "marketing-zola",
-      "route": "/forensic",
-      "htmlFile": "marketing-zola-forensic.html",
-      "snapshotFile": "marketing-zola-forensic-desktop.png",
-      "viewport": {
-        "width": 1440,
-        "height": 900
-      }
-    },
-    {
-      "id": "marketing-zola-forensic-mobile",
-      "surface": "marketing-zola",
-      "route": "/forensic",
-      "htmlFile": "marketing-zola-forensic.html",
-      "snapshotFile": "marketing-zola-forensic-mobile.png",
+      "route": "/email-logs",
+      "htmlFile": "marketing-zola-email-logs.html",
+      "snapshotFile": "marketing-zola-email-logs-mobile.png",
       "viewport": {
         "width": 390,
         "height": 844

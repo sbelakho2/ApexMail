@@ -19,9 +19,6 @@
         <loc>https://apexmail.ee/architecture/</loc>
     </url>
     <url>
-        <loc>https://apexmail.ee/case-studies/</loc>
-    </url>
-    <url>
         <loc>https://apexmail.ee/compare/</loc>
     </url>
     <url>
@@ -73,13 +70,43 @@
         <loc>https://apexmail.ee/de/acceptable-use/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/de/anti-spam/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/de/compare/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/compare/amazon-ses/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/compare/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/compare/methodology/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/compare/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/compare/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/compare/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/compliance/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/contact/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/contact/enterprise/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/contact/sales/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/contact/security/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/cookies/</loc>
@@ -91,7 +118,19 @@
         <loc>https://apexmail.ee/de/dpa/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/de/enterprise/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/de/features/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/pricing/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/pricing/calculator/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/privacy/</loc>
@@ -106,13 +145,34 @@
         <loc>https://apexmail.ee/de/responsible-disclosure/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/de/secure-email-for-regulated-saas/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/de/security/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/sla/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/de/solutions/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/de/solutions/enterprise/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/solutions/high-volume-sending/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/solutions/migration/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/solutions/regulated-industries/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/solutions/saas-platforms/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/de/solutions/transactional-email/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/de/status/</loc>
@@ -151,6 +211,9 @@
         <loc>https://apexmail.ee/dpa/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/email-logs/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/enterprise/</loc>
     </url>
     <url>
@@ -163,13 +226,43 @@
         <loc>https://apexmail.ee/es/acceptable-use/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/es/anti-spam/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/es/compare/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/compare/amazon-ses/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/compare/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/compare/methodology/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/compare/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/compare/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/compare/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/compliance/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/contact/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/contact/enterprise/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/contact/sales/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/contact/security/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/cookies/</loc>
@@ -181,7 +274,19 @@
         <loc>https://apexmail.ee/es/dpa/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/es/enterprise/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/es/features/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/pricing/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/pricing/calculator/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/privacy/</loc>
@@ -196,13 +301,34 @@
         <loc>https://apexmail.ee/es/responsible-disclosure/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/es/secure-email-for-regulated-saas/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/es/security/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/sla/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/es/solutions/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/es/solutions/enterprise/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/solutions/high-volume-sending/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/solutions/migration/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/solutions/regulated-industries/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/solutions/saas-platforms/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/es/solutions/transactional-email/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/es/status/</loc>
@@ -217,9 +343,6 @@
         <loc>https://apexmail.ee/features/</loc>
     </url>
     <url>
-        <loc>https://apexmail.ee/forensic/</loc>
-    </url>
-    <url>
         <loc>https://apexmail.ee/fr/</loc>
     </url>
     <url>
@@ -229,13 +352,43 @@
         <loc>https://apexmail.ee/fr/acceptable-use/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/fr/anti-spam/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/fr/compare/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/compare/amazon-ses/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/compare/mailgun/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/compare/methodology/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/compare/postmark/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/compare/resend/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/compare/sendgrid/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/compliance/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/contact/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/contact/enterprise/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/contact/sales/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/contact/security/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/cookies/</loc>
@@ -247,7 +400,19 @@
         <loc>https://apexmail.ee/fr/dpa/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/fr/enterprise/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/fr/features/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/inbox-placement/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/pricing/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/pricing/calculator/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/privacy/</loc>
@@ -262,13 +427,34 @@
         <loc>https://apexmail.ee/fr/responsible-disclosure/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/fr/secure-email-for-regulated-saas/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/fr/security/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/sla/</loc>
     </url>
     <url>
+        <loc>https://apexmail.ee/fr/solutions/</loc>
+    </url>
+    <url>
         <loc>https://apexmail.ee/fr/solutions/enterprise/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/solutions/high-volume-sending/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/solutions/migration/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/solutions/regulated-industries/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/solutions/saas-platforms/</loc>
+    </url>
+    <url>
+        <loc>https://apexmail.ee/fr/solutions/transactional-email/</loc>
     </url>
     <url>
         <loc>https://apexmail.ee/fr/status/</loc>

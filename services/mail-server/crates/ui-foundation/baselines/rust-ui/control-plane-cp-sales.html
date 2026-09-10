@@ -1,0 +1,285 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ApexMail Control Plane</title><meta name="description" content="ApexMail administration and monitoring"><link rel="stylesheet" href="assets/globals.css"></head><body class="antialiased bg-background text-surface-950"><a href="#app-main" class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-sm focus:bg-card focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-surface-950 focus:border focus:border-surface-950">Skip to content</a><div class="apex-cp-shell min-h-screen bg-[#fcfcfc] flex" data-theme-storage-key="apexmail-ui:theme"><aside class="hidden md:flex flex-col fixed left-0 top-0 h-screen w-64 z-30" data-user-role="admin"><div class="apex-cp-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 w-64"><div class="p-6 mb-4"><div class="flex flex-col gap-0.5"><span class="apex-sidebar-brand text-xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span><span class="text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500">Operations</span></div></div><nav class="flex-1 overflow-y-auto cp-sidebar-nav" data-sidebar="primary" aria-label="Control Plane navigation"><div class="space-y-1 mb-6"><h3 class="px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2">Operate</h3><div class="flex flex-col gap-1 px-3 py-2"><a href="/dashboard" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+<polyline points="9 22 9 12 15 12 15 22" /></svg></span>Overview</a><a href="/alerts" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg></span>Alerts</a><a href="/infrastructure" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="20" height="8" x="2" y="2" rx="2" ry="2" />
+<rect width="20" height="8" x="2" y="14" rx="2" ry="2" />
+<line x1="6" x2="6.01" y1="6" y2="6" />
+<line x1="6" x2="6.01" y1="18" y2="18" /></svg></span>Infrastructure</a><a href="/jobs" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><circle cx="12" cy="12" r="10" />
+<polyline points="12 6 12 12 16 14" /></svg></span>Jobs</a><a href="/analytics" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M3 3v18h18" />
+<path d="M18 17V9" />
+<path d="M13 17V5" />
+<path d="M8 17v-3" /></svg></span>Analytics</a></div></div><div class="space-y-1 mb-6"><h3 class="px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2">Customers</h3><div class="flex flex-col gap-1 px-3 py-2"><a href="/tenants" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="16" height="20" x="4" y="2" rx="2" ry="2" />
+<path d="M9 22v-4h6v4" />
+<path d="M8 6h.01" />
+<path d="M16 6h.01" />
+<path d="M12 6h.01" />
+<path d="M12 10h.01" />
+<path d="M12 14h.01" />
+<path d="M16 10h.01" />
+<path d="M16 14h.01" />
+<path d="M8 10h.01" />
+<path d="M8 14h.01" /></svg></span>Tenants</a><a href="/domains" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><circle cx="12" cy="12" r="10" />
+<line x1="2" x2="22" y1="12" y2="12" />
+<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg></span>Domains</a><a href="/sales" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+<polyline points="16 7 22 7 22 13" /></svg></span>Sales Console</a><a href="/discovery" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><circle cx="11" cy="11" r="8" />
+<line x1="21" x2="16.65" y1="21" y2="16.65" /></svg></span>Discovery</a></div></div><div class="space-y-1 mb-6"><h3 class="px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2">Governance</h3><div class="flex flex-col gap-1 px-3 py-2"><a href="/operators" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+<circle cx="9" cy="7" r="4" />
+<path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+<path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg></span>Operators</a><a href="/compliance" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg></span>Compliance</a><a href="/audit" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+<polyline points="14 2 14 8 20 8" />
+<line x1="16" x2="8" y1="13" y2="13" />
+<line x1="16" x2="8" y1="17" y2="17" />
+<line x1="10" x2="8" y1="9" y2="9" /></svg></span>Audit Logs</a><a href="/billing" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="22" height="16" x="1" y="4" rx="2" ry="2" />
+<line x1="1" x2="23" y1="10" y2="10" /></svg></span>Billing</a><a href="/settings/security" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+<path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Security</a></div></div></nav><div class="p-4 border-t border-surface-100"><form method="POST" action="/web/auth/logout"><input type="hidden" name="_csrf" value="" /><button type="submit" class="flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors"><span>Sign Out</span></button></form></div></div></aside><details class="apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50" id="control-plane-mobile-sidebar"><summary class="absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200" aria-label="Toggle control plane navigation menu" aria-controls="control-plane-mobile-panel"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-5 w-5"><line x1="4" x2="20" y1="12" y2="12" />
+<line x1="4" x2="20" y1="6" y2="6" />
+<line x1="4" x2="20" y1="18" y2="18" /></svg><span class="sr-only">Menu</span></summary><div id="control-plane-mobile-panel" class="h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16"><div class="apex-cp-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 w-64"><div class="p-6 mb-4"><div class="flex flex-col gap-0.5"><span class="apex-sidebar-brand text-xl font-bold tracking-tighter"><span class="text-primary">Apex</span><span class="text-surface-950">Mail</span></span><span class="text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500">Operations</span></div></div><nav class="flex-1 overflow-y-auto cp-sidebar-nav" data-sidebar="primary" aria-label="Control Plane navigation"><div class="space-y-1 mb-6"><h3 class="px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2">Operate</h3><div class="flex flex-col gap-1 px-3 py-2"><a href="/dashboard" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+<polyline points="9 22 9 12 15 12 15 22" /></svg></span>Overview</a><a href="/alerts" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+<path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg></span>Alerts</a><a href="/infrastructure" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="20" height="8" x="2" y="2" rx="2" ry="2" />
+<rect width="20" height="8" x="2" y="14" rx="2" ry="2" />
+<line x1="6" x2="6.01" y1="6" y2="6" />
+<line x1="6" x2="6.01" y1="18" y2="18" /></svg></span>Infrastructure</a><a href="/jobs" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><circle cx="12" cy="12" r="10" />
+<polyline points="12 6 12 12 16 14" /></svg></span>Jobs</a><a href="/analytics" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M3 3v18h18" />
+<path d="M18 17V9" />
+<path d="M13 17V5" />
+<path d="M8 17v-3" /></svg></span>Analytics</a></div></div><div class="space-y-1 mb-6"><h3 class="px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2">Customers</h3><div class="flex flex-col gap-1 px-3 py-2"><a href="/tenants" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="16" height="20" x="4" y="2" rx="2" ry="2" />
+<path d="M9 22v-4h6v4" />
+<path d="M8 6h.01" />
+<path d="M16 6h.01" />
+<path d="M12 6h.01" />
+<path d="M12 10h.01" />
+<path d="M12 14h.01" />
+<path d="M16 10h.01" />
+<path d="M16 14h.01" />
+<path d="M8 10h.01" />
+<path d="M8 14h.01" /></svg></span>Tenants</a><a href="/domains" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><circle cx="12" cy="12" r="10" />
+<line x1="2" x2="22" y1="12" y2="12" />
+<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg></span>Domains</a><a href="/sales" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+<polyline points="16 7 22 7 22 13" /></svg></span>Sales Console</a><a href="/discovery" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><circle cx="11" cy="11" r="8" />
+<line x1="21" x2="16.65" y1="21" y2="16.65" /></svg></span>Discovery</a></div></div><div class="space-y-1 mb-6"><h3 class="px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2">Governance</h3><div class="flex flex-col gap-1 px-3 py-2"><a href="/operators" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+<circle cx="9" cy="7" r="4" />
+<path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+<path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg></span>Operators</a><a href="/compliance" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg></span>Compliance</a><a href="/audit" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+<polyline points="14 2 14 8 20 8" />
+<line x1="16" x2="8" y1="13" y2="13" />
+<line x1="16" x2="8" y1="17" y2="17" />
+<line x1="10" x2="8" y1="9" y2="9" /></svg></span>Audit Logs</a><a href="/billing" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="22" height="16" x="1" y="4" rx="2" ry="2" />
+<line x1="1" x2="23" y1="10" y2="10" /></svg></span>Billing</a><a href="/settings/security" class="flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"><span class="w-5 h-5 flex items-center justify-center transition-colors text-surface-500"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="h-4 w-4"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+<path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg></span>Security</a></div></div></nav><div class="p-4 border-t border-surface-100"><form method="POST" action="/web/auth/logout"><input type="hidden" name="_csrf" value="" /><button type="submit" class="flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors"><span>Sign Out</span></button></form></div></div></div></details><div class="flex-1 flex flex-col min-h-screen min-w-0 ml-0 md:ml-64"><header class="h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20"><div class="flex items-baseline gap-3 min-w-0"><h1 class="text-lg font-bold text-surface-950 tracking-tight">Operator Console</h1><p class="hidden sm:block text-xs font-medium text-surface-500 truncate">Enterprise pipeline, expansion, and conversion posture.</p></div></header><main class="p-8 flex-1" id="app-main"><div class="max-w-7xl mx-auto"><section class="apex-cp-sales rounded-sm bg-surface-950 px-4 py-6 text-white md:px-6 md:py-8">
+    <div class="mx-auto max-w-7xl space-y-6">
+        <header class="apex-cp-dark-hero rounded-sm border border-white/10 bg-black/25 p-6 shadow-premium-black/30">
+            <div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+                <div>
+                    <p class="text-[11px] font-bold uppercase tracking-[0.32em] text-brand-400">Revenue Command Deck</p>
+                    <h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Operator console: Sales Cockpit</h1>
+                    <span data-sample-data class="mt-3 inline-flex items-center rounded-sm border border-brand-400/40 bg-brand-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-brand-100">Sample data</span>
+                    <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>. Every action below is a plain server-rendered form post — no scripts.</p>
+                    <div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">
+                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
+                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
+                            <p class="mt-1 text-xs text-surface-500">Weighted annual contract value</p>
+                        </article>
+                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
+                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Approvals queue</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p>
+                            <p class="mt-1 text-xs text-surface-500">7 high confidence, 4 review required</p>
+                        </article>
+                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
+                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Campaigns live</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p>
+                            <p class="mt-1 text-xs text-surface-500">1,268 recipients in active cadence</p>
+                        </article>
+                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
+                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Conversion pace</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
+                            <p class="mt-1 text-xs text-surface-500">From qualified to contract signature</p>
+                        </article>
+                    </div>
+                </div>
+
+                <section class="rounded-sm border border-white/10 bg-surface-950 p-5">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p>
+                        <h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2>
+                    </div>
+                    <p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p>
+                    <p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p>
+                </section>
+            </div>
+        </header>
+
+        <section class="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+            <div class="min-w-0 space-y-6">
+                <section class="apex-cp-dark-panel apex-cp-dark-panel--accent min-w-0 rounded-sm border border-white/10 bg-white/5 p-6">
+                    <form method="get" action="/sales" role="search" class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                        <div class="min-w-0">
+                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Triage Queue</p>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Lead inventory</h2>
+                        </div>
+                        <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)_auto]">
+                            <div>
+                                <label for="sales-query" class="sr-only">Search leads</label>
+                                <input id="sales-query" type="search" name="query" placeholder="Search company, owner, signal, or domain" class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                            </div>
+                            <div>
+                                <label for="sales-stage" class="sr-only">Filter by stage</label>
+                                <select id="sales-stage" name="stage" class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary">
+                                    <option value="">all stages</option>
+                                    <option value="qualification">qualification</option>
+                                    <option value="security review">security review</option>
+                                    <option value="proposal">proposal</option>
+                                    <option value="negotiation">negotiation</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="rounded-sm bg-primary px-4 py-3 text-xs font-bold text-white transition hover:bg-brand-700">Apply filters</button>
+                        </div>
+                    </form>
+
+                    <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500">Across all active stages</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-500">No blockers, proposal eligible</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-500">DPA or procurement exception</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500">Weighted by buying intent + fit</p></div>
+                    </div>
+
+                    <form method="post" action="/web/admin/sales/leads/update" class="mt-6 block">
+                        <div class="overflow-x-auto rounded-sm border border-white/10">
+                            <table class="min-w-full divide-y divide-white/10 text-left text-sm">
+                                <thead class="bg-black/30 text-surface-300">
+                                    <tr>
+                                        <th class="px-4 py-3 font-medium" scope="col">Pick</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Account</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Stage</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Confidence</th>
+                                        <th class="px-4 py-3 font-medium" scope="col">Blocker</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-white/10 text-surface-200">
+                                    <tr>
+                                        <td class="px-4 py-3 text-surface-500" colspan="5">No leads loaded — rows appear here when the discovery pipeline has data for this tenant.</td>
+                                    </tr>
+                                    </tbody>
+                            </table>
+                        </div>
+                        <div class="mt-4 flex flex-wrap items-center gap-3">
+                            <label for="lead-stage" class="text-xs uppercase tracking-[0.2em] text-surface-500">Move selected to</label>
+                            <select id="lead-stage" name="status" class="rounded-sm border border-white/10 bg-surface-900 px-3 py-2 text-sm text-white outline-none focus:border-primary">
+                                <option value="qualified">qualified</option>
+                                <option value="proposal">proposal</option>
+                                <option value="approved">approved</option>
+                                <option value="escalated">escalated</option>
+                            </select>
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-xs font-bold text-white transition hover:border-white/30 hover:bg-white/10">Update selected</button>
+                        </div>
+                    </form>
+
+                    <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
+                        <div class="flex items-center gap-2 text-xs text-surface-500">
+                            <span>Sample view — the live lead inventory and its real pagination render once the database is connected</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-600 opacity-40" aria-disabled="true" tabindex="-1">&larr; Previous</span>
+                            <a href="/sales?page=2" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white">Next &rarr;</a>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-950 p-6">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Stage Flow</p>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Outreach inventory</h2>
+                        </div>
+                    </div>
+                    <div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4 text-xs">
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Qualify</p><p class="mt-2 text-2xl font-bold text-white">63</p><p class="mt-1 text-surface-500">Intent verified</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Security</p><p class="mt-2 text-2xl font-bold text-white">29</p><p class="mt-1 text-surface-500">Questionnaire + legal</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Proposal</p><p class="mt-2 text-2xl font-bold text-white">18</p><p class="mt-1 text-surface-500">Commercial package sent</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Contract</p><p class="mt-2 text-2xl font-bold text-white">7</p><p class="mt-1 text-surface-500">Final approvals in flight</p></article>
+                    </div>
+                </section>
+            </div>
+
+            <div class="min-w-0 space-y-6">
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Approval loop</p>
+                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Autopilot loop</h2>
+                        </div>
+                        <span class="rounded-sm bg-warning-300/15 px-3 py-1 text-xs font-bold text-warning-100">Safe mode</span>
+                    </div>
+                    <div class="mt-5 grid gap-3 text-sm">
+                        <form method="post" action="/web/admin/sales/discovery" class="contents">
+                            <input type="hidden" name="action" value="start-cycle" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-500">Fetch candidates and stage risk filters</span></button>
+                        </form>
+                        <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
+                            <input type="hidden" name="status" value="approved" />
+                            <label for="sales-approve-ids" class="text-xs text-surface-500">Lead IDs to approve (comma-separated, from the queue)</label>
+                            <input id="sales-approve-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve listed leads</span><span class="mt-1 block text-xs text-surface-500">Promote high-confidence accounts only</span></button>
+                        </form>
+                        <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
+                            <input type="hidden" name="status" value="escalated" />
+                            <label for="sales-escalate-ids" class="text-xs text-surface-500">Lead IDs to escalate (comma-separated)</label>
+                            <input id="sales-escalate-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate listed leads</span><span class="mt-1 block text-xs text-surface-500">Route legal or security blockers to desk owners</span></button>
+                        </form>
+                    </div>
+                </section>
+
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-950 p-6">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Discovery</p>
+                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Source intake</h2>
+                        <p class="mt-2 text-xs text-surface-500">Import from enriched company cache</p>
+                    </div>
+                    <form method="post" action="/web/admin/sales/discovery" class="mt-5 grid gap-4">
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-discovery-sources" class="block text-surface-300">Sources (comma-separated)</label>
+                            <input id="sales-discovery-sources" name="sources" value="product_hunt, g2, capterra" required class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-discovery-categories" class="block text-surface-300">Categories (comma-separated)</label>
+                            <input id="sales-discovery-categories" name="categories" value="Email Infrastructure, Regulated SaaS" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                        </div>
+                        <button type="submit" class="rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Run discovery</button>
+                    </form>
+                </section>
+
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-900 p-6">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Outreach Command</p>
+                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Launch campaign from selected leads</h2>
+                    </div>
+                    <form method="post" action="/web/admin/sales/outreach" class="mt-5 grid gap-4">
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-offer-id" class="block text-surface-300">Offer id</label>
+                            <input id="sales-offer-id" name="offer_id" value="deliverability_audit" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-template-name" class="block text-surface-300">Template</label>
+                            <input id="sales-template-name" name="template_name" value="enterprise_owner_intro" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-lead-ids" class="block text-surface-300">Lead IDs (comma-separated)</label>
+                            <input id="sales-lead-ids" name="lead_ids" value="" required class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                        </div>
+                        <button type="submit" class="rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Launch outreach for the listed leads</button>
+                    </form>
+                </section>
+
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
+                    <div>
+                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Runtime Policy</p>
+                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Sales runtime configuration</h2>
+                    </div>
+                    <div class="mt-5 rounded-sm border border-white/10 bg-black/15 p-4 text-xs text-surface-300">
+                        Autopilot scoring, cadence windows, and approval safeguards are managed through the admin API and reviewed on the audit page.
+                    </div>
+                </section>
+            </div>
+        </section>
+    </div>
+</section></div></main></div></div></body></html>

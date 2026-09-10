@@ -1,51 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="apex-kiwi-title apex-kiwi-desc">
-  <title id="apex-kiwi-title">ApexMail</title>
-  <desc id="apex-kiwi-desc">ApexMail brand mark — a stylized kiwi bird in profile.</desc>
-  <!--
-    ApexMail kiwi brand mark (v8, final).
-
-    CONSTRUCTION: built from circular geometry (the body is an exact circle,
-    r=20 centered at (38,37)) with a beak cone merged into the upper-left
-    arc. This is the same "overlapping circles" construction method used
-    by the Twitter bird and other top-tier minimalist logos — it gives the
-    mark a "designed" quality that freehand Béziers lack.
-
-    PROPORTIONS derived from real kiwi anatomy (Apteryx mantelli):
-      - Body is plump and round (kiwis have rounded, terrestrial bodies
-        with no visible tail or wing — Wikipedia: "distinctly rounded,
-        terrestrial body shape").
-      - Beak is long and downcurved ("long, pliable and sensitive" bill,
-        foraging posture). Beak:body ratio ≈ 0.65, exaggerated from the
-        real ~0.43 for logo recognition.
-      - Beak base is thick enough (3px at 16px favicon) to survive
-        antialiasing — the thin-beak-disappears failure of earlier
-        iterations is solved by construction.
-
-    OBJECTIVE CRITERIA PASSED (all measured from rendered output):
-      C1. Coverage: 83% width, 63% height (fills canvas, has clear space).
-      C2. Aspect ratio: 1.32:1 (compact bird profile, not a flat smear).
-      C3. Beak:body ratio: 0.33-0.65 (kiwi-appropriate).
-      C4. Beak visibility: 3.0px at 16px (well above 1.5px threshold).
-      C5. Body shape: round circle (egg-like, bottom-heavy).
-      C6. One-shape: single continuous path (body arc + beak cone).
-      C7. Silhouette: solid black reads as "round bird with long beak".
-      C8. Dark mode: white fill on dark (auto via prefers-color-scheme).
-
-    The mark is ONE path: beak tip → upper beak curve → body arc (the
-    long way over the top) → lower beak curve → close. No separate
-    shapes, no internal detail. Hand-authored — not traced from any
-    third-party asset (14 segments vs 50-500+ in traced/stock SVGs).
-
-    Independent design — shares no artwork or asset path with the
-    KiwiCaptcha package's logo helpers. Enforced by
-    tools/check-kiwi-marketing-isolation.sh. See marketing_audit.md v2 §6.
-  -->
-  <style>
-    .apex-kiwi-mark { fill: #6366F1; }
-    @media (prefers-color-scheme: dark) { .apex-kiwi-mark { fill: #ffffff; } }
-  </style>
-
-  <!-- ONE continuous path: beak tip → upper beak Bézier → body circular arc
-       (large-arc, sweep over the top and around) → lower beak Bézier → close. -->
-  <path class="apex-kiwi-mark" d="M 5 42 C 12 30, 18 24, 23.9 22.9 A 20 20 0 1 1 18.3 33.5 C 14 35, 9 40, 5 42 Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">ApexMail</title>
+  <desc id="desc">ApexMail icon.</desc>
+  <rect width="64" height="64" rx="14" fill="#f8fafc"/>
+  <text x="32" y="44" font-family="system-ui,-apple-system,sans-serif" font-size="40" font-weight="700" fill="#dc2626" text-anchor="middle">A</text>
 </svg>
