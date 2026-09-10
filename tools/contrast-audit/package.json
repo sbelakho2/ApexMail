@@ -9,6 +9,6 @@
     "crop": "node crop.mjs"
   },
   "dependencies": {
-    "playwright": "1.59.0"
+    "playwright": "^1.63.0"
   }
 }
