@@ -4,6 +4,14 @@ set -euo pipefail
 # seo-validate.sh — SEO metadata and structured data validation.
 # Checks: unique titles, unique descriptions, canonicals, OG tags, Twitter
 # cards, JSON-LD validity, sitemap integrity, robots.txt, indexing controls.
+#
+# Extraction is attribute-order-agnostic and quote-agnostic: the zola
+# minifier emits <meta content="…" name=description>, <link
+# href=https://apexmail.ee/ rel=canonical> (bare values, any order), so the
+# tag is located by its key attribute FIRST and the value attribute is then
+# read off that tag. All patterns are POSIX ERE (no `grep -P` — BSD grep on
+# dev machines has no -P and the old PCRE extraction silently failed,
+# reporting every page as "Missing title/description/canonical").
 # =============================================================================
 readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,25 +35,41 @@ add_issue() {
     esac
 }
 
+# tag_attr <file> <element> <key_attr> <key_value> <value_attr>
+#   Find the first <element …> tag whose key_attr equals key_value (value
+#   quoted or bare) and print the tag's value_attr. Prints nothing when the
+#   tag or the attribute is absent.
+tag_attr() {
+    local file=$1 element=$2 key_attr=$3 key_value=$4 value_attr=$5
+    local tag
+    tag="$(grep -oE "<${element}[^>]*>" "$file" 2>/dev/null \
+        | grep -E "${key_attr}=(\"${key_value}\"|${key_value}([^A-Za-z0-9_-]|>))" \
+        | head -1 || true)"
+    [ -z "$tag" ] && return 0
+    printf '%s' "$tag" | grep -oE "${value_attr}=(\"[^\"]*\"|[^\" >]+)" \
+        | head -1 | sed -E "s/^${value_attr}=//; s/\"//g" || true
+}
+
 extract_meta() {
     local file="$1"
     local path
     path="$(echo "$file" | sed "s|${BUILD_DIR}||")"
     local title
     # Flatten newlines first: built HTML can split the title across lines.
-    title="$(tr '\n' ' ' < "$file" | grep -oP '<title>\K[^<]+' || true)"
+    title="$(tr '\n' ' ' < "$file" | grep -oE '<title>[^<]*</title>' | sed -E 's:</?title>::g' | head -1 || true)"
     local desc
-    desc="$(grep -oP '<meta\s+name="description"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "")"
+    desc="$(tag_attr "$file" meta name description)"
     local canonical
-    canonical="$(grep -oP '<link\s+rel="canonical"\s+href="([^"]+)"' "$file" 2>/dev/null | grep -oP 'href="\K[^"]+' || echo "")"
+    canonical="$(tag_attr "$file" link rel canonical href)"
     local og_title
-    og_title="$(grep -oP '<meta\s+property="og:title"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "")"
+    og_title="$(tag_attr "$file" meta property og:title content)"
     local og_desc
-    og_desc="$(grep -oP '<meta\s+property="og:description"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "")"
+    og_desc="$(tag_attr "$file" meta property og:description content)"
     local og_image
-    og_image="$(grep -oP '<meta\s+property="og:image"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "")"
+    og_image="$(tag_attr "$file" meta property og:image content)"
     local robots
-    robots="$(grep -oP '<meta\s+name="robots"\s+content="([^"]+)"' "$file" 2>/dev/null | grep -oP 'content="\K[^"]+' || echo "index, follow")"
+    robots="$(tag_attr "$file" meta name robots content)"
+    robots="${robots:-index, follow}"
     local jsonld
     # grep -c prints "0" and exits 1 on zero matches — `|| echo 0` would
     # append a second 0 ("0\n0") and break the jq --argjson call below.

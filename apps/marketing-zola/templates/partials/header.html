@@ -46,7 +46,7 @@
               </div>
               <div>
                 <div class="font-bold text-surface-950 group-hover:text-white text-xs tracking-wider mb-0.5">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security"] %}{{ i18n_data[l]["header"]["security"] }}{% else %}Security{% endif %}</div>
-                <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security_desc"] %}{{ i18n_data[l]["header"]["security_desc"] }}{% else %}Enterprise-grade protection{% endif %}</div>
+                <div class="text-[11px] text-surface-500 group-hover:text-surface-300 leading-snug">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["security_desc"] %}{{ i18n_data[l]["header"]["security_desc"] }}{% else %}Isolation, compliance and audit controls{% endif %}</div>
               </div>
             </a>
             <a href="{{ lp }}/private-cloud/" {% if current_path_value == "/private-cloud" or current_path_value == "/private-cloud/" %}aria-current="page"{% endif %} class="flex items-start gap-3 p-3 rounded-sm hover:bg-surface-950 hover:text-white transition-colors group">

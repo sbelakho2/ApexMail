@@ -63,13 +63,13 @@ comparison_sections = [
 # Sources block (rendered by macros::sources_block via partials/compare/table.html).
 # Each entry: { ref = anchor suffix (e.g. "mg1"), n = display number, label, url }.
 sources = [
-  { ref = "mg1", n = 1, label = "Documentación del centro de datos de la UE de Mailgun", url = "https://www.mailgun.com/eu-data-center/" },
+  { ref = "mg1", n = 1, label = "Precios de Mailgun (región UE según plan)", url = "https://www.mailgun.com/pricing/" },
   { ref = "mg2", n = 2, label = "Acuerdo de procesamiento de datos de Mailgun", url = "https://www.mailgun.com/legal/dpa/" },
-  { ref = "mg3", n = 3, label = "Referencia de la API de envío de Mailgun", url = "https://documentation.mailgun.com/en/latest/api-sending.html" },
+  { ref = "mg3", n = 3, label = "Referencia de la API de envío de Mailgun", url = "https://documentation.mailgun.com/docs/mailgun/user-manual/sending-messages" },
   { ref = "mg4", n = 4, label = "Documentación de email entrante de Mailgun", url = "https://documentation.mailgun.com/en/latest/user_manual.html#receiving-forwarding-and-storing-messages" },
   { ref = "mg5", n = 5, label = "Página de productos de Mailgun", url = "https://www.mailgun.com/products/" },
-  { ref = "mg6", n = 6, label = "Documentación de SSO de Mailgun", url = "https://www.mailgun.com/products/sso/" },
-  { ref = "mg7", n = 7, label = "Referencia de la Events API de Mailgun", url = "https://documentation.mailgun.com/en/latest/api-events.html" },
+  { ref = "mg6", n = 6, label = "Precios de Mailgun (SSO según plan)", url = "https://www.mailgun.com/pricing/" },
+  { ref = "mg7", n = 7, label = "Referencia de la Events API de Mailgun", url = "https://documentation.mailgun.com/docs/mailgun/user-manual/events" },
   { ref = "mg8", n = 8, label = "Página de precios de Mailgun", url = "https://www.mailgun.com/pricing/" },
   { ref = "mg9", n = 9, label = "Validación de email de Mailgun", url = "https://www.mailgun.com/email-validation/" }
 ]

@@ -348,6 +348,31 @@ analyze_css() {
 
     while IFS=$'\t' read -r sel color bg fs fw; do
         [[ -n "$color" ]] || continue
+        # Static-checker limits (detection correction, 2026-09-10 — these
+        # shapes produced the false-positive backlog that kept this gate
+        # advisory): a color-only rule whose REAL backdrop is not the page
+        # background cannot be measured here, so pairing it with the page
+        # background is a false violation. Skipped shapes:
+        #   * ::pseudo-elements (::placeholder …) — backdrop is the host
+        #     control's own background;
+        #   * .z-* — zola syntax-highlight tokens; they render exclusively
+        #     inside pre/.code-block, whose dark backgrounds other rules in
+        #     this same stylesheet declare;
+        #   * Tailwind bg-utility classes (.bg-…, hover:bg-…, [class~="bg-…])
+        #     — the element paints its own background;
+        #   * code-surface selectors (pre, .code-*, .term*, .giallo-*,
+        #     .z-hl) — light token/line-number colors designed for the dark
+        #     backdrops sibling rules in this stylesheet declare
+        #     (.term{background:#101012}, .prose pre background
+        #     rgb(9 9 11), html.dark .code-block #18181b).
+        # Real rendered-pair measurement stays with the pixel-verified WCAG
+        # gate (tools/contrast-audit/gate.sh, REQUIRED in the test stage).
+        case "$sel" in
+            *'::'*) continue ;;
+            *'.z-'*) continue ;;
+            *'.bg-'*|*'hover:bg-'*|*'class~="bg-'*) continue ;;
+            *pre*|*'.term'*|*'.code-'*|*'.giallo'*|*'.z-hl'*) continue ;;
+        esac
         local tok fg bg_tok target_bg ratio thr
         bg_tok=""
         tok="$(first_color_token "$color" || true)"
@@ -446,8 +471,11 @@ check_contrast() {
         fi
     done < <(printf '%s' "$html" | grep -oE 'href="[^"]+\.css[^"]*"' | sed -E 's/^href="([^"]*)"/\1/')
 
-    while IFS='|' read -r element msg; do
-        [[ -n "$element" ]] || continue
+    # analyze_css emits "VIOLATION|<selector>|<message>" — read all three
+    # fields (a two-variable read lumped the tag and selector together, so
+    # every report row recorded element="VIOLATION").
+    while IFS='|' read -r _vtag element msg; do
+        [[ "$_vtag" == "VIOLATION" ]] || continue
         echo "    CRITICAL: contrast violation on $page: $msg"
         add_issue "$page" "$element" "critical" "$msg"
     done < <(analyze_css "$page" "$css_file" "critical")
@@ -462,8 +490,8 @@ check_css_contrast() {
         local rel
         rel="$(echo "$css" | sed "s|${css_dir}||")"
         echo "  Auditing: $css"
-        while IFS='|' read -r element msg; do
-            [[ -n "$element" ]] || continue
+        while IFS='|' read -r _vtag element msg; do
+            [[ "$_vtag" == "VIOLATION" ]] || continue
             add_issue "$rel" "$element" "warning" "$msg"
         done < <(analyze_css "$rel" "$css" "warning")
     done < <(find "$css_dir" -name '*.css' 2>/dev/null)

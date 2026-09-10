@@ -134,6 +134,11 @@ cargo_output.txt
 deploy/tests/.contrast-check-report.json
 deploy/tests/.html-validation-report.json
 deploy/tests/.seo-validation-report.json
+deploy/tests/.broken-links-report.json
+deploy/tests/.font-optimization-report.json
+deploy/tests/.image-optimization-report.json
+deploy/tests/.performance-budget-report.json
+deploy/tests/.cta-tracking-report.json
 
 # content voice-check report artifact (generated)
 deploy/tests/.content-voice-report.json

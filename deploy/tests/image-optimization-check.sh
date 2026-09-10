@@ -5,6 +5,14 @@ set -euo pipefail
 # Checks: correct dimensions, responsive srcset, modern formats (WebP/AVIF),
 # compression, lazy loading, explicit width/height, no oversized images,
 # CDN caching headers.
+#
+# Fix notes (2026-09-10, wiring this into the REQUIRED validate gate):
+#   * Counter/report updates previously ran inside `find | while read` and
+#     `grep | while read` pipelines — SUBSHELLS — so ISSUES/CRITICAL were
+#     always discarded and the report was vacuously empty. Files and image
+#     tags are collected first; the loops run in this shell.
+#   * Patterns are POSIX ERE (no `grep -P` — BSD grep has no -P) and
+#     tolerate the minifier's unquoted attribute values.
 # =============================================================================
 readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,33 +72,38 @@ check_image() {
 
 check_html_images() {
     echo "=== HTML Image Tag Audit ==="
-    find "${BUILD_DIR}" -name '*.html' | while read -r html; do
-        local rel
+    local html_files=() html rel
+    while IFS= read -r -d '' html; do
+        html_files+=("$html")
+    done < <(find "${BUILD_DIR}" -name '*.html' -print0 2>/dev/null)
+
+    for html in "${html_files[@]}"; do
         rel="$(echo "$html" | sed "s|${BUILD_DIR}||")"
 
         # Check for width/height attributes
-        grep -noP '<img[^>]*>' "$html" 2>/dev/null | while IFS=: read -r ln img_tag; do
-            if ! echo "$img_tag" | grep -qP 'width=' && ! echo "$img_tag" | grep -qP 'style="[^"]*width'; then
+        local ln img_tag
+        while IFS=: read -r ln img_tag; do
+            [[ -z "$ln" ]] && continue
+            if ! echo "$img_tag" | grep -qE 'width=' && ! echo "$img_tag" | grep -qE 'style="[^"]*width'; then
                 add_issue "$rel:$ln" "explicit-size" "warning" "Image missing explicit width"
-                WARNINGS=$((WARNINGS+1))
             fi
-            if ! echo "$img_tag" | grep -qP 'height=' && ! echo "$img_tag" | grep -qP 'style="[^"]*height'; then
+            if ! echo "$img_tag" | grep -qE 'height=' && ! echo "$img_tag" | grep -qE 'style="[^"]*height'; then
                 add_issue "$rel:$ln" "explicit-size" "warning" "Image missing explicit height"
-                WARNINGS=$((WARNINGS+1))
             fi
             if ! echo "$img_tag" | grep -q 'loading=' && ! echo "$img_tag" | grep -q 'eager'; then
                 add_issue "$rel:$ln" "lazy-loading" "info" "Consider adding loading=\"lazy\" for below-fold images"
             fi
-        done
+        done < <(grep -noE '<img[^>]*>' "$html" 2>/dev/null || true)
 
         # Check for srcset
         local img_count
-        img_count="$(grep -c '<img' "$html" 2>/dev/null || echo 0)"
+        img_count="$(grep -c '<img' "$html" 2>/dev/null || true)"
+        img_count="${img_count:-0}"
         local srcset_count
-        srcset_count="$(grep -c 'srcset' "$html" 2>/dev/null || echo 0)"
+        srcset_count="$(grep -c 'srcset' "$html" 2>/dev/null || true)"
+        srcset_count="${srcset_count:-0}"
         if [[ "$img_count" -gt 0 && "$srcset_count" -eq 0 ]]; then
             add_issue "$rel" "srcset" "warning" "$img_count images without srcset"
-            WARNINGS=$((WARNINGS+1))
         fi
     done
 }
@@ -100,7 +113,12 @@ main() {
 
     # Check static image files
     echo "=== Static Image Files ==="
-    find "${BUILD_DIR}" \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.webp' -o -name '*.avif' -o -name '*.svg' -o -name '*.gif' \) 2>/dev/null | while read -r img; do
+    local images=() img
+    while IFS= read -r -d '' img; do
+        images+=("$img")
+    done < <(find "${BUILD_DIR}" \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' -o -name '*.webp' -o -name '*.avif' -o -name '*.svg' -o -name '*.gif' \) -print0 2>/dev/null)
+
+    for img in "${images[@]}"; do
         check_image "$img"
     done
 

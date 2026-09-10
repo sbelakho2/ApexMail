@@ -132,9 +132,16 @@
     "legalName": "{{ config.extra.company.legal_name | safe }}",
     "vatID": "{{ config.extra.company.vat_number | default(value='EE102951727') | safe }}",
     "sameAs": [
-      {%- if config.extra.github_url %}"{{ config.extra.github_url | safe }}",{%- endif %}
-      {%- if config.extra.linkedin_url %}"{{ config.extra.linkedin_url | safe }}",{%- endif %}
-      {%- if config.extra.twitter_url %}"{{ config.extra.twitter_url | safe }}"{%- endif %}
+      {#- Comma-safe assembly: every social URL is OPTIONAL (github_url has
+          always been empty; twitter_url is empty since the @apexmail
+          account does not exist) and the old per-item trailing commas left
+          a dangling comma — invalid JSON-LD — whenever the last item was
+          absent. Assemble an array first and let loop.last place commas. -#}
+      {%- set_global socials = [] -%}
+      {%- if config.extra.github_url %}{% set_global socials = socials | concat(with=config.extra.github_url) %}{% endif -%}
+      {%- if config.extra.linkedin_url %}{% set_global socials = socials | concat(with=config.extra.linkedin_url) %}{% endif -%}
+      {%- if config.extra.twitter_url %}{% set_global socials = socials | concat(with=config.extra.twitter_url) %}{% endif -%}
+      {%- for s in socials %}"{{ s | safe }}"{% if not loop.last %},{% endif %}{% endfor -%}
     ]
   }
   </script>

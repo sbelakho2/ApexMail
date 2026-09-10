@@ -20,11 +20,11 @@ Each SDK is developed inside ApexMail's monorepo; **source is currently private*
 
 | Language   | Module / package name        | Source                                                                                | Min runtime   | Planned install (once published)                              |
 |------------|------------------------------|---------------------------------------------------------------------------------------|---------------|---------------------------------------------------------------|
-| Python     | `apexmail`                   | [packages/sdk-python](packages/sdk-python) | Python 3.9+   | `pip install apexmail`                                        |
-| Go         | `github.com/apexmail/apexmail-go` | [packages/sdk-go](packages/sdk-go)         | Go 1.21+      | `go get github.com/apexmail/apexmail-go`                      |
-| PHP        | `apexmail/apexmail-php`      | [packages/sdk-php](packages/sdk-php)       | PHP 8.1+      | `composer require apexmail/apexmail-php`                      |
-| Ruby       | `apexmail` (gem)             | [packages/sdk-ruby](packages/sdk-ruby)     | Ruby 3.0+     | `gem install apexmail`                                        |
-| Java       | `ee.apexmail:apexmail-java`  | [packages/sdk-java](packages/sdk-java)     | Java 17+      | Maven: `ee.apexmail:apexmail-java` (version TBD on release)   |
+| Python     | `apexmail`                   | `packages/sdk-python` | Python 3.9+   | `pip install apexmail`                                        |
+| Go         | `github.com/apexmail/apexmail-go` | `packages/sdk-go`         | Go 1.21+      | `go get github.com/apexmail/apexmail-go`                      |
+| PHP        | `apexmail/apexmail-php`      | `packages/sdk-php`       | PHP 8.1+      | `composer require apexmail/apexmail-php`                      |
+| Ruby       | `apexmail` (gem)             | `packages/sdk-ruby`     | Ruby 3.0+     | `gem install apexmail`                                        |
+| Java       | `ee.apexmail:apexmail-java`  | `packages/sdk-java`     | Java 17+      | Maven: `ee.apexmail:apexmail-java` (version TBD on release)   |
 
 All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are passed in the `X-API-Key` header. There is no Node.js/JavaScript SDK at this time; Node developers should use the HTTP API or `fetch` directly (see the [API reference](/docs/api/)).
 
