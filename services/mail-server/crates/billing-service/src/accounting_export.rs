@@ -55,9 +55,7 @@ struct AccountingExportRow {
 
 /// Raw fetched row: the join fields above PLUS the invoice's immutable
 /// billing-address snapshot (audit F08). Issued invoices are legal
-/// documents — the export must show the address captured AT ISSUE TIME;
-/// the live `billing_addresses` join remains the fallback for legacy rows
-/// that predate snapshotting.
+/// documents — the export must show the address captured AT ISSUE TIME.
 #[derive(Debug, sqlx::FromRow)]
 struct FetchedAccountingRow {
     invoice_number: String,
@@ -73,6 +71,9 @@ struct FetchedAccountingRow {
     country: Option<String>,
     vat_number: Option<String>,
     billing_address_snapshot: Option<String>,
+    /// Buyer registry code frozen at issue time (audit F08, migration 185);
+    /// NULL on legacy invoices that predate the freeze.
+    billing_registry_code: Option<String>,
     subtotal: i64,
     vat_total: i64,
     total: i64,
@@ -80,78 +81,180 @@ struct FetchedAccountingRow {
     status: String,
 }
 
+/// Versioned snapshot DTO (audit F08): the billing-address snapshot a
+/// reader must parse SUCCESSFULLY for an issued document. Field names
+/// accept both writer dialects (billing-service snake_case, api-server
+/// admin camelCase); `snapshotVersion` identifies the contract (an
+/// unrecognized future version is surfaced, not silently reinterpreted).
+#[derive(Debug, serde::Deserialize)]
+struct BillingAddressSnapshotV1 {
+    #[serde(default, alias = "snapshotVersion")]
+    snapshot_version: Option<u32>,
+    #[serde(default, alias = "companyName")]
+    company_name: Option<String>,
+    #[serde(default, alias = "vatNumber")]
+    vat_number: Option<String>,
+    #[serde(default, alias = "addressLine1")]
+    address_line1: Option<String>,
+    #[serde(default, alias = "addressLine2")]
+    address_line2: Option<String>,
+    #[serde(default)]
+    city: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default, alias = "postalCode")]
+    postal_code: Option<String>,
+    #[serde(default)]
+    country: Option<String>,
+    #[serde(default, alias = "registryCode")]
+    registry_code: Option<String>,
+}
+
+/// The snapshot contract version this reader understands (audit F08).
+const SUPPORTED_SNAPSHOT_VERSION: u32 = 1;
+
+/// How ONE invoice's address source was chosen (audit F08: the choice is
+/// made ONCE per invoice, never per field).
+#[derive(Debug, PartialEq, Eq)]
+enum SnapshotSource {
+    /// The invoice carries a valid issued snapshot — every field comes
+    /// from it; null/empty fields REMAIN null/empty.
+    Snapshot,
+    /// Legacy invoice issued before snapshotting — the explicitly
+    /// labelled live-address fallback applies.
+    LegacyLiveFallback,
+    /// The snapshot is present but malformed — surfaced for repair (the
+    /// export row is emitted with a repair marker, live data is NOT
+    /// silently substituted).
+    RepairRequired,
+}
+
+fn trim_nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
 impl FetchedAccountingRow {
-    /// Snapshot-first resolution of one address field: the value frozen on
-    /// the invoice wins (snake_case key from the billing-service writer or
-    /// camelCase from the api-server admin writer); the live address join
-    /// fills legacy gaps.
-    fn resolve(
-        snapshot: &serde_json::Value,
-        snake_key: &str,
-        camel_key: &str,
-        live: Option<&String>,
-    ) -> Option<String> {
-        snapshot
-            .get(snake_key)
-            .or_else(|| snapshot.get(camel_key))
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
-            .filter(|value| !value.is_empty())
-            .or_else(|| live.cloned().filter(|value| !value.is_empty()))
-    }
-
+    /// Choose snapshot-vs-live ONCE for the whole invoice (audit F08) and
+    /// build the export row from exactly one source.
     fn into_export_row(self) -> AccountingExportRow {
-        let snapshot: serde_json::Value = self
-            .billing_address_snapshot
-            .as_deref()
-            .and_then(|raw| serde_json::from_str(raw).ok())
-            .unwrap_or(serde_json::Value::Null);
-
-        AccountingExportRow {
-            invoice_number: self.invoice_number,
-            issued_at: self.issued_at,
-            due_at: self.due_at,
-            tenant_name: self.tenant_name,
-            company_name: Self::resolve(
-                &snapshot,
-                "company_name",
-                "companyName",
-                self.company_name.as_ref(),
-            ),
+        // Decide the source first: a parseable snapshot wins for every
+        // field; a missing snapshot is the legacy fallback; an
+        // unparseable one surfaces for repair.
+        let mut source = SnapshotSource::LegacyLiveFallback;
+        let mut snapshot = BillingAddressSnapshotV1 {
+            snapshot_version: None,
+            company_name: None,
+            vat_number: None,
+            address_line1: None,
+            address_line2: None,
+            city: None,
+            state: None,
+            postal_code: None,
+            country: None,
             registry_code: None,
-            address_line1: Self::resolve(
-                &snapshot,
-                "address_line1",
-                "addressLine1",
-                self.address_line1.as_ref(),
-            ),
-            address_line2: Self::resolve(
-                &snapshot,
-                "address_line2",
-                "addressLine2",
-                self.address_line2.as_ref(),
-            ),
-            city: Self::resolve(&snapshot, "city", "city", self.city.as_ref()),
-            state: Self::resolve(&snapshot, "state", "state", self.state.as_ref()),
-            postal_code: Self::resolve(
-                &snapshot,
-                "postal_code",
-                "postalCode",
-                self.postal_code.as_ref(),
-            ),
-            country: Self::resolve(&snapshot, "country", "country", self.country.as_ref()),
-            vat_number: Self::resolve(
-                &snapshot,
-                "vat_number",
-                "vatNumber",
-                self.vat_number.as_ref(),
-            ),
-            subtotal: self.subtotal,
-            vat_total: self.vat_total,
-            total: self.total,
-            currency: self.currency,
-            status: self.status,
+        };
+        if self.billing_address_snapshot.is_some() {
+            match self
+                .billing_address_snapshot
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<BillingAddressSnapshotV1>(raw).ok())
+            {
+                Some(parsed) => {
+                    if let Some(version) = parsed.snapshot_version {
+                        if version > SUPPORTED_SNAPSHOT_VERSION {
+                            tracing::warn!(
+                                invoice_number = %self.invoice_number,
+                                version,
+                                "accounting export: unknown billing-address snapshot version — interpreting as v1"
+                            );
+                        }
+                    }
+                    source = SnapshotSource::Snapshot;
+                    snapshot = parsed;
+                }
+                None => {
+                    source = SnapshotSource::RepairRequired;
+                    tracing::error!(
+                        invoice_number = %self.invoice_number,
+                        "accounting export: malformed billing-address snapshot — row emitted with a repair marker"
+                    );
+                }
+            }
         }
+
+        let mut export = match source {
+            SnapshotSource::Snapshot => {
+                // Valid snapshot: fields come ONLY from it; null/empty
+                // stays null/empty — the live account can never refill a
+                // historical document.
+                AccountingExportRow {
+                    invoice_number: self.invoice_number,
+                    issued_at: self.issued_at,
+                    due_at: self.due_at,
+                    tenant_name: self.tenant_name,
+                    company_name: trim_nonempty(snapshot.company_name),
+                    registry_code: trim_nonempty(snapshot.registry_code),
+                    address_line1: trim_nonempty(snapshot.address_line1),
+                    address_line2: trim_nonempty(snapshot.address_line2),
+                    city: trim_nonempty(snapshot.city),
+                    state: trim_nonempty(snapshot.state),
+                    postal_code: trim_nonempty(snapshot.postal_code),
+                    country: trim_nonempty(snapshot.country),
+                    vat_number: trim_nonempty(snapshot.vat_number),
+                    subtotal: self.subtotal,
+                    vat_total: self.vat_total,
+                    total: self.total,
+                    currency: self.currency,
+                    status: self.status,
+                }
+            }
+            SnapshotSource::LegacyLiveFallback | SnapshotSource::RepairRequired => {
+                // Explicitly labelled LEGACY fallback (pre-snapshot
+                // invoices) — or a corrupt snapshot, where the live values
+                // are NOT silently substituted: the row ships empty with a
+                // repair marker in the customer-name column so operators
+                // see exactly which documents need repair.
+                let legacy = source == SnapshotSource::LegacyLiveFallback;
+                AccountingExportRow {
+                    invoice_number: self.invoice_number.clone(),
+                    issued_at: self.issued_at,
+                    due_at: self.due_at,
+                    tenant_name: self.tenant_name,
+                    company_name: if legacy {
+                        trim_nonempty(self.company_name)
+                    } else {
+                        None
+                    },
+                    registry_code: if legacy {
+                        trim_nonempty(self.billing_registry_code)
+                    } else {
+                        None
+                    },
+                    address_line1: if legacy { self.address_line1 } else { None },
+                    address_line2: if legacy { self.address_line2 } else { None },
+                    city: if legacy { self.city } else { None },
+                    state: if legacy { self.state } else { None },
+                    postal_code: if legacy { self.postal_code } else { None },
+                    country: if legacy { self.country } else { None },
+                    vat_number: if legacy { self.vat_number } else { None },
+                    subtotal: self.subtotal,
+                    vat_total: self.vat_total,
+                    total: self.total,
+                    currency: self.currency,
+                    status: self.status,
+                }
+            }
+        };
+
+        if source == SnapshotSource::RepairRequired {
+            // Surface the corrupt snapshot for repair (audit F08): the
+            // buyer column carries an explicit marker instead of live data.
+            export.company_name = Some(format!(
+                "[SNAPSHOT REPAIR REQUIRED: {}]",
+                export.invoice_number
+            ));
+        }
+        export
     }
 }
 
@@ -170,9 +273,12 @@ pub async fn export_accounting_csv(
 /// Fetch invoice data joined with tenant info and billing addresses.
 ///
 /// Audit F08: the invoice's immutable `billing_address` snapshot (captured
-/// at issue time) is the PRIMARY address source; the live-address LATERAL
-/// join is only the fallback for legacy invoices issued before
-/// snapshotting. `billing_addresses.state` exists since migration 132.
+/// at issue time, versioned contract incl. the registry identity frozen
+/// via `billing_registry_code`) is the address source for issued
+/// documents — chosen ONCE per invoice in `into_export_row`. The
+/// live-address LATERAL join feeds only the explicitly labelled legacy
+/// fallback for invoices issued before snapshotting.
+/// `billing_addresses.state` exists since migration 132.
 async fn fetch_accounting_rows(
     pool: &PgPool,
     start_date: DateTime<Utc>,
@@ -194,6 +300,7 @@ async fn fetch_accounting_rows(
             ba.country,
             ba.vat_number,
             i.billing_address AS billing_address_snapshot,
+            i.billing_registry_code,
             i.subtotal,
             i.vat_total,
             i.total,
@@ -427,11 +534,17 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Audit F08 — the immutable invoice snapshot wins over the live
-    // billing address; legacy rows fall back to the join.
+    // Audit F08 — snapshot versus live is chosen ONCE per invoice. A
+    // valid snapshot supplies every field (nulls stay null); only legacy
+    // rows without any snapshot use the live join; malformed snapshots
+    // surface for repair instead of silently degrading to live values.
     // ------------------------------------------------------------------
 
-    fn fetched_row(snapshot: Option<&str>, live_city: Option<&str>) -> FetchedAccountingRow {
+    fn fetched_row(
+        snapshot: Option<&str>,
+        live_city: Option<&str>,
+        registry: Option<&str>,
+    ) -> FetchedAccountingRow {
         FetchedAccountingRow {
             invoice_number: "INV-SNAP".into(),
             issued_at: Utc::now(),
@@ -446,6 +559,7 @@ mod tests {
             country: Some("EE".into()),
             vat_number: None,
             billing_address_snapshot: snapshot.map(str::to_string),
+            billing_registry_code: registry.map(str::to_string),
             subtotal: 1000,
             vat_total: 240,
             total: 1240,
@@ -457,25 +571,67 @@ mod tests {
     #[test]
     fn snapshot_address_wins_over_the_live_address() {
         let snapshot = r#"{"company_name":"Snapshot OÜ","city":"Tartu","state":"Tartumaa"}"#;
-        let row = fetched_row(Some(snapshot), Some("Tallinn")).into_export_row();
+        let row = fetched_row(Some(snapshot), Some("Tallinn"), None).into_export_row();
         assert_eq!(row.company_name.as_deref(), Some("Snapshot OÜ"));
         assert_eq!(row.city.as_deref(), Some("Tartu"));
         assert_eq!(row.state.as_deref(), Some("Tartumaa"));
-        // Fields absent from the snapshot fall back to the live join.
-        assert_eq!(row.address_line1.as_deref(), Some("Live Street 1"));
+        // F08: a field ABSENT from a valid snapshot stays null — the live
+        // join no longer refills it.
+        assert_eq!(row.address_line1, None);
+    }
+
+    #[test]
+    fn snapshot_null_optional_fields_stay_null_after_account_edits() {
+        // F08 verification: an issued invoice whose optional fields are
+        // empty keeps them empty even though the live account now has
+        // values (byte-for-byte historical stability).
+        let snapshot = r#"{"company_name":"Snapshot OÜ","country":"EE"}"#;
+        let row = fetched_row(Some(snapshot), Some("Tallinn"), None).into_export_row();
+        assert_eq!(row.company_name.as_deref(), Some("Snapshot OÜ"));
+        assert_eq!(row.address_line1, None);
+        assert_eq!(row.address_line2, None);
+        assert_eq!(row.city, None);
+        assert_eq!(row.state, None);
+        assert_eq!(row.postal_code, None);
+        assert_eq!(row.vat_number, None);
+    }
+
+    #[test]
+    fn snapshot_parses_the_camelcase_admin_writer_dialect() {
+        // Same snapshot contract as the api-server admin writer.
+        let snapshot =
+            r#"{"snapshotVersion":1,"companyName":"Admin OÜ","addressLine1":"Admin St 9"}"#;
+        let row = fetched_row(Some(snapshot), Some("Tallinn"), None).into_export_row();
+        assert_eq!(row.company_name.as_deref(), Some("Admin OÜ"));
+        assert_eq!(row.address_line1.as_deref(), Some("Admin St 9"));
+        assert_eq!(row.city, None);
+    }
+
+    #[test]
+    fn snapshot_registry_identity_is_frozen_at_issue_time() {
+        let snapshot = r#"{"company_name":"Snapshot OÜ","registry_code":"16377012"}"#;
+        let row = fetched_row(Some(snapshot), None, Some("LATER-CHANGED")).into_export_row();
+        assert_eq!(row.registry_code.as_deref(), Some("16377012"));
     }
 
     #[test]
     fn legacy_rows_without_snapshot_use_the_live_address() {
-        let row = fetched_row(None, Some("Tallinn")).into_export_row();
+        let row = fetched_row(None, Some("Tallinn"), Some("10001234")).into_export_row();
         assert_eq!(row.company_name.as_deref(), Some("Live Company OÜ"));
         assert_eq!(row.city.as_deref(), Some("Tallinn"));
+        assert_eq!(row.registry_code.as_deref(), Some("10001234"));
     }
 
     #[test]
-    fn malformed_snapshot_degrades_to_the_live_address() {
-        let row = fetched_row(Some("{not json"), Some("Tallinn")).into_export_row();
-        assert_eq!(row.city.as_deref(), Some("Tallinn"));
+    fn malformed_snapshot_is_surfaced_for_repair_not_refilled() {
+        let row = fetched_row(Some("{not json"), Some("Tallinn"), None).into_export_row();
+        // No live substitution: the address fields stay empty and the
+        // buyer column carries an explicit repair marker.
+        assert_eq!(row.city, None);
+        assert_eq!(row.address_line1, None);
+        let company = row.company_name.expect("repair marker present");
+        assert!(company.contains("SNAPSHOT REPAIR REQUIRED"));
+        assert!(company.contains("INV-SNAP"));
     }
 
     #[test]

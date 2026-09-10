@@ -50,6 +50,11 @@ static S3_PUBLIC_URL: LazyLock<Option<String>> =
 /// Schema version for invoice line items JSON.
 const INVOICE_LINE_ITEMS_SCHEMA_VERSION: u32 = 1;
 
+/// Schema version for the immutable billing-address snapshot JSON
+/// (audit F08). A versioned snapshot DTO lets readers distinguish a
+/// deliberately-empty optional field from a malformed/legacy payload.
+pub const BILLING_ADDRESS_SNAPSHOT_VERSION: u32 = 1;
+
 // ---------------------------------------------------------------------------
 // Re-exports from billing-common
 // ---------------------------------------------------------------------------
@@ -216,6 +221,9 @@ struct BillingAddrSnapshotRow {
     postal_code: Option<String>,
     country: Option<String>,
     email: Option<String>,
+    /// Buyer business-registry code (export-relevant identity, audit F08),
+    /// frozen at issue time from the tenant's settings.
+    registry_code: Option<String>,
 }
 
 /// Create an invoice on the pool (own transaction).
@@ -243,12 +251,16 @@ pub async fn create_invoice_in_tx(
 ) -> Result<Invoice, InvoiceError> {
     // Fetch the FULL billing address: country + VAT number drive VAT
     // calculation, and the whole row is snapshotted immutably onto the
-    // invoice (audit F08).
+    // invoice (audit F08). The buyer registry code (export-relevant
+    // identity) is frozen from the tenant's settings in the same read.
     let addr: BillingAddrSnapshotRow = sqlx::query_as(
         r#"
-        SELECT company_name, vat_number, address_line1, address_line2,
-               city, state, postal_code, country, email
-        FROM billing_addresses WHERE tenant_id = $1
+        SELECT ba.company_name, ba.vat_number, ba.address_line1, ba.address_line2,
+               ba.city, ba.state, ba.postal_code, ba.country, ba.email,
+               t.settings->>'registryCode' AS registry_code
+        FROM billing_addresses ba
+        JOIN tenants t ON t.id = ba.tenant_id
+        WHERE ba.tenant_id = $1
         "#,
     )
     .bind(&input.tenant_id)
@@ -307,9 +319,12 @@ pub async fn create_invoice_in_tx(
     let id = Uuid::new_v4();
     let items_json = encode_invoice_line_items(&line_items)?;
     // Immutable billing-address snapshot (audit F08). Stored as TEXT
-    // (the column's type since migration 076) — same JSON shape the
-    // api-server admin writer snapshots.
+    // (the column's type since migration 076) — versioned JSON (the
+    // api-server admin writer snapshots the same contract). Null/empty
+    // optional fields stay null: readers must NOT fill them from the live
+    // account (F08: snapshot-vs-live is chosen once per invoice).
     let address_snapshot = serde_json::json!({
+        "snapshotVersion": BILLING_ADDRESS_SNAPSHOT_VERSION,
         "company_name": addr.company_name,
         "vat_number": addr.vat_number,
         "address_line1": addr.address_line1,
@@ -319,6 +334,7 @@ pub async fn create_invoice_in_tx(
         "postal_code": addr.postal_code,
         "country": addr.country,
         "email": addr.email,
+        "registry_code": addr.registry_code,
     })
     .to_string();
 
@@ -329,12 +345,14 @@ pub async fn create_invoice_in_tx(
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
             billing_country, vat_rate, overage_period, billing_address,
+            billing_registry_code,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
             $5, $8, $6, $7, $8, $9,
             $10, $11, $12, $13,
             $14, $15, $16, $17,
+            $18,
             $10, $10
         )
         "#,
@@ -356,6 +374,7 @@ pub async fn create_invoice_in_tx(
     .bind(vat_rate)
     .bind(input.overage_period)
     .bind(address_snapshot)
+    .bind(addr.registry_code)
     .execute(&mut **tx)
     .await
     .map_err(InvoiceError::Db)?;
@@ -397,38 +416,107 @@ pub fn compute_outstanding(
 }
 
 /// Durable outstanding balance for an invoice: total minus confirmed
-/// payment allocations (migration 140) minus credit notes (migration 134).
-/// This is the single derivation UI, dunning and refunds must use
-/// (audit F35).
+/// payment allocations (migration 140) minus the DEBT-REDUCTION part of
+/// credit notes (migration 183 — only that part reduces the unpaid
+/// obligation; the refunded part returned value that was actually paid).
+/// This is the single derivation UI, wallet application, Stripe
+/// collection, dunning and credit limits must use (audits F35/F60).
 pub async fn invoice_outstanding_cents(
     pool: &PgPool,
     invoice_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
-    let outstanding: i64 = sqlx::query_scalar(
-        r#"
-        SELECT i.total
-             - COALESCE(p.payments, 0)
-             - COALESCE(c.credits, 0)
-        FROM invoices i
-        LEFT JOIN (
-            SELECT invoice_id, SUM(amount_cents)::bigint AS payments
-            FROM invoice_payment_allocations
-            WHERE invoice_id = $1
-            GROUP BY invoice_id
-        ) p ON p.invoice_id = i.id
-        LEFT JOIN (
-            SELECT invoice_id, SUM(amount)::bigint AS credits
-            FROM credit_notes
-            WHERE invoice_id = $1
-            GROUP BY invoice_id
-        ) c ON c.invoice_id = i.id
-        WHERE i.id = $1
-        "#,
-    )
-    .bind(invoice_id)
-    .fetch_one(pool)
-    .await?;
+    let outstanding: i64 = sqlx::query_scalar(OUTSTANDING_ONE_SQL)
+        .bind(invoice_id)
+        .fetch_one(pool)
+        .await?;
     Ok(outstanding.max(0))
+}
+
+/// Executor-generic variant of [`invoice_outstanding_cents`] for callers
+/// inside a transaction (wallet application under the collection lock).
+pub async fn invoice_outstanding_cents_in<'e, E>(
+    executor: E,
+    invoice_id: Uuid,
+) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let outstanding: i64 = sqlx::query_scalar(OUTSTANDING_ONE_SQL)
+        .bind(invoice_id)
+        .fetch_one(executor)
+        .await?;
+    Ok(outstanding.max(0))
+}
+
+/// The one-invoice outstanding derivation shared by every caller
+/// (audits F60/F73): the canonical amount resolver handles legacy
+/// nullable `total` (pre-076 rows fall back to the NOT NULL `amount`),
+/// subtracts confirmed payment allocations, then the debt-reduction part
+/// of credit notes (legacy NULL split rows count their full amount, the
+/// pre-183 behaviour), and clamps at zero.
+const OUTSTANDING_ONE_SQL: &str = r#"
+    SELECT COALESCE(i.total, i.amount, 0)::bigint
+         - COALESCE(p.payments, 0)
+         - COALESCE(c.credit_debt, 0)
+    FROM invoices i
+    LEFT JOIN (
+        SELECT invoice_id, SUM(amount_cents)::bigint AS payments
+        FROM invoice_payment_allocations
+        WHERE invoice_id = $1
+        GROUP BY invoice_id
+    ) p ON p.invoice_id = i.id
+    LEFT JOIN (
+        SELECT invoice_id,
+               SUM(CASE WHEN debt_reduction_cents IS NULL
+                        THEN amount ELSE debt_reduction_cents END)::bigint AS credit_debt
+        FROM credit_notes
+        WHERE invoice_id = $1
+        GROUP BY invoice_id
+    ) c ON c.invoice_id = i.id
+    WHERE i.id = $1
+"#;
+
+/// Per-currency outstanding buckets for a tenant's WHOLE eligible invoice
+/// set (audit F04): obligation minus allocations and debt-reduction
+/// credits, aggregated independently of any list pagination. This is the
+/// same accounting model as [`invoice_outstanding_cents`].
+const TENANT_OUTSTANDING_SQL: &str = r#"
+    SELECT i.currency,
+           COALESCE(SUM(
+               GREATEST(
+                   COALESCE(i.total, i.amount, 0)::bigint
+                   - COALESCE(p.payments, 0)
+                   - COALESCE(c.credit_debt, 0),
+                   0
+               )
+           ), 0)::bigint
+    FROM invoices i
+    LEFT JOIN (
+        SELECT invoice_id, SUM(amount_cents)::bigint AS payments
+        FROM invoice_payment_allocations
+        GROUP BY invoice_id
+    ) p ON p.invoice_id = i.id
+    LEFT JOIN (
+        SELECT invoice_id,
+               SUM(CASE WHEN debt_reduction_cents IS NULL
+                        THEN amount ELSE debt_reduction_cents END)::bigint AS credit_debt
+        FROM credit_notes
+        GROUP BY invoice_id
+    ) c ON c.invoice_id = i.id
+    WHERE i.tenant_id = $1
+      AND i.status::text NOT IN ('draft', 'void', 'uncollectible')
+    GROUP BY i.currency
+    ORDER BY i.currency
+"#;
+
+pub async fn tenant_outstanding_by_currency(
+    pool: &PgPool,
+    tenant_id: &str,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    sqlx::query_as(TENANT_OUTSTANDING_SQL)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
 }
 
 /// Generate a PDF for an invoice by calling the pdf-renderer service, upload
@@ -1109,6 +1197,43 @@ mod tests {
         assert_eq!(hex_encode(&[0x00, 0xff, 0xab]), "00ffab");
         assert_eq!(hex_encode(&[]), "");
         assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    // ------------------------------------------------------------------
+    // Audits F60/F04/F73 — ONE outstanding derivation, allocation-ledger
+    // aware, subtracting only the DEBT-REDUCTION part of credit notes and
+    // resolving legacy nullable totals canonically.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn outstanding_sql_subtracts_allocations_and_debt_reduction_credits_only() {
+        // Legacy nullable totals resolve canonically...
+        assert!(OUTSTANDING_ONE_SQL.contains("COALESCE(i.total, i.amount, 0)"));
+        // ...confirmed payment allocations are subtracted...
+        assert!(OUTSTANDING_ONE_SQL.contains("p.payments"));
+        // ...and credit notes contribute ONLY their debt-reduction part
+        // (legacy NULL split rows count their full amount).
+        assert!(OUTSTANDING_ONE_SQL.contains("CASE WHEN debt_reduction_cents IS NULL"));
+        assert!(OUTSTANDING_ONE_SQL.contains("THEN amount ELSE debt_reduction_cents END"));
+        // Saturating at zero happens in Rust (`.max(0)`), never a negative
+        // balance.
+    }
+
+    #[test]
+    fn tenant_outstanding_aggregates_the_whole_set_by_currency_bucket() {
+        // The shared per-tenant aggregation must consult the allocation
+        // ledger and the credit-note debt-reduction split, group by
+        // currency, and clamp each invoice's balance at zero (audit F04:
+        // whole eligible set, distinct buckets, never a negative sum).
+        assert!(TENANT_OUTSTANDING_SQL.contains("GROUP BY i.currency"));
+        assert!(TENANT_OUTSTANDING_SQL.contains("invoice_payment_allocations"));
+        assert!(TENANT_OUTSTANDING_SQL.contains("debt_reduction_cents"));
+        assert!(TENANT_OUTSTANDING_SQL.contains("GREATEST("));
+        // Draft/void/uncollectible invoices are not collectible debt;
+        // paid invoices remain in the set with a zero balance by
+        // construction rather than by exclusion.
+        assert!(TENANT_OUTSTANDING_SQL.contains("NOT IN ('draft', 'void', 'uncollectible')"));
+        assert!(!TENANT_OUTSTANDING_SQL.contains("'paid'"));
     }
 
     /// Verify that all 27 EU member states have a defined VAT rate in
