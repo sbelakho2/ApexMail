@@ -69,13 +69,31 @@ async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
         false
     });
 
-    if db_ok && redis_ok {
+    // F14: required-schema readiness. A misdeployed schema (missing console
+    // table/column, SQLSTATE 42P01/42703) used to pass readiness and then
+    // render empty pages / zero KPIs. The probe fails readiness FIRST, so a
+    // rollout with a missing column never serves fabricated empty data.
+    let schema_missing: Vec<String> = if db_ok {
+        match crate::routes::web::data::missing_required_console_schema(&state.db).await {
+            Ok(missing) => missing,
+            Err(error) => {
+                tracing::warn!(error = %error, "readiness: required-schema probe failed");
+                vec!["schema probe unavailable".to_string()]
+            }
+        }
+    } else {
+        Vec::new() // DB already degraded; the db flag reports it.
+    };
+    let schema_ok = db_ok && schema_missing.is_empty();
+
+    if db_ok && redis_ok && schema_ok {
         (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "db": "connected",
                 "redis": "connected",
+                "schema": "complete",
             })),
         )
     } else {
@@ -85,6 +103,11 @@ async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
                 "status": "degraded",
                 "db": if db_ok { "connected" } else { "disconnected" },
                 "redis": if redis_ok { "connected" } else { "disconnected" },
+                "schema": if schema_ok {
+                    serde_json::json!("complete")
+                } else {
+                    serde_json::json!(schema_missing)
+                },
             })),
         )
     }

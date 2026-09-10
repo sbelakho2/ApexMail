@@ -772,10 +772,12 @@ enum LedgerReplay {
     /// The key was used with a different method/route/principal/payload —
     /// reject with 409 (F19).
     Conflict(&'static str),
-    /// A completed record exists — replay its stored response (F20).
+    /// A completed record exists — replay its stored response (F20). The
+    /// body is carried RAW (as persisted); [`replay_ledger_response`] owns
+    /// parsing/versioning and rejects corrupt bodies explicitly.
     Complete {
         response_status: i64,
-        response_body: String,
+        response_body: Option<String>,
     },
     /// Another live request owns the key right now (F21).
     InFlight,
@@ -861,10 +863,35 @@ fn classify_ledger_row(
     match row.status.as_str() {
         "complete" => LedgerReplay::Complete {
             response_status: row.response_status.unwrap_or(202),
-            response_body: row.response_body.clone().unwrap_or_default(),
+            response_body: row.response_body.clone(),
         },
         _ => LedgerReplay::InFlight,
     }
+}
+
+/// F20 schema version of the persisted ledger response body.
+///
+/// v1 (legacy): the bare `MessageResponse` / `BatchSendResponse` JSON —
+/// replaying it verbatim produced a DIFFERENT response shape than the first
+/// response (`ApiResponse {data, error}`), breaking SDK deserialization
+/// whenever Redis was unavailable.
+///
+/// v2 (current): `{"v":2,"body":<complete final HTTP envelope>}` where
+/// `body` is byte-identical to the JSON the first response serialized —
+/// constructed and serialized ONCE per send and persisted with its status,
+/// so the retry replays the exact same contract independent of Redis.
+const LEDGER_RESPONSE_SCHEMA_VERSION: i64 = 2;
+
+/// F20: build the versioned persisted body for a send's final response.
+/// The complete HTTP envelope (`ApiResponse::success(..)`) is serialized
+/// exactly once here — the same serialization is both persisted in the
+/// ledger and returned to the first caller, so a replay is byte-identical.
+fn ledger_response_body<T: Serialize>(payload: &T) -> Result<String, serde_json::Error> {
+    let stored = serde_json::json!({
+        "v": LEDGER_RESPONSE_SCHEMA_VERSION,
+        "body": ApiResponse::success(payload),
+    });
+    serde_json::to_string(&stored)
 }
 
 /// F19/F20 fast path: consult the durable ledger BEFORE executing a send.
@@ -973,9 +1000,32 @@ async fn open_ledger_in_tx(
     }
 }
 
-/// F21: complete the ledger record with the handler's response, fenced on
-/// this request's owner token. Called inside the same transaction as the
+/// F20: why a ledger completion failed. Both variants are propagated by the
+/// callers — a send whose response cannot be durably recorded must roll back
+/// its message/queue writes, never return success.
+#[derive(Debug)]
+enum CompleteLedgerError {
+    /// The SQL statement itself failed. Inside a transaction this typically
+    /// aborts it; the caller rolls back and compensates quota.
+    #[expect(
+        dead_code,
+        reason = "the sqlx source is carried for diagnostics and logged via Debug at the call sites"
+    )]
+    Db(sqlx::Error),
+    /// Zero owner-fenced rows were completed — this request no longer owns
+    /// the record (lease taken over). The caller rolls back and fails; the
+    /// current owner's record remains the authority.
+    NotOwner,
+}
+
+/// F21/F20: complete the ledger record with the handler's response, fenced
+/// on this request's owner token. Called inside the same transaction as the
 /// message/queue writes, so response and effects are atomic (F20).
+///
+/// Returns `Ok(())` only when EXACTLY ONE owner-fenced row was completed.
+/// SQL failures and ownership loss are `Err` — callers must roll back the
+/// message/queue writes and compensate the reserved quota so no
+/// accepted-but-unrecorded message or orphan quota survives.
 async fn complete_ledger_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -983,7 +1033,7 @@ async fn complete_ledger_in_tx(
     owner_token: &str,
     response_status: i64,
     response_body: &str,
-) {
+) -> Result<(), CompleteLedgerError> {
     let completed = sqlx::query(
         "UPDATE idempotency_records
          SET status = 'complete', response_status = $4, response_body = $5,
@@ -998,18 +1048,23 @@ async fn complete_ledger_in_tx(
     .execute(&mut **tx)
     .await;
     match completed {
-        Ok(updated) if updated.rows_affected() == 0 => {
-            tracing::warn!(
-                tenant_id,
-                idempotency_key = key,
-                "idempotency ledger completion fenced out — ownership lost"
-            );
-        }
-        Ok(_) => {}
+        Ok(updated) => completion_outcome(updated.rows_affected()),
         Err(error) => {
             tracing::error!(error = %error, tenant_id, idempotency_key = key,
                 "failed to complete idempotency ledger record");
+            Err(CompleteLedgerError::Db(error))
         }
+    }
+}
+
+/// F20: exactly ONE owner-fenced row must complete. Zero (or anything else)
+/// means this request no longer owns the record — an ownership error the
+/// caller propagates with a rollback.
+fn completion_outcome(rows_affected: u64) -> Result<(), CompleteLedgerError> {
+    if rows_affected == 1 {
+        Ok(())
+    } else {
+        Err(CompleteLedgerError::NotOwner)
     }
 }
 
@@ -1339,7 +1394,10 @@ async fn send_message(
             }) => {
                 // The original response was durably stored even though the
                 // caller never consumed it — replay it (F20).
-                return replay_ledger_response(response_status, &response_body);
+                return replay_ledger_response(
+                    response_status,
+                    response_body.as_deref().unwrap_or(""),
+                );
             }
             Some(LedgerReplay::Conflict(reason)) => return Err(ApiError::Conflict(reason.into())),
             Some(LedgerReplay::InFlight) => {
@@ -1386,7 +1444,10 @@ async fn send_message(
                     } = classify_ledger_row(&row, "POST", SEND_ROUTE, &payload_hash, &principal)
                     {
                         let _ = tx.rollback().await;
-                        return replay_ledger_response(response_status, &response_body);
+                        return replay_ledger_response(
+                            response_status,
+                            response_body.as_deref().unwrap_or(""),
+                        );
                     }
                 }
                 let _ = tx.rollback().await;
@@ -1522,20 +1583,47 @@ async fn send_message(
         created_at: persisted.created_at.to_rfc3339(),
     };
 
-    // F20: durably record the response in the same transaction as the
-    // message + queue rows — a caller that loses the HTTP response gets the
-    // exact same reply on retry.
+    // F20: construct and serialize the COMPLETE final HTTP envelope ONCE.
+    // The same serialized envelope is persisted in the ledger (inside this
+    // transaction) and returned to the first caller, so a retry replays the
+    // exact same contract — single send and batch alike — independent of
+    // Redis and of client response consumption.
+    let stored_body = match ledger_response_body(&response) {
+        Ok(stored_body) => stored_body,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+            record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to serialize send response envelope");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    };
+
+    // F20: completion is REQUIRED — exactly one owner-fenced row must
+    // complete, or the message/queue writes roll back and the reserved
+    // quota is compensated. A failure here must never leave an
+    // accepted-but-unrecorded message or an orphan quota reservation.
     if let Some(key) = idempotency_key.as_deref() {
-        if let Ok(body_json) = serde_json::to_string(&response) {
-            complete_ledger_in_tx(
-                &mut tx,
-                &auth.tenant_id,
-                key,
-                &owner_token,
-                StatusCode::ACCEPTED.as_u16() as i64,
-                &body_json,
-            )
-            .await;
+        if let Err(error) = complete_ledger_in_tx(
+            &mut tx,
+            &auth.tenant_id,
+            key,
+            &owner_token,
+            StatusCode::ACCEPTED.as_u16() as i64,
+            &stored_body,
+        )
+        .await
+        {
+            let _ = tx.rollback().await;
+            compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
+            record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+            tracing::error!(
+                error = ?error,
+                tenant_id = %auth.tenant_id,
+                idempotency_key = key,
+                "idempotency ledger completion failed — send rolled back"
+            );
+            return Err(ApiError::Internal("database error".into()));
         }
     }
 
@@ -1553,13 +1641,63 @@ async fn send_message(
 }
 
 /// F20: replay a durably stored ledger response.
+///
+/// The persisted body is versioned ([`LEDGER_RESPONSE_SCHEMA_VERSION`]):
+///
+/// * v2 — `{"v":2,"body":<envelope>}`: the complete final HTTP envelope as
+///   serialized for the first response; replayed verbatim so status, body,
+///   shape and IDs match the first response independent of Redis.
+/// * v1 (legacy unwrapped rows) — a bare `MessageResponse` /
+///   `BatchSendResponse`: wrapped into the same `ApiResponse {data, error}`
+///   envelope at replay time, preserving SDK compatibility for rows written
+///   before versioning.
+///
+/// A corrupt, empty or unknown-version body is an EXPLICIT error — a
+/// synthesized success must never answer a retry.
 fn replay_ledger_response(status: i64, body: &str) -> Result<Response, ApiError> {
     let status =
         StatusCode::from_u16(u16::try_from(status).unwrap_or(StatusCode::ACCEPTED.as_u16()))
             .unwrap_or(StatusCode::ACCEPTED);
-    let body = serde_json::from_str::<serde_json::Value>(body)
-        .unwrap_or(serde_json::json!({"data": null, "error": null}));
-    Ok((status, Json(body)).into_response())
+    let corrupt = |detail: &str| {
+        tracing::error!(
+            stored_status = status.as_u16(),
+            detail,
+            "corrupt persisted idempotency response — refusing to synthesize a success"
+        );
+        ApiError::Internal(
+            "stored idempotent response is corrupt; contact support with the idempotency key"
+                .into(),
+        )
+    };
+
+    if body.trim().is_empty() {
+        return Err(corrupt("empty stored response body"));
+    }
+    let value: serde_json::Value = serde_json::from_str(body).map_err(|error| {
+        tracing::error!(error = %error, "stored idempotency response body is not JSON");
+        corrupt("stored response body failed to parse")
+    })?;
+
+    if value.get("v").and_then(|v| v.as_i64()) == Some(LEDGER_RESPONSE_SCHEMA_VERSION) {
+        // Current schema: the envelope is stored under "body".
+        let envelope = value
+            .get("body")
+            .cloned()
+            .filter(|body| body.is_object())
+            .ok_or_else(|| corrupt("versioned record without an envelope object"))?;
+        return Ok((status, Json(envelope)).into_response());
+    }
+
+    if value.get("v").is_none() && value.is_object() {
+        // Legacy v1 row (bare MessageResponse/BatchSendResponse): wrap it in
+        // the standard envelope so the replayed shape matches the first
+        // response exactly. (`ApiResponse` skips `meta` when absent, so the
+        // wrapped envelope is byte-compatible with the first response.)
+        let envelope = serde_json::json!({ "data": value, "error": null });
+        return Ok((status, Json(envelope)).into_response());
+    }
+
+    Err(corrupt("unknown stored response schema version"))
 }
 
 async fn send_batch(
@@ -1616,7 +1754,10 @@ async fn send_batch(
                 response_status,
                 response_body,
             }) => {
-                return replay_ledger_response(response_status, &response_body);
+                return replay_ledger_response(
+                    response_status,
+                    response_body.as_deref().unwrap_or(""),
+                );
             }
             Some(LedgerReplay::Conflict(reason)) => return Err(ApiError::Conflict(reason.into())),
             Some(LedgerReplay::InFlight) => {
@@ -1664,7 +1805,10 @@ async fn send_batch(
                     } = classify_ledger_row(&row, "POST", BATCH_ROUTE, &payload_hash, &principal)
                     {
                         let _ = tx.rollback().await;
-                        return replay_ledger_response(response_status, &response_body);
+                        return replay_ledger_response(
+                            response_status,
+                            response_body.as_deref().unwrap_or(""),
+                        );
                     }
                 }
                 let _ = tx.rollback().await;
@@ -1861,19 +2005,49 @@ async fn send_batch(
 
     // F20: store the full per-item results in the ledger BEFORE the commit,
     // so they are durable the instant the batch itself is — independent of
-    // whether the caller ever consumes the HTTP response.
+    // whether the caller ever consumes the HTTP response. The persisted body
+    // is the COMPLETE final HTTP envelope (`ApiResponse::success(..)`),
+    // serialized once, so a replay returns the same shape as the first
+    // response. Completion failures roll the whole batch back with idempotent
+    // quota compensation — no accepted-but-unrecorded items survive.
     if accepted > 0 {
         if let Some(key) = batch_key.as_deref() {
-            if let Ok(body_json) = serde_json::to_string(&response) {
-                complete_ledger_in_tx(
-                    &mut tx,
-                    &auth.tenant_id,
-                    key,
-                    &owner_token,
-                    StatusCode::OK.as_u16() as i64,
-                    &body_json,
-                )
-                .await;
+            // Rollback + idempotent quota compensation for every earlier
+            // item reservation — shared by both failure arms below.
+            let stored_body = match ledger_response_body(&response) {
+                Ok(stored_body) => stored_body,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    for reservation in &committed_quota_reservations {
+                        compensate_reservation(&state, &auth.tenant_id, reservation).await;
+                    }
+                    record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+                    tracing::error!(error = %error, tenant_id = %auth.tenant_id, "batch response envelope serialization failed");
+                    return Err(ApiError::Internal("database error".into()));
+                }
+            };
+            if let Err(error) = complete_ledger_in_tx(
+                &mut tx,
+                &auth.tenant_id,
+                key,
+                &owner_token,
+                StatusCode::OK.as_u16() as i64,
+                &stored_body,
+            )
+            .await
+            {
+                let _ = tx.rollback().await;
+                for reservation in &committed_quota_reservations {
+                    compensate_reservation(&state, &auth.tenant_id, reservation).await;
+                }
+                record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
+                tracing::error!(
+                    error = ?error,
+                    tenant_id = %auth.tenant_id,
+                    idempotency_key = key,
+                    "idempotency ledger completion failed — batch rolled back"
+                );
+                return Err(ApiError::Internal("database error".into()));
             }
         }
         if let Err(error) = tx.commit().await {
@@ -3545,6 +3719,88 @@ Bcc: victim@example.com"@example.com"#
         b.subject = "Different".into();
         assert_eq!(canonical_send_hash(&a), canonical_send_hash(&a));
         assert_ne!(canonical_send_hash(&a), canonical_send_hash(&b));
+    }
+
+    // ── F20: envelope replay identity ───────────────────────────────
+
+    fn sample_message_response() -> MessageResponse {
+        MessageResponse {
+            id: "msg_123".into(),
+            status: "queued".into(),
+            created_at: "2026-09-10T00:00:00+00:00".into(),
+        }
+    }
+
+    /// The persisted ledger body IS the complete final HTTP envelope: a
+    /// replay must return byte-identical status + body to the first
+    /// response, for single and batch sends alike.
+    #[test]
+    fn ledger_body_roundtrips_the_complete_envelope() {
+        let response = sample_message_response();
+        let first_envelope =
+            serde_json::to_string(&ApiResponse::success(&response)).expect("serialize envelope");
+        let stored = ledger_response_body(&response).expect("serialize stored body");
+
+        // The stored body embeds the first response's envelope verbatim.
+        let stored_value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored_value["v"], LEDGER_RESPONSE_SCHEMA_VERSION);
+        assert_eq!(
+            stored_value["body"].to_string(),
+            serde_json::from_str::<serde_json::Value>(&first_envelope)
+                .unwrap()
+                .to_string(),
+            "persisted body must be the complete first-response envelope"
+        );
+
+        // And the replay serves exactly that envelope with the same status.
+        let replayed = replay_ledger_response(202, &stored).expect("replay must succeed");
+        assert_eq!(replayed.status(), StatusCode::ACCEPTED);
+    }
+
+    /// Legacy unwrapped rows (bare MessageResponse/BatchSendResponse) are
+    /// versioned up at replay time into the same envelope shape — SDKs see
+    /// one contract regardless of which deployment wrote the row.
+    #[test]
+    fn ledger_replay_wraps_legacy_unwrapped_rows() {
+        let legacy = serde_json::to_string(&sample_message_response()).unwrap();
+        let replayed = replay_ledger_response(202, &legacy).expect("legacy row must replay");
+        assert_eq!(replayed.status(), StatusCode::ACCEPTED);
+
+        let batch_legacy = serde_json::to_string(&BatchSendResponse {
+            accepted: 1,
+            rejected: 0,
+            results: vec![],
+        })
+        .unwrap();
+        let replayed =
+            replay_ledger_response(200, &batch_legacy).expect("legacy batch row must replay");
+        assert_eq!(replayed.status(), StatusCode::OK);
+    }
+
+    /// Corrupt persisted bodies are rejected explicitly — never a
+    /// synthesized success.
+    #[test]
+    fn ledger_replay_rejects_corrupt_bodies() {
+        for corrupt in ["", "   ", "not json at all", "{\"v\":99,\"body\":{}}", "[]"] {
+            assert!(
+                replay_ledger_response(202, corrupt).is_err(),
+                "corrupt body {corrupt:?} must be rejected, not synthesized"
+            );
+        }
+    }
+
+    /// F20: completion requires exactly ONE owner-fenced row.
+    #[test]
+    fn ledger_completion_requires_exactly_one_fenced_row() {
+        assert!(completion_outcome(1).is_ok());
+        assert!(matches!(
+            completion_outcome(0),
+            Err(CompleteLedgerError::NotOwner)
+        ));
+        assert!(matches!(
+            completion_outcome(2),
+            Err(CompleteLedgerError::NotOwner)
+        ));
     }
 
     // ── F26: MIME header storage ────────────────────────────────────

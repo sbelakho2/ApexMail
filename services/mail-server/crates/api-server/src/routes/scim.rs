@@ -178,6 +178,9 @@ const SCIM_GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
 const SCIM_LIST_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 const SCIM_ERROR_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 const SCIM_SPC_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig";
+/// RFC 7644 §3.5.2: the `schemas` value carried by every PatchOp request
+/// body (F42).
+const SCIM_PATCH_OP_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
 /// Maximum allowed count parameter for list operations.
 const MAX_SCIM_COUNT: i64 = 200;
@@ -226,12 +229,22 @@ impl ScimError {
 
 impl IntoResponse for ScimError {
     fn into_response(self) -> Response {
+        // RFC 7644 §3.1: SCIM endpoints return `application/scim+json` —
+        // errors included (F42). Success handlers already return `Json`
+        // (application/json), which RFC 7644 clients also accept; errors
+        // are where SCIM clients actually switch on the media type, so the
+        // SCIM type is set explicitly here.
         let body = Json(serde_json::json!({
             "schemas": [SCIM_ERROR_SCHEMA],
             "status": self.status.as_u16().to_string(),
             "detail": self.detail,
         }));
-        (self.status, body).into_response()
+        let mut response = (self.status, body).into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/scim+json"),
+        );
+        response
     }
 }
 
@@ -451,6 +464,24 @@ fn parse_json_body<T: DeserializeOwned>(
         .map_err(|error| ScimError::bad_request(format!("invalid {resource} resource: {error}")))
 }
 
+/// Parse and validate a PATCH request body shared by the User and Group
+/// PATCH handlers (F42). Beyond the JSON shape this enforces the RFC 7644
+/// §3.5.2 `schemas` attribute: absent/empty is tolerated for minimal
+/// clients, but a declared schema that is not the PatchOp URN is a 400 —
+/// the IdP is telling us it is sending something we are not reading.
+fn parse_patch_body(
+    body: Result<Json<serde_json::Value>, JsonRejection>,
+    resource: &str,
+) -> Result<ScimPatchRequest, ScimError> {
+    let request: ScimPatchRequest = parse_json_body(body, resource)?;
+    if let Err(detail) = validate_schemas(&request.schemas, SCIM_PATCH_OP_SCHEMA) {
+        return Err(ScimError::bad_request(format!(
+            "{resource} PATCH {detail} (expected '{SCIM_PATCH_OP_SCHEMA}')"
+        )));
+    }
+    Ok(request)
+}
+
 // ─── Lifecycle enforcement (F41) ───────────────────────────────
 
 /// Insert a SCIM-provisioned user with the lifecycle the caller requested
@@ -490,9 +521,17 @@ async fn insert_scim_user(
     }
 }
 
-/// Single-statement user write shared by replace and PATCH: one UPDATE
-/// covers every planned change, so a multi-operation PATCH is atomic.
-async fn apply_user_patch(
+/// A bound value for the parameterized user-patch UPDATE (F42).
+#[derive(Debug)]
+enum PatchBind<'a> {
+    Text(&'a str),
+    NullableText(Option<&'a str>),
+    Status(&'a str),
+}
+
+/// Whole-row user write for PUT (replace semantics: the resource is fully
+/// specified by the request, so every writable column is written).
+async fn replace_user_row(
     db: &sqlx::PgPool,
     tenant_id: &str,
     id: &str,
@@ -512,6 +551,89 @@ async fn apply_user_patch(
     .execute(db)
     .await
     .map(|result| result.rows_affected())
+}
+
+/// F42: build the parameterized user-patch UPDATE from the FOLDED change
+/// set. Only fields the PATCH explicitly supplied appear in the SET clause —
+/// omitted fields are never written, so a concurrent name-only PATCH cannot
+/// resurrect a stale `active`/`status` value it folded from an outdated
+/// snapshot (the read-modify-write whole-row write this replaces). All
+/// values are bound parameters; the only interpolated text is the fixed
+/// column list. Returns `None` when the patch changes nothing (no UPDATE is
+/// needed).
+fn build_user_patch_update<'a>(
+    changes: &'a UserPatchChanges,
+) -> Option<(String, Vec<PatchBind<'a>>)> {
+    let mut assignments: Vec<&'static str> = Vec::with_capacity(3);
+    let mut binds: Vec<PatchBind<'a>> = Vec::with_capacity(3);
+
+    if let Some(email) = changes.email.as_deref() {
+        assignments.push("email");
+        binds.push(PatchBind::Text(email));
+    }
+    // Some(None) = explicitly clear the stored name.
+    if let Some(name) = changes.name.as_ref() {
+        assignments.push("name");
+        binds.push(PatchBind::NullableText(name.as_deref()));
+    }
+    if let Some(active) = changes.active {
+        assignments.push("status");
+        binds.push(PatchBind::Status(status_for_active(active)));
+    }
+
+    if assignments.is_empty() {
+        return None;
+    }
+
+    let placeholders: Vec<String> = (1..=binds.len()).map(|index| format!("${index}")).collect();
+    let set_clause = assignments
+        .iter()
+        .zip(placeholders.iter())
+        .map(|(column, placeholder)| format!("{column} = {placeholder}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE users SET {set_clause}, updated_at = NOW()
+         WHERE id = ${}::uuid AND tenant_id = ${}
+         RETURNING email, name, status",
+        binds.len() + 1,
+        binds.len() + 2,
+    );
+    Some((sql, binds))
+}
+
+/// F42: apply a User PATCH with a parameterized UPDATE that changes ONLY
+/// the explicitly supplied fields, returning the post-update row
+/// (email, name, status) for the response. Omitted fields are preserved
+/// under concurrent requests by construction.
+async fn apply_user_patch_changes(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    id: &str,
+    changes: &UserPatchChanges,
+) -> Result<Option<(String, Option<String>, String)>, sqlx::Error> {
+    let Some((sql, binds)) = build_user_patch_update(changes) else {
+        // Nothing to change: return the current row (the caller already
+        // holds it) — no write, no timestamp churn.
+        let row: Option<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT email, name, status FROM users WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(db)
+        .await?;
+        return Ok(row);
+    };
+
+    let mut query = sqlx::query_as::<_, (String, Option<String>, String)>(&sql);
+    for value in &binds {
+        query = match value {
+            PatchBind::Text(text) => query.bind(text),
+            PatchBind::NullableText(text) => query.bind(text),
+            PatchBind::Status(status) => query.bind(status),
+        };
+    }
+    query.bind(id).bind(tenant_id).fetch_optional(db).await
 }
 
 /// Session revocation on SCIM deactivation (F41): writes the
@@ -699,6 +821,15 @@ struct ScimPatchOp {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScimPatchRequest {
+    /// RFC 7644 §3.5.2: every PATCH request body carries `schemas`
+    /// containing `urn:ietf:params:scim:api:messages:2.0:PatchOp`. Real IdP
+    /// payloads (Azure AD, Okta) always include it; previously the field was
+    /// rejected wholesale by `deny_unknown_fields`, so standard bodies
+    /// failed before any operation was applied (F42). Absent/empty stays
+    /// accepted for hand-rolled minimal clients; a present-but-wrong schema
+    /// URN is a client error (validated in [`parse_patch_body`]).
+    #[serde(default)]
+    schemas: Vec<String>,
     #[serde(rename = "Operations")]
     operations: Vec<ScimPatchOp>,
 }
@@ -1048,7 +1179,8 @@ async fn update_user(
 
     // F41: PUT maps `active` through the same lifecycle mapping as create
     // and PATCH, and deactivation revokes sessions + invalidates caches.
-    let rows = apply_user_patch(
+    // PUT is REPLACE semantics — the whole writable row is written.
+    let rows = replace_user_row(
         &state.db,
         &auth.tenant_id,
         &id,
@@ -1087,7 +1219,8 @@ async fn patch_user(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<ScimUser>, ScimError> {
     require_scopes(&auth, &["scim:write"])?;
-    let request: ScimPatchRequest = parse_json_body(body, "User PATCH")?;
+    // F42: shared PATCH DTO parsing + RFC 7644 §3.5.2 schemas validation.
+    let request: ScimPatchRequest = parse_patch_body(body, "User PATCH")?;
 
     let current: Option<(String, Option<String>, String, String)> = sqlx::query_as(
         "SELECT email, name, status, role FROM users WHERE id = $1::uuid AND tenant_id = $2",
@@ -1096,7 +1229,7 @@ async fn patch_user(
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?;
-    let Some((current_email, current_name, current_status, current_role)) = current else {
+    let Some((current_email, current_name, _current_status, current_role)) = current else {
         return Err(ScimError::not_found("user not found"));
     };
 
@@ -1104,21 +1237,11 @@ async fn patch_user(
     // single invalid op rejects the whole request and leaves the user
     // untouched.
     let changes = plan_user_patch(&request).map_err(ScimError::bad_request)?;
-    let UserPatchChanges {
-        email: change_email,
-        name: change_name,
-        active: change_active,
-    } = changes;
 
-    // Fold onto the current stored state (later operations win).
-    let email = change_email
-        .map(|value| value.trim().to_lowercase())
-        .unwrap_or(current_email.clone());
-    let name = change_name.unwrap_or(current_name);
-    let active = change_active.unwrap_or(current_status == "active");
-
-    let email_changed = email != current_email;
-    if email_changed {
+    // Privilege guards for an email change (P2-1): validated against the
+    // current row BEFORE any write.
+    if let Some(email) = changes.email.as_deref() {
+        let email = email.trim().to_lowercase();
         if !is_plausible_email(&email) {
             return Err(ScimError::bad_request(format!(
                 "userName/emails[0].value must be a valid address, got '{email}'"
@@ -1132,19 +1255,16 @@ async fn patch_user(
         }
     }
 
-    // One UPDATE covers the whole folded plan → atomic write.
-    let rows = apply_user_patch(
-        &state.db,
-        &auth.tenant_id,
-        &id,
-        &email,
-        name.as_deref(),
-        active,
-    )
-    .await?;
-    if rows == 0 {
+    // F42 concurrency: a parameterized UPDATE that changes ONLY the fields
+    // the PATCH explicitly supplied. The stale snapshot above is used solely
+    // for validation/response — omitted fields are never written, so a
+    // concurrent name-only patch can no longer restore `active=true` after
+    // a deactivation (read-modify-write of the whole row was the defect).
+    let applied = apply_user_patch_changes(&state.db, &auth.tenant_id, &id, &changes).await?;
+    let Some((final_email, final_name, final_status)) = applied else {
         return Err(ScimError::not_found("user not found"));
-    }
+    };
+    let active = final_status == "active";
 
     enforce_lifecycle_authz(&state, &auth.tenant_id, &id, active).await;
 
@@ -1155,14 +1275,20 @@ async fn patch_user(
         "scim_user",
         Some(&id),
         serde_json::json!({
-            "email": email,
-            "emailChanged": email_changed,
+            "email": final_email,
+            "emailChanged": changes.email.is_some() && final_email != current_email,
+            "nameChanged": changes.name.is_some() && final_name != current_name,
             "status": status_for_active(active),
         }),
     )
     .await;
 
-    Ok(Json(canonical_scim_user(id, email, name, active)))
+    Ok(Json(canonical_scim_user(
+        id,
+        final_email,
+        final_name,
+        active,
+    )))
 }
 
 async fn delete_user(
@@ -1506,7 +1632,8 @@ async fn patch_group(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<ScimGroup>, ScimError> {
     require_scopes(&auth, &["scim:write"])?;
-    let request: ScimPatchRequest = parse_json_body(body, "Group PATCH")?;
+    // F42: shared PATCH DTO parsing + RFC 7644 §3.5.2 schemas validation.
+    let request: ScimPatchRequest = parse_patch_body(body, "Group PATCH")?;
 
     let row = sqlx::query_as::<_, GroupScimRow>(
         "SELECT id, scim_id, display_name, created_at FROM scim_groups
@@ -2230,7 +2357,13 @@ mod tests {
     // ── F42: User PATCH planning ────────────────────────────────
 
     fn patch_body(operations: serde_json::Value) -> ScimPatchRequest {
-        serde_json::from_value(json!({ "Operations": operations })).expect("valid patch request")
+        // Real IdP fixture shape: RFC 7644 §3.5.2 requires the PatchOp
+        // schemas attribute on every PATCH body (F42).
+        serde_json::from_value(json!({
+            "schemas": [SCIM_PATCH_OP_SCHEMA],
+            "Operations": operations
+        }))
+        .expect("valid patch request")
     }
 
     #[test]
@@ -2346,6 +2479,113 @@ mod tests {
         let request = patch_body(json!([{ "op": "remove", "path": "name.givenName" }]));
         let changes = plan_user_patch(&request).unwrap();
         assert_eq!(changes.name, Some(None));
+    }
+
+    // ── F42: RFC 7644 §3.5.2 PatchOp schemas attribute ──────────
+
+    /// A standard IdP PATCH body (with the required schemas attribute)
+    /// deserializes cleanly — it used to be rejected wholesale by
+    /// deny_unknown_fields.
+    #[test]
+    fn patch_request_accepts_the_rfc_schemas_attribute() {
+        let json = json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{ "op": "replace", "path": "active", "value": false }]
+        });
+        let req: ScimPatchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.schemas, vec![SCIM_PATCH_OP_SCHEMA.to_string()]);
+        assert_eq!(req.operations.len(), 1);
+    }
+
+    /// A declared schema that is not the PatchOp URN is a 400 (the IdP is
+    /// saying it is sending something we are not reading).
+    #[test]
+    fn patch_body_with_wrong_schema_urn_is_rejected() {
+        assert!(validate_schemas(&[SCIM_USER_SCHEMA.into()], SCIM_PATCH_OP_SCHEMA).is_err());
+        // Absent or empty schemas stay accepted for minimal clients.
+        assert!(validate_schemas(&[], SCIM_PATCH_OP_SCHEMA).is_ok());
+        assert!(
+            validate_schemas(&[SCIM_PATCH_OP_SCHEMA.to_string()], SCIM_PATCH_OP_SCHEMA).is_ok()
+        );
+    }
+
+    // ── F42: parameterized user-patch UPDATE ─────────────────────
+
+    /// The SET clause of a built UPDATE (between SET and WHERE) — the only
+    /// place a column may be written.
+    fn set_clause_of(sql: &str) -> String {
+        sql.split_once(" WHERE ")
+            .map(|(head, _)| head.to_string())
+            .unwrap_or_else(|| sql.to_string())
+    }
+
+    /// A name-only patch writes ONLY the name column — omitted fields are
+    /// preserved under concurrency, so a stale folded snapshot can never
+    /// restore a deactivated status.
+    #[test]
+    fn name_only_patch_updates_only_the_name_column() {
+        let changes = UserPatchChanges {
+            email: None,
+            name: Some(Some("Renamed".into())),
+            active: None,
+        };
+        let (sql, binds) = build_user_patch_update(&changes).expect("name-only patch must update");
+        let set_clause = set_clause_of(&sql).to_lowercase();
+        assert!(set_clause.contains("name = $1"), "SET clause: {sql}");
+        assert!(
+            !set_clause.contains("email"),
+            "email must not be written: {sql}"
+        );
+        assert!(
+            !set_clause.contains("status"),
+            "status must not be written: {sql}"
+        );
+        assert_eq!(binds.len(), 1);
+    }
+
+    /// A deactivation patch writes ONLY the status column — the concurrent
+    /// name patch scenario from the finding can no longer resurrect
+    /// active=true, and vice versa.
+    #[test]
+    fn deactivation_patch_updates_only_the_status_column() {
+        let changes = UserPatchChanges {
+            email: None,
+            name: None,
+            active: Some(false),
+        };
+        let (sql, binds) = build_user_patch_update(&changes).expect("deactivation must update");
+        let set_clause = set_clause_of(&sql).to_lowercase();
+        assert!(set_clause.contains("status = $1"), "SET clause: {sql}");
+        assert!(
+            !set_clause.contains("email") && !set_clause.contains("name"),
+            "other columns must not be written: {sql}"
+        );
+        assert_eq!(binds.len(), 1);
+    }
+
+    /// Every supplied field is written with a bound parameter; clearing the
+    /// name binds NULL explicitly.
+    #[test]
+    fn full_patch_binds_every_supplied_field() {
+        let changes = UserPatchChanges {
+            email: Some("new@example.com".into()),
+            name: Some(None),
+            active: Some(true),
+        };
+        let (sql, binds) = build_user_patch_update(&changes).expect("full patch must update");
+        assert!(sql.contains("email = $1"));
+        assert!(sql.contains("name = $2"));
+        assert!(sql.contains("status = $3"));
+        assert!(sql.contains("RETURNING email, name, status"));
+        assert_eq!(binds.len(), 3);
+        assert!(matches!(binds[1], PatchBind::NullableText(None)));
+    }
+
+    /// A patch that changes nothing performs no UPDATE.
+    #[test]
+    fn no_op_patch_builds_no_update() {
+        let changes = UserPatchChanges::default();
+        assert!(build_user_patch_update(&changes).is_none());
     }
 
     // ── F43: pagination normalization ───────────────────────────
@@ -2896,8 +3136,10 @@ mod tests {
             .await
             .expect("seed user");
 
-        // Valid multi-op plan: rename + deactivate in ONE statement.
+        // Valid multi-op plan (RFC 7644 §3.5.2 schemas field included, as a
+        // real IdP sends it): rename + deactivate in ONE statement.
         let valid_request: ScimPatchRequest = serde_json::from_value(json!({
+            "schemas": [SCIM_PATCH_OP_SCHEMA],
             "Operations": [
                 { "op": "replace", "path": "name.givenName", "value": "Renamed" },
                 { "op": "replace", "path": "active", "value": false }
@@ -2905,22 +3147,13 @@ mod tests {
         }))
         .unwrap();
         let changes = plan_user_patch(&valid_request).expect("valid plan");
-        let UserPatchChanges {
-            email: _,
-            name,
-            active,
-        } = changes;
-        let rows = apply_user_patch(
-            &pool,
-            &tenant_id,
-            &user_id.to_string(),
-            &email,
-            name.flatten().as_deref(),
-            active.unwrap_or(true),
-        )
-        .await
-        .expect("apply patch");
-        assert_eq!(rows, 1, "the single UPDATE must touch the user");
+        let applied = apply_user_patch_changes(&pool, &tenant_id, &user_id.to_string(), &changes)
+            .await
+            .expect("apply patch")
+            .expect("the single UPDATE must touch the user");
+        let (_, applied_name, applied_status) = applied;
+        assert_eq!(applied_status, "deactivated");
+        assert_eq!(applied_name.as_deref(), Some("Renamed"));
 
         let (status, name): (String, Option<String>) =
             sqlx::query_as("SELECT status, name FROM users WHERE id = $1 AND tenant_id = $2")
@@ -2956,6 +3189,70 @@ mod tests {
             Some("Renamed"),
             "rejected patch must not rename"
         );
+
+        let _ = pool.close().await;
+        drop_test_database(&server_part, &db_name).await;
+    }
+
+    /// F42 concurrency: a name-only PATCH that raced a deactivation must
+    /// NOT restore active=true. The parameterized UPDATE writes only the
+    /// supplied columns, so the stale pre-read snapshot (active) can never
+    /// reach the database.
+    #[tokio::test]
+    async fn scim_concurrent_name_patch_cannot_undo_deactivation() {
+        let Some((pool, db_name, server_part)) =
+            prod_lineage_pool("scim_concurrent_name_patch_cannot_undo_deactivation").await
+        else {
+            return;
+        };
+
+        let tenant_id = format!("ten_scx_{}", &Uuid::new_v4().simple().to_string()[..18]);
+        insert_test_tenant(&pool, &tenant_id).await;
+
+        let user_id = Uuid::new_v4();
+        let email = format!("race-{user_id}@lifecycle.example");
+        insert_scim_user(&pool, &tenant_id, user_id, &email, Some("Before"), true)
+            .await
+            .expect("seed user");
+
+        // The racing scenario from the finding, sequenced: the name patch
+        // reads its snapshot (active=true), the deactivation commits, THEN
+        // the name patch writes. Under the old whole-row write the stale
+        // status resurrected the account; the parameterized UPDATE now
+        // touches only `name`.
+        let name_patch = UserPatchChanges {
+            email: None,
+            name: Some(Some("Racing Rename".into())),
+            active: None, // name-only: MUST NOT carry the stale active=true
+        };
+        let deactivation = UserPatchChanges {
+            email: None,
+            name: None,
+            active: Some(false),
+        };
+
+        // Deactivation commits between the name patch's read and write.
+        apply_user_patch_changes(&pool, &tenant_id, &user_id.to_string(), &deactivation)
+            .await
+            .expect("deactivate")
+            .expect("row");
+        apply_user_patch_changes(&pool, &tenant_id, &user_id.to_string(), &name_patch)
+            .await
+            .expect("rename")
+            .expect("row");
+
+        let (status, name): (String, Option<String>) =
+            sqlx::query_as("SELECT status, name FROM users WHERE id = $1 AND tenant_id = $2")
+                .bind(user_id)
+                .bind(&tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("user row after the race");
+        assert_eq!(
+            status, "deactivated",
+            "a name-only patch must never restore active after deactivation"
+        );
+        assert_eq!(name.as_deref(), Some("Racing Rename"));
 
         let _ = pool.close().await;
         drop_test_database(&server_part, &db_name).await;

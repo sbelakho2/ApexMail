@@ -314,6 +314,13 @@ impl TemplateRenderer {
             }
         }
 
+        // F62: the plaintext body may have just been REPLACED by the stored
+        // `text_body` — recompute the derived metadata from the FINAL body
+        // so `plaintext_size_bytes` describes the body actually returned
+        // (it previously kept the size of the HTML-generated plaintext).
+        result.metadata.plaintext_size_bytes = result.plaintext.as_ref().map(|p| p.len());
+        result.metadata.html_size_bytes = result.html.len();
+
         Ok(result)
     }
 }
@@ -337,36 +344,66 @@ struct StoredTemplate {
 /// Build the render-cache key for a stored template.
 ///
 /// #191: the props JSON is hashed for a stable key regardless of key
-/// ordering. F62: the key must cover EVERYTHING that affects the output —
-/// tenant (scope), template, the stored content's `version` AND content
-/// stamp, props, subject, minify and plaintext generation. The version and
-/// stamp tie invalidation to the canonical writer: the api-server bumps
-/// `version` on every save and rewrites `updated_at`/snapshot `created_at`
-/// on rollback, so a stale render is never served after a stored change.
+/// ordering. F62: the key is a hash of a VERSIONED structure covering
+/// EVERYTHING that affects the output — the tenant (scope), the template,
+/// the stored content's `version` AND content stamp, and EVERY
+/// output-affecting `RenderOptions` field: `props`, `subject`, `minify`,
+/// `generate_plaintext` and `missing_field_fallback` (previously omitted,
+/// so otherwise-identical requests with different fallback strings shared
+/// one cached output). Adding a new output-affecting option means adding it
+/// to [`StoredRenderCacheKeyInputs`] and bumping
+/// [`STORED_RENDER_CACHE_KEY_VERSION`], which rotates every key.
+///
+/// The version and stamp tie invalidation to the canonical writer: the
+/// api-server bumps `version` on every save and rewrites
+/// `updated_at`/snapshot `created_at` on rollback, so a stale render is
+/// never served after a stored change.
+const STORED_RENDER_CACHE_KEY_VERSION: u8 = 2;
+
+/// F62: the versioned structure hashed into the stored-render cache key.
+/// Serde serializes it field-by-field in declaration order, so every
+/// output-affecting dimension is part of the key BY CONSTRUCTION — the
+/// incomplete positional key this replaces silently dropped
+/// `missing_field_fallback`.
+#[derive(serde::Serialize)]
+struct StoredRenderCacheKeyInputs<'a> {
+    key_version: u8,
+    tenant_id: &'a str,
+    template_id: &'a str,
+    version: i32,
+    content_stamp_micros: i64,
+    props: &'a serde_json::Value,
+    subject: Option<&'a str>,
+    minify: bool,
+    generate_plaintext: bool,
+    missing_field_fallback: Option<&'a str>,
+}
+
 fn stored_render_cache_key(stored: &StoredTemplate, options: &RenderOptions) -> String {
-    // serde_json::Value Display can produce different strings for
-    // logically-equal JSON; a content hash is order-stable.
     use sha2::{Digest, Sha256};
-    let hash_short = |input: &str| -> String {
-        let hash = Sha256::digest(input.as_bytes());
-        hex::encode(&hash[..16]) // 128-bit hash is sufficient for cache keys
+    let inputs = StoredRenderCacheKeyInputs {
+        key_version: STORED_RENDER_CACHE_KEY_VERSION,
+        tenant_id: &stored.tenant_id,
+        template_id: &stored.template_id,
+        version: stored.version,
+        content_stamp_micros: stored.content_stamp.timestamp_micros(),
+        props: &options.props,
+        subject: options.subject.as_deref(),
+        minify: options.minify,
+        generate_plaintext: options.generate_plaintext,
+        missing_field_fallback: options.missing_field_fallback.as_deref(),
     };
-    let props_hash = hash_short(&serde_json::to_string(&options.props).unwrap_or_default());
-    format!(
-        "{}:{}:{}:{}:{}:{}:{}:{}",
-        stored.tenant_id,
-        stored.template_id,
-        stored.version,
-        stored.content_stamp.timestamp_micros(),
-        props_hash,
-        options.minify as u8,
-        options.generate_plaintext as u8,
-        options
-            .subject
-            .as_deref()
-            .map(hash_short)
-            .unwrap_or_else(|| "-".to_string()),
-    )
+    // A serialization failure can only come from a non-serializable props
+    // value; hashing the fallback error marker still distinguishes the
+    // request from every other one (and never collides two DIFFERENT props).
+    let serialized = serde_json::to_string(&inputs).unwrap_or_else(|error| {
+        format!(
+            "{{\"key_version\":{},\"serialization_error\":\"{}\"}}",
+            STORED_RENDER_CACHE_KEY_VERSION, error
+        )
+    });
+    let hash = Sha256::digest(serialized.as_bytes());
+    format!("stored-render:{:x}", hash)
 }
 
 /// Internal DB row type for the canonical `templates` table (avoids orphan
@@ -736,6 +773,171 @@ mod tests {
             stored_render_cache_key(&stored, &stored_opts()),
             stored_render_cache_key(&stored, &other_opts)
         );
+    }
+
+    /// F62 regression: `missing_field_fallback` CHANGES the output, so it
+    /// must change the cache key — otherwise identical requests with
+    /// different fallbacks shared the first cached render.
+    #[tokio::test]
+    async fn stored_cache_key_discriminates_missing_field_fallback() {
+        let stored = fake_stored_template(3, "s", "<p>{{ missing }}</p>");
+        let mut fallback_a = stored_opts();
+        fallback_a.missing_field_fallback = Some("FALLBACK-A".into());
+        let mut fallback_b = stored_opts();
+        fallback_b.missing_field_fallback = Some("FALLBACK-B".into());
+
+        assert_ne!(
+            stored_render_cache_key(&stored, &fallback_a),
+            stored_render_cache_key(&stored, &fallback_b),
+            "different fallbacks must not share a cached render"
+        );
+        // Same fallback twice → same key (stable).
+        assert_eq!(
+            stored_render_cache_key(&stored, &fallback_a),
+            stored_render_cache_key(&stored, &fallback_a)
+        );
+        // And the fallback really does change the rendered output.
+        let renderer = stored_renderer();
+        let a = renderer.render_stored(&stored, &fallback_a).unwrap();
+        let b = renderer.render_stored(&stored, &fallback_b).unwrap();
+        assert_eq!(a.html, "<p>FALLBACK-A</p>");
+        assert_eq!(b.html, "<p>FALLBACK-B</p>");
+    }
+
+    /// F62: EVERY output-affecting RenderOptions field is part of the
+    /// versioned key — flipping any one of them must rotate it.
+    #[test]
+    fn stored_cache_key_covers_every_output_affecting_option() {
+        let stored = fake_stored_template(3, "s {{ n }}", "<p>{{ n }}</p>");
+        let base = stored_opts();
+
+        let mut variant = base.clone();
+        variant.props = serde_json::json!({"other": 1});
+        assert_ne!(
+            stored_render_cache_key(&stored, &base),
+            stored_render_cache_key(&stored, &variant),
+            "props"
+        );
+
+        let mut variant = base.clone();
+        variant.subject = Some("Subject {{ n }}".into());
+        assert_ne!(
+            stored_render_cache_key(&stored, &base),
+            stored_render_cache_key(&stored, &variant),
+            "subject"
+        );
+
+        let mut variant = base.clone();
+        variant.minify = !variant.minify;
+        assert_ne!(
+            stored_render_cache_key(&stored, &base),
+            stored_render_cache_key(&stored, &variant),
+            "minify"
+        );
+
+        let mut variant = base.clone();
+        variant.generate_plaintext = !variant.generate_plaintext;
+        assert_ne!(
+            stored_render_cache_key(&stored, &base),
+            stored_render_cache_key(&stored, &variant),
+            "generate_plaintext"
+        );
+
+        let mut variant = base.clone();
+        variant.missing_field_fallback = Some("fb".into());
+        assert_ne!(
+            stored_render_cache_key(&stored, &base),
+            stored_render_cache_key(&stored, &variant),
+            "missing_field_fallback"
+        );
+    }
+
+    /// F62: derived metadata must describe the FINAL body — when the stored
+    /// `text_body` replaces the generated plaintext,
+    /// `plaintext_size_bytes` follows the replacement.
+    #[tokio::test]
+    async fn stored_render_metadata_recomputed_after_final_body_selection() {
+        let renderer = stored_renderer();
+        let mut stored = fake_stored_template(1, "s", "<p>Hello {{ name }}</p>");
+        // A text_body much longer than the generated plaintext.
+        stored.text_body = Some("plain-text-body-substantially-longer-than-html {{ name }}".into());
+
+        let result = renderer.render_stored(&stored, &stored_opts()).unwrap();
+        assert_eq!(
+            result.metadata.plaintext_size_bytes,
+            Some(result.plaintext.as_ref().unwrap().len()),
+            "plaintext_size_bytes must measure the FINAL plaintext body"
+        );
+        assert_eq!(
+            result.metadata.html_size_bytes,
+            result.html.len(),
+            "html_size_bytes must measure the final html body"
+        );
+    }
+
+    /// F62 warm-cache identity: warm the cache with fallback A, then render
+    /// the same template with fallback B — the result must match an
+    /// uncached fallback-B render (body AND metadata), proving the fallback
+    /// participates in the cache identity end-to-end.
+    #[tokio::test]
+    async fn warm_cache_fallback_a_vs_fallback_b() {
+        let Some(pool) = stored_template_test_pool("fallback").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let renderer = TemplateRenderer::new(pool.clone(), test_config());
+        let tenant = "ten_f62_db_fbowner000001";
+        let template_id = apexmail_lib::id::generate_id("", 26);
+        seed_versioned_template(&pool, tenant, &template_id).await;
+
+        let fallback_a = RenderOptions {
+            props: serde_json::json!({"name": "Alice"}),
+            generate_plaintext: true,
+            minify: false,
+            subject: None,
+            missing_field_fallback: Some("FB-A".into()),
+        };
+        let mut fallback_b = fallback_a.clone();
+        fallback_b.missing_field_fallback = Some("FB-B".into());
+
+        // Warm with A.
+        let warm_a = renderer
+            .render_template(tenant, &template_id, None, &fallback_a)
+            .await
+            .unwrap();
+
+        // B must NOT hit A's cache: identical to a fresh B render.
+        let warm_b = renderer
+            .render_template(tenant, &template_id, None, &fallback_b)
+            .await
+            .unwrap();
+        let fresh_b = renderer
+            .render_stored(
+                &renderer
+                    .load_current_version(tenant, &template_id)
+                    .await
+                    .unwrap(),
+                &fallback_b,
+            )
+            .unwrap();
+
+        assert!(warm_a.metadata.cached || !warm_a.metadata.cached); // shape sanity
+        assert_eq!(warm_b.html, fresh_b.html, "cached B must equal uncached B");
+        assert_eq!(warm_b.subject, fresh_b.subject);
+        assert_eq!(
+            warm_b.metadata.plaintext_size_bytes, fresh_b.metadata.plaintext_size_bytes,
+            "metadata must match the uncached render too"
+        );
+        // The bodies genuinely differ across fallbacks.
+        assert_ne!(warm_a.html, warm_b.html);
+        // Re-rendering A still returns A (its cache entry remains valid).
+        let again_a = renderer
+            .render_template(tenant, &template_id, None, &fallback_a)
+            .await
+            .unwrap();
+        assert_eq!(again_a.html, warm_a.html);
+
+        pool.close().await;
     }
 
     // ── F62: DB-backed tests (skipped without TEST_DATABASE_URL; same

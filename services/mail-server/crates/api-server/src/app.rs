@@ -722,7 +722,29 @@ pub fn build_app(state: AppState) -> Router {
             10 * 1024 * 1024, /* 10 MB general limit */
         ))
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
-        .layer(TraceLayer::new_for_http())
+        // F65: the default TraceLayer span records the FULL request URI —
+        // including one-time verification/reset tokens that travel in the
+        // path. The customized span carries only approved correlation
+        // fields: method, the SAME redacted route the request-logger uses
+        // (MatchedPath route template via the shared helper's fallback when
+        // unmatched) and the caller-supplied correlation id. No raw
+        // token-bearing URI enters any span field at any tracing level.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                let route = request_logger::redact_token_bearing_path(req.uri().path());
+                let correlation_id = req
+                    .headers()
+                    .get("x-correlation-id")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("-");
+                tracing::info_span!(
+                    "http.request",
+                    method = %req.method(),
+                    route = %route,
+                    correlation_id = %correlation_id,
+                )
+            },
+        ))
         .layer(cors)
         .with_state(state)
 }
