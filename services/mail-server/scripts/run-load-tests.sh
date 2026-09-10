@@ -84,7 +84,6 @@ run_test() {
   local script="$2"
   local extra_args="${3:-}"
   local report_file="$REPORT_DIR/${name}-${TIMESTAMP}.json"
-  local html_report="$REPORT_DIR/${name}-${TIMESTAMP}.html"
 
   echo ""
   echo "═══════════════════════════════════════════════════════════════"

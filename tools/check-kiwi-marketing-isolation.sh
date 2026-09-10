@@ -68,7 +68,7 @@ for src_path in "${SOURCE_PATHS[@]}"; do
 
   # Build a grep exclude list from ALLOWED_PATHS (relative to repo root).
   excludes=()
-  for ap in ${ALLOWED_PATHS[@]:-}; do
+  for ap in "${ALLOWED_PATHS[@]}"; do
     excludes+=( --exclude="$ap" )
   done
 

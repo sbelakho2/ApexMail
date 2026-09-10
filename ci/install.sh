@@ -59,6 +59,74 @@ install_apt_deps() {
     apt-get install -y $_missing
 }
 
+# --- 1b. polyglot toolchains (SDK lanes, satellite crates, static lint) -------------
+# Everything the test stage's new lanes need (see ci/README.md "SDK lanes"
+# and "Static lint gates"): go/java+maven/ruby/php+composer for the five SDK
+# lanes and the PHP suites; shellcheck + hadolint for the static lint gates.
+# Idempotent: each package installs only when its command is absent.
+install_sdk_toolchains() {
+    [ -f /etc/debian_version ] || { log "not Debian/Ubuntu — install SDK toolchains manually"; return 0; }
+    _missing=''
+    # Each apt package maps to the COMMAND its lane needs; the php-* and
+    # other extension packages ride along with php-cli (one apt line).
+    #   golang-go    → go    (sdk-go; go.mod wants >=1.21, distro Go is newer)
+    #   default-jdk  → java  (sdk-java; pom targets release 17, default-jdk
+    #                         on bookworm+ is 17 or 21; maven pulls it too)
+    #   maven        → mvn   (sdk-java)
+    #   ruby-full    → ruby  (sdk-ruby; stdlib-only contract suite)
+    #   php-cli (+php-xml/php-mbstring/php-curl) → php (PHP suites, sdk-php)
+    #   the shellcheck apt package feeds the static-lint shell gate; the
+    #   repo gate runs at -S warning, and older distro builds report a
+    #   subset of those findings, so the gate only gets looser, never
+    #   stricter, on an older host.
+    for p in golang-go default-jdk maven ruby-full \
+             php-cli php-xml php-mbstring php-curl shellcheck; do
+        case $p in
+            golang-go)   _cmd=go ;;
+            default-jdk|maven) _cmd=mvn ;;
+            ruby-full)   _cmd=ruby ;;
+            php-*)       _cmd=php ;;
+            *)           _cmd=$p ;;
+        esac
+        have "$_cmd" || _missing="$_missing $p"
+    done
+    if [ -n "$_missing" ]; then
+        log "installing SDK/CI toolchains:$_missing"
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y
+        # shellcheck disable=SC2086  # word list
+        apt-get install -y $_missing
+    else
+        log "SDK/CI toolchains already present"
+    fi
+    # Composer via the official installer (no distro package on Debian): a
+    # single phar in /usr/local/bin, pinned installer from getcomposer.org.
+    if ! have composer; then
+        log "installing composer (official installer)"
+        curl -sS https://getcomposer.org/installer | \
+            php -- --install-dir=/usr/local/bin --filename=composer
+    else
+        log "composer present: $(composer --version 2>/dev/null | head -1)"
+    fi
+}
+
+# hadolint — Dockerfile lint gate. Pinned single-file release binary, same
+# pattern as gitleaks/trivy (versions bump consciously).
+install_hadolint() {
+    have hadolint && { log "hadolint present: $(hadolint --version)"; return 0; }
+    _v=2.15.1
+    _arch=x86_64
+    case "$(uname -m)" in
+        aarch64|arm64) _arch=arm64 ;;
+    esac
+    _tmp=$(mktemp -d)
+    log "installing hadolint v$_v (${_arch})"
+    curl -sSLf "https://github.com/hadolint/hadolint/releases/download/v$_v/hadolint-linux-${_arch}" \
+        -o "$_tmp/hadolint"
+    install -m 0755 "$_tmp/hadolint" /usr/local/bin/hadolint
+    rm -rf "$_tmp"
+}
+
 # --- 2. rust + cargo tooling ----------------------------------------------------------
 install_cargo_tools() {
     if ! have cargo; then
@@ -238,6 +306,16 @@ do_check() {
     for c in cargo cargo-audit sqlx gitleaks trivy zola; do
         if have "$c"; then log "ok: $c"; else log "optional-missing: $c (gate degrades, see ci/README.md)"; fi
     done
+    # SDK-lane / static-lint toolchains (test stage; REQUIRED lanes, so a
+    # gap on the deploy host fails closed — list it loudly here).
+    for c in go mvn ruby php composer shellcheck hadolint; do
+        if have "$c"; then
+            log "ok: $c"
+        else
+            log "MISSING: $c (a REQUIRED test-stage lane fails closed without it)"
+            _bad=1
+        fi
+    done
     [ -d "$DEPLOY_DIR" ] || log "note: $DEPLOY_DIR not present (dev machine?)"
     if command -v systemctl >/dev/null 2>&1; then
         systemctl is-enabled apexmail-pipeline.timer >/dev/null 2>&1 \
@@ -252,10 +330,12 @@ case "${1:-all}" in
     all)
         need_root
         install_apt_deps
+        install_sdk_toolchains
         install_cargo_tools
         install_gitleaks
         install_trivy
         install_zola
+        install_hadolint
         install_etc_conf
         install_units
         log "install complete — next: sudo ci/install.sh deploy-key"

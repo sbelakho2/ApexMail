@@ -18,10 +18,6 @@ set -euo pipefail
 #   OUTPUT_DIR       — Directory for hash output files (default: /tmp/verify-deploy)
 # =============================================================================
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly SCRIPT_NAME="$(basename "$0")"
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
 : "${DEPLOY_BASE_URL:=${1:-https://apexmail.ee}}"
 : "${FETCH_COUNT:=5}"
 : "${MAX_RETRIES:=3}"
@@ -35,8 +31,6 @@ readonly CRITICAL_PAGES=(
   "/privacy/"
   "/terms/"
 )
-
-readonly HASH_ALGO="sha256"
 
 # ── Setup ─────────────────────────────────────────────────────
 
@@ -87,7 +81,7 @@ main() {
 
   local failed=0
   local page_hashes_file="${OUTPUT_DIR}/page_hashes.txt"
-  > "$page_hashes_file"
+  : > "$page_hashes_file"
 
   for page in "${CRITICAL_PAGES[@]}"; do
     local page_slug

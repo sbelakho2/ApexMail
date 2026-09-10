@@ -121,15 +121,22 @@ resolve_secret() {
 export POSTGRES_USER=apexmail
 mkdir -p secrets
 
-export POSTGRES_PASSWORD="$(resolve_secret POSTGRES_PASSWORD secrets/postgres_password.txt 32)"
+POSTGRES_PASSWORD="$(resolve_secret POSTGRES_PASSWORD secrets/postgres_password.txt 32)"
+export POSTGRES_PASSWORD
 export POSTGRES_DB=apexmail
-export REDIS_PASSWORD="$(resolve_secret REDIS_PASSWORD secrets/redis_password.txt 32)"
-export TRACKING_SECRET_KEY="$(resolve_secret TRACKING_SECRET_KEY secrets/tracking_secret_key.txt 32)"
-export CLICKHOUSE_PASSWORD="$(resolve_secret CLICKHOUSE_PASSWORD secrets/clickhouse_password.txt 32)"
-export INTERNAL_SERVICE_TOKEN="$(resolve_secret INTERNAL_SERVICE_TOKEN secrets/internal_service_token.txt 32)"
-export JWT_SECRET="$(resolve_secret JWT_SECRET secrets/jwt_secret.txt 32)"
+REDIS_PASSWORD="$(resolve_secret REDIS_PASSWORD secrets/redis_password.txt 32)"
+export REDIS_PASSWORD
+TRACKING_SECRET_KEY="$(resolve_secret TRACKING_SECRET_KEY secrets/tracking_secret_key.txt 32)"
+export TRACKING_SECRET_KEY
+CLICKHOUSE_PASSWORD="$(resolve_secret CLICKHOUSE_PASSWORD secrets/clickhouse_password.txt 32)"
+export CLICKHOUSE_PASSWORD
+INTERNAL_SERVICE_TOKEN="$(resolve_secret INTERNAL_SERVICE_TOKEN secrets/internal_service_token.txt 32)"
+export INTERNAL_SERVICE_TOKEN
+JWT_SECRET="$(resolve_secret JWT_SECRET secrets/jwt_secret.txt 32)"
+export JWT_SECRET
 export GRAFANA_USER=admin
-export GRAFANA_PASSWORD="$(resolve_secret GRAFANA_PASSWORD secrets/grafana_password.txt 24)"
+GRAFANA_PASSWORD="$(resolve_secret GRAFANA_PASSWORD secrets/grafana_password.txt 24)"
+export GRAFANA_PASSWORD
 
 chmod 600 secrets/*.txt
 
@@ -223,11 +230,15 @@ export DB_USER=${POSTGRES_USER}
 export DB_PASSWORD=${POSTGRES_PASSWORD}
 export REDIS_HOST=localhost
 export REDIS_PORT=${HOST_REDIS_PORT}
-export API_KEY_HASH_SECRET="$(resolve_secret API_KEY_HASH_SECRET secrets/api_key_hash_secret.txt 32)"
-export WEBHOOK_SIGNING_SECRET="$(resolve_secret WEBHOOK_SIGNING_SECRET secrets/webhook_signing_secret.txt 32)"
+API_KEY_HASH_SECRET="$(resolve_secret API_KEY_HASH_SECRET secrets/api_key_hash_secret.txt 32)"
+export API_KEY_HASH_SECRET
+WEBHOOK_SIGNING_SECRET="$(resolve_secret WEBHOOK_SIGNING_SECRET secrets/webhook_signing_secret.txt 32)"
+export WEBHOOK_SIGNING_SECRET
 export AWS_REGION=us-east-1
-export JWT_PRIVATE_KEY_PEM="$(cat /tmp/jwt_private.pem)"
-export JWT_PUBLIC_KEY_PEM="$(cat /tmp/jwt_public.pem)"
+JWT_PRIVATE_KEY_PEM="$(cat /tmp/jwt_private.pem)"
+export JWT_PRIVATE_KEY_PEM
+JWT_PUBLIC_KEY_PEM="$(cat /tmp/jwt_public.pem)"
+export JWT_PUBLIC_KEY_PEM
 export UI_MARKETING_HOSTS="${UI_MARKETING_HOSTS:-apexmail.ee,www.apexmail.ee,marketing.localhost}"
 
 # -----------------------------------------------------------------------------

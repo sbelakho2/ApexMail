@@ -68,6 +68,9 @@ axllent/mailpit:v1.21
 certbot/certbot:v2.11.0
 "
 
+# shellcheck disable=SC3043  # `local` is a widespread POSIX-sh extension
+# (dash/busybox/bash all provide it); this script runs on the deploy host's
+# /bin/sh, never on a strict POSIX shell without it.
 scan_image() {
     local image="$1"
     echo "${YELLOW}Scanning: ${image}${NC}"

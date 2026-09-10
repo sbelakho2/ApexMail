@@ -81,6 +81,7 @@ cmd_list() {
     for st in $(printf '%s' "$CI_STAGES" | tr ',' ' '); do
         adv=no
         case ",$CI_ADVISORY_STAGES," in *",$st,"*) adv=yes ;; esac
+        tmo=''
         eval "tmo=\${CI_TIMEOUT_$st:-600}"
         printf '%-10s %-8s %-9s %s\n' "$st" "${tmo}s" "$adv" "$CI_DIR/stages/$st.sh"
     done
@@ -96,7 +97,9 @@ cmd_status() {
         printf '(none)\n'
     fi
     printf '\n== latest manifest ==\n'
-    _latest=$(ls -1 "$RUNS_DIR" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}' | sort -r | head -1 || true)
+    _latest=$(cd "$RUNS_DIR" 2>/dev/null && \
+        ls -1d [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]* 2>/dev/null \
+        | sort -r | head -1 || true)
     if [ -n "$_latest" ] && [ -f "$RUNS_DIR/$_latest/manifest.json" ]; then
         cat "$RUNS_DIR/$_latest/manifest.json"
     elif [ -n "$_latest" ] && [ -f "$RUNS_DIR/$_latest/manifest.jsonl" ]; then
@@ -230,6 +233,7 @@ cmd_run() {
             printf 'fail\n'
             return 0
         fi
+        _es_tmo=600
         eval "_es_tmo=\${CI_TIMEOUT_$_es_st:-600}"
         _es_is_adv=0
         case ",$CI_ADVISORY_STAGES," in *",$_es_st,"*) _es_is_adv=1 ;; esac
@@ -315,7 +319,7 @@ cmd_run() {
 # enforcement, lock exclusivity.
 cmd_selftest() {
     _sf_fail=0
-    ci_info "selftest (1/6): syntax + shellcheck of every ci/ script"
+    ci_info "selftest (1/7): syntax + shellcheck of every ci/ script"
     for f in "$CI_DIR/pipeline.sh" "$CI_DIR/lib.sh" "$CI_DIR/check-pr.sh" \
              "$CI_DIR/install.sh" "$CI_DIR"/stages/*.sh "$CI_DIR"/units/*.sh; do
         [ -f "$f" ] || continue
@@ -325,27 +329,49 @@ cmd_selftest() {
         for f in "$CI_DIR/pipeline.sh" "$CI_DIR/lib.sh" "$CI_DIR/check-pr.sh" \
                  "$CI_DIR/install.sh" "$CI_DIR"/stages/*.sh "$CI_DIR"/units/*.sh; do
             [ -f "$f" ] || continue
-            shellcheck -S error "$f" || { ci_err "shellcheck failed: $f"; _sf_fail=1; }
+            # -S warning matches the repo-wide static-lint gate the test
+            # stage runs over every tracked script; ci/ must clear the same
+            # bar it enforces.
+            shellcheck -S warning "$f" || { ci_err "shellcheck failed: $f"; _sf_fail=1; }
         done
     else
         ci_warn "shellcheck not installed — syntax-only check"
     fi
 
-    ci_info "selftest (2/6): stage contract (exists, executable, defines stage_main)"
+    ci_info "selftest (2/7): stage contract (exists, executable, defines stage_main)"
     for st in $(printf '%s' "$CI_STAGES" | tr ',' ' '); do
         s="$CI_DIR/stages/$st.sh"
         [ -x "$s" ] || { ci_err "missing/not executable: $s"; _sf_fail=1; }
         grep -q 'stage_main' "$s" 2>/dev/null || { ci_err "no stage_main in $s"; _sf_fail=1; }
     done
 
-    ci_info "selftest (3/6): full dry-run through the real runner"
+    ci_info "selftest (3/7): test-stage lane contract (lanes + flags present)"
+    # The SDK/satellite/static-lint lanes (F-wave enterprise coverage): the
+    # lane functions must exist in the test stage and their required-by-
+    # default flags in pipeline.conf — checked the same way the stage
+    # contract above is, so a refactor cannot silently drop a lane.
+    _ts="$CI_DIR/stages/test.sh"
+    for fn in run_php_tests run_sdk_tests run_satellite_crates run_static_lint_gates \
+              lane_tool_status provision_composer_vendor provision_sdk_python_venv; do
+        grep -q "$fn()" "$_ts" 2>/dev/null || { ci_err "test stage lost lane/helper: $fn"; _sf_fail=1; }
+    done
+    for fl in CI_PHP_CHECK CI_SDK_CHECK CI_SATELLITE_CHECK CI_STATIC_LINT_CHECK CI_SDK_VENV_DIR; do
+        grep -q "$fl" "$CI_DIR/pipeline.conf" 2>/dev/null \
+            || { ci_err "pipeline.conf lost flag: $fl"; _sf_fail=1; }
+    done
+    [ -f "$REPO_ROOT/.hadolint.yaml" ] \
+        || { ci_err ".hadolint.yaml missing (hadolint gate config)"; _sf_fail=1; }
+
+    ci_info "selftest (4/7): full dry-run through the real runner"
     if ! "$CI_DIR/pipeline.sh" run --dry-run --stages "$CI_STAGES" --lock-wait 10; then
         ci_err "dry-run pipeline run failed"
         _sf_fail=1
     fi
 
-    ci_info "selftest (4/6): manifest + per-stage logs of the dry run are valid"
-    _latest=$(ls -1 "$RUNS_DIR" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}' | sort -r | head -1 || true)
+    ci_info "selftest (5/7): manifest + per-stage logs of the dry run are valid"
+    _latest=$(cd "$RUNS_DIR" 2>/dev/null && \
+        ls -1d [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]* 2>/dev/null \
+        | sort -r | head -1 || true)
     if [ -z "$_latest" ]; then
         ci_err "no run dir produced"
         _sf_fail=1
@@ -360,7 +386,7 @@ cmd_selftest() {
         done
     fi
 
-    ci_info "selftest (5/6): timeout wrapper stops a runaway command"
+    ci_info "selftest (6/7): timeout wrapper stops a runaway command"
     _sf_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-selftest.XXXXXX")
     printf '#!/bin/sh\nsleep 30\n' >"$_sf_tmp/slow.sh"
     chmod +x "$_sf_tmp/slow.sh"
@@ -375,7 +401,7 @@ cmd_selftest() {
     fi
     rm -rf "$_sf_tmp"
 
-    ci_info "selftest (6/6): run lock excludes a concurrent holder"
+    ci_info "selftest (7/7): run lock excludes a concurrent holder"
     if ci_lock_acquire selftest 0; then
         if CI_ROOT="$CI_DIR" sh -c '. "$CI_ROOT/lib.sh"; ci_lock_acquire selftest 1' >/dev/null 2>&1; then
             # With flock both acquires share fd 9 in THIS process; only the

@@ -29,7 +29,7 @@
 # itself runs under the tool's own pinned C locale and awk selection.
 set -u
 
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 LINT="$HERE/docs-lint.sh"
 
 fail=0

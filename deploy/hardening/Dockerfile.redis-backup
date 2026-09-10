@@ -11,4 +11,8 @@
 # Entrypoint (set in docker-compose.prod.yml) is
 # deploy/hardening/scripts/redis-backup-encrypt.sh.
 FROM redis:7.4-alpine
+# Security-tool image: openssl/rsync freshness is the POINT (the container
+# runs on a no-egress network and encrypts backups); alpine micro-versions
+# churn with the base tag and no digest pin exists for these bases.
+# hadolint ignore=DL3018
 RUN apk add --no-cache openssl rsync

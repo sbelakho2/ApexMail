@@ -164,7 +164,7 @@ list_secrets() {
         PROD_DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE PROD_BACKUP_ENCRYPTION_KEY_FILE
     )
 
-    local key f mtime age_epoch age_days status
+    local key f age_epoch age_days status
     local now_epoch
     now_epoch=$(date +%s)
 
@@ -376,7 +376,7 @@ rollback() {
 
     # Audit M: immediate cleanup — the plaintext backup has served its
     # purpose and must not linger in /tmp.
-    find "$latest_backup" -type f -exec shred -u {} 2>/dev/null \; \
+    find "$latest_backup" -type f -exec sh -c 'shred -u "$1" 2>/dev/null' _ {} \; \
         || find "$latest_backup" -type f -delete
     rmdir "$latest_backup" 2>/dev/null || true
 

@@ -100,6 +100,7 @@ validate_pipeline_config() {
         _s="$CI_ROOT/stages/$_st.sh"
         [ -x "$_s" ] || { ci_err "stage script missing/not executable: $_s"; _vp_err=1; }
         grep -q 'stage_main' "$_s" 2>/dev/null || { ci_err "no stage_main in $_s"; _vp_err=1; }
+        _vp_t=''
         eval "_vp_t=\${CI_TIMEOUT_$_st:-}"
         case $_vp_t in
             ''|*[!0-9]*) ci_err "CI_TIMEOUT_$_st not a number: '$_vp_t'"; _vp_err=1 ;;

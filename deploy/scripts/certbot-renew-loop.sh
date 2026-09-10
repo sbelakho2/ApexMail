@@ -29,7 +29,6 @@
 set -eu
 
 LIVE_DIR="/etc/letsencrypt/live/apexmail.ee"
-OUT_DIR="/etc/letsencrypt"
 WEBROOT="/var/www/certbot"
 # Sentinel watched by the nginx sidecar loop (shared certbot_webroot volume).
 RELOAD_SENTINEL="${WEBROOT}/reload-requested"

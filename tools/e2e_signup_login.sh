@@ -43,7 +43,7 @@ ok "signup accepted ($SIGNUP_RES)"
 step "Extract verification token from messages queue"
 # Wait briefly for the INSERT to be visible
 TOKEN=""
-for i in 1 2 3 4 5; do
+for _ in 1 2 3 4 5; do
   HTML_BODY=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -c \
     "SELECT html_body FROM messages WHERE to_emails::text ILIKE '%${EMAIL}%' ORDER BY created_at DESC LIMIT 1;" 2>/dev/null || true)
   TOKEN=$(echo "$HTML_BODY" | grep -oE 'token=[A-Za-z0-9_-]+' | head -1 | cut -d= -f2 || true)

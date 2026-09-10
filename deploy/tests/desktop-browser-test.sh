@@ -22,8 +22,10 @@ set -euo pipefail
 #   and the report is still written to .desktop-browser-report.json
 #   as {checked_at, critical, issues}.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.desktop-browser-report.json"
 readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-desktop-test"
 

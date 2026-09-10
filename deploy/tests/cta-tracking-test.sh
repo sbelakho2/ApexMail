@@ -5,28 +5,16 @@ set -euo pipefail
 # Checks event naming, unique events, page+CTA identification, mobile/desktop
 # distinction, and that events map to funnel stages.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.cta-tracking-report.json"
 
 : "${BUILD_DIR:=../apps/marketing-zola/public}"
 
-CRITICAL=0
 WARNINGS=0
 ISSUES="[]"
-
-REQUIRED_CTA_PATTERNS=(
-    "data-track.*signup"
-    "data-track.*pricing"
-    "data-track.*docs"
-    "data-track.*contact"
-    "data-event.*cta"
-    "class.*btn-"
-    "href.*signup"
-    "href.*contact"
-    "data-action"
-    "data-category"
-)
 
 TRACKING_ATTRS=(
     "data-track"

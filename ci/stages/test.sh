@@ -20,7 +20,12 @@
 #   5. cargo machete + cargo deny (required when installed; see README)
 #   6. ephemeral services per CI_TEST_DB / CI_TEST_REDIS, then
 #      cargo test --workspace
-#   7. PHP: three phpunit suites (skip-warn when vendor/ is absent)
+#   7. PHP: three phpunit suites (REQUIRED; composer install when the
+#      checkout has no vendor/ yet)
+#   8. the five SDK lanes (python/go/java/ruby/php — CI_SDK_CHECK)
+#   9. the satellite Rust crates (CI_SATELLITE_CHECK)
+#  10. static lint gates: shellcheck/hadolint/py_compile
+#      (CI_STATIC_LINT_CHECK)
 #
 # DB/Redis policy: GitHub-parity by default (CI_TEST_DB=none, CI_TEST_REDIS=0)
 # — the DB/Redis-gated tests self-skip exactly as they do on GitHub runners.
@@ -195,18 +200,266 @@ apply_test_schema() {
     [ "$_mig_ok" = 1 ] || { ci_err "migrator failed against the ephemeral DB — see $CI_STAGE_LOG"; return "$CI_EXIT_FAIL"; }
 }
 
-# --- 7. PHP suites ---------------------------------------------------------------------
+# --- shared lane-tool gating --------------------------------------------------------
+# lane_tool_status <tool> <lane-label> <flag> — print the lane disposition on
+# stdout: `run`, `skip` (advisory lane, tool absent) or `fail` (required
+# lane, tool absent). Backed by ci_have_tool semantics: on the deploy host a
+# missing tool DIES (fail closed, CI_MISSING_TOOLS=auto); on a dev machine
+# the lane flag decides — REQUIRED turns the gap into a stage failure,
+# `advisory` logs and skips. In dry-run (selftest) the lane is assumed
+# runnable: presence is a real-run concern and selftest machines are not
+# required to carry every toolchain (the deploy host installs them all via
+# ci/install.sh).
+lane_tool_status() {
+    _lt_tool=$1 _lt_lane=$2 _lt_flag=${3:-required}
+    if ci_dry; then
+        printf 'run\n'
+        return "$CI_EXIT_OK"
+    fi
+    if ci_have_tool "$_lt_tool"; then
+        printf 'run\n'
+        return "$CI_EXIT_OK"
+    fi
+    # ci_have_tool has warned already; decide fail-vs-skip.
+    if [ "$_lt_flag" = required ]; then
+        ci_err "$_lt_lane: '$_lt_tool' missing — lane is REQUIRED \
+(install it via ci/install.sh, or set the lane's CI_*_CHECK=advisory for a triage window)"
+        printf 'fail\n'
+        return "$CI_EXIT_OK"
+    fi
+    ci_warn "ADVISORY: $_lt_lane skipped — '$_lt_tool' missing"
+    printf 'skip\n'
+    return "$CI_EXIT_OK"
+}
+
+# --- 7. PHP suites (REQUIRED) --------------------------------------------------------
+# Previously each suite silently skipped when vendor/bin/phpunit was absent —
+# on the deploy host phpunit WAS absent for months, so the lane passed while
+# testing nothing. Now php+composer are ci_have_tool-gated (fail closed on
+# the deploy host) and composer install provisions vendor/ when missing
+# (one-time ~30 s per package, then cached in the checkout).
 run_php_tests() {
+    _pt_st=$(lane_tool_status php php-suites "${CI_PHP_CHECK:-required}")
+    case $_pt_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    _pt_st=$(lane_tool_status composer php-suites "${CI_PHP_CHECK:-required}")
+    case $_pt_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
     for _pkg in packages/kiwicaptcha-php \
                 packages/kiwicaptcha-risk-php \
                 packages/kiwicaptcha/integrations/symfony; do
-        _phpunit=$REPO_ROOT/$_pkg/vendor/bin/phpunit
-        if [ ! -x "$_phpunit" ]; then
-            ci_warn "$_pkg: vendor/bin/phpunit missing — run 'composer install' there; skipped"
-            continue
-        fi
-        (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" ./vendor/bin/phpunit)
+        provision_composer_vendor "$_pkg" || return "$CI_EXIT_FAIL"
+        (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" ./vendor/bin/phpunit) \
+            || return "$CI_EXIT_FAIL"
     done
+    return "$CI_EXIT_OK"
+}
+
+# provision_composer_vendor <pkg-rel-path> — composer install when the
+# checkout carries no vendor/ yet (dry-run safe).
+provision_composer_vendor() {
+    _cv_dir=$1
+    [ -x "$REPO_ROOT/$_cv_dir/vendor/bin/phpunit" ] && return "$CI_EXIT_OK"
+    if ci_dry; then
+        ci_info "dry-run: composer install --quiet --no-interaction ($_cv_dir)"
+        return "$CI_EXIT_OK"
+    fi
+    ci_info "$_cv_dir: vendor/ absent — composer install (cached in the checkout after the first run)"
+    (cd "$REPO_ROOT/$_cv_dir" && composer install --quiet --no-interaction) >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "composer install failed in $_cv_dir"; return "$CI_EXIT_FAIL"; }
+}
+
+# --- 8. SDK lanes (python / go / java / ruby / php) ------------------------------------
+# The five first-party SDKs previously had NO CI lane at all. Each lane is
+# REQUIRED via CI_SDK_CHECK; the toolchain check fails closed on the deploy
+# host and degrades to an explicit advisory skip nowhere else (see
+# lane_tool_status). Python runs out of a dedicated cached venv — never the
+# user site — so the lane cannot pollute a dev machine's packages.
+run_sdk_tests() {
+    # sdk-python: shared venv at CI_SDK_VENV_DIR (default
+    # /tmp/apexmail-ci-sdks), created once, reused across runs; pytest +
+    # pytest-asyncio (the pyproject sets asyncio_mode=auto) + the SDK's two
+    # runtime deps (httpx, pydantic[email] — EmailStr needs the extra). The
+    # suite imports the src/ layout via PYTHONPATH, so no editable install
+    # of the moving checkout is needed (F47 wave: fresh venv → 59 passed).
+    _py_venv="${CI_SDK_VENV_DIR:-/tmp/apexmail-ci-sdks}/venv-python"
+    _st=$(lane_tool_status python3 sdk-python "${CI_SDK_CHECK:-required}")
+    case $_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        run)
+            provision_sdk_python_venv "$_py_venv" || return "$CI_EXIT_FAIL"
+            (cd "$REPO_ROOT/packages/sdk-python" && \
+                ci_check "sdk-python (pytest, venv $_py_venv)" \
+                env PYTHONPATH=src "$_py_venv/bin/python" -m pytest -q) \
+                || return "$CI_EXIT_FAIL"
+            ;;
+    esac
+
+    _st=$(lane_tool_status go sdk-go "${CI_SDK_CHECK:-required}")
+    case $_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        run)
+            # go.mod has zero external requires — no module downloads.
+            (cd "$REPO_ROOT/packages/sdk-go" && ci_check "sdk-go (go test ./...)" \
+                go test ./...) || return "$CI_EXIT_FAIL"
+            ;;
+    esac
+
+    _st=$(lane_tool_status mvn sdk-java "${CI_SDK_CHECK:-required}")
+    case $_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        run)
+            # First run downloads the jackson/jupiter deps into ~/.m2 (~minutes);
+            # every later run is cached. -B: no color/progress spam in stage logs.
+            (cd "$REPO_ROOT/packages/sdk-java" && ci_check "sdk-java (mvn -B test)" \
+                mvn -q -B test) || return "$CI_EXIT_FAIL"
+            ;;
+    esac
+
+    _st=$(lane_tool_status ruby sdk-ruby "${CI_SDK_CHECK:-required}")
+    case $_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        run)
+            # The contract suite is stdlib-only (F48 wave: 46 checks).
+            (cd "$REPO_ROOT/packages/sdk-ruby" && \
+                ci_check "sdk-ruby (payload contract suite)" \
+                ruby test/payload_contract_test.rb) || return "$CI_EXIT_FAIL"
+            ;;
+    esac
+
+    _st=$(lane_tool_status php sdk-php "${CI_SDK_CHECK:-required}")
+    case $_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        run)
+            _st=$(lane_tool_status composer sdk-php "${CI_SDK_CHECK:-required}")
+            case $_st in
+                fail) return "$CI_EXIT_FAIL" ;;
+                run)
+                    provision_composer_vendor packages/sdk-php || return "$CI_EXIT_FAIL"
+                    (cd "$REPO_ROOT/packages/sdk-php" && ci_check "sdk-php (phpunit)" \
+                        ./vendor/bin/phpunit) || return "$CI_EXIT_FAIL"
+                    ;;
+            esac
+            ;;
+    esac
+    return "$CI_EXIT_OK"
+}
+
+# provision_sdk_python_venv <venv-path> — create the shared venv once and
+# keep its deps satisfied (idempotent pip install; dry-run safe).
+provision_sdk_python_venv() {
+    _pv_venv=$1
+    if [ ! -x "$_pv_venv/bin/python" ]; then
+        if ci_dry; then
+            ci_info "dry-run: python3 -m venv $_pv_venv"
+            return "$CI_EXIT_OK"
+        fi
+        mkdir -p "$(dirname "$_pv_venv")"
+        ci_info "creating the SDK test venv once at $_pv_venv (cached across runs)"
+        python3 -m venv "$_pv_venv" >>"$CI_STAGE_LOG" 2>&1 \
+            || { ci_err "python3 -m venv $_pv_venv failed"; return "$CI_EXIT_FAIL"; }
+    fi
+    if ci_dry; then
+        ci_info "dry-run: pip install pytest pytest-asyncio httpx pydantic[email] into $_pv_venv"
+        return "$CI_EXIT_OK"
+    fi
+    # Mirror packages/sdk-python/pyproject.toml: requires httpx>=0.25.0 and
+    # pydantic[email]>=2.0.0; dev extras add pytest/pytest-asyncio. respx/
+    # mypy/ruff are not exercised by this lane (the contract suite mocks
+    # httpx transport in-process).
+    "$_pv_venv/bin/python" -m pip install --quiet --disable-pip-version-check \
+        'pytest>=7.0.0' 'pytest-asyncio>=0.21.0' 'httpx>=0.25.0' 'pydantic[email]>=2.0.0' \
+        >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "pip install into $_pv_venv failed (network?)"; return "$CI_EXIT_FAIL"; }
+}
+
+# --- 9. satellite Rust crates -----------------------------------------------------------
+# packages/smtp-auth-proxy and packages/kiwicaptcha-wasm are NOT members of
+# the services/mail-server workspace, so `cargo test --workspace` never
+# touched them. Each is its own crate root (kiwicaptcha-wasm even declares
+# its own [workspace]); cargo test from inside each directory builds only
+# that graph.
+run_satellite_crates() {
+    _sc_st=$(lane_tool_status cargo satellite-crates "${CI_SATELLITE_CHECK:-required}")
+    case $_sc_st in
+        fail) return "$CI_EXIT_FAIL" ;;
+        skip) return "$CI_EXIT_OK" ;;
+    esac
+    # smtp-auth-proxy path-depends on services/mail-server/crates/apexmail-lib
+    # (first build compiles that slice of the graph).
+    (cd "$REPO_ROOT/packages/smtp-auth-proxy" && \
+        ci_check "cargo test packages/smtp-auth-proxy" cargo test --quiet) \
+        || return "$CI_EXIT_FAIL"
+    # kiwicaptcha-wasm pins its compiler via rust-toolchain.toml (1.96.0 +
+    # wasm32 target). With a rustup-managed cargo (what ci/install.sh
+    # installs) the proxy honors the pin and auto-installs that toolchain on
+    # first use — the pin is the REQUIRED path, not an obstacle: it is what
+    # keeps `cargo test` here reproducible. `cargo test` compiles the crate
+    # for the HOST target (the wasm32 target is only needed for the cdylib
+    # release build, which build.sh owns).
+    (cd "$REPO_ROOT/packages/kiwicaptcha-wasm" && \
+        ci_check "cargo test packages/kiwicaptcha-wasm" cargo test --quiet) \
+        || return "$CI_EXIT_FAIL"
+    return "$CI_EXIT_OK"
+}
+
+# --- 10. static lint gates -----------------------------------------------------------------
+# Runs shellcheck over EVERY tracked *.sh, hadolint over every tracked
+# Dockerfile (repo config .hadolint.yaml: failure-threshold=warning, inline
+# ignores only), and a python compile gate over the audit tooling itself.
+# All three REQUIRED via CI_STATIC_LINT_CHECK; findings are fixed at the
+# source — the repo is clean at `shellcheck -S warning` and `hadolint`
+# today, and these gates keep it that way.
+run_static_lint_gates() {
+    _sl_st=$(lane_tool_status shellcheck shellcheck-gate "${CI_STATIC_LINT_CHECK:-required}")
+    case $_sl_st in
+        run)
+            # -S warning: error+warning findings fail; style/info stay visible
+            # but advisory. -z/-0 pairing keeps paths with spaces safe.
+            (cd "$REPO_ROOT" && ci_check "shellcheck -S warning (all tracked *.sh)" \
+                sh -c 'git ls-files -z -- "*.sh" | xargs -0 shellcheck -S warning') \
+                || return "$CI_EXIT_FAIL"
+            ;;
+        fail) return "$CI_EXIT_FAIL" ;;
+    esac
+
+    _sl_st=$(lane_tool_status hadolint hadolint-gate "${CI_STATIC_LINT_CHECK:-required}")
+    case $_sl_st in
+        run)
+            (cd "$REPO_ROOT" && ci_check "hadolint (all tracked Dockerfiles, .hadolint.yaml)" \
+                sh -c 'git ls-files -z -- "*Dockerfile*" | xargs -0 hadolint --config .hadolint.yaml') \
+                || return "$CI_EXIT_FAIL"
+            ;;
+        fail) return "$CI_EXIT_FAIL" ;;
+    esac
+
+    _sl_st=$(lane_tool_status python3 python-compile-gate "${CI_STATIC_LINT_CHECK:-required}")
+    case $_sl_st in
+        run)
+            # py_compile catches syntax errors in the audit tooling itself
+            # (tools/, apps/ai/). PYTHONPYCACHEPREFIX keeps __pycache__ out of
+            # the checkout; the rc accumulates across the while loop (which is
+            # NOT in a pipeline subshell, so the status survives).
+            (cd "$REPO_ROOT" && ci_check "python compile gate (tools/*.py apps/ai/**/*.py)" \
+                sh -c '_pc_tmp=$(mktemp -d "${TMPDIR:-/tmp}/apexmail-pyc.XXXXXX") || exit 1
+export PYTHONPYCACHEPREFIX=$_pc_tmp
+_pc_lst=$_pc_tmp/files
+git ls-files -- "tools/*.py" "apps/ai/**/*.py" >"$_pc_lst" || { rm -rf "$_pc_tmp"; exit 1; }
+_pc_rc=0
+while IFS= read -r _pc_f; do
+    python3 -m py_compile "$_pc_f" || _pc_rc=1
+done <"$_pc_lst"
+rm -rf "$_pc_tmp"
+exit $_pc_rc') \
+                || return "$CI_EXIT_FAIL"
+            ;;
+        fail) return "$CI_EXIT_FAIL" ;;
+    esac
+    return "$CI_EXIT_OK"
 }
 
 # --- 8. WCAG AA contrast gate -----------------------------------------------------------
@@ -384,6 +637,9 @@ stage_main() {
     cargo_tool_gates
     run_cargo_tests
     run_php_tests
+    run_static_lint_gates
+    run_sdk_tests
+    run_satellite_crates
     run_contrast_gate
     run_layout_gates
     run_i18n_gate

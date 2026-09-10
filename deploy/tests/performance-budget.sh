@@ -24,8 +24,10 @@ set -euo pipefail
 #   original field names: url, lcp, tti, cls, ttfb, js_bytes, css_bytes,
 #   image_bytes, font_bytes, total_bytes, third_party.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.performance-budget-report.json"
 readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-perf-budget"
 
@@ -33,9 +35,6 @@ readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-perf-budget"
 : "${TEST_URLS:=/ /pricing/ /docs/ /features/}"
 : "${CHROMIUM_BIN:=}"
 
-LCP_BUDGET=2500
-TTI_BUDGET=4000
-CLS_BUDGET=0.1
 TTFB_BUDGET=600
 JS_BYTES_BUDGET=350000
 CSS_BYTES_BUDGET=150000
@@ -112,12 +111,16 @@ run_audit() {
     ttfb="$(echo "$ttfb_s * 1000" | bc -l | awk '{ printf "%.0f", $1 }')"
 
     # Rendered DOM for resource enumeration
-    local dump html res_urls
+    local dump html
     dump="$("$CHROMIUM_BIN" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
         --no-first-run --no-default-browser-check --virtual-time-budget=10000 \
         --dump-dom "$url" 2>/dev/null || true)"
     html="$(printf '%s' "$dump" | sed -n '/<html/,/<\/html>/p')"
-    [[ -n "$html" ]] && printf '%s' "$html" > "${WORK_DIR}/dom.html" || > "${WORK_DIR}/dom.html"
+    if [[ -n "$html" ]]; then
+        printf '%s' "$html" > "${WORK_DIR}/dom.html"
+    else
+        : > "${WORK_DIR}/dom.html"
+    fi
 
     local base bhost reqs js_bytes css_bytes img_bytes font_bytes total_bytes third meta ctype csize abs host
     base="${BASE_URL}"
@@ -196,7 +199,7 @@ run_audit() {
 }
 
 check_budget() {
-    local metric="$1" value="$2" threshold="$3" page="$4"
+    local metric="$1" value="$2" threshold="$3"
     if [[ -z "$value" || "$value" == "null" ]]; then return; fi
     if (( $(echo "$value > $threshold" | bc -l 2>/dev/null || echo 0) )); then
         echo "    FAIL: $metric = $value (budget: $threshold)"

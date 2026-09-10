@@ -24,8 +24,10 @@ set -euo pipefail
 #   NDJSON file; the report is still written to .browser-test-report.json
 #   as {checked_at, critical, warnings, test_pages}.
 # =============================================================================
-readonly TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly TIMESTAMP
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly REPORT_FILE="${SCRIPT_DIR}/.browser-test-report.json"
 readonly WORK_DIR="${TMPDIR:-/tmp}/apexmail-browser-test"
 readonly NDJSON_FILE="${WORK_DIR}/results.ndjson"
@@ -102,7 +104,8 @@ resource_sweep() {
 }
 
 check_page() {
-    local page="$1" url="${BASE_URL}${page}" out err
+    local page="$1" out err
+    local url="${BASE_URL}${page}"
     echo "  Testing: $url"
     out="$(mktemp "${WORK_DIR}/dom.XXXXXX")"
     err="$(mktemp "${WORK_DIR}/log.XXXXXX")"
@@ -177,7 +180,7 @@ main() {
     echo "=== ApexMail Browser Console & Network Test ==="
     rm -rf "$WORK_DIR"
     mkdir -p "$WORK_DIR"
-    > "$NDJSON_FILE"
+    : > "$NDJSON_FILE"
 
     for page in $TEST_PAGES; do
         check_page "$page"

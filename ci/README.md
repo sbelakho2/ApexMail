@@ -24,7 +24,8 @@ independent.”* Everything here is POSIX sh + the tools already on the host
    │ 01 fetch      git fetch origin main (deploy key); refuse unpushed │
    │ 02 validate   env-file, compose -q, pipeline sanity, repo gates   │
    │ 03 test       fmt, clippy -D, cargo test --workspace (+ephemeral  │
-   │               DB/Redis opt-in), PHP suites                        │
+   │               DB/Redis opt-in), PHP suites, five SDK lanes,       │
+   │               satellite crates, shellcheck/hadolint/py-compile    │
    │ 04 security   gitleaks, cargo audit (+RUSTSEC ignores), cargo vet,│
    │               fresh-DB migration validation, Trivy(+SBOM)         │
    │ 05 images     deploy.sh --build-only + :sha pins + Trivy gate     │
@@ -119,7 +120,7 @@ between buckets by editing `ci/stages/validate.sh` (`ci_check` ↔
 |---|---|---|---|
 | 1 | fetch | 180 s | 2 s (HTTPS fetch + pushed-HEAD check) |
 | 2 | validate | 1800 s | 45–150 s (zola build + pricing/legal/a11y/seo gates dominate) |
-| 3 | test | 5400 s | **247 s total**: fmt+clippy gates ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG AA contrast gate ~2.5 min (after the PHP suites; loud-skip when node/playwright are absent) |
+| 3 | test | 5400 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and the first-ever composer installs download deps on first run; see §8b) |
 | 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
 | 5 | images | 10800 s | host-only (Rust docker build; `deploy.sh --build-only` timing) |
 | 6 | migrate | 600 s | host-only (migrator one-shot, seconds) |
@@ -271,6 +272,78 @@ CI_TEST_REDIS=1      ci/pipeline.sh run --stages test   # redis + TEST_REDIS_URL
 
 Both currently surface real defects that GitHub CI never executed (§9 F3,
 F4) — they are opt-in until fixed.
+
+---
+
+## 8b. SDK lanes, satellite crates, and the static lint gates (test stage)
+
+Enterprise-coverage extension of the test stage. Everything in this section
+is a **REQUIRED** lane with an explicit advisory override in
+`ci/pipeline.conf`, and every toolchain is `ci_have_tool`-gated: on the
+deploy host a missing tool **fails closed** (`ci/install.sh` installs them
+all); on a dev machine a REQUIRED lane's missing tool fails the stage too —
+set the lane flag to `advisory` only for a bounded triage window. In
+`--dry-run`/selftest mode the lanes are assumed runnable (presence is a
+real-run concern; selftest machines need not carry every toolchain).
+
+### PHP suites (`CI_PHP_CHECK=required`)
+
+`phpunit` over `packages/kiwicaptcha-php`, `packages/kiwicaptcha-risk-php`
+and `packages/kiwicaptcha/integrations/symfony`. These used to *silently
+skip* when `vendor/bin/phpunit` was absent — and on the deploy host it was
+absent, so nothing ran. Now `php` + `composer` are required tools and
+`composer install --quiet --no-interaction` provisions `vendor/` when the
+checkout has none (one-time ~30 s per package, then cached in the tree).
+
+### SDK lanes (`CI_SDK_CHECK=required`)
+
+The five first-party SDKs previously had **no CI lane at all**:
+
+| Lane | Command | Notes |
+|---|---|---|
+| sdk-python | venv pytest | Dedicated cached venv at `CI_SDK_VENV_DIR` (default `/tmp/apexmail-ci-sdks/venv-python`), created once and reused; installs pytest, pytest-asyncio, httpx, `pydantic[email]` (the SDK's own deps per its pyproject). The suite imports `src/` via `PYTHONPATH` — no editable install of a moving checkout, and never the user site (no dev-machine pollution). |
+| sdk-go | `go test ./...` | `go.mod` has zero external requires — no module downloads. |
+| sdk-java | `mvn -q -B test` | First run downloads the jackson/jupiter deps into `~/.m2` (minutes); later runs are cached. |
+| sdk-ruby | `ruby test/payload_contract_test.rb` | Stdlib-only contract suite (46 checks). |
+| sdk-php | `composer install` + `vendor/bin/phpunit` | Same provisioning pattern as the PHP suites. |
+
+### Satellite crates (`CI_SATELLITE_CHECK=required`)
+
+`cargo test --quiet` in `packages/smtp-auth-proxy` and
+`packages/kiwicaptcha-wasm` — both are crate roots **outside** the
+`services/mail-server` workspace, so `cargo test --workspace` never touched
+them. kiwicaptcha-wasm pins its compiler via `rust-toolchain.toml (1.96.0 +
+wasm32 target)`: with the rustup-managed cargo that `ci/install.sh`
+installs, the pin is honored automatically (rustup installs that toolchain
+on first use — network needed once). `cargo test` builds the crate for the
+HOST target; the wasm32 target is only needed by `build.sh`'s release
+build, not by the test lane.
+
+### Static lint gates (`CI_STATIC_LINT_CHECK=required`)
+
+* **shellcheck** over every tracked `*.sh` (`git ls-files`), at
+  `-S warning` (error+warning fail; style/info advisory). The whole repo is
+  clean at this level; findings are fixed at the source, and the two
+  justified false-positives carry inline `# shellcheck disable=`
+  comments with reasons (grep `disable=SC` to audit).
+* **hadolint** over every tracked Dockerfile, configured by the checked-in
+  `.hadolint.yaml` (`failure-threshold: warning`, no global rule ignores).
+  The only suppressed findings are inline `# hadolint ignore=DL…` comments
+  at the exact instruction, each with a justification — grep
+  `hadolint ignore` to audit them (currently only DL3008/DL3018 package
+  pinning, where the images deliberately track distro security updates the
+  Trivy gate exists to catch). Info-level findings (DL3059 consecutive
+  RUNs = intentional cache boundaries, DL3066 named users = readable
+  `docker ps`) are reported but do not fail.
+* **python compile gate**: `python3 -m py_compile` over
+  `git ls-files 'tools/*.py' 'apps/ai/**/*.py'` — catches syntax errors in
+  the audit tooling itself. `PYTHONPYCACHEPREFIX` points at a temp dir so
+  no `__pycache__` pollutes the checkout.
+
+`ci/install.sh` installs every toolchain these lanes need (golang-go,
+default-jdk, maven, ruby-full, php-cli + php-xml/mbstring/curl, composer
+via the official installer, shellcheck via apt, hadolint as a pinned
+release binary) and `ci/install.sh check` verifies their presence.
 
 ---
 

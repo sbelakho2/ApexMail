@@ -32,6 +32,8 @@
 CI_EXIT_OK=0
 CI_EXIT_FAIL=1
 CI_EXIT_SKIP=75
+# shellcheck disable=SC2034  # cross-file contract constant: consumed by
+# ci/pipeline.sh (unchanged status) and the fetch stage's exit path.
 CI_EXIT_UNCHANGED=76
 CI_EXIT_TIMEOUT=124
 
@@ -44,6 +46,8 @@ CI_EXIT_TIMEOUT=124
 CI_ROOT=${CI_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)}
 [ -n "${CI_ROOT:-}" ] && [ -f "$CI_ROOT/lib.sh" ] || \
     CI_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+# shellcheck disable=SC2034  # cross-file: every stage script that sources
+# lib.sh reads REPO_ROOT (single-file analysis cannot see those uses).
 REPO_ROOT=${CI_REPO_ROOT:-$(CDPATH='' cd -- "$CI_ROOT/.." && pwd -P)}
 RUNS_DIR=${CI_RUNS_DIR:-$CI_ROOT/runs}
 LOCK_DIR="$RUNS_DIR/.locks"
@@ -124,7 +128,7 @@ ci_lock_acquire() {
         eval "exec 9>>\"\$_lock_file\"" || return 1
         if flock -w "$_lock_wait" 9; then
             CI_LOCK_NAME="$_lock_name"
-            CI_LOCK_MODE=flock
+            CI_LOCK_MODE='flock'
             return "$CI_EXIT_OK"
         fi
         return 1
@@ -135,7 +139,7 @@ ci_lock_acquire() {
         if mkdir "$_lock_dir" 2>/dev/null; then
             printf '%s\n' $$ >"$_lock_dir/pid" 2>/dev/null || true
             CI_LOCK_NAME="$_lock_name"
-            CI_LOCK_MODE=mkdir
+            CI_LOCK_MODE='mkdir'
             return "$CI_EXIT_OK"
         fi
         _lock_pid=$(cat "$_lock_dir/pid" 2>/dev/null || printf '')
@@ -180,7 +184,7 @@ ci_lock_file_acquire() {
         eval "exec 9>>\"\$_lfa_file\"" || return 1
         if flock -w "$_lfa_wait" 9; then
             CI_LOCK_NAME=$(basename "$_lfa_file" | sed 's/\.lock$//')
-            CI_LOCK_MODE=flock
+            CI_LOCK_MODE='flock'
             return "$CI_EXIT_OK"
         fi
         return 1
@@ -191,7 +195,7 @@ ci_lock_file_acquire() {
         if mkdir "$_lfa_dir" 2>/dev/null; then
             printf '%s\n' $$ >"$_lfa_dir/pid" 2>/dev/null || true
             CI_LOCK_NAME=$(basename "$_lfa_file" | sed 's/\.lock$//')
-            CI_LOCK_MODE=mkdir
+            CI_LOCK_MODE='mkdir'
             CI_LOCK_DIR_PATH="$_lfa_dir"
             return "$CI_EXIT_OK"
         fi
@@ -361,6 +365,10 @@ s.close()'
     fi
     _fp_p=55432
     while [ "$_fp_p" -lt 55532 ]; do
+        # shellcheck disable=SC3025  # bash/ksh-ism on purpose: this branch is
+        # the last-resort probe when python3 is absent; on a shell without
+        # /dev/tcp the redirect fails and the port counts as free-or-dead,
+        # and the fixed-port probe loop simply advances.
         if ! (exec 3<>"/dev/tcp/127.0.0.1/$_fp_p") 2>/dev/null; then
             printf '%s\n' "$_fp_p"
             return
@@ -502,7 +510,11 @@ ci_prune_runs() {
     _pr_keep=${1:-30}
     [ -d "$RUNS_DIR" ] || return "$CI_EXIT_OK"
     _pr_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-ci.XXXXXX")
-    ls -1 "$RUNS_DIR" 2>/dev/null | grep -E '^[0-9]{8}T[0-9]{6}' | sort -r >"$_pr_tmp"
+    # Glob instead of `ls | grep`: run-dir names are UTC timestamps with a
+    # _PID suffix (YYYYMMDDTHHMMSS_<pid>); the trailing * absorbs the pid.
+    (cd "$RUNS_DIR" 2>/dev/null && \
+        ls -1d [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]* 2>/dev/null \
+        || true) | sort -r >"$_pr_tmp"
     _pr_n=0
     while IFS= read -r _pr_dir; do
         _pr_n=$((_pr_n + 1))
