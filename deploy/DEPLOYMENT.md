@@ -392,8 +392,10 @@ its "Verify rollout" step):
 - [ ] `https://track.apexmail.ee/health` → 200
 - [ ] `https://status.apexmail.ee/status` → 200
 - [ ] `https://enterprise.apexmail.ee/health` → 200
-- [ ] `https://api.apexmail.ee/sales-api/u/<bogus>` → **404** (a 502/503 means
-      sales-autopilot is down behind nginx)
+- [ ] `https://api.apexmail.ee/sales-api/u/<bogus>` → the app's **400**
+      `{"error":"invalid or expired unsubscribe token"}` (any 502/503 means
+      sales-autopilot is down behind nginx; a 400 proves the request reached
+      and was handled by the service)
 - [ ] SMTP banner answers on port 25 (and TLS on 465; bounce/FBL ports
       2525/2526 reachable).
 - [ ] TLS certificate is Let's Encrypt (workflow warns while self-signed).
