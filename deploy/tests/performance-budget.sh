@@ -125,7 +125,7 @@ run_audit() {
     # Rendered DOM for resource enumeration: chromium's --dump-dom when a
     # headless browser exists, else the raw HTML — exact for this zero-JS
     # site (see the header note).
-    local dump html res_urls
+    local dump html
     if resolve_chromium; then
         dump="$("$CHROMIUM_BIN" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
             --no-first-run --no-default-browser-check --virtual-time-budget=10000 \

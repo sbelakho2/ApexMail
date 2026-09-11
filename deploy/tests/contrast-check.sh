@@ -373,7 +373,7 @@ analyze_css() {
             *'::'*) continue ;;
             *'.z-'*) continue ;;
             *'.bg-'*|*'hover:bg-'*|*'class~="bg-'*) continue ;;
-            *pre*|*'.term'*|*'.code-'*|*'.giallo'*|*'.z-hl'*) continue ;;
+            *pre*|*'.term'*|*'.code-'*|*'.giallo'*) continue ;;
         esac
         local tok fg bg_tok target_bg ratio thr
         bg_tok=""
