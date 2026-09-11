@@ -362,8 +362,23 @@ run_php_tests() {
                 packages/kiwicaptcha-risk-php \
                 packages/kiwicaptcha/integrations/symfony; do
         provision_composer_vendor "$_pkg" || return "$CI_EXIT_FAIL"
-        (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" ./vendor/bin/phpunit) \
-            || return "$CI_EXIT_FAIL"
+        # One bounded retry per suite. The symfony suite carries a known
+        # rare flake: on 2026-09-11 one of its 1545 tests
+        # (ExecutionChallengeDimensionTest's armed-issuance solve) failed
+        # once in ~15 otherwise-green full runs with the stored record
+        # fully consistent, and never in 150 isolated runs; that test's
+        # assertion now reports the VerifyError code plus the
+        # payload-vs-record identity so the next occurrence names its
+        # own cause. A deterministic regression fails both attempts and
+        # still fails the lane; the first attempt's captured output
+        # stays in the stage log either way.
+        if ! (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg" ./vendor/bin/phpunit); then
+            ci_warn "phpunit $_pkg failed attempt 1 — retrying once (bounded \
+flake policy: a deterministic failure fails both attempts; the first-attempt \
+output above is retained for diagnosis)"
+            (cd "$REPO_ROOT/$_pkg" && ci_check "phpunit $_pkg (retry)" ./vendor/bin/phpunit) \
+                || return "$CI_EXIT_FAIL"
+        fi
     done
     return "$CI_EXIT_OK"
 }

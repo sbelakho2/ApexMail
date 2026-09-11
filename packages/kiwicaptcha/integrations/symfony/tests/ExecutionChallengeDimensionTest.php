@@ -225,10 +225,34 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // for every token.
         $counter = $this->winningCounter($payload);
 
+        // The solve is computed from the client-facing payload; the
+        // verifier reads the stored record. The two are the same
+        // challenge by construction (the response serializer emits the
+        // record), so a divergence here — e.g., a re-mint overwriting
+        // the record under the same nonce — would surface only as a
+        // mystifying proof failure. Assert the identity directly: the
+        // named assertion is the diagnosis.
+        self::assertSame($record->prefix, $payload['prefix'], 'the payload prefix must be the stored record prefix');
+        self::assertSame($record->salt, $payload['salt'], 'the payload salt must be the stored record salt');
+        self::assertSame($record->targetBits, $payload['targetBits'], 'the payload target bits must be the stored record target bits');
+
         $verifier = new Verifier($storage, now: static fn (): int => time());
 
         $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
-        self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1')->isOk());
+        $outcome = $verifier->verify($good, self::SECRET, 'login', '127.0.0.1');
+        self::assertTrue(
+            $outcome->isOk(),
+            'the armed solve must verify; got '.$outcome->code()
+            .($outcome->detail !== null ? ' ('.$outcome->detail.')' : '')
+            .sprintf(
+                ' [record: algorithm %s, targetBits %d, protocol v%s, execution v%s, minDurationMs %d]',
+                $record->algorithm->value,
+                $record->targetBits,
+                $record->protocolVersion,
+                $record->executionVersion ?? 0,
+                $record->minDurationMs,
+            ),
+        );
 
         $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();
         self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($wrong, self::SECRET, 'login', '127.0.0.1')->error);
