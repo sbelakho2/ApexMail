@@ -1,4 +1,4 @@
--- Migration 103: Lease tokens for queue_jobs (exact lease fencing).
+-- 103: Lease tokens for queue_jobs (exact lease fencing).
 --
 -- Problem (audit item K / migrations_needed proposal
 -- 20260821_queue_lease_token.sql): complete()/fail()/dead_letter() could

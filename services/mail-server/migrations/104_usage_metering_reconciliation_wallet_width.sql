@@ -1,4 +1,4 @@
--- Migration 104: Usage-metering completeness + reconciliation + wallet width unification.
+-- 104: Usage-metering completeness + reconciliation + wallet width unification.
 --
 -- A) Derived metering aggregates (audit item: "only EmailsSent is metered")
 --    The maintenance sweep in billing-service derives per-tenant per-day

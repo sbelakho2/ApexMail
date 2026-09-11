@@ -1,4 +1,4 @@
--- Migration 127: webhook retry ladder (external review 2026-09-08 §7).
+-- 127: webhook retry ladder (external review 2026-09-08 §7).
 --
 -- Infrastructure webhooks must survive multi-hour customer outages. The
 -- previous policy (3 retries, exponential backoff capped at 1h) exhausted

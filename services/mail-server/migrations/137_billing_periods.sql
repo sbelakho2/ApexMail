@@ -1,4 +1,4 @@
--- Migration 137: immutable billing-period records (audit F30).
+-- 137: immutable billing-period records (audit F30).
 --
 -- The overage sweep read its billing periods straight off the MUTABLE
 -- stripe_subscriptions.billing_cycle_start/end columns. A renewal webhook

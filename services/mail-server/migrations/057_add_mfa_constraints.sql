@@ -1,4 +1,4 @@
--- Migration 057: Add mfa constraints
+-- 057_add_mfa_constraints.sql
 --
 -- =============================================================================
 -- A-04: MFA Recovery Codes CHECK Constraint

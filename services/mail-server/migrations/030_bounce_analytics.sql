@@ -1,4 +1,4 @@
--- Migration 030: Bounce analytics
+-- 030_bounce_analytics.sql
 -- Bounce analytics aggregation tables. Schema previously created at runtime
 -- via `Aggregator::initialize_schema`; centralized here so deploys go through
 -- migration history. Idempotent.

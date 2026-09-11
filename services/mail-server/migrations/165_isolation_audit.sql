@@ -1,4 +1,4 @@
--- Migration 165: Isolation audit
+-- 165_isolation_audit.sql
 --
 -- =============================================================================
 -- F63: canonical schema for the isolation crate's tamper-evident audit log.

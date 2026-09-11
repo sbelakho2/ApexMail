@@ -1,4 +1,4 @@
--- Migration 063: Add db audit fixes
+-- 063_add_db_audit_fixes.sql
 --
 -- =============================================================================
 -- REMAINING DB AUDIT FIXES (DB-105, DB-106, DB-110, DB-115)

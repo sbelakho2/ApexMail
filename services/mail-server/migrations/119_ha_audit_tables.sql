@@ -1,4 +1,4 @@
--- Migration 119: Ha audit tables
+-- 119_ha_audit_tables.sql
 --
 -- =============================================================================
 -- Canonical schema for the HA audit tables. The ha crate writes failover

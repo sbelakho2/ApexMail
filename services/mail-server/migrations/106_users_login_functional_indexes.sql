@@ -1,4 +1,4 @@
--- Migration 106: Login lookup functional indexes (audit item L-24) + missing
+-- 106: Login lookup functional indexes (audit item L-24) + missing
 --      users.username column.
 --
 -- auth.rs resolves login accounts with:

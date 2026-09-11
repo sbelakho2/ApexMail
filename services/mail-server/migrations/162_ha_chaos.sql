@@ -1,4 +1,4 @@
--- Migration 162: Ha chaos
+-- 162_ha_chaos.sql
 --
 -- =============================================================================
 -- F63: canonical schema for the ha crate's chaos-engineering experiment log.

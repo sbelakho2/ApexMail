@@ -1,4 +1,4 @@
--- Migration 131: plan_overrides.updated_at (audit F06).
+-- 131: plan_overrides.updated_at (audit F06).
 --
 -- The admin plan-override upsert writes `updated_at = NOW()` in its
 -- ON CONFLICT branch, but no migration ever added the column — the update

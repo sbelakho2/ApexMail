@@ -1,4 +1,4 @@
--- Migration 056: Fix critical schema issues
+-- 056_fix_critical_schema_issues.sql
 --
 -- =============================================================================
 -- CRITICAL (P0) SCHEMA FIXES

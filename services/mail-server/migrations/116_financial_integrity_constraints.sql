@@ -1,4 +1,4 @@
--- Migration 116: Financial integrity constraints
+-- 116_financial_integrity_constraints.sql
 --
 -- =============================================================================
 -- Integrity constraints the chain never enforced, plus data repairs that

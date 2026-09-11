@@ -1,4 +1,4 @@
--- Migration 117: Metering events reconciliation
+-- 117_metering_events_reconciliation.sql
 --
 -- =============================================================================
 -- Reconcile metering_events with the writers that use it.

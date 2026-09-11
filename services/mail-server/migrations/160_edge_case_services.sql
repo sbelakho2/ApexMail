@@ -1,4 +1,4 @@
--- Migration 160: Edge case services
+-- 160_edge_case_services.sql
 --
 -- =============================================================================
 -- F63: canonical schema for the edge-cases crate's persistence contracts.

@@ -1,4 +1,4 @@
--- Migration 102: Scope message-id deduplication to the DELIVERY path.
+-- 102: Scope message-id deduplication to the DELIVERY path.
 --
 -- Problem (audit item I.5 / migrations_needed proposal
 -- 20260821_message_dedup_delivery_scope.sql): idx_mail_messages_dedup

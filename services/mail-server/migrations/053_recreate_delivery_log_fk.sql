@@ -1,4 +1,4 @@
--- Migration 053: Recreate delivery log fk
+-- 053_recreate_delivery_log_fk.sql
 --
 -- C-17: Recreate FK constraint dropped during partitioning in migration 050.
 --

@@ -1,4 +1,4 @@
--- Migration 084: Enhance compliance_submissions with file storage, auto-naming, and checksums.
+-- 084: Enhance compliance_submissions with file storage, auto-naming, and checksums.
 --
 -- Adds columns for:
 --   - file_name     — auto-generated qualified filename

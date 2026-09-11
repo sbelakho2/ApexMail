@@ -1,4 +1,4 @@
--- Migration 167: Isolation encryption
+-- 167_isolation_encryption.sql
 --
 -- =============================================================================
 -- F63: canonical schema for the isolation crate's envelope-encryption key

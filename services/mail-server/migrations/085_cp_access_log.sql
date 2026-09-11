@@ -1,4 +1,4 @@
--- Migration 085: Control-plane access logging for admin isolation compliance.
+-- 085: Control-plane access logging for admin isolation compliance.
 -- Logs every access attempt (success and failure) to /cp/* and /v1/admin/* routes.
 -- This table is separate from the general audit_logs to keep CP access
 -- records immutable and auditable independently from user-facing activity.

@@ -1,4 +1,4 @@
--- Migration 166: Isolation data isolation
+-- 166_isolation_data_isolation.sql
 --
 -- =============================================================================
 -- F63: canonical schema for the isolation crate's data-isolation layer.

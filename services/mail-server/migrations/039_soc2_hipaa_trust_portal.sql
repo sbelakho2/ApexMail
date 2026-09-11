@@ -1,4 +1,4 @@
--- Migration 039: SOC2 Type II + HIPAA BAA + Trust Portal.
+-- 039: SOC2 Type II + HIPAA BAA + Trust Portal.
 --
 -- Provides the persistence layer for ApexMail's enterprise compliance posture:
 --   * SOC2 Trust Service Criteria control catalog + automated evidence collection

@@ -1,4 +1,4 @@
--- Migration 090: Widen events id columns
+-- 090_widen_events_id_columns.sql
 --
 -- =============================================================================
 -- SPLIT-BRAIN RESOLUTION (cont.): events id column widths

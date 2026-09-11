@@ -1,4 +1,4 @@
--- Migration 123: AI assistant storage — grounded docs index + chat audit + email-agent
+-- 123: AI assistant storage — grounded docs index + chat audit + email-agent
 -- claim disambiguation.
 --
 -- ai_docs_chunks: the assistant's knowledge index over the repo's own docs.

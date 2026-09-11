@@ -1,4 +1,4 @@
--- Migration 052: Add missing foundation tables
+-- 052_add_missing_foundation_tables.sql
 --
 -- Foundation tables required by earlier migrations but never created.
 -- This migration fills 9 missing-table gaps identified by the comprehensive

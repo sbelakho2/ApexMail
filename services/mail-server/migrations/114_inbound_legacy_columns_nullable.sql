@@ -1,4 +1,4 @@
--- Migration 114: Inbound legacy columns nullable
+-- 114_inbound_legacy_columns_nullable.sql
 --
 -- =============================================================================
 -- inbound_messages: the MTA inbound writer and the legacy columns

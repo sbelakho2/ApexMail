@@ -1,4 +1,4 @@
--- Migration 125: Supporting indexes for two unindexed hot paths.
+-- 125: Supporting indexes for two unindexed hot paths.
 --
 --   1. Email verification lookup (routes/auth.rs verify_email_token):
 --        SELECT ... FROM users

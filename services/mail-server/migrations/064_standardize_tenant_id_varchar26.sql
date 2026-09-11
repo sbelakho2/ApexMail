@@ -1,4 +1,4 @@
--- Migration 064: Standardize tenant id varchar26
+-- 064_standardize_tenant_id_varchar26.sql
 --
 -- =============================================================================
 -- H-01 FINALIZATION: Standardize tenant identifiers to VARCHAR(26)

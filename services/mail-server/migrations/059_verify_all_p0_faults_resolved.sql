@@ -1,4 +1,4 @@
--- Migration 059: Verify all p0 faults resolved
+-- 059_verify_all_p0_faults_resolved.sql
 --
 -- =============================================================================
 -- P0 DATABASE MIGRATION FAULT VERIFICATION

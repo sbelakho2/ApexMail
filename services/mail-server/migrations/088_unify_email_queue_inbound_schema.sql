@@ -1,4 +1,4 @@
--- Migration 088: Unify email queue inbound schema
+-- 088_unify_email_queue_inbound_schema.sql
 --
 -- =============================================================================
 -- SPLIT-BRAIN RESOLUTION: email_queue / inbound_messages / queue consumers

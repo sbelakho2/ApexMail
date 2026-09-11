@@ -1,4 +1,4 @@
--- Migration 101: Billing revenue-integrity fixes (audit items A / I4).
+-- 101: Billing revenue-integrity fixes (audit items A / I4).
 --
 --   1. invoices.stripe_invoice_id needs a UNIQUE constraint so the
 --      invoice.paid webhook handler can upsert idempotently with

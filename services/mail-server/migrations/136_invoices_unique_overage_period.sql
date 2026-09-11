@@ -1,4 +1,4 @@
--- Migration 136: one usage invoice per (tenant, period) (audit F29).
+-- 136: one usage invoice per (tenant, period) (audit F29).
 --
 -- The overage sweep's advisory-lock claim committed BEFORE the invoice
 -- INSERT ran on a separate connection, so two sweeps could both pass the

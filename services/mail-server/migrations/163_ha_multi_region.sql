@@ -1,4 +1,4 @@
--- Migration 163: Ha multi region
+-- 163_ha_multi_region.sql
 --
 -- =============================================================================
 -- F63: canonical schema for the ha crate's multi-region registry and

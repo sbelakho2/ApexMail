@@ -1,4 +1,4 @@
--- Migration 134: canonical credit_notes persistence (audit F60).
+-- 134: canonical credit_notes persistence (audit F60).
 --
 -- credit_notes.rs has always read/written a `credit_notes` table that no
 -- migration ever created — every credit-note operation failed with 42P01.

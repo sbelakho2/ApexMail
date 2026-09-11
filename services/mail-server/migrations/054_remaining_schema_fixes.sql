@@ -1,4 +1,4 @@
--- Migration 054: Remaining schema fixes
+-- 054_remaining_schema_fixes.sql
 --
 -- Addresses remaining HIGH, MEDIUM, and LOW issues from the migration audit
 -- that require new schema changes (not modifications to existing migrations).

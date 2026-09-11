@@ -1,4 +1,4 @@
--- Migration 093: Deep schema convergence
+-- 093_deep_schema_convergence.sql
 --
 -- =============================================================================
 -- DEEP PASS: schema/contract convergence (wave 2)

@@ -1,4 +1,4 @@
--- Migration 120: Ip pool allocated to varchar26
+-- 120_ip_pool_allocated_to_varchar26.sql
 --
 -- =============================================================================
 -- ip_pool_available.allocated_to is the LAST tenant-id column still typed

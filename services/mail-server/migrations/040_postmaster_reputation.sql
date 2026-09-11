@@ -1,4 +1,4 @@
--- Migration 040: Sender reputation tracking (Google Postmaster Tools v1 + Microsoft SNDS).
+-- 040: Sender reputation tracking (Google Postmaster Tools v1 + Microsoft SNDS).
 --
 -- ApexMail polls Postmaster Tools and SNDS daily for every sending domain /
 -- IP we operate.  The raw metrics land here so:

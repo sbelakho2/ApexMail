@@ -1,4 +1,4 @@
--- Migration 083: Add analytics indexes
+-- 083_add_analytics_indexes.sql
 -- =============================================================================
 -- Adds targeted composite indexes to accelerate ALL analytics query patterns
 -- identified during an extreme performance audit of every query across:

@@ -1,4 +1,4 @@
--- Migration 067: Fix remaining db faults v3
+-- 067_fix_remaining_db_faults_v3.sql
 --
 -- =============================================================================
 -- FINAL REMAINING DB FAULT FIXES (Phase 3)
