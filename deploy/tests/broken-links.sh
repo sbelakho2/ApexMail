@@ -33,7 +33,12 @@ TOTAL_FAILED=0
 # cached code/effective-url/redirect-count. Format: url \t code \t eff \t red.
 CHECK_CACHE="$(mktemp "${TMPDIR:-/tmp}/apexmail-broken-links.XXXXXX")"
 RESULTS_JSONL="$(mktemp "${TMPDIR:-/tmp}/apexmail-broken-links.XXXXXX")"
-trap 'rm -f "$CHECK_CACHE" "$RESULTS_JSONL"' EXIT
+# The crawl list is a scratch artifact: it lives outside the checkout, like
+# every other temp of this script. Writing it into SCRIPT_DIR made every run
+# dirty the (tracked, historical accident) file and left the deploy checkout
+# one upstream edit away from a failed `git pull --ff-only`.
+ROUTES_FILE="$(mktemp "${TMPDIR:-/tmp}/apexmail-broken-links.XXXXXX")"
+trap 'rm -f "$CHECK_CACHE" "$RESULTS_JSONL" "$ROUTES_FILE"' EXIT
 
 # fetch_url_meta <url> — print "code|effective_url|redirect_count".
 fetch_url_meta() {
@@ -146,7 +151,7 @@ extract_links() {
 }
 
 main() {
-    local routes_file="${SCRIPT_DIR}/.routes.txt"
+    local routes_file="$ROUTES_FILE"
 
     # Collect routes — crawl built HTML
     find "${BUILD_DIR}" -name '*.html' -not -name '404.html' | \

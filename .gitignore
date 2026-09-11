@@ -139,6 +139,9 @@ deploy/tests/.font-optimization-report.json
 deploy/tests/.image-optimization-report.json
 deploy/tests/.performance-budget-report.json
 deploy/tests/.cta-tracking-report.json
+# the broken-links crawl list (rewritten on every run; a tracked copy made
+# the deploy checkout permanently dirty and would break git pull --ff-only)
+deploy/tests/.routes.txt
 
 # content voice-check report artifact (generated)
 deploy/tests/.content-voice-report.json
