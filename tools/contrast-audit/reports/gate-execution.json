@@ -1,9 +1,0 @@
-{
- "tool": "tools/contrast-audit/gate.sh",
- "gate": "wcag-aa-contrast",
- "revision": "08b831a43358c0c0b244f2fd10ccb69f999511f3",
- "dirtyWorkingTree": true,
- "status": "executed",
- "detail": "",
- "recordedAt": "2026-09-10T19:05:38.322Z"
-}

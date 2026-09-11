@@ -131,6 +131,14 @@ cargo_output.txt
 .zcode/
 
 # ─── deploy/tests validator report artifacts (F14: captured into ci/runs/<ts>/) ──
+# The contrast/layout gates regenerate reports/ on every run (445 MiB of
+# crops, screenshots and JSON reports). A tracked copy dirtied the deploy
+# checkout with 673 modified files after each pipeline run — the F52
+# execution record then reported a dirty working tree caused by the gate
+# itself. The run directory captures the evidence; the working tree stays clean.
+tools/contrast-audit/reports/
+# PHPUnit's result cache (written by every local suite run)
+.phpunit.result.cache
 deploy/tests/.contrast-check-report.json
 deploy/tests/.html-validation-report.json
 deploy/tests/.seo-validation-report.json
