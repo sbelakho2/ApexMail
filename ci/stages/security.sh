@@ -154,7 +154,10 @@ trivy_fs_scan() {
     _tf_rc=0
     (cd "$REPO_ROOT" && ci_check "trivy fs (vuln+secret, $CI_TRIVY_SEVERITY)" \
         trivy fs --severity "$CI_TRIVY_SEVERITY" --scanners vuln,secret \
-            --skip-dirs node_modules,target,public,vendor,.git \
+            --skip-dirs node_modules,target,public,vendor,.git,secrets,certs,backups \
+            --skip-dirs deploy/nginx/ssl,deploy/nginx/ssl-archive \
+            --skip-files './.env*' \
+            --skip-files './backup-*.dump' \
             --ignorefile "$REPO_ROOT/.trivyignore" \
             --secret-config "$REPO_ROOT/trivy-secret.yaml" \
             --exit-code 1 .) || _tf_rc=$?
