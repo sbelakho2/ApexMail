@@ -217,10 +217,12 @@ run_coverage_gate() {
     # --ignore-filename-regex keeps the measurement to WORKSPACE sources
     # only (dependency/stdlib code lives under ~/.cargo and target/).
     # shellcheck disable=SC2086  # _TEST_ENV is an intentional word list
+    # cargo-llvm-cov consumes its own flags (--lcov --output-path) before
+    # `nextest`; --lcov-path is a nextest flag and was rejected there.
     if ! (cd "$WS" && ci_run_logged env $_TEST_ENV CARGO_TERM_COLOR=never \
             cargo llvm-cov nextest --workspace \
             --ignore-filename-regex '/(target|\.cargo|\.rustup)/' \
-            --lcov-path "$_cov_lcov"); then
+            --lcov --output-path "$_cov_lcov"); then
         if [ "${CI_COVERAGE_CHECK:-required}" = advisory ]; then
             ci_warn "ADVISORY: instrumented test run FAILED (CI_COVERAGE_CHECK=advisory)"
             return "$CI_EXIT_OK"
