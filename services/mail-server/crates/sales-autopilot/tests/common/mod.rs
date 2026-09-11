@@ -44,7 +44,7 @@ pub async fn test_pool(test_name: &str) -> Option<PgPool> {
                 return false;
             };
             let db =
-                match migrator::test_support::fresh_canonical_db(base_url.as_str(), SALES_TEST_DB)
+                match migrator::test_support::shared_canonical_db(base_url.as_str(), SALES_TEST_DB)
                     .await
                 {
                     Ok(db) => db,

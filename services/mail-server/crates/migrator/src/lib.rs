@@ -526,6 +526,15 @@ pub mod test_support {
 
         ensure_template_ready(&admin, server_part).await?;
 
+        // Serialize same-name provisioning across processes: two nextest
+        // workers issuing DROP+CREATE for one name otherwise race into
+        // pg_database_datname_index duplicates (and a FORCE drop can sever a
+        // sibling's active connections).
+        let _ = sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+            .bind(db_name)
+            .execute(&admin)
+            .await;
+
         // Per-test database: drop any leftover, clone the template. The
         // retry absorbs a clone racing another process's top-up window
         // ("source database is being accessed by other users").
@@ -680,6 +689,131 @@ pub mod test_support {
         let db_only = db_part.split('?').next().unwrap_or(db_part);
         let db_name = format!("{db_only}_{db_suffix}");
         fresh_canonical_db(&format!("{server_part}/{db_only}"), &db_name).await
+    }
+
+    /// A **shared** canonical database: create-if-absent, reuse-if-present.
+    ///
+    /// Suites whose tests intentionally share ONE database (sales-autopilot's
+    /// `apexmail_sales_test`, provisioned once per suite under a
+    /// `#[cfg(test)]` process-local OnceCell) run many nextest PROCESSES in
+    /// parallel — each process would otherwise DROP+CREATE the same name,
+    /// racing into `pg_database_datname_index` duplicates and FORCE-dropping a
+    /// database a sibling is actively using. This variant takes a Postgres
+    /// advisory lock keyed on the database name and reuses an existing
+    /// database that already carries the complete pinned canonical lineage;
+    /// anything else (absent, foreign lineage, partial clone) is replaced
+    /// under the same lock.
+    pub async fn shared_canonical_db(
+        base_url: &str,
+        db_name: &str,
+    ) -> Result<Option<PgPool>, ProvisionError> {
+        if base_url.trim().is_empty() {
+            return Ok(None);
+        }
+        let (server_part, _) = base_url.rsplit_once('/').ok_or_else(|| {
+            ProvisionError::new(
+                "url-parse",
+                format!("base URL {base_url:?} has no database segment"),
+            )
+        })?;
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(60))
+            .connect(&format!("{server_part}/postgres"))
+            .await
+            .map_err(|error| {
+                ProvisionError::new(
+                    "admin-connect",
+                    format!("connect {server_part}/postgres: {error}"),
+                )
+            })?;
+
+        // Serialize provisioning of THIS name across processes. hashtext is
+        // stable for the same name; the lock is session-scoped on the admin
+        // pool's single connection and released when it closes.
+        let _ = sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+            .bind(db_name)
+            .execute(&admin)
+            .await;
+
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)")
+                .bind(db_name)
+                .fetch_one(&admin)
+                .await
+                .unwrap_or(false);
+
+        if exists {
+            // Reuse only a database whose ledger is the complete pinned
+            // chain; a partial/foreign leftover is replaced.
+            let healthy = match PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_secs(10))
+                .connect(&format!("{server_part}/{db_name}"))
+                .await
+            {
+                Ok(pool) => {
+                    let complete = clone_ledger_complete(&pool).await.unwrap_or(false);
+                    pool.close().await;
+                    complete
+                }
+                Err(_) => false,
+            };
+            if healthy {
+                admin.close().await; // releases the advisory lock
+                let pool = PgPoolOptions::new()
+                    .max_connections(4)
+                    .acquire_timeout(Duration::from_secs(5))
+                    .connect(&format!("{server_part}/{db_name}"))
+                    .await
+                    .map_err(|error| {
+                        ProvisionError::new(
+                            "shared-connect",
+                            format!("connect shared {db_name}: {error}"),
+                        )
+                    })?;
+                return Ok(Some(pool));
+            }
+        }
+
+        ensure_template_ready(&admin, server_part).await?;
+        drop_database(&admin, db_name).await?;
+        let template_db = canonical_template_db();
+        sqlx::query(&format!(
+            r#"CREATE DATABASE "{db_name}" TEMPLATE "{template_db}""#
+        ))
+        .execute(&admin)
+        .await
+        .map_err(|error| {
+            ProvisionError::new("shared-clone", format!("clone {db_name}: {error}"))
+        })?;
+        admin.close().await;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&format!("{server_part}/{db_name}"))
+            .await
+            .map_err(|error| {
+                ProvisionError::new(
+                    "shared-connect",
+                    format!("connect shared {db_name}: {error}"),
+                )
+            })?;
+        let complete = clone_ledger_complete(&pool).await.map_err(|error| {
+            ProvisionError::new(
+                "shared-ledger",
+                format!("read back {db_name} ledger: {error}"),
+            )
+        })?;
+        if !complete {
+            pool.close().await;
+            return Err(ProvisionError::new(
+                "shared-ledger",
+                format!("{db_name} does not carry the complete pinned canonical chain"),
+            ));
+        }
+        Ok(Some(pool))
     }
 }
 
