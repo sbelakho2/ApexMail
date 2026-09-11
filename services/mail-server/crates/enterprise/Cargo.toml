@@ -45,9 +45,9 @@ mail-common = { path = "../mail-common" }
 apexmail-dns-resolver = { path = "../dns-resolver" }
 urlencoding = { workspace = true }
 flate2 = "1.1"
-jsonwebtoken = "9.3"
+jsonwebtoken = "11.0"
 xml-sec = "0.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-jsonwebtoken = "9.3"
+jsonwebtoken = "11.0"
