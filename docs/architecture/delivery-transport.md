@@ -19,7 +19,7 @@ current operator contract.
 | Path | Provider | Transport | When Used |
 |------|----------|-----------|-----------|
 | **Shared sending** | AWS SES | SES API (`SendRawEmail`) | Default for all tenants without dedicated IPs |
-| **Dedicated IPs** | Hetzner Cloud | Self-hosted SMTP (outbound-queue) | When tenant has active/warming dedicated IPs |
+| **Dedicated IPs** | Hetzner Cloud | Self-hosted SMTP (`SmtpTransport`, worker-processors) | When tenant has active/warming dedicated IPs |
 
 There is **no provider choice** for dedicated IPs. Dedicated IPs are **always** Hetzner floating IPs. Shared sending is **always** AWS SES. A tenant can use **both paths simultaneously** — shared for overflow/warmup and dedicated for primary sending.
 
@@ -116,7 +116,7 @@ The `transport_routing_cache` table is maintained by a PostgreSQL trigger (`trg_
 1. Worker picks a queued message from the email queue.
 2. `TransportRouter` checks routing cache — tenant has dedicated IPs.
 3. `SmtpTransport` resolves recipient MX records via DNS.
-4. The outbound-queue's `SmtpSender` selects a Hetzner floating IP (round-robin, warmup-aware).
+4. The worker processor selects the binding warmup IP (`select_binding_warmup_ip` in `worker-processors/src/email/processor.rs`); the live `SmtpTransport` sends via the configured SMTP relay.
 5. Email is sent directly to the recipient MX with STARTTLS, binding to the selected source IP.
 6. Delivery confirmation (SMTP 250 OK) or DSN bounce is processed inline.
 

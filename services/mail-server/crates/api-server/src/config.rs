@@ -114,6 +114,14 @@ pub struct Config {
     /// internal requests. If set, X-API-Key matching this value bypasses
     /// the normal api_keys DB lookup and returns a super-admin identity.
     pub control_plane_api_key: Option<String>,
+    /// Base URL of the sales-autopilot service — the canonical sales brain the
+    /// control plane proxies to.
+    ///
+    /// Overridden by `SALES_AUTOPILOT_BASE_URL`; the compose stacks set it to
+    /// `http://sales-autopilot:3010`. The default is a loopback address so a
+    /// local (non-containerised) run reaches a service started on this host —
+    /// it must never be a bind address like `0.0.0.0`, which is not a routable
+    /// peer and would make every call fail from inside a container.
     pub sales_autopilot_base_url: String,
     pub internal_service_token: Option<String>,
     /// ai-service base URL for the grounded assistant (empty = assistant
@@ -1005,7 +1013,7 @@ impl Config {
             control_plane_api_key: env::var("CONTROL_PLANE_API_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://0.0.0.0:3010"),
+            sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://127.0.0.1:3010"),
             ai_service_base_url: env_or("AI_SERVICE_BASE_URL", "http://ai-service:3012"),
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
                 .ok()

@@ -1,21 +1,25 @@
-//! Pattern-based reply classification using Aho-Corasick.
+//! Reply classification facade — composes the three honest layers.
+//!
+//! 1. [`deterministic`](super::deterministic) — high-certainty header/syntax
+//!    cases (DSN/bounces, Auto-Submitted/OOO, one-click unsubscribe, explicit
+//!    stop requests). Runs first and wins.
+//! 2. [`ai`](super::ai) — semantic classification for everything the
+//!    deterministic layer could not prove. Provider-agnostic, with a
+//!    never-guessing fallback on outage.
+//! 3. [`policy`](super::policy) — the only place that turns a classification
+//!    into an action.
+//!
+//! The legacy [`classify`] entry point (subject + body only, synchronous)
+//! remains for compatibility: it runs the deterministic layer and then the
+//! historical Aho-Corasick/pattern heuristics that predate the split. The
+//! worker itself uses [`classify_full`], which is header-aware and async.
 //!
 //! # ReDoS Protection (O-16.11)
 //!
-//! This module mitigates regex denial-of-service (ReDoS) through:
-//!
-//! 1. **Input length capping** — The combined `subject + body` text is truncated
-//!    to `MAX_CLASSIFIER_INPUT_BYTES` before any pattern matching, preventing
-//!    attackers from submitting multi-megabyte payloads that trigger pathological
-//!    backtracking.
-//! 2. **Aho-Corasick pre-filter** — Quick patterns use `aho_corasick::AhoCorasick`
-//!    which guarantees O(n) matching (no backtracking). The slower `regex::Regex`
-//!    patterns only execute if at least one quick pattern matched, providing a
-//!    natural rate limit on expensive matching.
-//! 3. **Synchronous timeout note** — If called from an async context, the caller
-//!    should wrap `classify()` in `tokio::task::spawn_blocking` with a timeout.
-//!    The function itself remains synchronous to maintain API compatibility,
-//!    but the input length cap prevents the worst-case ReDoS scenarios.
+//! Input is truncated to [`MAX_CLASSIFIER_INPUT_BYTES`] before any pattern
+//! matching. The Aho-Corasick quick patterns guarantee O(n) matching; the
+//! slower `regex::Regex` patterns only execute if at least one quick pattern
+//! matched.
 
 use std::sync::LazyLock;
 
@@ -23,16 +27,17 @@ use aho_corasick::AhoCorasick;
 use regex::Regex;
 use tracing::warn;
 
-/// Maximum combined (subject + body) input size for the classifier (O-16.11).
-/// Prevents ReDoS attacks via pathological inputs > 100 KB.
-const MAX_CLASSIFIER_INPUT_BYTES: usize = 1024 * 100; // 100 KB
-
+use super::ai::{self, ReplyClassifier, AI_OUTAGE_REASON_PREFIX};
+pub use super::deterministic::MAX_CLASSIFIER_INPUT_BYTES as CLASSIFIER_INPUT_CAP;
+use super::deterministic::{self, DeterministicVerdict, MAX_CLASSIFIER_INPUT_BYTES};
+use super::policy::{self, PolicyInput};
 use super::types::{
-    ActionType, ClassificationResult, ExtractedData, ReplyClassification, Sentiment,
-    SuggestedAction, Urgency,
+    ActionType, AiClassification, ClassificationOutcome, ClassificationResult, ClassifierKind,
+    ExtractedData, ReplyClassification, ReplyDisposition, ReplyInput, Sentiment, SuggestedAction,
+    Urgency,
 };
 
-/// Compiled pattern matchers for each classification.
+/// Compiled pattern matchers for the historical heuristic layer.
 struct PatternSet {
     out_of_office: Vec<Regex>,
     not_interested: Vec<Regex>,
@@ -190,14 +195,174 @@ fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
         .collect()
 }
 
-/// Classify a reply based on pattern matching.
+/// Classify a reply from subject + body (legacy synchronous entry point).
 ///
-/// O-16.11: Input is truncated to `MAX_CLASSIFIER_INPUT_BYTES` before any
-/// pattern matching to prevent ReDoS via pathological inputs.
+/// Runs the deterministic layer first; if nothing is provable there, falls
+/// back to the historical pattern heuristic. Callers that also have headers
+/// should use [`classify_full`] — the worker does.
 pub fn classify(subject: &str, body: &str) -> ClassificationResult {
-    // O-16.11: Cap input length to prevent ReDoS attacks. The Aho-Corasick
-    // quick patterns (O(n) guaranteed) run first; regex patterns only execute
-    // if quick patterns match, which provides a natural rate limit.
+    let input = ReplyInput::new(subject, body);
+    if let Some(verdict) = deterministic::classify(&input) {
+        return result_from_verdict(&verdict);
+    }
+    legacy_heuristic_classify(subject, body)
+}
+
+/// Full three-layer classification: deterministic first, then the AI layer
+/// (or its never-guessing fallback). `ai` is typically an
+/// [`super::ai::HttpReplyClassifier`] or the static fallback.
+pub async fn classify_full(ai: &dyn ReplyClassifier, input: &ReplyInput) -> ClassificationOutcome {
+    if let Some(verdict) = deterministic::classify(input) {
+        return outcome_from_verdict(verdict);
+    }
+
+    let classification = ai::classify_or_fallback(ai, input).await;
+    outcome_from_ai(classification)
+}
+
+/// Build the legacy-shaped result for a deterministic verdict.
+fn result_from_verdict(verdict: &DeterministicVerdict) -> ClassificationResult {
+    let decision = policy::decide(
+        PolicyInput::new(verdict.disposition, verdict.confidence)
+            .with_return_date(verdict.return_date),
+        chrono::Utc::now(),
+    );
+    build_result(
+        decision.disposition,
+        verdict.confidence,
+        decision.legacy_action,
+        verdict.reasoning.clone(),
+        verdict.return_date,
+    )
+}
+
+fn outcome_from_verdict(verdict: DeterministicVerdict) -> ClassificationOutcome {
+    let decision = policy::decide(
+        PolicyInput::new(verdict.disposition, verdict.confidence)
+            .with_return_date(verdict.return_date),
+        chrono::Utc::now(),
+    );
+    let result = build_result(
+        decision.disposition,
+        verdict.confidence,
+        decision.legacy_action,
+        verdict.reasoning.clone(),
+        verdict.return_date,
+    );
+    ClassificationOutcome {
+        disposition: decision.disposition,
+        classifier: ClassifierKind::Deterministic,
+        result,
+        evidence: verdict.evidence,
+        model_version: None,
+        prompt_version: None,
+        return_date: verdict.return_date,
+        downgraded_from: None,
+    }
+}
+
+fn outcome_from_ai(classification: AiClassification) -> ClassificationOutcome {
+    // The never-guessing fallback is itself deterministic (it is a pure
+    // function of the outage), so an outage result is recorded as
+    // `deterministic` with the outage named in the reasoning — never as a
+    // model verdict.
+    let outage = classification
+        .reasoning
+        .starts_with(AI_OUTAGE_REASON_PREFIX);
+    let decision = policy::decide(
+        PolicyInput::new(classification.disposition, classification.confidence),
+        chrono::Utc::now(),
+    );
+    let downgraded_from = decision.downgraded.map(|_| classification.disposition);
+    let reasoning = match decision.downgraded {
+        Some(reason) => format!(
+            "{} (observed '{}' at confidence {:.2}, downgraded: {})",
+            classification.reasoning,
+            classification.disposition.as_str(),
+            decision.confidence,
+            reason.as_str()
+        ),
+        None => classification.reasoning.clone(),
+    };
+    let result = build_result(
+        decision.disposition,
+        decision.confidence,
+        decision.legacy_action,
+        reasoning,
+        None,
+    );
+    ClassificationOutcome {
+        disposition: decision.disposition,
+        classifier: if outage {
+            ClassifierKind::Deterministic
+        } else {
+            ClassifierKind::Ai
+        },
+        result,
+        evidence: classification.evidence,
+        model_version: classification.model_version,
+        prompt_version: classification.prompt_version,
+        return_date: None,
+        downgraded_from,
+    }
+}
+
+/// Assemble the legacy result plus sentiment/urgency from the final
+/// disposition.
+fn build_result(
+    disposition: ReplyDisposition,
+    confidence: f64,
+    suggested_action: SuggestedAction,
+    reasoning: String,
+    return_date: Option<chrono::DateTime<chrono::Utc>>,
+) -> ClassificationResult {
+    ClassificationResult {
+        classification: ReplyClassification::from(disposition),
+        confidence,
+        sub_type: None,
+        extracted_data: ExtractedData {
+            return_date,
+            referred_contact: None,
+            meeting_request: disposition == ReplyDisposition::MeetingRequest,
+            sentiment: sentiment_for(disposition),
+            urgency: urgency_for(disposition),
+        },
+        suggested_action,
+        reasoning,
+    }
+}
+
+fn sentiment_for(disposition: ReplyDisposition) -> Sentiment {
+    match disposition {
+        ReplyDisposition::Positive
+        | ReplyDisposition::MeetingRequest
+        | ReplyDisposition::Question
+        | ReplyDisposition::Referral => Sentiment::Positive,
+        ReplyDisposition::NotInterested
+        | ReplyDisposition::Unsubscribe
+        | ReplyDisposition::Complaint
+        | ReplyDisposition::BounceHard => Sentiment::Negative,
+        _ => Sentiment::Neutral,
+    }
+}
+
+fn urgency_for(disposition: ReplyDisposition) -> Urgency {
+    match disposition {
+        ReplyDisposition::Unsubscribe
+        | ReplyDisposition::Complaint
+        | ReplyDisposition::Positive
+        | ReplyDisposition::MeetingRequest
+        | ReplyDisposition::Question
+        | ReplyDisposition::Referral => Urgency::High,
+        ReplyDisposition::NotInterested | ReplyDisposition::BounceHard => Urgency::Medium,
+        _ => Urgency::Low,
+    }
+}
+
+/// The historical heuristic classifier, unchanged in behaviour. Only used by
+/// the legacy [`classify`] path when the deterministic layer proves nothing;
+/// the worker's async path uses the AI layer instead of these patterns.
+fn legacy_heuristic_classify(subject: &str, body: &str) -> ClassificationResult {
     let combined = format!("{} {}", subject, body);
     let combined = if combined.len() > MAX_CLASSIFIER_INPUT_BYTES {
         let truncated: String = combined
@@ -425,7 +590,7 @@ pub fn classify(subject: &str, body: &str) -> ClassificationResult {
     }
 }
 
-/// Build suggested action based on classification.
+/// Build suggested action based on classification (legacy heuristic path).
 fn build_suggested_action(
     classification: ReplyClassification,
     _sentiment: Sentiment,
@@ -493,6 +658,10 @@ fn build_suggested_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reply_handler::ai::{ClassifyError, ReplyClassifier};
+    use async_trait::async_trait;
+
+    // ── Existing tests, converted to the new module layout ───────────
 
     #[test]
     fn test_classify_out_of_office() {
@@ -544,5 +713,127 @@ mod tests {
         );
         assert_eq!(result.classification, ReplyClassification::MeetingRequest);
         assert!(result.extracted_data.meeting_request);
+    }
+
+    // ── The three-layer composition ──────────────────────────────────
+
+    struct ErroringClassifier;
+    #[async_trait]
+    impl ReplyClassifier for ErroringClassifier {
+        async fn classify(&self, _input: &ReplyInput) -> Result<AiClassification, ClassifyError> {
+            Err(ClassifyError::Transport("connection refused".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn full_classification_uses_deterministic_first() {
+        let input = ReplyInput::new(
+            "Re: proposal",
+            "This sounds great — can we schedule a call?",
+        )
+        .with_header("Auto-Submitted", "auto-replied");
+        let outcome = classify_full(&ErroringClassifier, &input).await;
+        assert_eq!(outcome.disposition, ReplyDisposition::OutOfOffice);
+        assert_eq!(outcome.classifier, ClassifierKind::Deterministic);
+        assert_eq!(
+            outcome.result.classification,
+            ReplyClassification::OutOfOffice
+        );
+        assert!(outcome
+            .evidence
+            .iter()
+            .any(|e| e.kind == "header" && e.value == "auto-replied"));
+    }
+
+    #[tokio::test]
+    async fn full_classification_falls_back_to_unknown_on_ai_outage() {
+        let input = ReplyInput::new("Re: proposal", "vaguely positive vibes");
+        let outcome = classify_full(&ErroringClassifier, &input).await;
+        assert_eq!(outcome.disposition, ReplyDisposition::Unknown);
+        assert_eq!(outcome.classifier, ClassifierKind::Deterministic);
+        assert_eq!(outcome.result.confidence, 0.0);
+        assert!(outcome.result.reasoning.contains(AI_OUTAGE_REASON_PREFIX));
+        assert_ne!(
+            outcome.result.classification,
+            ReplyClassification::PositiveIntent
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_stop_request_wins_over_ai() {
+        // Even a classifier that would say "positive" must not be consulted
+        // for an explicit unsubscribe.
+        struct AlwaysPositive;
+        #[async_trait]
+        impl ReplyClassifier for AlwaysPositive {
+            async fn classify(
+                &self,
+                _input: &ReplyInput,
+            ) -> Result<AiClassification, ClassifyError> {
+                Ok(AiClassification {
+                    disposition: ReplyDisposition::Positive,
+                    confidence: 1.0,
+                    reasoning: String::new(),
+                    model_version: None,
+                    prompt_version: None,
+                    evidence: vec![],
+                })
+            }
+        }
+        let input = ReplyInput::new("Re: list", "please unsubscribe me");
+        let outcome = classify_full(&AlwaysPositive, &input).await;
+        assert_eq!(outcome.disposition, ReplyDisposition::Unsubscribe);
+        assert_eq!(outcome.classifier, ClassifierKind::Deterministic);
+    }
+
+    #[tokio::test]
+    async fn low_confidence_ai_result_downgrades_in_the_full_path() {
+        struct Hesitant;
+        #[async_trait]
+        impl ReplyClassifier for Hesitant {
+            async fn classify(
+                &self,
+                _input: &ReplyInput,
+            ) -> Result<AiClassification, ClassifyError> {
+                Ok(AiClassification {
+                    disposition: ReplyDisposition::Unsubscribe,
+                    confidence: 0.2,
+                    reasoning: "maybe".into(),
+                    model_version: Some("test".into()),
+                    prompt_version: None,
+                    evidence: vec![],
+                })
+            }
+        }
+        let outcome = classify_full(&Hesitant, &ReplyInput::new("Re: hi", "hmm")).await;
+        assert_eq!(outcome.disposition, ReplyDisposition::Unknown);
+        assert_eq!(outcome.downgraded_from, Some(ReplyDisposition::Unsubscribe));
+        assert!(
+            outcome.result.suggested_action.action == ActionType::Ignore
+                || !outcome.result.suggested_action.auto_execute,
+            "a downgraded classification must not auto-suppress"
+        );
+        assert!(outcome.result.reasoning.contains("downgraded"));
+    }
+
+    #[test]
+    fn legacy_result_projection_maps_every_disposition() {
+        for disposition in ReplyDisposition::ALL {
+            let legacy = ReplyClassification::from(disposition);
+            assert!(!legacy.as_str().is_empty());
+        }
+        assert_eq!(
+            ReplyClassification::from(ReplyDisposition::OutOfOffice).as_str(),
+            "out_of_office"
+        );
+        assert_eq!(
+            ReplyClassification::from(ReplyDisposition::BounceHard).as_str(),
+            "bounce"
+        );
+    }
+
+    #[test]
+    fn input_cap_is_reexported() {
+        assert_eq!(CLASSIFIER_INPUT_CAP, MAX_CLASSIFIER_INPUT_BYTES);
     }
 }

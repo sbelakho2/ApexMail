@@ -1,8 +1,14 @@
-//! Growth analytics endpoint — new signups, activation rate, DAU/MAU,
-//! trial conversion, and customer lifecycle metrics.
+//! Growth analytics endpoint — new signups, activation rate, active-tenant
+//! activity, trial conversion, and customer lifecycle metrics.
 //!
 //! All values come from real database queries against tenants, users, messages,
 //! events, subscriptions, and stripe_subscriptions tables.
+//!
+//! Honest labels: the activity counters here measure active TENANTS (distinct
+//! `events.tenant_id`), not users — ApexMail's events carry no user identity,
+//! so DAU/WAU/MAU would be a lie. "Activation" and time-to-first-send are
+//! derived from the actual successful-send lifecycle (`events.event_type =
+//! 'sent'`), not from message rows or current status.
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -79,11 +85,13 @@ pub struct SourceBreakdown {
 #[serde(rename_all = "camelCase")]
 pub struct ActivationStats {
     pub total_activated: i64,
+    /// Fraction in `0.0..=1.0` (activated tenants / new tenants).
     pub activation_rate: f64,
-    /// Average hours from signup to first actual send. `None` when no
-    /// tenant in the window has sent yet — never-sent is explicitly
-    /// distinct from zero elapsed time (F79).
-    pub avg_time_to_activate_hours: Option<f64>,
+    /// Average hours from signup to the first ACTUAL successful send event
+    /// (`events.event_type = 'sent'`). `None` when no tenant in the window
+    /// has sent yet — never-sent is explicitly distinct from zero elapsed
+    /// time (F79).
+    pub avg_time_to_first_send_hours: Option<f64>,
     pub activation_funnel: Vec<ActivationFunnelStage>,
 }
 
@@ -92,18 +100,31 @@ pub struct ActivationStats {
 pub struct ActivationFunnelStage {
     pub stage: String,
     pub count: i64,
+    /// Display percentage (0-100) of the signup population.
     pub percentage: f64,
 }
 
+/// Activity metrics. These count TENANTS, not users: the events table has no
+/// user dimension, so reporting "DAU/WAU/MAU" would mislabel active tenants
+/// as active users. Field names state exactly what is measured.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngagementMetrics {
-    pub dau: i64,
-    pub mau: i64,
-    pub dau_mau_ratio: f64,
-    pub wau: i64,
-    pub monthly_active_tenants: i64,
-    pub avg_session_count_per_user: f64,
+    /// Distinct tenants with at least one event today (UTC day).
+    pub active_tenants_today: i64,
+    /// Distinct tenants with at least one event in the last 7 days.
+    pub active_tenants_7d: i64,
+    /// Distinct tenants with at least one event in the last 30 days.
+    pub active_tenants_30d: i64,
+    /// `active_tenants_today / active_tenants_30d` — a fraction in
+    /// `0.0..=1.0`, measuring daily stickiness of the tenant base.
+    pub active_tenants_today_ratio_30d: f64,
+    /// Distinct tenants with at least one successful `sent` EVENT in the
+    /// last 30 days (the real send lifecycle, not message rows).
+    pub sending_tenants_30d: i64,
+    /// Mean number of active days (distinct tenant+day with an event) per
+    /// active tenant over 30 days.
+    pub avg_active_days_per_tenant_30d: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,12 +168,11 @@ fn parse_period_days(period: &str) -> i64 {
     }
 }
 
-/// Average engagement-session count per active user over the last 30 days,
-/// computed from real events: a "session" is an active day (distinct
-/// tenant + day with at least one event), so this is the mean number of
-/// active days per active tenant. Returns 0.0 when there is no event data —
-/// never a fabricated constant.
-async fn avg_session_count_per_user(db: &sqlx::PgPool) -> f64 {
+/// Mean number of active days per active tenant over the last 30 days,
+/// computed from real events: an "active day" is a distinct
+/// (tenant_id, day) pair with at least one event. Returns 0.0 when there is
+/// no event data — never a fabricated constant.
+async fn avg_active_days_per_tenant_30d(db: &sqlx::PgPool) -> f64 {
     sqlx::query_scalar::<_, Option<f64>>(
         "SELECT COUNT(DISTINCT (tenant_id, DATE(timestamp)))::float8
               / NULLIF(COUNT(DISTINCT tenant_id), 0)
@@ -164,6 +184,57 @@ async fn avg_session_count_per_user(db: &sqlx::PgPool) -> f64 {
     .ok()
     .flatten()
     .unwrap_or(0.0)
+}
+
+/// The honest tenant-activity block: distinct TENANTS with event activity in
+/// today / 7-day / 30-day windows, plus tenants with real successful sends.
+/// The events table has no user dimension, so these are not DAU/WAU/MAU.
+async fn engagement_metrics(db: &sqlx::PgPool) -> EngagementMetrics {
+    let active_tenants_today: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
+         WHERE timestamp >= CURRENT_DATE",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    let active_tenants_30d: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
+         WHERE timestamp >= NOW() - INTERVAL '30 days'",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    let active_tenants_7d: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
+         WHERE timestamp >= NOW() - INTERVAL '7 days'",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    let sending_tenants_30d: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
+         WHERE event_type = 'sent'
+           AND timestamp >= NOW() - INTERVAL '30 days'",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap_or(0);
+
+    EngagementMetrics {
+        active_tenants_today,
+        active_tenants_7d,
+        active_tenants_30d,
+        active_tenants_today_ratio_30d: if active_tenants_30d > 0 {
+            active_tenants_today as f64 / active_tenants_30d as f64
+        } else {
+            0.0
+        },
+        sending_tenants_30d,
+        avg_active_days_per_tenant_30d: avg_active_days_per_tenant_30d(db).await,
+    }
 }
 
 /// Trials started in the window — a trial is a stripe_subscriptions row
@@ -281,14 +352,16 @@ async fn get_growth_analytics(
     .collect();
 
     // ─── Activation ────────────────────────────────────────────────────
-    // "Activated" = tenant has verified a domain AND sent at least 1 email
+    // "Activated" = tenant has a REAL successful send event
+    // (`events.event_type = 'sent'`, written after provider acceptance).
+    // Message rows / current status are not the successful-send lifecycle.
     let total_tenants: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM tenants WHERE created_at >= NOW() - $1::interval",
     )
     .bind(&interval)
     .fetch_one(db)
     .await
-    .unwrap_or(1);
+    .unwrap_or(0);
 
     let domain_verified: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT d.tenant_id)::bigint
@@ -302,10 +375,10 @@ async fn get_growth_analytics(
     .unwrap_or(0);
 
     let email_sent: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT m.tenant_id)::bigint
-         FROM messages m
-         JOIN tenants t ON t.id::text = m.tenant_id::text
-         WHERE m.status IN ('sent', 'delivered')
+        "SELECT COUNT(DISTINCT e.tenant_id)::bigint
+         FROM events e
+         JOIN tenants t ON t.id::text = e.tenant_id::text
+         WHERE e.event_type = 'sent'
            AND t.created_at >= NOW() - $1::interval",
     )
     .bind(&interval)
@@ -359,42 +432,9 @@ async fn get_growth_analytics(
         },
     ];
 
-    // Avg time to activate (first email sent minus tenant creation) — the
-    // shared, corrected per-tenant first-send query (F79).
-    let avg_time_to_activate = avg_time_to_first_send_hours(db, &interval).await?;
-
-    // ─── Engagement ─────────────────────────────────────────────────────
-    let dau: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
-         WHERE timestamp >= CURRENT_DATE",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    let mau: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
-         WHERE timestamp >= NOW() - INTERVAL '30 days'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(1);
-
-    let wau: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
-         WHERE timestamp >= NOW() - INTERVAL '7 days'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    let monthly_active_tenants: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM messages
-         WHERE created_at >= NOW() - INTERVAL '30 days'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    // Avg time to first ACTUAL send — the shared, corrected per-tenant
+    // first-send-event query (F79).
+    let avg_time_to_first_send = avg_time_to_first_send_hours(db, &interval).await?;
 
     // ─── Trial Conversion ───────────────────────────────────────────────
     // Computed from stripe_subscriptions' period/status semantics (the table
@@ -520,21 +560,10 @@ async fn get_growth_analytics(
             } else {
                 0.0
             },
-            avg_time_to_activate_hours: avg_time_to_activate,
+            avg_time_to_first_send_hours: avg_time_to_first_send,
             activation_funnel,
         },
-        engagement: EngagementMetrics {
-            dau,
-            mau,
-            dau_mau_ratio: if mau > 0 {
-                dau as f64 / mau as f64
-            } else {
-                0.0
-            },
-            wau,
-            monthly_active_tenants,
-            avg_session_count_per_user: avg_session_count_per_user(db).await,
-        },
+        engagement: engagement_metrics(db).await,
         trial_conversion: TrialConversionStats {
             trials_started,
             trials_converted,
@@ -558,22 +587,25 @@ async fn get_growth_analytics(
     }))
 }
 
-/// F79: average time from signup to first ACTUAL send, shared by both
-/// endpoints. The first-send timestamp per tenant is computed in a
-/// subquery (nesting MIN inside AVG at one query level is invalid SQL —
-/// 42803), the outer SELECT then averages the per-tenant deltas, and the
-/// result is a typed `Option<f64>`: `None` means no tenant in the window
-/// has sent, which is explicitly distinct from a zero elapsed time. Query
-/// errors propagate as unavailable, never as a numerical zero.
+/// F79: average time from signup to the first ACTUAL successful send event,
+/// shared by both endpoints. The first send is the earliest
+/// `events.event_type = 'sent'` occurrence for the tenant (written after
+/// provider acceptance) — not `messages.created_at` and not a current-status
+/// comparison. The per-tenant MIN lives in a subquery (nesting MIN inside
+/// AVG at one query level is invalid SQL — 42803); the outer SELECT
+/// averages the per-tenant deltas. The result is a typed `Option<f64>`:
+/// `None` means no tenant in the window has sent, which is explicitly
+/// distinct from a zero elapsed time. Query errors propagate as unavailable,
+/// never as a numerical zero.
 const AVG_TIME_TO_FIRST_SEND_SQL: &str = r#"
     SELECT AVG(EXTRACT(EPOCH FROM (first_send - created_at)) / 3600)::double precision
     FROM (
         SELECT t.id AS tenant_id, t.created_at AS created_at,
-               MIN(m.created_at) AS first_send
+               MIN(e.timestamp) AS first_send
         FROM tenants t
-        JOIN messages m ON m.tenant_id::text = t.id::text
+        JOIN events e ON e.tenant_id::text = t.id::text
         WHERE t.created_at >= NOW() - $1::interval
-          AND m.status IN ('sent', 'delivered')
+          AND e.event_type = 'sent'
         GROUP BY t.id, t.created_at
     ) first_sends
 "#;
@@ -634,7 +666,7 @@ async fn get_activation_funnel(
     .bind(&interval)
     .fetch_one(db)
     .await
-    .unwrap_or(1);
+    .unwrap_or(0);
 
     let domain_verified: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT d.tenant_id)::bigint
@@ -647,11 +679,12 @@ async fn get_activation_funnel(
     .await
     .unwrap_or(0);
 
+    // Real successful-send lifecycle: distinct tenants with a `sent` event.
     let email_sent: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT m.tenant_id)::bigint
-         FROM messages m
-         JOIN tenants t ON t.id::text = m.tenant_id::text
-         WHERE m.status IN ('sent', 'delivered')
+        "SELECT COUNT(DISTINCT e.tenant_id)::bigint
+         FROM events e
+         JOIN tenants t ON t.id::text = e.tenant_id::text
+         WHERE e.event_type = 'sent'
            AND t.created_at >= NOW() - $1::interval",
     )
     .bind(&interval)
@@ -659,7 +692,7 @@ async fn get_activation_funnel(
     .await
     .unwrap_or(0);
 
-    let avg_time_to_activate = avg_time_to_first_send_hours(db, &interval).await?;
+    let avg = avg_time_to_first_send_hours(db, &interval).await?;
 
     Ok(Json(ActivationStats {
         total_activated: email_sent,
@@ -668,7 +701,7 @@ async fn get_activation_funnel(
         } else {
             0.0
         },
-        avg_time_to_activate_hours: avg_time_to_activate,
+        avg_time_to_first_send_hours: avg,
         activation_funnel: vec![
             ActivationFunnelStage {
                 stage: "Signed up".into(),
@@ -703,52 +736,7 @@ async fn get_engagement_metrics(
 ) -> Result<Json<EngagementMetrics>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
-    let db = &state.db;
-
-    let dau: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
-         WHERE timestamp >= CURRENT_DATE",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    let mau: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
-         WHERE timestamp >= NOW() - INTERVAL '30 days'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(1);
-
-    let wau: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM events
-         WHERE timestamp >= NOW() - INTERVAL '7 days'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    let monthly_active_tenants: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM messages
-         WHERE created_at >= NOW() - INTERVAL '30 days'",
-    )
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    Ok(Json(EngagementMetrics {
-        dau,
-        mau,
-        dau_mau_ratio: if mau > 0 {
-            dau as f64 / mau as f64
-        } else {
-            0.0
-        },
-        wau,
-        monthly_active_tenants,
-        avg_session_count_per_user: avg_session_count_per_user(db).await,
-    }))
+    Ok(Json(engagement_metrics(&state.db).await))
 }
 
 #[cfg(test)]
@@ -794,16 +782,33 @@ mod tests {
     }
 
     #[test]
-    fn dau_mau_ratio_handles_zero_mau() {
+    fn active_tenant_ratio_handles_zero_30d_population() {
         let metrics = EngagementMetrics {
-            dau: 0,
-            mau: 0,
-            dau_mau_ratio: 0.0,
-            wau: 0,
-            monthly_active_tenants: 0,
-            avg_session_count_per_user: 0.0,
+            active_tenants_today: 0,
+            active_tenants_7d: 0,
+            active_tenants_30d: 0,
+            active_tenants_today_ratio_30d: 0.0,
+            sending_tenants_30d: 0,
+            avg_active_days_per_tenant_30d: 0.0,
         };
-        assert_eq!(metrics.dau_mau_ratio, 0.0);
+        assert_eq!(metrics.active_tenants_today_ratio_30d, 0.0);
+    }
+
+    #[test]
+    fn engagement_metrics_are_labelled_tenants_not_users() {
+        // The struct must not expose DAU/WAU/MAU-style user labels: the
+        // events table has no user dimension, so those would be a mislabel.
+        let metrics = EngagementMetrics {
+            active_tenants_today: 5,
+            active_tenants_7d: 9,
+            active_tenants_30d: 12,
+            active_tenants_today_ratio_30d: 5.0 / 12.0,
+            sending_tenants_30d: 7,
+            avg_active_days_per_tenant_30d: 3.5,
+        };
+        assert!(metrics.active_tenants_today_ratio_30d <= 1.0);
+        assert!(metrics.active_tenants_today <= metrics.active_tenants_30d);
+        assert!(metrics.active_tenants_7d <= metrics.active_tenants_30d);
     }
 
     #[test]
@@ -854,20 +859,23 @@ mod tests {
             "no aggregate may be nested in the outer AVG: {outer}"
         );
         assert!(
-            AVG_TIME_TO_FIRST_SEND_SQL.contains("MIN(m.created_at) AS first_send"),
+            AVG_TIME_TO_FIRST_SEND_SQL.contains("MIN(e.timestamp) AS first_send"),
             "the per-tenant first send is computed in the subquery"
         );
         // Typed float result.
         assert!(AVG_TIME_TO_FIRST_SEND_SQL.contains(")::double precision"));
-        // The metric is FIRST ACTUAL SEND: the status filter matches the
-        // activation funnel's definition of a sent message.
-        assert!(AVG_TIME_TO_FIRST_SEND_SQL.contains("m.status IN ('sent', 'delivered')"));
+        // The metric is the FIRST SUCCESSFUL SEND EVENT: the events
+        // lifecycle, not messages.created_at / current status.
+        assert!(AVG_TIME_TO_FIRST_SEND_SQL.contains("e.event_type = 'sent'"));
+        assert!(!AVG_TIME_TO_FIRST_SEND_SQL.contains("FROM messages"));
+        assert!(!AVG_TIME_TO_FIRST_SEND_SQL.contains("status IN"));
     }
 
-    /// Seed two tenants with different first-send delays and multiple
-    /// messages: the exact expected average comes back, and never-sent
-    /// tenants (and no-data windows) are distinct from zero. Canonical
-    /// schema via the production migrator; gated on TEST_DATABASE_URL.
+    /// Seed two tenants with different first-successful-send delays
+    /// (event occurrence) and multiple events: the exact expected average
+    /// comes back, and never-sent tenants (and no-data windows) are distinct
+    /// from zero. Canonical schema via the production migrator; gated on
+    /// TEST_DATABASE_URL.
     #[tokio::test]
     async fn avg_time_to_first_send_matches_exact_expectation() {
         let pool =
@@ -899,14 +907,18 @@ mod tests {
                 .unwrap();
                 if sent {
                     for i in 0..3 {
+                        // A successful send EVENT, timestamped at the actual
+                        // send occurrence; later duplicates must not move MIN.
                         sqlx::query(
-                            "INSERT INTO messages (tenant_id, from_address, from_email, to_addresses, to_emails, subject, status, created_at) \
-                             VALUES ($1, 'a@apex.example', 'a@apex.example', '{}', '[]'::jsonb, 's', 'sent', \
-                                     NOW() - make_interval(days => $2::int) + make_interval(hours => $3::int))",
+                            "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp) \
+                             VALUES ($1, $2, $3, 'sent', \
+                                     NOW() - make_interval(days => $4::int) + make_interval(hours => $5::int))",
                         )
+                        .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
                         .bind(&tenant)
+                        .bind(format!("msg-{}-{i}", &suffix[..10]))
                         .bind(days_before)
-                        .bind(delay_hours + i) // later duplicates must not move the MIN
+                        .bind(delay_hours + i)
                         .execute(&pool)
                         .await
                         .unwrap();

@@ -27,7 +27,7 @@ use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
 use crate::middleware::{
-    auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning, waf,
+    auth, cp_auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning, waf,
 };
 use crate::routes;
 use crate::state::AppState;
@@ -1364,6 +1364,7 @@ async fn render_ui_response_with_state(
     headers: &HeaderMap,
     uri: &Uri,
     method: &Method,
+    connect_info: Option<std::net::SocketAddr>,
 ) -> Option<Response> {
     if !matches!(method, &Method::GET | &Method::HEAD) {
         return None;
@@ -1395,6 +1396,15 @@ async fn render_ui_response_with_state(
     // Control-plane pages (other than the login) are operator-only: a
     // customer session is bounced to the CP login, mirroring the
     // /web/admin/* form gate and require_system_tenant on the JSON side.
+    //
+    // Fix 1: the browser render path then runs the SAME CP authentication
+    // verification as the admin APIs (dedicated CP cookie, role/MFA claims
+    // re-checked live, idle/absolute session policy, IP allowlist, CP
+    // access logging). Reading the operator console must never be weaker
+    // than acting on it. Browser failures redirect to login — never a JSON
+    // 401.
+    let mut cp_verification: Option<cp_auth::CpSessionVerification> = None;
+    let mut cp_role: Option<String> = None;
     if surface == "control-plane" && !is_cp_public_path(uri.path()) {
         // Fail closed: no resolvable identity ⇒ login redirect, never the
         // static CP page.
@@ -1409,6 +1419,32 @@ async fn render_ui_response_with_state(
                 "non-system session bounced from the control plane"
             );
             return Some(login_redirect_response(uri));
+        }
+
+        match cp_auth::verify_cp_session(state, headers, connect_info, &auth_user, uri.path()).await
+        {
+            Ok(cp_auth::CpAuthOutcome::Verified(verification)) => {
+                cp_role = Some(verification.user.role.clone());
+                cp_verification = Some(verification);
+            }
+            // Machine credentials are the documented non-user automation
+            // bypass; they cannot arrive as a browser navigation.
+            Ok(cp_auth::CpAuthOutcome::MachineCredential) => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %uri.path(),
+                    error = %error,
+                    "control-plane render denied by the CP session gate"
+                );
+                return Some(login_redirect_response(uri));
+            }
+        }
+
+        // Fix 7: /alerts/rules has no alert-rule table or CRUD service. The
+        // route stays routable but honest: an explanatory 501 instead of a
+        // fake empty rule surface.
+        if uri.path() == "/alerts/rules" {
+            return Some(cp_alert_rules_not_implemented_response(cp_role.as_deref()));
         }
     }
 
@@ -1448,6 +1484,13 @@ async fn render_ui_response_with_state(
         field_data.as_ref(),
         Some(form_csrf.token.as_str()),
     )?;
+    // Fix 9: the CP layout renders a hardcoded `admin` role placeholder —
+    // propagate the VERIFIED CP role so owner/admin distinctions are
+    // truthful.
+    let html = match cp_role.as_deref() {
+        Some(role) => ui_foundation::shell::apply_control_plane_role(&html, role),
+        None => html,
+    };
     let html = apply_recorded_consent_state(html, headers);
     let mut response = match kiwi_widget_for_render(surface, uri) {
         Some(scope) => {
@@ -1463,7 +1506,37 @@ async fn render_ui_response_with_state(
         field_map.is_some(),
         &state.config,
     );
+    // Fix 1: a successful GET slides the CP idle window exactly like the
+    // API gate does — an operator browsing the console must not be timed
+    // out because only mutations refreshed the activity cookie.
+    if let Some(verification) = &cp_verification {
+        if let Ok(value) = cp_auth::refreshed_cp_cookie(state, verification).parse() {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
     Some(response)
+}
+
+/// Fix 7: `/alerts/rules` is routable but has no backing rule store or CRUD
+/// service; the page previously rendered an empty "rule list" that implied
+/// one existed. Return an explicit 501 with an explanatory, zero-JS page so
+/// the surface is honest instead of broken.
+fn cp_alert_rules_not_implemented_response(cp_role: Option<&str>) -> Response {
+    let inner = "<section class=\"mx-auto max-w-2xl py-16 text-center\">\
+        <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">Control Plane</p>\
+        <h1 class=\"mt-4 text-3xl font-bold tracking-tighter text-surface-950\">Alert rules are not implemented</h1>\
+        <p class=\"mt-4 text-sm font-medium text-surface-600\">There is no alert-rule store or rule-management API in this deployment, so there is nothing to list or edit here. Alerting policy is enforced by the fleet alerting engine. This route returns 501 Not Implemented until a rule store is provisioned.</p>\
+        <a href=\"/alerts\" class=\"mt-8 inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-brand-700\">Back to Alerts</a>\
+        </section>";
+    let page = ui_foundation::leptos_views::control_plane_app_layout(inner);
+    let page = match cp_role {
+        Some(role) => ui_foundation::shell::apply_control_plane_role(&page, role),
+        None => page,
+    };
+    let page = ui_foundation::leptos_views::control_plane_root_layout(&page);
+    let mut response = html_response_with_csp(page, browser_csp_header());
+    *response.status_mut() = StatusCode::NOT_IMPLEMENTED;
+    response
 }
 
 /// Set the response cookies every browser GET render owes:
@@ -1687,10 +1760,21 @@ async fn fallback_handler(
     }
 
     // Data-aware render first (authenticated pages load real rows); the
-    // sync, database-free render remains the fallback.
-    if let Some(response) =
-        render_ui_response_with_state(&state, request.headers(), request.uri(), request.method())
-            .await
+    // sync, database-free render remains the fallback. The peer address
+    // feeds the CP IP allowlist on the browser render path too (fail
+    // closed when an allowlist is configured and it is absent).
+    let connect_info = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0);
+    if let Some(response) = render_ui_response_with_state(
+        &state,
+        request.headers(),
+        request.uri(),
+        request.method(),
+        connect_info,
+    )
+    .await
     {
         return response;
     }
@@ -2224,7 +2308,14 @@ mod tests {
             .expect("expected control-plane sales ui response");
         let body = response_body_string(response).await;
 
-        assert!(body.contains("Operator console for discovery, outreach, and autopilot approvals."));
+        // The page is the autonomous control center, not the retired triage
+        // console: it answers whether the engine is producing pipeline safely.
+        assert!(body.contains("Sales Autopilot"));
+        assert!(body.contains(
+            "Is the machine generating qualified pipeline profitably and safely right now?"
+        ));
+        // And it must never present invented data as live.
+        assert!(!body.contains("data-sample-data"));
         assert!(body.contains("Same-origin operator session"));
     }
 
@@ -3918,11 +4009,22 @@ mod tests {
     /// no local Postgres is reachable so the suite stays green everywhere.
     #[tokio::test]
     async fn reset_password_token_roundtrip_against_db() {
-        let state = test_state_app().await;
-        if !test_db_reachable(&state.db).await {
-            eprintln!("skipping reset_password_token_roundtrip_against_db: no database");
+        // Canonical isolated test database (`<dbname>_api`, the full
+        // `migrations/` chain applied by the production migrator): this
+        // fixture binds `Uuid::new_v4()` into `users.id`, which canonical
+        // migration 052 declares `UUID PRIMARY KEY DEFAULT gen_random_uuid()`
+        // (migrations/052_add_missing_foundation_tables.sql:56). The raw
+        // `TEST_DATABASE_URL` database can be a legacy lineage whose
+        // `users.id` is VARCHAR(26) — the UUID bind then fails with 22001,
+        // which is why this test only ever passed where no database was
+        // reachable. Soft-skips without TEST_DATABASE_URL (workspace
+        // convention); a configured-but-broken database PANICS in test_db.
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("reset_password_token_roundtrip_against_db").await
+        else {
             return;
-        }
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
 
         let email = format!(
             "web-reset-{}@test.apexmail.ee",
@@ -4422,6 +4524,28 @@ mod tests {
         format!("apexmail_cp_session={token}")
     }
 
+    /// A valid ordinary `am_session` JWT for the seeded operator (the
+    /// identity require_auth/browser_auth_user resolves on the request).
+    fn mint_am_session(config: &Config, user_id: &str, tenant_id: &str) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let claims = crate::middleware::auth::JwtClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            scopes: vec!["*".into()],
+            exp: now + 3600,
+            iat: now,
+            jti: uuid::Uuid::new_v4().to_string(),
+            typ: Some("session".into()),
+        };
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+                .expect("encoding key"),
+        )
+        .expect("sign am_session")
+    }
+
     /// CP login through the real form endpoint; returns the response's
     /// Set-Cookie header values.
     async fn cp_gate_login(
@@ -4640,6 +4764,164 @@ mod tests {
             "the gate must slide the CP session cookie on activity"
         );
     }
+
+    /// Fix 1: the browser GET render path must run the SAME CP gate as the
+    /// admin APIs. An authenticated am_session alone (no dedicated CP
+    /// cookie) previously rendered the operator console; it must now
+    /// redirect to the CP login.
+    #[tokio::test]
+    async fn cp_browser_get_requires_the_cp_session_cookie() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_get_requires_cp_cookie").await else {
+            return;
+        };
+        let (user_id, _email, _password) = cp_gate_seed_operator(&db, true).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/dashboard")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", format!("am_session={am_session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "reading the operator console must require the dedicated CP session"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/login?next=%2Fdashboard")
+        );
+    }
+
+    /// Fix 1 + Fix 9: a valid CP session renders the page, the response
+    /// slides the CP activity cookie, and the VERIFIED role (owner) is
+    /// propagated into the shell instead of the hardcoded "admin".
+    #[tokio::test]
+    async fn cp_browser_get_refreshes_cookie_and_propagates_role() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_get_admits").await else {
+            return;
+        };
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, true);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/dashboard")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", format!("am_session={am_session}; {cp_cookie}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let refreshed = all_set_cookies(&response);
+        assert!(
+            cookie_value(&refreshed, "apexmail_cp_session").is_some(),
+            "a successful CP GET must refresh the CP activity cookie"
+        );
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("data-user-role=\"owner\""),
+            "the shell must carry the authenticated CP role, not the hardcoded admin"
+        );
+    }
+
+    /// Fix 3 (browser path): a live role demotion or MFA removal must
+    /// invalidate CP authority on the very next GET, even though the signed
+    /// cookie still claims owner + MFA.
+    #[tokio::test]
+    async fn cp_browser_get_denies_live_demotion_and_mfa_removal() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_get_live_recheck").await else {
+            return;
+        };
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, true);
+        let cookies = format!("am_session={am_session}; {cp_cookie}");
+
+        // Demoted after the cookie was minted.
+        sqlx::query("UPDATE users SET role = 'viewer' WHERE id = $1::uuid")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .expect("demote operator");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/dashboard")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", &cookies)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        // Re-promoted, but MFA was removed.
+        sqlx::query("UPDATE users SET role = 'owner', mfa_enabled = false WHERE id = $1::uuid")
+            .bind(&user_id)
+            .execute(&db)
+            .await
+            .expect("revoke MFA");
+        let response = app
+            .oneshot(
+                Request::get("/dashboard")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", &cookies)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    /// Fix 7: /alerts/rules is routable but has no backing rule store — the
+    /// page must return an explicit not-implemented response instead of a
+    /// fabricated empty rule surface.
+    #[tokio::test]
+    async fn cp_alert_rules_route_returns_not_implemented() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_alert_rules_501").await else {
+            return;
+        };
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
+        let am_session = mint_am_session(&config, &user_id, "system_internal_tenant01");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, true);
+
+        let response = app
+            .oneshot(
+                Request::get("/alerts/rules")
+                    .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", format!("am_session={am_session}; {cp_cookie}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = response_body_string(response).await;
+        assert!(
+            body.to_lowercase().contains("not implemented"),
+            "the 501 page must explain that alert rules are not implemented"
+        );
+    }
+
     /// A cursor that decodes to something OTHER than a timestamp must be
     /// a 400 — the messages list used to bind the decoded string into a
     /// `::timestamp` cast and surface the database's parse failure as a

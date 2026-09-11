@@ -84,7 +84,6 @@ paths = [
     "(^|/)crates/ddos-protection/src/decision[.]rs$",
     "(^|/)crates/enterprise/src/field_encryption[.]rs$",
     "(^|/)crates/mailstore-core/src/(encryption|main|storage)[.]rs$",
-    "(^|/)crates/outbound-queue/src/main[.]rs$",
     "(^|/)crates/sales-autopilot/src/dispatcher[.]rs$",
     # KiwiCaptcha canonical example vectors live in the package source and
     # perf tooling (deterministic fake secrets by design).

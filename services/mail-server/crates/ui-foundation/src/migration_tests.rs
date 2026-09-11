@@ -480,7 +480,7 @@ fn migration_control_plane_pages_have_titles() {
     let pages_and_titles: Vec<(&str, &str)> = vec![
         ("dashboard", "Dashboard"),
         ("tenants", "Tenants"),
-        ("sales", "Operator console"),
+        ("sales", "Sales Autopilot"),
         ("operators", "Operators"),
         ("analytics", "Analytics"),
         ("discovery", "Lead Sources"),

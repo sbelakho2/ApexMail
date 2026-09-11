@@ -156,7 +156,10 @@ async fn get_dashboard_stats(
     let db = &state.db;
 
     let has_sales_leads = table_exists(db, "sales_leads").await;
-    let has_drip_campaigns = table_exists(db, "drip_campaigns").await;
+    // Canonical sales campaign model. `drip_campaigns` was the control plane's
+    // own execution path and was dropped in migration 200; counting it here
+    // would silently report zero forever.
+    let has_sales_campaigns = table_exists(db, "sales_campaigns").await;
     let has_gdpr_requests = table_exists(db, "gdpr_requests").await;
     let has_system_alerts = table_exists(db, "system_alerts").await;
 
@@ -181,10 +184,10 @@ async fn get_dashboard_stats(
         0
     };
 
-    let campaigns_running = if has_drip_campaigns {
+    let campaigns_running = if has_sales_campaigns {
         fetch_count_or_zero(
             db,
-            "SELECT COUNT(*)::bigint FROM drip_campaigns WHERE status = 'active'",
+            "SELECT COUNT(*)::bigint FROM sales_campaigns WHERE status = 'active'",
         )
         .await
     } else {

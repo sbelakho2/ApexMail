@@ -1,13 +1,14 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::error::ApiError;
+use crate::middleware::auth::AuthUser;
 use crate::routes::helpers::extract_cookie;
 use crate::state::AppState;
 use ipnetwork::IpNetwork;
@@ -187,22 +188,58 @@ pub async fn refresh_cp_session_activity(
     Ok((token, updated))
 }
 
-pub async fn require_cp_auth(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
-    mut req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Result<axum::response::Response, ApiError> {
-    let path = req.uri().path().to_string();
+/// Outcome of the shared CP-session verification ([`verify_cp_session`]).
+pub(crate) enum CpAuthOutcome {
+    /// Printed machine credentials pass without a CP session: the static
+    /// control-plane key and system-tenant API keys authenticate as
+    /// NON-user identities (no user_id). They are deliberately issued
+    /// operator credentials for automation, not browser sessions, so the
+    /// CP-session regime — which exists to keep human operator sessions
+    /// MFA-backed and time-bounded — does not apply.
+    MachineCredential,
+    /// A verified human operator CP session.
+    Verified(CpSessionVerification),
+}
 
-    // ── IP allowlist enforcement ────────────────────────────
+/// The verified session material the middleware inserts into the request
+/// and replays as a refreshed cookie.
+#[derive(Debug, Clone)]
+pub(crate) struct CpSessionVerification {
+    pub user: CpAuthUser,
+    pub refreshed_token: String,
+    pub refreshed_claims: CpSessionClaims,
+}
+
+/// Verify a CP session exactly the way the admin API gate does — one shared
+/// implementation so the browser GET render path can never drift weaker than
+/// the mutation path.
+///
+/// `bearer` is the request's ORDINARY authenticated identity
+/// ([`AuthUser`]): the signed CP claims must name that same user and tenant,
+/// so a CP cookie cannot be paired with somebody else's session. The live
+/// row in `users` is then re-read on every call and must still be active
+/// with an admin/owner role and MFA enabled — role demotions, MFA removal,
+/// and deactivation take effect immediately instead of at session expiry.
+/// The refreshed claims carry the LIVE role/MFA values.
+pub(crate) async fn verify_cp_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    connect_info: Option<SocketAddr>,
+    bearer: &AuthUser,
+    path: &str,
+) -> Result<CpAuthOutcome, ApiError> {
+    // ── IP allowlist enforcement (fail closed) ──────────────
+    // An EMPTY allowlist is the explicit "every network" policy. A
+    // configured allowlist with an unresolvable peer address is a DENY:
+    // missing client identity must never be treated as allowlisted.
     if !state.config.cp_auth.allowed_ips.is_empty() {
-        if let Some(axum::extract::ConnectInfo(addr)) = connect_info {
-            if !validate_cidr_allowed(addr.ip(), &state.config.cp_auth.allowed_ips) {
+        match connect_info {
+            Some(addr) if validate_cidr_allowed(addr.ip(), &state.config.cp_auth.allowed_ips) => {}
+            Some(_) => {
                 log_cp_access(
-                    &state,
+                    state,
                     None,
-                    &path,
+                    path,
                     StatusCode::FORBIDDEN.as_u16(),
                     "cp_ip_denied",
                 )
@@ -211,41 +248,43 @@ pub async fn require_cp_auth(
                     "access denied from this network".into(),
                 ));
             }
+            None => {
+                log_cp_access(
+                    state,
+                    None,
+                    path,
+                    StatusCode::FORBIDDEN.as_u16(),
+                    "cp_ip_unavailable",
+                )
+                .await;
+                return Err(ApiError::Forbidden(
+                    "client address unavailable for the configured network allowlist".into(),
+                ));
+            }
         }
     }
 
     // ── Machine credentials pass without a CP session ───────
-    // The static control-plane key and system-tenant API keys authenticate
-    // as NON-user identities (no user_id): they are deliberately issued
-    // operator credentials for automation, not browser sessions, so the
-    // CP-session regime — which exists to keep human operator sessions
-    // MFA-backed and time-bounded — does not apply. Every user-session
-    // identity (am_session cookie or bearer JWT) MUST present the CP
-    // cookie below. `require_system_tenant_middleware` runs before this
-    // gate on the admin router, so only system-tenant callers reach here.
-    if let Some(auth_user) = req.extensions().get::<crate::middleware::auth::AuthUser>() {
-        if auth_user.user_id.is_none() && auth_user.tenant_id == "system" {
-            log_cp_access(
-                &state,
-                auth_user.api_key_id.as_deref(),
-                &path,
-                StatusCode::OK.as_u16(),
-                "cp_machine_key",
-            )
-            .await;
-            return Ok(next.run(req).await);
-        }
+    if bearer.user_id.is_none() && bearer.tenant_id == "system" {
+        log_cp_access(
+            state,
+            bearer.api_key_id.as_deref(),
+            path,
+            StatusCode::OK.as_u16(),
+            "cp_machine_key",
+        )
+        .await;
+        return Ok(CpAuthOutcome::MachineCredential);
     }
 
     // ── Extract CP session cookie ───────────────────────────
-    let headers = req.headers().clone();
-    let token = match extract_cookie(&headers, CP_SESSION_COOKIE_NAME) {
+    let token = match extract_cookie(headers, CP_SESSION_COOKIE_NAME) {
         Some(t) if !t.is_empty() => t,
         _ => {
             log_cp_access(
-                &state,
+                state,
                 None,
-                &path,
+                path,
                 StatusCode::UNAUTHORIZED.as_u16(),
                 "cp_missing_session",
             )
@@ -261,9 +300,9 @@ pub async fn require_cp_auth(
         Ok(c) => c,
         Err(e) => {
             log_cp_access(
-                &state,
+                state,
                 None,
-                &path,
+                path,
                 StatusCode::UNAUTHORIZED.as_u16(),
                 "cp_invalid_token",
             )
@@ -272,12 +311,31 @@ pub async fn require_cp_auth(
         }
     };
 
+    // ── Bind the claims to the ordinary authenticated identity ──
+    // A structurally valid CP cookie for user A must not authorize a
+    // request authenticated as user B (or another tenant).
+    if bearer.user_id.as_deref() != Some(claims.sub.as_str())
+        || bearer.tenant_id != claims.tenant_id
+    {
+        log_cp_access(
+            state,
+            Some(&claims.email),
+            path,
+            StatusCode::FORBIDDEN.as_u16(),
+            "cp_identity_mismatch",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "CP session does not belong to the authenticated user".into(),
+        ));
+    }
+
     // ── Validate role ───────────────────────────────────────
     if !matches!(claims.role.as_str(), "admin" | "owner") {
         log_cp_access(
-            &state,
+            state,
             Some(&claims.email),
-            &path,
+            path,
             StatusCode::FORBIDDEN.as_u16(),
             "cp_insufficient_role",
         )
@@ -290,9 +348,9 @@ pub async fn require_cp_auth(
     // ── Enforce MFA ─────────────────────────────────────────
     if !claims.mfa_enabled {
         log_cp_access(
-            &state,
+            state,
             Some(&claims.email),
-            &path,
+            path,
             StatusCode::FORBIDDEN.as_u16(),
             "cp_mfa_required",
         )
@@ -306,9 +364,9 @@ pub async fn require_cp_auth(
     let now = Utc::now().timestamp();
     if now >= claims.exp {
         log_cp_access(
-            &state,
+            state,
             Some(&claims.email),
-            &path,
+            path,
             StatusCode::UNAUTHORIZED.as_u16(),
             "cp_session_expired",
         )
@@ -319,9 +377,9 @@ pub async fn require_cp_auth(
     let idle_deadline = claims.last_active + state.config.cp_auth.session_idle_timeout_secs as i64;
     if now > idle_deadline {
         log_cp_access(
-            &state,
+            state,
             Some(&claims.email),
-            &path,
+            path,
             StatusCode::UNAUTHORIZED.as_u16(),
             "cp_session_idle",
         )
@@ -331,85 +389,167 @@ pub async fn require_cp_auth(
         ));
     }
 
-    // ── Verify user still exists and is active ──────────────
-    let user_status: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM users WHERE id = $1::uuid AND tenant_id = $2")
-            .bind(&claims.sub)
-            .bind(&claims.tenant_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "CP auth user status check failed");
-                ApiError::Internal("authentication error".into())
-            })?;
+    // ── Re-read the LIVE role/MFA/status from the database ──
+    // Signed claims are a snapshot from login time; authority must not
+    // outlive a demotion or an MFA removal, so the current row is the only
+    // source of truth for the authorization decision.
+    let live: Option<(String, String, Option<bool>)> = sqlx::query_as(
+        "SELECT status, role, mfa_enabled FROM users WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&claims.sub)
+    .bind(&claims.tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "CP auth user recheck failed");
+        ApiError::Internal("authentication error".into())
+    })?;
 
-    match user_status {
+    let (status, live_role, live_mfa) = match live {
         None => {
             log_cp_access(
-                &state,
+                state,
                 Some(&claims.email),
-                &path,
+                path,
                 StatusCode::UNAUTHORIZED.as_u16(),
                 "cp_user_missing",
             )
             .await;
             return Err(ApiError::Unauthorized("user no longer exists".into()));
         }
-        Some((status,)) if status != "active" => {
-            log_cp_access(
-                &state,
-                Some(&claims.email),
-                &path,
-                StatusCode::FORBIDDEN.as_u16(),
-                "cp_user_inactive",
-            )
-            .await;
-            return Err(ApiError::Forbidden(format!("account is {status}")));
-        }
-        _ => {}
-    }
-
-    // ── Refresh session active timestamp ────────────────────
-    let (new_token, updated_claims) = refresh_cp_session_activity(&state, &claims).await?;
-
-    // ── Insert CP auth user into extensions ─────────────────
-    let cp_user = CpAuthUser {
-        user_id: claims.sub,
-        tenant_id: claims.tenant_id.clone(),
-        email: claims.email.clone(),
-        role: claims.role.clone(),
+        Some(row) => row,
     };
 
-    let (mut parts, body) = req.into_parts();
-    parts.extensions.insert(cp_user.clone());
-    parts.extensions.insert(updated_claims);
-    req = axum::http::Request::from_parts(parts, body);
+    if status != "active" {
+        log_cp_access(
+            state,
+            Some(&claims.email),
+            path,
+            StatusCode::FORBIDDEN.as_u16(),
+            "cp_user_inactive",
+        )
+        .await;
+        return Err(ApiError::Forbidden(format!("account is {status}")));
+    }
+
+    if !matches!(live_role.as_str(), "admin" | "owner") {
+        log_cp_access(
+            state,
+            Some(&claims.email),
+            path,
+            StatusCode::FORBIDDEN.as_u16(),
+            "cp_role_revoked",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "admin or owner role required for control plane".into(),
+        ));
+    }
+
+    if !live_mfa.unwrap_or(false) {
+        log_cp_access(
+            state,
+            Some(&claims.email),
+            path,
+            StatusCode::FORBIDDEN.as_u16(),
+            "cp_mfa_revoked",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "MFA is required for control-plane access".into(),
+        ));
+    }
+
+    // ── Refresh session active timestamp with the LIVE values ───
+    let live_claims = CpSessionClaims {
+        role: live_role.clone(),
+        mfa_enabled: true,
+        ..claims.clone()
+    };
+    let (new_token, updated_claims) = refresh_cp_session_activity(state, &live_claims).await?;
+
+    let cp_user = CpAuthUser {
+        user_id: claims.sub.clone(),
+        tenant_id: claims.tenant_id.clone(),
+        email: claims.email.clone(),
+        role: live_role,
+    };
 
     log_cp_access(
-        &state,
+        state,
         Some(&cp_user.email),
-        &path,
+        path,
         StatusCode::OK.as_u16(),
         "cp_access",
     )
     .await;
 
-    let mut response = next.run(req).await;
+    Ok(CpAuthOutcome::Verified(CpSessionVerification {
+        user: cp_user,
+        refreshed_token: new_token,
+        refreshed_claims: updated_claims,
+    }))
+}
 
-    let cookie = build_cp_session_cookie(
-        &new_token,
+/// Build the `Set-Cookie` value that replays a refreshed CP session.
+pub(crate) fn refreshed_cp_cookie(
+    state: &AppState,
+    verification: &CpSessionVerification,
+) -> String {
+    build_cp_session_cookie(
+        &verification.refreshed_token,
         state.config.cp_auth.session_absolute_timeout_secs as i64,
         state.config.environment.is_production(),
-    );
-    // APPEND, never insert: `insert` replaces every existing Set-Cookie
-    // value on the response — including the signed flash cookie every CP
-    // form handler sets — so "Tenant suspended / Operator invited" feedback
-    // never reached the browser.
-    response
-        .headers_mut()
-        .append("Set-Cookie", cookie.parse().expect("valid cookie header"));
+    )
+}
 
-    Ok(response)
+pub async fn require_cp_auth(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    let path = req.uri().path().to_string();
+
+    // `require_auth` runs before this gate on the admin router and always
+    // populates the ordinary identity; without it there is nothing to bind
+    // the CP claims to, so fail closed rather than trust bare claims.
+    let bearer = req.extensions().get::<AuthUser>().cloned().ok_or_else(|| {
+        ApiError::Unauthorized("authentication required for control-plane access".into())
+    })?;
+
+    match verify_cp_session(
+        &state,
+        req.headers(),
+        connect_info.map(|ci| ci.0),
+        &bearer,
+        &path,
+    )
+    .await?
+    {
+        CpAuthOutcome::MachineCredential => Ok(next.run(req).await),
+        CpAuthOutcome::Verified(verification) => {
+            let (mut parts, body) = req.into_parts();
+            parts.extensions.insert(verification.user.clone());
+            parts
+                .extensions
+                .insert(verification.refreshed_claims.clone());
+            req = axum::http::Request::from_parts(parts, body);
+
+            let mut response = next.run(req).await;
+
+            let cookie = refreshed_cp_cookie(&state, &verification);
+            // APPEND, never insert: `insert` replaces every existing
+            // Set-Cookie value on the response — including the signed flash
+            // cookie every CP form handler sets — so "Tenant suspended /
+            // Operator invited" feedback never reached the browser.
+            response
+                .headers_mut()
+                .append("Set-Cookie", cookie.parse().expect("valid cookie header"));
+
+            Ok(response)
+        }
+    }
 }
 
 async fn log_cp_access(
@@ -681,12 +821,22 @@ mod tests {
             email: &str,
             mfa_enabled: bool,
         ) -> String {
+            cp_cookie_header_with_role(state, user_id, email, "admin", mfa_enabled)
+        }
+
+        fn cp_cookie_header_with_role(
+            state: &AppState,
+            user_id: &str,
+            email: &str,
+            role: &str,
+            mfa_enabled: bool,
+        ) -> String {
             let now = Utc::now().timestamp();
             let claims = CpSessionClaims {
                 sub: user_id.to_string(),
                 tenant_id: "system".into(),
                 email: email.to_string(),
-                role: "admin".into(),
+                role: role.into(),
                 mfa_enabled,
                 iat: now,
                 last_active: now,
@@ -694,6 +844,18 @@ mod tests {
             };
             let token = create_cp_session_token(&claims, &state.config.cp_auth.session_secret);
             format!("{CP_SESSION_COOKIE_NAME}={token}")
+        }
+
+        /// The ordinary authenticated identity the gate binds CP claims to
+        /// (require_auth populates this before require_cp_auth runs).
+        fn cp_auth_user(user_id: &str) -> crate::middleware::auth::AuthUser {
+            crate::middleware::auth::AuthUser {
+                tenant_id: "system".into(),
+                user_id: Some(user_id.to_string()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            }
         }
 
         #[tokio::test]
@@ -716,6 +878,7 @@ mod tests {
                         .parse::<std::net::SocketAddr>()
                         .unwrap(),
                 ))
+                .extension(cp_auth_user(&user_id))
                 .body(Body::empty())
                 .unwrap();
             let response = app.oneshot(request).await.unwrap();
@@ -730,6 +893,49 @@ mod tests {
             .unwrap()
             .flatten();
             assert_eq!(outcome.as_deref(), Some("cp_ip_denied"));
+        }
+
+        /// Fix 2: a configured allowlist must FAIL CLOSED when the peer
+        /// address cannot be established — a missing ConnectInfo is a deny,
+        /// never an implicit allowlist pass.
+        #[tokio::test]
+        async fn missing_connect_info_with_allowlist_is_denied() {
+            let Some((state, db)) =
+                gate_state("cp_ip_missing_connect_info", vec!["10.0.0.0/8".to_string()]).await
+            else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            let app = gate_router(state.clone());
+
+            // No ConnectInfo extension: the old conditional skipped the
+            // allowlist entirely and admitted the session.
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "an unresolvable client address must not satisfy a configured allowlist"
+            );
+
+            let outcome: Option<String> = sqlx::query_scalar(
+                "SELECT outcome FROM cp_access_log
+                 WHERE path = '/v1/admin/probe' AND outcome = 'cp_ip_unavailable' LIMIT 1",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap()
+            .flatten();
+            assert_eq!(outcome.as_deref(), Some("cp_ip_unavailable"));
         }
 
         #[tokio::test]
@@ -783,6 +989,7 @@ mod tests {
                 .oneshot(
                     Request::get("/v1/admin/probe")
                         .header("cookie", format!("{CP_SESSION_COOKIE_NAME}={token}"))
+                        .extension(cp_auth_user(&user_id))
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -810,6 +1017,100 @@ mod tests {
                 .oneshot(
                     Request::get("/v1/admin/probe")
                         .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        /// Fix 3: a role demotion AFTER login (the signed claims still say
+        /// admin) must be caught by the live DB recheck on the next request.
+        #[tokio::test]
+        async fn demoted_role_is_rejected_on_live_recheck() {
+            let Some((state, db)) = gate_state("cp_role_demoted", vec![]).await else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            // The cookie was minted while the user was an admin.
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            sqlx::query("UPDATE users SET role = 'viewer' WHERE id = $1::uuid")
+                .bind(&user_id)
+                .execute(&db)
+                .await
+                .expect("demote operator");
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "a live role demotion must revoke CP authority immediately"
+            );
+        }
+
+        /// Fix 3: MFA removal AFTER login must be caught by the live DB
+        /// recheck even though the signed claims still say mfa_enabled=true.
+        #[tokio::test]
+        async fn mfa_disabled_after_login_is_rejected_on_live_recheck() {
+            let Some((state, db)) = gate_state("cp_mfa_revoked", vec![]).await else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            sqlx::query("UPDATE users SET mfa_enabled = false WHERE id = $1::uuid")
+                .bind(&user_id)
+                .execute(&db)
+                .await
+                .expect("disable operator MFA");
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&user_id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "removing MFA must revoke CP authority immediately"
+            );
+        }
+
+        /// Fix 3: CP claims are bound to the ordinary authenticated
+        /// identity — a valid CP cookie for user A cannot authorize a
+        /// request authenticated as user B.
+        #[tokio::test]
+        async fn cp_session_for_a_different_user_is_rejected() {
+            let Some((state, db)) = gate_state("cp_identity_mismatch", vec![]).await else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let (other_user_id, _other_email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .extension(cp_auth_user(&other_user_id))
                         .body(Body::empty())
                         .unwrap(),
                 )

@@ -21,12 +21,18 @@ This document defines the cache warming strategy for all ApexMail services.
 
 | Property | Value |
 |----------|-------|
-| **Location** | [`outbound-queue/src/smtp_sender.rs`](../../services/mail-server/crates/outbound-queue/src/smtp_sender.rs) |
-| **Cache Type** | `moka::sync::Cache<String, MxRecord>` |
-| **Capacity** | 10,000 entries |
-| **TTL** | 300s (MX records), 60s (temporary failures) |
+| **Location** | [`dns-resolver/src/cache.rs`](../../services/mail-server/crates/dns-resolver/src/cache.rs) (`DnsCache`, wrapped by `CachedDnsResolver` in [`resolver.rs`](../../services/mail-server/crates/dns-resolver/src/resolver.rs)) |
+| **Cache Type** | `moka::sync::Cache<String, CachedEntry>` (positive) and `moka::sync::Cache<String, ()>` (negative) |
+| **Capacity** | 10,000 positive entries, 1,000 negative entries |
+| **TTL** | Authoritative record TTL capped at 24h (300s default), 60s for negative results |
 | **Warm-up Data** | Top 100 email provider domains (Gmail, Outlook, Yahoo, Proton, etc.) |
-| **Warm-up Method** | Pre-resolve MX records via `dns_resolver.mx_lookup()` |
+| **Warm-up Method** | Pre-resolve MX records via `dig`/`host` in [`deploy/scripts/cache-warm.sh`](../../deploy/scripts/cache-warm.sh) |
+
+The `dns-resolver` crate provides the cache, but no production service
+constructs `CachedDnsResolver` today (only tests reference it), and the
+outbound SMTP transport (`worker-processors/src/email/transport.rs`)
+connects to a configured relay where mail-send performs its own resolution.
+There is no in-process warm-up hook for this cache.
 
 **Pre-warm domains** (top 100 by email traffic volume):
 

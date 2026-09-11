@@ -21,6 +21,37 @@ pub struct EngagementTrustService {
     pool: PgPool,
 }
 
+/// Batched campaign-trust aggregation (F6) with DISTINCT-MESSAGE cardinality:
+/// multiple opens/clicks of ONE message (or per-recipient send copies) count
+/// once, so a trust score cannot be inflated by repeat events. The paged
+/// inner SELECT reproduces the previous cursor pagination exactly (DISTINCT
+/// campaign recipients, ordered ascending); the LEFT JOIN + FILTER
+/// aggregation over `events.message_id` produces the trust inputs.
+///
+/// `$1` tenant, `$2` campaign, `$3` cursor, `$4` page size, `$5` window start.
+const CAMPAIGN_TRUST_SQL: &str = "SELECT r.recipient AS email, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'sent') AS sent, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'delivered') AS delivered, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'opened') AS opened, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'clicked') AS clicked, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'complained') AS complained, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'unsubscribed') AS unsubscribed, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'replied') AS replied, \
+     COUNT(DISTINCT e.message_id) FILTER (WHERE e.event_type = 'bounced') AS bounced \
+     FROM (SELECT DISTINCT recipient FROM events \
+           WHERE tenant_id = $1 AND campaign_id = $2 AND recipient > $3 \
+           ORDER BY recipient ASC LIMIT $4) r \
+     LEFT JOIN events e \
+       ON e.tenant_id = $1 AND e.recipient = r.recipient AND e.timestamp >= $5 \
+     GROUP BY r.recipient \
+     ORDER BY r.recipient ASC";
+
+/// Per-subscriber counts with the same DISTINCT-message cardinality as the
+/// campaign path (both feed `engagement_from_counts`).
+const SUBSCRIBER_COUNTS_SQL: &str = "SELECT event_type, COUNT(DISTINCT message_id) FROM events \
+     WHERE tenant_id = $1 AND recipient = $2 AND timestamp >= $3 \
+     GROUP BY event_type";
+
 impl EngagementTrustService {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
@@ -67,31 +98,14 @@ impl EngagementTrustService {
 
         loop {
             let cursor_bound = cursor.clone().unwrap_or_default();
-            let rows = sqlx::query_as::<_, SubscriberCountsRow>(
-                "SELECT r.recipient AS email, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'sent') AS sent, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'delivered') AS delivered, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'opened') AS opened, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'clicked') AS clicked, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'complained') AS complained, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'unsubscribed') AS unsubscribed, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'replied') AS replied, \
-                 COUNT(*) FILTER (WHERE e.event_type = 'bounced') AS bounced \
-                 FROM (SELECT DISTINCT recipient FROM events \
-                       WHERE tenant_id = $1 AND campaign_id = $2 AND recipient > $3 \
-                       ORDER BY recipient ASC LIMIT $4) r \
-                 LEFT JOIN events e \
-                   ON e.tenant_id = $1 AND e.recipient = r.recipient AND e.timestamp >= $5 \
-                 GROUP BY r.recipient \
-                 ORDER BY r.recipient ASC",
-            )
-            .bind(tenant_id)
-            .bind(campaign_id)
-            .bind(&cursor_bound)
-            .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
-            .bind(since_90d)
-            .fetch_all(&self.pool)
-            .await?;
+            let rows = sqlx::query_as::<_, SubscriberCountsRow>(CAMPAIGN_TRUST_SQL)
+                .bind(tenant_id)
+                .bind(campaign_id)
+                .bind(&cursor_bound)
+                .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
+                .bind(since_90d)
+                .fetch_all(&self.pool)
+                .await?;
 
             if rows.is_empty() {
                 break;
@@ -133,16 +147,12 @@ impl EngagementTrustService {
     ) -> anyhow::Result<SubscriberEngagement> {
         let since_90d = Utc::now() - chrono::Duration::days(90);
 
-        let counts = sqlx::query_as::<_, (String, i64)>(
-            "SELECT event_type, COUNT(*) FROM events \
-             WHERE tenant_id = $1 AND recipient = $2 AND timestamp >= $3 \
-             GROUP BY event_type",
-        )
-        .bind(tenant_id)
-        .bind(email)
-        .bind(since_90d)
-        .fetch_all(&self.pool)
-        .await?;
+        let counts = sqlx::query_as::<_, (String, i64)>(SUBSCRIBER_COUNTS_SQL)
+            .bind(tenant_id)
+            .bind(email)
+            .bind(since_90d)
+            .fetch_all(&self.pool)
+            .await?;
 
         let map: std::collections::HashMap<String, i64> = counts.into_iter().collect();
 
@@ -472,5 +482,120 @@ mod tests {
         assert!(trust.reliability >= 0.0);
         assert!(trust.intimacy >= 0.0);
         assert!(trust.self_orientation >= 0.0); // 0 = best, 100 = worst
+    }
+
+    /// The trust inputs must count DISTINCT message ids — repeat opens/clicks
+    /// of one message can no longer inflate open_rate/click_rate above 1.0
+    /// (which the final score clamps away, hiding the cardinality defect).
+    #[test]
+    fn trust_sql_counts_distinct_messages() {
+        for sql in [CAMPAIGN_TRUST_SQL, SUBSCRIBER_COUNTS_SQL] {
+            assert!(
+                sql.contains("COUNT(DISTINCT") && sql.contains("message_id"),
+                "trust counts must be distinct-message based: {sql}"
+            );
+            assert!(
+                !sql.contains("COUNT(*)"),
+                "raw event-row counts would inflate engagement: {sql}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod db_tests {
+    //! DB-backed proof that repeat opens on one message count once in the
+    //! campaign-trust aggregation. Canonical schema via the production
+    //! migrator; gated on TEST_DATABASE_URL (soft-skip when unset).
+
+    use super::*;
+
+    #[tokio::test]
+    async fn campaign_trust_counts_one_open_per_message() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "engagement_trust_distinct",
+            "engagement_trust",
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let Some(pool) = pool else {
+            eprintln!(
+                "skipping campaign_trust_counts_one_open_per_message: set TEST_DATABASE_URL to run DB-backed test"
+            );
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = format!("t{}", &suffix[..25]);
+        let campaign = uuid::Uuid::new_v4().to_string();
+        let recipient = "reader@example.com";
+        let message_opened_thrice = format!("msg-{suffix}-a");
+        let message_opened_once = format!("msg-{suffix}-b");
+
+        let seed = |event: &'static str, message: &str| {
+            let pool = pool.clone();
+            let tenant = tenant.clone();
+            let campaign = campaign.clone();
+            let message = message.to_string();
+            async move {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, campaign_id, event_type, recipient, timestamp)
+                     VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+                )
+                .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
+                .bind(&tenant)
+                .bind(&message)
+                .bind(&campaign)
+                .bind(event)
+                .bind(recipient)
+                .execute(&pool)
+                .await
+                .expect("seed event");
+            }
+        };
+
+        // Two sends; one message opened three times, the other once.
+        seed("sent", &message_opened_thrice).await;
+        seed("sent", &message_opened_once).await;
+        seed("opened", &message_opened_thrice).await;
+        seed("opened", &message_opened_thrice).await;
+        seed("opened", &message_opened_thrice).await;
+        seed("opened", &message_opened_once).await;
+
+        let service = EngagementTrustService::new(pool.clone());
+        let metrics = service
+            .campaign_trust(&tenant, &campaign)
+            .await
+            .expect("campaign trust query must execute");
+
+        assert_eq!(metrics.subscriber_count, 1);
+        // Trust still computes; the key property is that the inputs count
+        // two opened MESSAGES, not four open events. Recompute the inputs
+        // the same way the service does to assert the cardinality directly.
+        let (opened,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT message_id)::bigint FROM events
+             WHERE tenant_id = $1 AND campaign_id = $2 AND event_type = 'opened'",
+        )
+        .bind(&tenant)
+        .bind(&campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("canonical opened count");
+        let (raw_open_events,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM events
+             WHERE tenant_id = $1 AND campaign_id = $2 AND event_type = 'opened'",
+        )
+        .bind(&tenant)
+        .bind(&campaign)
+        .fetch_one(&pool)
+        .await
+        .expect("raw open count");
+        assert_eq!(raw_open_events, 4, "four open events were seeded");
+        assert_eq!(opened, 2, "distinct opened messages must be two");
+
+        pool.close().await;
     }
 }

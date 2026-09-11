@@ -23,9 +23,6 @@ use apexmail_lib::id;
 // ═══════════════════════════════════════════════════════════════════════════
 
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
-    use tokio::sync::OnceCell;
-    static INIT_DB: OnceCell<()> = OnceCell::const_new();
-
     let database_url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
@@ -42,9 +39,10 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         }
     };
     let db_only = db_part.split('?').next().unwrap_or(db_part);
-    // Unique per test: nextest runs each test in its own process; the fixed
-    // `_concurrency` name had sibling processes dropping each other's DB.
-    // Each test still exercises true concurrency via its own tokio tasks.
+    // Unique per test: each test owns its database name, so provisioning can
+    // run per CALL. (The previous process-wide OnceCell created only the
+    // FIRST caller's database — under `cargo test` all sibling tests then
+    // failed to connect; it worked only under nextest's one-process-per-test.)
     let isolated_db = format!(
         "{db_only}_conc_{}",
         test_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
@@ -52,30 +50,29 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
     let isolated_url = format!("{server_part}/{isolated_db}");
     let admin_url = format!("{server_part}/postgres");
 
-    INIT_DB
-        .get_or_init(|| async {
-            let admin = match PgPoolOptions::new()
-                .max_connections(1)
-                .acquire_timeout(Duration::from_secs(3))
-                .connect(&admin_url)
-                .await
-            {
-                Ok(p) => p,
-                Err(error) => {
-                    eprintln!("concurrency DB bootstrap: cannot connect to admin URL: {error}");
-                    return;
-                }
-            };
-            let _ = sqlx::query(&format!(
-                "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
-            ))
-            .execute(&admin)
-            .await;
-            let _ = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
-                .execute(&admin)
-                .await;
-        })
-        .await;
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect(&admin_url)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("concurrency DB bootstrap: cannot connect to admin URL {admin_url}: {error}")
+        });
+    sqlx::query(&format!(
+        "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
+    ))
+    .execute(&admin)
+    .await
+    .unwrap_or_else(|error| {
+        panic!("concurrency DB bootstrap: could not drop {isolated_db}: {error}")
+    });
+    sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
+        .execute(&admin)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("concurrency DB bootstrap: could not create {isolated_db}: {error}")
+        });
+    admin.close().await;
 
     Some(
         PgPoolOptions::new()
@@ -97,9 +94,11 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
 /// All concurrency tests share ONE isolated database, and the tests run in
 /// parallel — concurrent `CREATE TABLE IF NOT EXISTS` against the same
 /// catalog races in pg_class/pg_type (23505 on pg_type_typname_nsp_index).
-/// Guard the DDL with the same session advisory lock the sales-autopilot
-/// initialize_schema uses (pinned to one dedicated connection, released on
-/// drop); the per-test INSERTs below it are ON CONFLICT-safe without it.
+/// Guard the DDL with a session advisory lock (pinned to one dedicated
+/// connection, released on drop); the per-test INSERTs below it are
+/// ON CONFLICT-safe without it. This is TEST-ONLY DDL for these billing
+/// tables: `sales_autopilot::initialize_schema` no longer creates anything —
+/// it only verifies the canonical migration chain.
 async fn seed_minimal_billing_tables(pool: &PgPool, tenant_id: &str) {
     let mut lock_conn = pool.acquire().await.unwrap();
     sqlx::query("SELECT pg_advisory_lock(7723691501421983235)")

@@ -346,6 +346,12 @@ services:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
       AI_SERVICE_BASE_URL: http://ai-service:3012
+      # The sales autopilot is the ONLY sales brain. The control plane reaches
+      # it over the backend network for /v1/admin/autopilot/* and
+      # /v1/admin/sales/outreach/start. Without this the CP defaults to
+      # http://0.0.0.0:3010 — a bind address, not a routable peer — so every
+      # autopilot/outreach call fails with 503 inside the api-server container.
+      SALES_AUTOPILOT_BASE_URL: ${SALES_AUTOPILOT_BASE_URL:-http://sales-autopilot:3010}
       RUST_LOG: info
       ENVIRONMENT: ${ENVIRONMENT:-production}
       HOST: 0.0.0.0

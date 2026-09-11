@@ -218,6 +218,18 @@ async fn create_feature(
     ))
 }
 
+/// One statement per flag: COALESCE leaves omitted fields untouched,
+/// `RETURNING id` makes a missing flag observable (rows-affected was never
+/// checked, so updating a nonexistent UUID reported success), and the whole
+/// batch runs in ONE transaction so a mid-batch failure cannot leave a
+/// partial result.
+const UPDATE_FEATURE_SQL: &str = "UPDATE feature_flags
+     SET enabled = COALESCE($1, enabled),
+         description = COALESCE($2, description),
+         updated_at = NOW()
+     WHERE id = $3
+     RETURNING id";
+
 async fn update_feature(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -225,38 +237,44 @@ async fn update_feature(
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
-    for update in normalize_feature_updates(body)? {
-        let id = update.id;
-        let mut changes = serde_json::Map::new();
 
+    let updates = normalize_feature_updates(body)?;
+
+    let mut tx = state.db.begin().await?;
+    let mut applied: Vec<(Uuid, serde_json::Value)> = Vec::new();
+
+    for update in updates {
+        let id = update.id;
+        let updated_id: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(UPDATE_FEATURE_SQL)
+            .bind(update.enabled)
+            .bind(update.description.as_deref())
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+        if updated_id.is_none() {
+            // Dropping `tx` without commit rolls the whole batch back:
+            // preceding flags in this batch keep their old values.
+            return Err(ApiError::NotFound(format!("feature flag {id} not found")));
+        }
+
+        let mut changes = serde_json::Map::new();
         if let Some(enabled) = update.enabled {
-            sqlx::query("UPDATE feature_flags SET enabled = $1, updated_at = NOW() WHERE id = $2")
-                .bind(enabled)
-                .bind(id)
-                .execute(&state.db)
-                .await?;
             changes.insert("enabled".into(), json!(enabled));
         }
         if let Some(desc) = &update.description {
-            sqlx::query(
-                "UPDATE feature_flags SET description = $1, updated_at = NOW() WHERE id = $2",
-            )
-            .bind(desc)
-            .bind(id)
-            .execute(&state.db)
-            .await?;
             changes.insert("description".into(), json!(desc));
         }
+        applied.push((id, serde_json::Value::Object(changes)));
+    }
 
-        if !changes.is_empty() {
-            log_feature_audit(
-                &state,
-                &auth,
-                "control_plane.feature.updated",
-                id,
-                serde_json::Value::Object(changes),
-            )
-            .await;
+    tx.commit().await?;
+
+    // Audit only AFTER commit: a rolled-back batch must not leave
+    // "updated" audit records for changes that never landed.
+    for (id, changes) in applied {
+        if changes.as_object().is_some_and(|fields| !fields.is_empty()) {
+            log_feature_audit(&state, &auth, "control_plane.feature.updated", id, changes).await;
         }
     }
 
@@ -296,5 +314,123 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].id, Uuid::nil());
         assert_eq!(updates[0].enabled, Some(true));
+    }
+
+    /// Fix 8: one set-based statement per flag with COALESCE (omitted fields
+    /// stay untouched) and RETURNING id (a missing flag is observable).
+    #[test]
+    fn batch_update_statement_is_coalesced_and_returns_the_id() {
+        assert!(UPDATE_FEATURE_SQL.contains("COALESCE($1, enabled)"));
+        assert!(UPDATE_FEATURE_SQL.contains("COALESCE($2, description)"));
+        assert!(UPDATE_FEATURE_SQL.contains("RETURNING id"));
+    }
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("test-static-key".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn seed_flag(db: &sqlx::PgPool, enabled: bool) -> Uuid {
+        let id = Uuid::new_v4();
+        let name = format!("flag-{}", Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO feature_flags (id, name, description, enabled, created_at, updated_at)
+             VALUES ($1, $2, 'seed', $3, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(&name)
+        .bind(enabled)
+        .execute(db)
+        .await
+        .expect("seed feature flag");
+        id
+    }
+
+    /// Fix 8 (missing-id): updating a nonexistent UUID must be a 404, not a
+    /// silent success.
+    #[tokio::test]
+    async fn update_of_missing_flag_returns_not_found() {
+        let Some(pool) = crate::test_db::canonical_pool("features_missing_id").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+
+        let result = update_feature(
+            State(state),
+            admin_auth(),
+            Json(FeatureUpdatePayload::Single(UpdateFeatureRequest {
+                id: Uuid::new_v4(),
+                enabled: Some(true),
+                description: None,
+            })),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(ApiError::NotFound(_))),
+            "a nonexistent feature id must surface as 404"
+        );
+    }
+
+    /// Fix 8 (partial failure): when a later id in the batch is missing, the
+    /// earlier update must roll back — never a partially applied batch.
+    #[tokio::test]
+    async fn batch_update_rolls_back_on_a_missing_id() {
+        let Some(pool) = crate::test_db::canonical_pool("features_batch_rollback").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let existing = seed_flag(&pool, false).await;
+        let missing = Uuid::new_v4();
+
+        let result = update_feature(
+            State(state),
+            admin_auth(),
+            Json(FeatureUpdatePayload::Batch(BatchUpdateFeatureRequest {
+                updates: vec![
+                    UpdateFeatureRequest {
+                        id: existing,
+                        enabled: Some(true),
+                        description: None,
+                    },
+                    UpdateFeatureRequest {
+                        id: missing,
+                        enabled: Some(true),
+                        description: None,
+                    },
+                ],
+            })),
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::NotFound(_))));
+
+        let enabled: bool = sqlx::query_scalar("SELECT enabled FROM feature_flags WHERE id = $1")
+            .bind(existing)
+            .fetch_one(&pool)
+            .await
+            .expect("read flag");
+        assert!(
+            !enabled,
+            "the preceding update must be rolled back with the failed batch"
+        );
+
+        // The rolled-back batch leaves no "updated" audit record.
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM audit_logs
+             WHERE action = 'control_plane.feature.updated' AND resource_id = $1",
+        )
+        .bind(existing.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("read audit log");
+        assert_eq!(
+            audits, 0,
+            "rolled-back changes must not be audited as applied"
+        );
     }
 }

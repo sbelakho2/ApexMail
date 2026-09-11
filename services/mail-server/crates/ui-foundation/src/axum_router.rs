@@ -13,7 +13,9 @@
 //! static fallback pages render exactly as before.
 
 use crate::leptos_views;
-use crate::view_data::{CampaignEditData, FormFieldData, ListPageData, MfaSetupData};
+use crate::view_data::{
+    CampaignEditData, FormFieldData, ListPageData, MfaSetupData, SalesPageData,
+};
 
 /// Server-loaded page data for one route request.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +26,13 @@ pub struct RouteData {
     pub campaign_edit: Option<CampaignEditData>,
     /// Pending TOTP setup (QR + secret) for the CP security page.
     pub mfa_setup: Option<MfaSetupData>,
+    /// Sales-autopilot control data for `/sales`.
+    ///
+    /// Present means the loader reached the canonical sales tables and the
+    /// page renders live autonomy, decision, exception and queue state.
+    /// Absent means the loader could not answer — the page then renders an
+    /// explicit unavailable state rather than a zero-filled dashboard.
+    pub sales: Option<SalesPageData>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1488,8 +1497,9 @@ fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
             "Create a tenant workspace for enterprise onboarding.",
         ),
         "/cp/sales" | "/sales" => (
-            "Operator Console",
-            "Enterprise pipeline, expansion, and conversion posture.",
+            "Sales Autopilot",
+            "Autonomy, decisions, exceptions and revenue — is the machine \
+             generating qualified pipeline profitably and safely right now?",
         ),
         "/operators" => ("Operators", "Administrator access, roles, and activity."),
         "/operators/new" => (
@@ -1523,7 +1533,13 @@ fn control_plane_route_context(path: &str) -> (&'static str, &'static str) {
         "/compliance" => ("Compliance", "Trust workflows and policy operations."),
         "/compliance/gdpr" => ("GDPR Compliance", "Data protection request handling."),
         "/alerts" => ("Alerts", "Incident triage and fleet risk signals."),
-        "/alerts/rules" => ("Alert Rules", "Alerting policy and escalation thresholds."),
+        // CP honesty: there is no alert-rule store in this deployment; the
+        // route returns 501 at the HTTP layer and must not be described as a
+        // working rules surface.
+        "/alerts/rules" => (
+            "Alert Rules",
+            "Not implemented in this deployment: there is no alert-rule store.",
+        ),
         "/settings" => ("Settings", "Control-plane configuration."),
         "/cp/security" | "/settings/security" => (
             "Security Settings",
@@ -1572,6 +1588,24 @@ fn render_inner(
 fn data_backed_inner(path: &str, data: Option<&RouteData>) -> Option<String> {
     let list = data.and_then(|d| d.list.as_ref())?;
     Some(leptos_views::data_list_page(list, &list_noun(path)))
+}
+
+/// Honest not-implemented inner page for `/alerts/rules`.
+///
+/// The route stays registered because the SSR manifest requires a view for
+/// every route, but there is no alert-rule store or CRUD service in this
+/// deployment, so rendering the old static rule list implied a backing store
+/// that does not exist. The api-server returns 501 at the HTTP layer for the
+/// same path; this view keeps direct SSR rendering (and the unit tests)
+/// honest and points operators back to `/alerts`.
+fn alert_rules_not_implemented_inner() -> String {
+    "<section class=\"mx-auto max-w-2xl py-16 text-center\">\
+        <p class=\"text-xs font-bold uppercase tracking-[0.28em] text-primary\">Control Plane</p>\
+        <h1 class=\"mt-4 text-3xl font-bold tracking-tighter text-surface-950\">Alert rules are not implemented</h1>\
+        <p class=\"mt-4 text-sm font-medium text-surface-600\">There is no alert-rule store or rule-management API in this deployment, so there is nothing to list or edit here. Alerting policy is enforced by the fleet alerting engine.</p>\
+        <a href=\"/alerts\" class=\"mt-8 inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white transition-colors hover:bg-brand-700\">Back to Alerts</a>\
+        </section>"
+        .to_string()
 }
 
 /// Single-word noun for pagination storage keys / summary copy, derived
@@ -1816,9 +1850,15 @@ fn render_control_plane(
         "/tenants" => data_backed_inner("/tenants", data)
             .unwrap_or_else(leptos_views::control_plane_tenants_page),
         "/tenants/new" => leptos_views::control_plane_tenants_new_page(),
-        "/sales" => {
-            data_backed_inner("/sales", data).unwrap_or_else(leptos_views::control_plane_sales_page)
-        }
+        "/sales" => match data.and_then(|d| d.sales.as_ref()) {
+            // Live control-center render: autonomy, decisions, exceptions and
+            // queue state from the canonical sales tables.
+            Some(sales) => leptos_views::control_plane_sales_page_with_data(sales),
+            // The loader could not answer. The no-data render states that
+            // explicitly; it must never fall back to a lead list, whose
+            // triage information architecture this page intentionally left.
+            None => leptos_views::control_plane_sales_page(),
+        },
         "/operators" => data_backed_inner("/operators", data)
             .unwrap_or_else(leptos_views::control_plane_operators_page),
         "/operators/new" => leptos_views::control_plane_operators_new_page(),
@@ -1845,8 +1885,10 @@ fn render_control_plane(
             .unwrap_or_else(leptos_views::control_plane_gdpr_page),
         "/alerts" => data_backed_inner("/alerts", data)
             .unwrap_or_else(leptos_views::control_plane_alerts_page),
-        "/alerts/rules" => data_backed_inner("/alerts/rules", data)
-            .unwrap_or_else(leptos_views::control_plane_alert_rules_page),
+        // The rule store does not exist (the HTTP layer returns 501), so this
+        // view must not render a data-backed "rule list" that implies one
+        // exists. Operators get the honest page with a link back to Alerts.
+        "/alerts/rules" => alert_rules_not_implemented_inner(),
         "/settings" => leptos_views::control_plane_settings_page(),
         "/settings/security" => match data.and_then(|d| d.mfa_setup.as_ref()) {
             Some(setup) => leptos_views::control_plane_security_page_with_setup(Some(
@@ -2665,6 +2707,7 @@ mod tests {
         });
         RouteData {
             list: Some(data),
+            sales: None,
             campaign_edit: None,
             mfa_setup: None,
         }
@@ -2739,10 +2782,40 @@ mod tests {
         assert!(static_html.contains("Add Tenant") || static_html.contains("Tenants"));
     }
 
+    /// There is no alert-rule store; `/alerts/rules` must never render a rule
+    /// list that implies one exists. It points operators back to `/alerts`.
+    #[test]
+    fn alert_rules_route_renders_an_honest_not_implemented_page() {
+        let data = sample_route_data(1);
+        let html = render_route_with_data(
+            "control-plane",
+            "/alerts/rules",
+            None,
+            None,
+            &[],
+            Some(&data),
+        )
+        .expect("control-plane /alerts/rules must render");
+
+        assert!(
+            html.contains("Alert rules are not implemented"),
+            "the page must say the surface is not implemented"
+        );
+        assert!(
+            html.contains("Back to Alerts"),
+            "the only useful navigation is back to /alerts"
+        );
+        assert!(
+            !html.contains("no_overlapping") && !html.contains("escalation thresholds"),
+            "the stale rule-policy copy must be gone"
+        );
+    }
+
     #[test]
     fn campaign_edit_with_values_updates_in_place() {
         let data = RouteData {
             list: None,
+            sales: None,
             campaign_edit: Some(CampaignEditData {
                 id: "c_123".into(),
                 name: "Spring Winback".into(),
@@ -2769,6 +2842,7 @@ mod tests {
     fn mfa_setup_data_renders_qr_and_secret() {
         let data = RouteData {
             list: None,
+            sales: None,
             campaign_edit: None,
             mfa_setup: Some(crate::view_data::MfaSetupData {
                 secret: "JBSWY3DPEHPK3PXP".into(),
@@ -2964,6 +3038,7 @@ mod tests {
             &[],
             Some(&RouteData {
                 list: Some(data),
+                sales: None,
                 campaign_edit: None,
                 mfa_setup: None,
             }),
@@ -3022,6 +3097,7 @@ mod tests {
             &[],
             Some(&RouteData {
                 list: Some(data),
+                sales: None,
                 campaign_edit: None,
                 mfa_setup: None,
             }),

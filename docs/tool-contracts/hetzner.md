@@ -61,7 +61,7 @@ apx-<role>-<index>
 - No service listens on a public IP except:
   - `apx-api-1`: ports 80/443 (nginx reverse proxy).
   - `apx-worker-1`: port 25/587 (inbound MTA — direct, not proxied).
-- **Outbound email delivery** defaults to **AWS SES API** (no local SMTP egress required). When `EMAIL_TRANSPORT_TYPE=smtp`, the worker sends outbound mail directly from this server using the `OUTBOUND_IPS` pool.
+- **Outbound email delivery** defaults to **AWS SES API** (no local SMTP egress required). When `EMAIL_TRANSPORT_TYPE=smtp`, the worker sends outbound mail through the configured SMTP relay (`SMTP_HOST`/`SMTP_PORT`); source-IP binding via `OUTBOUND_IPS` has no live implementation.
 
 ### Firewall Rules
 
@@ -96,7 +96,8 @@ apx-<role>-<index>
 ### Access
 
 - S3 credentials are scoped per bucket using Hetzner S3 access keys.
-- Application code uses the `@aws-sdk/client-s3` package (S3-compatible API).
+- Application code talks to the S3-compatible API (presigned URLs / plain
+  HTTPS from the Rust services); there is no Node.js SDK in the mail-server.
 - Endpoint: `https://fsn1.your-objectstorage.com` (Falkenstein region).
 - All uploads use `Content-MD5` header for integrity verification.
 - Multipart upload for files > 50 MB.
@@ -166,7 +167,7 @@ ApexMail uses **Hetzner Cloud floating IPs** for all dedicated sending IPs. Thes
 |--------|---------------------|---------------------|
 | Cost | ~€4/mo (~$4.50) | $24.95/mo |
 | Provisioning | Instant via Cloud API | Instant via SES API |
-| Warmup | Self-managed (45-day schedule) | AWS-managed |
+| Warmup | Self-managed (60-day schedule) | AWS-managed |
 | rDNS | Full control via API | Limited |
 | Control | Full (assign to any server) | SES pool only |
 
@@ -178,16 +179,22 @@ When a tenant upgrades to a plan with dedicated IPs:
 
 ```
 Stripe webhook (plan change)
-  → stripe-integration.ts: autoProvisionDedicatedIps()
+  → billing-service: auto_provision_dedicated_ips_background()
   → POST /v1/dedicated-ips
   → DedicatedIpProvider::allocate_ip()
   → Hetzner Cloud API: POST /v1/floating_ips
   → Assign to MTA server
   → Set rDNS to mail.<tenant_domain>
   → Insert dedicated_ips row (status='warming')
-  → DB trigger updates transport_routing_cache
-  → Next message routes via SMTP automatically
 ```
+
+The `trg_update_transport_routing` trigger (migration 021) maintains
+`transport_routing_cache` on every `dedicated_ips` change. No **shipping**
+worker consumes that cache today: transport selection is a deployment-level
+`EMAIL_TRANSPORT_TYPE` choice (`ses` default; `smtp` relay). Allocating an IP
+does **not** silently switch a tenant's mail to SMTP — see
+[Delivery Transport](../architecture/delivery-transport.md), whose current
+operator contract says no per-message automatic routing is active.
 
 #### 2. Warmup (60-day schedule)
 
@@ -208,15 +215,26 @@ Stripe webhook (plan change)
 | 55-59 | 250,000 |
 | 60+ | Unlimited |
 
-During warmup, excess traffic overflows to SES shared sending automatically.
+Sends are deferred when the IP's daily warmup quota is exhausted: the
+worker's warmup admission (`check_warmup_limit` in
+`worker-processors/src/email/processor.rs`) defers the row with
+`requeue_reason = warmup_limit`, enforced atomically in Redis. There is **no
+automatic overflow to SES shared sending** in the runtime; a warming IP never
+silently exceeds its schedule.
 
 #### 3. Steady State
 
 Once warmed (`status='active'`):
-- IP handles all tenant traffic via `SmtpTransport`
-- `ip_daily_usage` tracks send volume, bounces, complaints
-- DNSBL monitoring every 15 minutes
-- Alerts fire if IP is blacklisted
+- With `EMAIL_TRANSPORT_TYPE=smtp` the worker enforces this IP's warmup-day
+  quota before each send (`check_warmup_limit` in
+  `worker-processors/src/email/processor.rs`). Source-IP binding
+  (`OUTBOUND_IPS`) has no live implementation — the SMTP transport connects
+  to the configured relay (`SMTP_HOST`/`SMTP_PORT`).
+- DNSBL monitoring: no live implementation. The sweep was removed with the
+  retired outbound delivery package; blocklisting must be checked manually.
+
+`ip_daily_usage` exists in the schema but is not written or read by any
+shipping code path today — do not treat it as a live per-IP ledger.
 
 #### 4. Release
 
@@ -227,9 +245,10 @@ DELETE /v1/dedicated-ips/{ip_id}
   → DedicatedIpProvider::release_ip()
   → Hetzner Cloud API: DELETE /v1/floating_ips/{hetzner_id}
   → Update dedicated_ips row (status='retired')
-  → DB trigger updates transport_routing_cache
-  → If no remaining IPs, tenant reverts to SES shared
 ```
+
+Whether the tenant's mail reverts to SES shared is a deployment-level
+transport decision (`EMAIL_TRANSPORT_TYPE`), not an automatic trigger.
 
 ### API Configuration
 
@@ -255,8 +274,8 @@ DELETE /v1/dedicated-ips/{ip_id}
 |-------|---------|
 | `dedicated_ips` | Hetzner floating IPs assigned to tenants |
 | `hetzner_mta_servers` | Available MTA servers for IP assignment |
-| `transport_routing_cache` | Precomputed routing decisions (trigger-maintained) |
-| `ip_daily_usage` | Per-IP daily send/bounce/complaint counts |
+| `transport_routing_cache` | Precomputed routing decisions (trigger-maintained; no shipping worker reads it — see above) |
+| `ip_daily_usage` | Schema placeholder for per-IP daily counts; not written or read by any code path today |
 
 ### Key Columns on `dedicated_ips`
 
@@ -266,19 +285,22 @@ DELETE /v1/dedicated-ips/{ip_id}
 | `hetzner_server_id` | BIGINT | Which MTA server the IP is assigned to |
 | `ip_address` | INET | The actual IP address |
 | `rdns_hostname` | VARCHAR(255) | Reverse DNS (e.g., `mail.example.com`) |
-| `status` | VARCHAR(20) | `warming`, `active`, `cooldown`, `releasing`, `retired` |
-| `warmup_progress` | DOUBLE PRECISION | 0.0 → 1.0 over 45-day warmup |
+| `status` | VARCHAR(20) | `pending`, `warming`, `active`, `suspended`, `releasing`, `retired` (migration 003 + 021 CHECK) |
+| `warmup_progress` | DOUBLE PRECISION | 0.0 → 1.0 over 60-day warmup (`mail_common::warmup::FULL_WARMUP_DAYS`) |
 | `billing_status` | VARCHAR(30) | `included`, `pending_charge`, `active`, `pending_cancel` |
 
 ### Monitoring
 
-| Metric | Description | Alert |
-|--------|-------------|-------|
-| `apexmail_dedicated_ips_total` | Gauge: total dedicated IPs | — |
-| `apexmail_dedicated_ip_warmup_progress` | Gauge: warmup progress per IP | — |
-| `apexmail_smtp_emails_sent_total` | Counter: emails sent via SMTP | — |
-| DNSBL status | Checked every 15 minutes | Critical if IP blacklisted |
-| Bounce rate per IP | Per-IP daily bounce % | Warning if > 2% |
+| Signal | Where it lives | Alert |
+|--------|----------------|-------|
+| Warmup quota per IP/day | Redis counter `apexmail:warmup:ip:{ip_address}:{utc_day}`; exhaustion defers the row (`requeue_reason = warmup_limit`) | — |
+| DNSBL status | No live sweep — the monitor was removed with the retired outbound delivery package; check manually | Critical if IP blacklisted |
+| IP lifecycle/status | `dedicated_ips.status` in Postgres (operator/CP view) | — |
+
+The gauge/counter names in earlier revisions of this document
+(`apexmail_dedicated_ips_total`, `apexmail_dedicated_ip_warmup_progress`,
+`apexmail_smtp_emails_sent_total`) are not emitted by any code path in this
+tree; they have been removed rather than documented as if live.
 
 ---
 

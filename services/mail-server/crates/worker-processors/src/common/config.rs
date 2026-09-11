@@ -263,8 +263,10 @@ fn tracking_base_url_from_env() -> String {
 
 /// Warmup configuration.
 ///
-/// The API server's DedicatedIpProvider (mail-common::warmup) owns the
-/// per-IP warmup *schedule*; this switch only gates the worker's send-time
+/// The canonical schedule is `mail_common::warmup::WarmupSchedule` (60 days,
+/// 50/day ramping to unlimited) — there is deliberately no per-process
+/// schedule copy here (the old `schedule` vec was a second, wrong ~9-step
+/// ramp and was never read). This switch only gates the worker's send-time
 /// warmup cap. It defaults ON now that `get_domain` reads the REAL warmup
 /// state (the tenant's `dedicated_ips` rows, migrations 003/071/093):
 /// the cap can only ever engage for a domain whose tenant actually has a
@@ -273,16 +275,11 @@ fn tracking_base_url_from_env() -> String {
 #[derive(Debug, Clone)]
 pub struct WarmupConfig {
     pub enabled: bool,
-    /// Daily send limits per day number (day 1 -> 50 emails, day 2 -> 100, etc.)
-    pub schedule: Vec<u32>,
 }
 
 impl Default for WarmupConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            schedule: vec![50, 100, 200, 400, 800, 1500, 3000, 5000, 10000],
-        }
+        Self { enabled: true }
     }
 }
 

@@ -4,6 +4,7 @@
     clippy::too_many_arguments,
     clippy::result_large_err
 )]
+pub mod analytics_metrics;
 pub mod app;
 pub mod audit_log;
 pub mod config;

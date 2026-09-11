@@ -584,6 +584,24 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
     )
 }
 
+/// Overlay the AUTHENTICATED CP operator role onto an already-rendered
+/// control-plane document.
+///
+/// The CP page layout pins `data-user-role` to a hardcoded `"admin"`
+/// placeholder; the api-server request pipeline knows the verified CP claim
+/// role and calls this on the rendered HTML, so the shell reflects the real
+/// owner/admin distinction instead of a constant. The role is HTML-escaped,
+/// so a hostile value cannot break out of the attribute.
+pub fn apply_control_plane_role(html: &str, role: &str) -> String {
+    if role.is_empty() {
+        return html.to_string();
+    }
+    html.replace(
+        "data-user-role=\"admin\"",
+        &format!("data-user-role=\"{}\"", html_escape(role)),
+    )
+}
+
 fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     // Task-oriented regroup (design report structural #20): Operate /
     // Customers / Governance. Alerts — the most operational page — joins
@@ -1190,6 +1208,36 @@ mod tests {
         // The fabricated version string is gone.
         assert!(!html.contains("System v2.4.0-stable"));
         assert!(!html.contains("v2.4.0"));
+    }
+
+    /// Fix 9: the rendered CP layout carries a hardcoded `admin`
+    /// placeholder role; the request pipeline overlays the authenticated CP
+    /// claim role so owner/admin distinctions are truthful.
+    #[test]
+    fn control_plane_role_overlay_propagates_the_real_role() {
+        let rendered = crate::leptos_views::control_plane_app_layout_with_title(
+            "<section>Ops</section>",
+            "Operations",
+            "Monitor.",
+            "/dashboard",
+            "t",
+        );
+        assert!(
+            rendered.contains("data-user-role=\"admin\""),
+            "precondition: the layout renders the admin placeholder"
+        );
+
+        let owner = apply_control_plane_role(&rendered, "owner");
+        assert!(owner.contains("data-user-role=\"owner\""));
+        assert!(!owner.contains("data-user-role=\"admin\""));
+
+        // An empty role (no verified session) leaves the document untouched.
+        assert_eq!(apply_control_plane_role(&rendered, ""), rendered);
+
+        // Hostile values cannot break out of the attribute.
+        let escaped = apply_control_plane_role(&rendered, "\"><script>alert(1)</script>");
+        assert!(!escaped.contains("<script>"));
+        assert!(escaped.contains("&quot;&gt;&lt;script&gt;"));
     }
 
     /// Item 25: the impersonation banner is a fixed overlay — the shell

@@ -368,12 +368,164 @@ pub struct RenderedMessage {
     pub text: Option<String>,
 }
 
-/// Render a template for one recipient: personalization (HTML-escaped) +
-/// CAN-SPAM footer with the unsubscribe link.
+/// Why a recipient is receiving this message.
+///
+/// This exists because the previous footer hardcoded "You are receiving this
+/// email because you signed up at ApexMail", which is simply false for cold
+/// discovered prospects. Manufacturing consent in a footer is both a
+/// deliverability and a legal defect, so the reason is now an explicit input
+/// the caller must choose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FooterReason<'a> {
+    /// Cold/business outreach to someone who never signed up. Carries the
+    /// lawful-basis description the jurisdiction policy resolved.
+    BusinessContact { basis: &'a str },
+    /// The recipient opted in or is an existing customer.
+    ConsentedRelationship,
+    /// A product/account notification to a customer.
+    AccountNotification,
+}
+
+/// Everything the footer must disclose (CAN-SPAM + ePrivacy Art. 13 style).
+#[derive(Debug, Clone)]
+pub struct OutreachFooter<'a> {
+    /// Who is actually sending: a legal identity, not just a product name.
+    pub sender_identity: &'a str,
+    pub reason: FooterReason<'a>,
+    pub unsubscribe_link: &'a str,
+    pub postal_address: Option<&'a str>,
+    pub privacy_url: Option<&'a str>,
+}
+
+/// Render the truthfulness-aware footer for one outbound sales message.
+///
+/// Returns `(html, text)`. The caller supplies the reason, and the wording
+/// follows from it — the footer can never claim a signup that did not happen.
+pub fn render_outreach_footer(footer: &OutreachFooter<'_>) -> (String, String) {
+    let mut disclosure = String::new();
+    if let Some(address) = footer.postal_address {
+        disclosure.push_str(escape_html(address).as_str());
+    }
+    if let Some(privacy) = footer.privacy_url {
+        if !disclosure.is_empty() {
+            disclosure.push_str(" &middot; ");
+        }
+        disclosure.push_str(&format!(
+            "<a href=\"{}\" style=\"color:#666\">Privacy</a>",
+            escape_html(privacy)
+        ));
+    }
+
+    let reason_html = match &footer.reason {
+        FooterReason::BusinessContact { basis } => format!(
+            "We are contacting you as a business contact because {} \
+             We are not claiming that you signed up or consented to marketing.",
+            escape_html(basis)
+        ),
+        FooterReason::ConsentedRelationship => {
+            "You are receiving this email because you opted in to ApexMail communications."
+                .to_string()
+        }
+        FooterReason::AccountNotification => {
+            "You are receiving this email as part of your ApexMail account.".to_string()
+        }
+    };
+
+    let html = format!(
+        "\n<div class=\"apexmail-unsubscribe-footer\" style=\"margin-top:24px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#666\">\n  \
+         <p>{}<br>{}</p>\n  <p>{} <a href=\"{}\" style=\"color:#666\">Unsubscribe</a></p>\n</div>\n",
+        escape_html(footer.sender_identity),
+        reason_html,
+        if disclosure.is_empty() { String::new() } else { disclosure },
+        escape_html(footer.unsubscribe_link),
+    );
+
+    let reason_text = match &footer.reason {
+        FooterReason::BusinessContact { basis } => format!(
+            "We are contacting you as a business contact because {basis} \
+             We are not claiming that you signed up or consented to marketing."
+        ),
+        FooterReason::ConsentedRelationship => {
+            "You are receiving this email because you opted in to ApexMail communications."
+                .to_string()
+        }
+        FooterReason::AccountNotification => {
+            "You are receiving this email as part of your ApexMail account.".to_string()
+        }
+    };
+
+    let mut text = format!(
+        "\n\n--\n{reason_text}\nUnsubscribe: {}",
+        footer.unsubscribe_link
+    );
+    if let Some(address) = footer.postal_address {
+        text.push_str(&format!("\n{address}"));
+    }
+    if let Some(privacy) = footer.privacy_url {
+        text.push_str(&format!("\nPrivacy: {privacy}"));
+    }
+    text.push('\n');
+
+    (html, text)
+}
+
+/// The truthful default footer used when a caller has no policy context yet.
+///
+/// It describes a business contact rather than claiming a signup, so the
+/// mis-statement cannot recur by default.
+fn default_footer<'a>(
+    recipient: &'a DispatchRecipient,
+    sender_name: &'a str,
+) -> OutreachFooter<'a> {
+    OutreachFooter {
+        sender_identity: sender_name,
+        reason: FooterReason::BusinessContact {
+            basis: "your organisation appears to be a potential fit for ApexMail's email delivery platform.",
+        },
+        unsubscribe_link: &recipient.unsubscribe_link,
+        postal_address: None,
+        privacy_url: None,
+    }
+}
+
+/// Render a template for one recipient: personalization (HTML-escaped) + a
+/// truthful CAN-SPAM footer with the unsubscribe link.
+///
+/// Uses the neutral business-contact footer. Callers with jurisdiction context
+/// should use [`render_for_recipient_with_footer`] and pass the disclosure the
+/// policy resolved.
 pub fn render_for_recipient(
     template: &TemplateContent,
     recipient: &DispatchRecipient,
     sender_name: &str,
+) -> Result<RenderedMessage, SalesError> {
+    render_for_recipient_with_footer(template, recipient, default_footer(recipient, sender_name))
+}
+
+/// Render a template with an explicit, policy-resolved footer.
+pub fn render_for_recipient_with_footer(
+    template: &TemplateContent,
+    recipient: &DispatchRecipient,
+    footer: OutreachFooter<'_>,
+) -> Result<RenderedMessage, SalesError> {
+    let sender_name = footer.sender_identity.to_string();
+    let (footer_html, footer_text) = render_outreach_footer(&footer);
+    render_with_footer_text(
+        template,
+        recipient,
+        &sender_name,
+        &footer_html,
+        &footer_text,
+    )
+}
+
+/// Shared rendering core once the footer bodies are known.
+fn render_with_footer_text(
+    template: &TemplateContent,
+    recipient: &DispatchRecipient,
+    sender_name: &str,
+    footer_html: &str,
+    footer_text: &str,
 ) -> Result<RenderedMessage, SalesError> {
     let lead = recipient.lead.clone().unwrap_or_default();
     let first_name = lead
@@ -402,12 +554,6 @@ pub fn render_for_recipient(
             "campaign template has neither an HTML nor a text body".into(),
         ));
     }
-
-    let footer_html = format!(
-        "\n<div class=\"apexmail-unsubscribe-footer\" style=\"margin-top:24px;padding-top:12px;border-top:1px solid #eee;font-size:12px;color:#666\">\n  <p>You are receiving this email because you signed up at ApexMail. <a href=\"{}\" style=\"color:#666\">Unsubscribe</a></p>\n</div>\n",
-        recipient.unsubscribe_link
-    );
-    let footer_text = format!("\n\n--\nUnsubscribe: {}\n", recipient.unsubscribe_link);
 
     let html = template.html_body.as_deref().map(|body| {
         let rendered = interpolate(body, &vars);
@@ -549,12 +695,75 @@ pub async fn sender_domain_ready(
 // Production dispatcher
 // ---------------------------------------------------------------------------
 
-/// Idempotency key namespace for campaign sends.
+/// The identity of one logical outbound send.
+///
+/// The old key was `campaign_idempotency_key(campaign_id, recipient_email)`
+/// → `sacmp:{campaign}:{recipient}`. That is a *dedupe* key, not an identity:
+/// as soon as a campaign (or a sequence) legitimately sends a second email to
+/// the same recipient, the second send collides with the first and is silently
+/// dropped. The unit of idempotency has to be the logical step execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendIdentity<'a> {
+    /// One send of one step of one enrollment. This is the canonical identity
+    /// for sequence mail: `sa:{enrollment}:{version}:{step}:{attempt_kind}:{variant}`.
+    StepExecution {
+        enrollment_id: Uuid,
+        sequence_version_id: Uuid,
+        step_id: Uuid,
+        attempt_kind: &'a str,
+        variant: &'a str,
+    },
+    /// One send per recipient per campaign. Correct ONLY for a single-touch
+    /// campaign; a multi-touch campaign must use [`SendIdentity::StepExecution`]
+    /// or its later touches will be deduped away.
+    CampaignRecipient {
+        campaign_id: Uuid,
+        recipient_email: &'a str,
+    },
+}
+
+/// Compute the idempotency key for one logical send.
+///
+/// Resolution order matters: a step execution always wins, because that is the
+/// identity that makes a second legitimate touch representable.
+pub fn send_idempotency_key(identity: SendIdentity<'_>) -> String {
+    match identity {
+        SendIdentity::StepExecution {
+            enrollment_id,
+            sequence_version_id,
+            step_id,
+            attempt_kind,
+            variant,
+        } => crate::sequences::sales_step_idempotency_key(
+            enrollment_id,
+            sequence_version_id,
+            step_id,
+            attempt_kind,
+            variant,
+        ),
+        SendIdentity::CampaignRecipient {
+            campaign_id,
+            recipient_email,
+        } => {
+            // Bound the key length: messages.idempotency_key is VARCHAR(255).
+            // The fixed prefix + campaign uuid leave ~200 chars for the
+            // recipient.
+            let recipient = truncate_bytes(recipient_email.trim().to_ascii_lowercase(), 200);
+            format!("sacmp:{campaign_id}:{recipient}")
+        }
+    }
+}
+
+/// Legacy (campaign, recipient) key.
+///
+/// Retained for the single-touch campaign path only. New multi-touch work must
+/// build its key from [`SendIdentity::StepExecution`], otherwise the second
+/// email to a recipient inside the same campaign is silently suppressed.
 pub fn campaign_idempotency_key(campaign_id: Uuid, recipient_email: &str) -> String {
-    // Bound the key length: messages.idempotency_key is VARCHAR(255). The
-    // fixed prefix + campaign uuid leave ~200 chars for the recipient.
-    let recipient = truncate_bytes(recipient_email.trim().to_ascii_lowercase(), 200);
-    format!("sacmp:{campaign_id}:{recipient}")
+    send_idempotency_key(SendIdentity::CampaignRecipient {
+        campaign_id,
+        recipient_email,
+    })
 }
 
 fn truncate_bytes(s: String, max: usize) -> String {
@@ -895,6 +1104,206 @@ impl ProductionCampaignDispatcher {
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
         metrics::counter!("sales_campaign_dispatch_enqueued_total").increment(1);
+        Ok(EnqueueOutcome::Enqueued)
+    }
+
+    /// Enqueue ONE sequence step execution.
+    ///
+    /// This is the canonical send path for sequence mail. It differs from
+    /// [`Self::enqueue_recipient`] in exactly one way that matters: the send
+    /// identity is the caller's logical step execution (see
+    /// [`SendIdentity::StepExecution`]), not `(campaign, recipient)`, so a
+    /// later legitimate touch to the same person is a different message rather
+    /// than a suppressed duplicate.
+    ///
+    /// The caller (the action worker) has already claimed the
+    /// `sales_step_executions` row, so that row — not a campaign ledger — is
+    /// the send ledger. Suppression is still re-checked inside the transaction,
+    /// because an unsubscribe that landed between the decision and this send
+    /// must win.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_sequenced(
+        &self,
+        tenant_id: &str,
+        idempotency_key: &str,
+        rendered: &RenderedMessage,
+        recipient_email: &str,
+        unsubscribe_link: &str,
+        metadata_extra: serde_json::Value,
+    ) -> Result<EnqueueOutcome, SalesError> {
+        let reservation = self.quota.reserve(tenant_id).await?;
+
+        let outcome = self
+            .enqueue_sequenced_tx(
+                tenant_id,
+                idempotency_key,
+                rendered,
+                recipient_email,
+                unsubscribe_link,
+                metadata_extra,
+                &reservation,
+            )
+            .await;
+
+        match &outcome {
+            Ok(EnqueueOutcome::Enqueued) => {}
+            Ok(EnqueueOutcome::AlreadyClaimed) | Ok(EnqueueOutcome::DuplicateIdempotency) => {
+                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
+                    tracing::error!(error = %e, tenant_id = %tenant_id, "failed to release quota for skipped step send");
+                }
+            }
+            Err(_) => {
+                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
+                    tracing::error!(error = %e, tenant_id = %tenant_id, "failed to roll back quota after step send failure");
+                }
+            }
+        }
+
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn enqueue_sequenced_tx(
+        &self,
+        tenant_id: &str,
+        idempotency_key: &str,
+        rendered: &RenderedMessage,
+        recipient_email: &str,
+        unsubscribe_link: &str,
+        metadata_extra: serde_json::Value,
+        reservation: &QuotaReservation,
+    ) -> Result<EnqueueOutcome, SalesError> {
+        let message_id = Uuid::new_v4();
+        let created_at = Utc::now();
+        let from = self.cfg.from_email.clone();
+
+        let mut metadata = serde_json::json!({
+            "source": "sales-autopilot",
+            "sales_tenant_id": tenant_id,
+            "from_name": self.cfg.from_name,
+            "quota_event_id": reservation.event_id.to_string(),
+        });
+        if let (Some(base), Some(extra)) = (metadata.as_object_mut(), metadata_extra.as_object()) {
+            for (key, value) in extra {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+        let headers = serde_json::json!({
+            "List-Unsubscribe": format!("<{unsubscribe_link}>"),
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        });
+        let tags = vec!["sales-sequence".to_string()];
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        // Re-check suppression inside the transaction: a bounce, complaint or
+        // unsubscribe that arrived between the decision and now is honored.
+        let still_eligible: bool = sqlx::query_scalar(
+            "SELECT NOT EXISTS (\
+                SELECT 1 FROM sales_unsubscribes u \
+                WHERE u.tenant_id = $1 AND u.email = LOWER($2)\
+             ) AND NOT EXISTS (\
+                SELECT 1 FROM suppressions s \
+                WHERE s.tenant_id = $1 AND LOWER(s.email) = LOWER($2)\
+             )",
+        )
+        .bind(tenant_id)
+        .bind(recipient_email)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        if !still_eligible {
+            return Ok(EnqueueOutcome::AlreadyClaimed);
+        }
+
+        let domain_id = resolve_sender_domain_id(&mut tx, tenant_id, &from)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                SalesError::InvalidInput(format!(
+                    "sender domain '{}' is not ready for the configured delivery transport",
+                    from.rsplit_once('@').map(|(_, d)| d).unwrap_or(&from)
+                ))
+            })?;
+
+        let result = sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
+             subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key)
+             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+        )
+        .bind(message_id)
+        .bind(tenant_id)
+        .bind(&from)
+        .bind(serde_json::json!([recipient_email]))
+        .bind(None::<serde_json::Value>)
+        .bind(None::<serde_json::Value>)
+        .bind(&rendered.subject)
+        .bind(&rendered.html)
+        .bind(&rendered.text)
+        .bind("queued")
+        .bind(serde_json::json!(tags))
+        .bind(&metadata)
+        .bind(None::<DateTime<Utc>>)
+        .bind(created_at)
+        .bind(idempotency_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            // This logical step execution was already enqueued. Never send it
+            // twice; a replay of the action is a no-op.
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                recipient = %recipient_email,
+                idempotency_key = %idempotency_key,
+                "sequence step send skipped: idempotency key already enqueued"
+            );
+            tx.commit()
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+            return Ok(EnqueueOutcome::DuplicateIdempotency);
+        }
+
+        // campaign_id is NULL: sequence mail is attributed to a step
+        // execution, not to a campaign.
+        sqlx::query(
+            "INSERT INTO email_queue (
+                id, message_id, tenant_id, domain_id, campaign_id, from_address, to_addresses, subject,
+                \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at
+             ) VALUES (
+                $1::uuid, $2::uuid, $3, $4::uuid, NULL, $5, ARRAY[$6], $7,
+                $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $13, $13
+             )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(message_id)
+        .bind(tenant_id)
+        .bind(&domain_id)
+        .bind(&from)
+        .bind(recipient_email)
+        .bind(&rendered.subject)
+        .bind(&rendered.html)
+        .bind(&rendered.text)
+        .bind(&tags)
+        .bind(&metadata)
+        .bind(&headers)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        metrics::counter!("sales_sequence_send_enqueued_total").increment(1);
         Ok(EnqueueOutcome::Enqueued)
     }
 
@@ -1571,6 +1980,142 @@ mod tests {
         let long = format!("{}@example.com", "a".repeat(400));
         let key = campaign_idempotency_key(campaign, &long);
         assert!(key.len() <= 255, "key length {} > 255", key.len());
+    }
+
+    /// The footer must never manufacture consent. The previous implementation
+    /// hardcoded "you signed up at ApexMail" for cold discovered prospects.
+    #[test]
+    fn footer_never_claims_a_signup_that_did_not_happen() {
+        let recipient = DispatchRecipient::new("prospect@example.com", "https://x/u/1");
+        let template = TemplateContent {
+            subject: "Hello".into(),
+            html_body: Some("<html><body><p>Hi</p></body></html>".into()),
+            text_body: Some("Hi".into()),
+        };
+
+        let rendered = render_for_recipient(&template, &recipient, "ApexMail OÜ").unwrap();
+        let html = rendered.html.unwrap();
+        let text = rendered.text.unwrap();
+
+        // The false claim is gone in both bodies.
+        for body in [&html, &text] {
+            assert!(
+                !body.contains("because you signed up"),
+                "footer must not claim a signup for cold outreach"
+            );
+            assert!(
+                body.contains("not claiming that you signed up"),
+                "footer must explicitly disclaim consent for a business contact"
+            );
+            // The opt-out mechanism is still present (CAN-SPAM).
+            assert!(
+                body.contains("https://x/u/1"),
+                "opt-out link must be present"
+            );
+        }
+        assert!(html.contains("apexmail-unsubscribe-footer"));
+    }
+
+    /// An opted-in relationship may say so — the wording follows the reason.
+    #[test]
+    fn consented_relationship_footer_states_the_opt_in() {
+        let recipient = DispatchRecipient::new("customer@example.com", "https://x/u/2");
+        let template = TemplateContent {
+            subject: "Hello".into(),
+            html_body: Some("<p>Hi</p>".into()),
+            text_body: None,
+        };
+        let (html, text) = render_outreach_footer(&OutreachFooter {
+            sender_identity: "ApexMail OÜ",
+            reason: FooterReason::ConsentedRelationship,
+            unsubscribe_link: "https://x/u/2",
+            postal_address: Some("Tallinn, Estonia"),
+            privacy_url: Some("https://apexmail.ee/privacy"),
+        });
+        assert!(html.contains("opted in"));
+        assert!(html.contains("Tallinn, Estonia"));
+        assert!(html.contains("https://apexmail.ee/privacy"));
+        assert!(text.contains("opted in"));
+        assert!(text.contains("Privacy: https://apexmail.ee/privacy"));
+
+        let rendered = render_for_recipient_with_footer(
+            &template,
+            &recipient,
+            OutreachFooter {
+                sender_identity: "ApexMail OÜ",
+                reason: FooterReason::ConsentedRelationship,
+                unsubscribe_link: "https://x/u/2",
+                postal_address: None,
+                privacy_url: None,
+            },
+        )
+        .unwrap();
+        assert!(rendered.html.unwrap().contains("opted in"));
+    }
+
+    /// The regression the identity fix exists for: two different steps of the
+    /// same enrollment to the same recipient must NOT collide.
+    #[test]
+    fn different_steps_of_one_enrollment_do_not_collide() {
+        let enrollment = Uuid::new_v4();
+        let version = Uuid::new_v4();
+        let step_one = Uuid::new_v4();
+        let step_two = Uuid::new_v4();
+
+        let first = send_idempotency_key(SendIdentity::StepExecution {
+            enrollment_id: enrollment,
+            sequence_version_id: version,
+            step_id: step_one,
+            attempt_kind: "primary",
+            variant: "default",
+        });
+        let second = send_idempotency_key(SendIdentity::StepExecution {
+            enrollment_id: enrollment,
+            sequence_version_id: version,
+            step_id: step_two,
+            attempt_kind: "primary",
+            variant: "default",
+        });
+        assert_ne!(
+            first, second,
+            "a second legitimate email in one sequence must be representable"
+        );
+
+        // Variant divergence: an A/B arm is its own logical send.
+        let variant_b = send_idempotency_key(SendIdentity::StepExecution {
+            enrollment_id: enrollment,
+            sequence_version_id: version,
+            step_id: step_one,
+            attempt_kind: "primary",
+            variant: "arm-b",
+        });
+        assert_ne!(first, variant_b);
+
+        // Stable for identical inputs (replay collapses to one row).
+        let repeat = send_idempotency_key(SendIdentity::StepExecution {
+            enrollment_id: enrollment,
+            sequence_version_id: version,
+            step_id: step_one,
+            attempt_kind: "primary",
+            variant: "default",
+        });
+        assert_eq!(first, repeat);
+
+        assert!(first.starts_with("sa:"), "step keys use the sa: namespace");
+        assert!(first.len() <= 255, "key length {} > 255", first.len());
+    }
+
+    /// The legacy campaign key keeps its documented behaviour so the
+    /// single-touch campaign path is unchanged by the identity refactor.
+    #[test]
+    fn legacy_campaign_key_unchanged() {
+        let campaign = Uuid::new_v4();
+        let key = send_idempotency_key(SendIdentity::CampaignRecipient {
+            campaign_id: campaign,
+            recipient_email: "User@Example.COM ",
+        });
+        assert_eq!(key, campaign_idempotency_key(campaign, "user@example.com"));
+        assert!(key.starts_with(&format!("sacmp:{campaign}:")));
     }
 
     #[test]

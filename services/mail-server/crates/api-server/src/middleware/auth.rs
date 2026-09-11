@@ -2482,6 +2482,39 @@ mod tests {
     /// decision is dropped, so no TTL window remains).
     #[tokio::test]
     async fn suspended_tenant_session_is_refused_and_suspend_is_immediate() {
+        // `authenticate_jwt` checks the Redis token blacklist before
+        // anything else and fails CLOSED when Redis is unreachable
+        // (`is_token_blacklisted` maps a dead pool to ServiceUnavailable, by
+        // design). Gate on a reachable TEST_REDIS_URL exactly like
+        // `demoted_admin_session_loses_admin_scopes` above: the ambient
+        // 6379 is never probed implicitly, and an infrastructure failure
+        // must read as a skip, never as an authentication result.
+        let redis_url = match std::env::var("TEST_REDIS_URL") {
+            Ok(url) if !url.trim().is_empty() => url,
+            _ => {
+                eprintln!("skipping suspended_tenant_session_is_refused: no TEST_REDIS_URL");
+                return;
+            }
+        };
+        let redis_probe = match deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        {
+            Ok(pool) => pool,
+            Err(_) => return,
+        };
+        let redis_reachable = match redis_probe.get().await {
+            Ok(mut conn) => deadpool_redis::redis::cmd("PING")
+                .query_async::<String>(&mut *conn)
+                .await
+                .is_ok(),
+            Err(_) => false,
+        };
+        if !redis_reachable {
+            eprintln!("skipping suspended_tenant_session_is_refused: TEST_REDIS_URL unreachable");
+            return;
+        }
+        drop(redis_probe);
+
         let Some((pool, state, tenant_id, user_id)) =
             suspended_tenant_fixture("f18_jwt_gate").await
         else {

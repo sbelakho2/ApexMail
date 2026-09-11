@@ -312,31 +312,22 @@ mod tests {
     #[ignore = "requires local PostgreSQL with the sales-autopilot schema"]
     #[tokio::test]
     async fn capped_only_campaign_stays_active_until_cap_window_passes() {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://apexmail:apexmail@localhost:5432/apexmail".to_string()
-            }))
-            .await
-            .unwrap();
-        crate::routes::initialize_schema(&db).await.unwrap();
+        let Some(db) = crate::test_db::canonical_test_pool(
+            "scheduler::tests::capped_only_campaign_stays_active_until_cap_window_passes",
+        )
+        .await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("sched-e");
 
         let manager = CampaignManager::new(10, db.clone());
         let campaign = manager
-            .create_campaign(
-                "sched-e-test".into(),
-                "capped".into(),
-                "t".into(),
-                "all".into(),
-            )
+            .create_campaign(tenant.clone(), "capped".into(), "t".into(), "all".into())
             .await
             .unwrap();
         manager
-            .add_recipients(
-                "sched-e-test",
-                campaign.id,
-                vec!["capped@example.com".into()],
-            )
+            .add_recipients(&tenant, campaign.id, vec!["capped@example.com".into()])
             .await
             .unwrap();
 
@@ -349,7 +340,7 @@ mod tests {
         for n in 0..3 {
             let filler = manager
                 .create_campaign(
-                    "sched-e-test".into(),
+                    tenant.clone(),
                     format!("filler-{n}"),
                     "t".into(),
                     "all".into(),
@@ -357,7 +348,7 @@ mod tests {
                 .await
                 .unwrap();
             manager
-                .add_recipients("sched-e-test", filler.id, vec!["capped@example.com".into()])
+                .add_recipients(&tenant, filler.id, vec!["capped@example.com".into()])
                 .await
                 .unwrap();
             sqlx::query(
@@ -386,7 +377,7 @@ mod tests {
         // Tick with the cap in force: the funnel must show capped=1 → the
         // gate keeps the campaign active even though nothing is due.
         let funnel = manager
-            .recipient_funnel_counts("sched-e-test", campaign.id)
+            .recipient_funnel_counts(&tenant, campaign.id)
             .await
             .unwrap();
         assert_eq!(funnel.due, 0, "recipient is capped, not due");
@@ -409,7 +400,7 @@ mod tests {
             .unwrap();
         }
         let funnel = manager
-            .recipient_funnel_counts("sched-e-test", campaign.id)
+            .recipient_funnel_counts(&tenant, campaign.id)
             .await
             .unwrap();
         assert_eq!(funnel.due, 1, "cap window passed — recipient is due again");
@@ -426,7 +417,7 @@ mod tests {
             .await
             .unwrap();
         let funnel = manager
-            .recipient_funnel_counts("sched-e-test", campaign.id)
+            .recipient_funnel_counts(&tenant, campaign.id)
             .await
             .unwrap();
         assert_eq!(funnel.due, 0);

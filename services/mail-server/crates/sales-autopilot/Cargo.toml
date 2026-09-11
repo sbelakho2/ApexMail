@@ -18,6 +18,8 @@ serde_json.workspace       = true
 sqlx.workspace             = true
 uuid.workspace             = true
 chrono.workspace           = true
+# IANA timezone database (DST-correct calendar arithmetic, §29).
+chrono-tz.workspace        = true
 tracing.workspace          = true
 thiserror.workspace        = true
 reqwest.workspace          = true
@@ -39,6 +41,11 @@ metrics.workspace             = true
 anyhow.workspace           = true
 deadpool-redis.workspace   = true
 redis.workspace            = true
+# Waterfall/independent provider calls are joined with futures::future::join_all.
+futures.workspace          = true
+# The experiment engine draws Thompson samples through the ONE Beta sampler
+# (analytics::campaign_autopilot::sample_beta), which takes a `rand::Rng`.
+rand.workspace             = true
 
 [dev-dependencies]
 # Test databases bootstrap through the REAL production migrator (audit F01):

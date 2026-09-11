@@ -252,30 +252,95 @@ mod sales {
         })
     }
 
-    async fn app_with_test_db(test_name: &str) -> Option<axum::Router> {
-        let database_url = match std::env::var("TEST_DATABASE_URL") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => {
-                eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
-                return None;
+    /// Dedicated canonical database for the sales route tests. Provisioning
+    /// goes through the REAL production migrator (audit F01), exactly like
+    /// `crates/sales-autopilot/tests/common/mod.rs`; `initialize_schema` only
+    /// VERIFIES the schema now, so runtime DDL is never the schema source.
+    const SALES_ROUTES_DB: &str = "apexmail_integration_routes";
+
+    /// Provisioning runs exactly once per test PROCESS; each test then gets a
+    /// FRESH pool (a sqlx pool is bound to the runtime that created it —
+    /// sharing one across `#[tokio::test]` runtimes deadlocks).
+    static INIT: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    /// Rewrite the database segment of a `postgresql://…/<db>` URL,
+    /// preserving any query string.
+    fn database_url_for(base_url: &str, db_name: &str) -> String {
+        match base_url.rsplit_once('/') {
+            Some((server, rest)) => {
+                let query = rest
+                    .split_once('?')
+                    .map(|(_, query)| format!("?{query}"))
+                    .unwrap_or_default();
+                format!("{server}/{db_name}{query}")
             }
-        };
-        let db = PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(3))
-            .connect(&database_url)
-            .await
-            .unwrap_or_else(|error| {
-                panic!("TEST_DATABASE_URL is set but {test_name} could not connect: {error}")
-            });
-        initialize_schema(&db).await.unwrap_or_else(|error| {
-            panic!("failed to initialize sales schema for {test_name}: {error}")
-        });
+            None => base_url.to_string(),
+        }
+    }
+
+    async fn connect(url: &str) -> sqlx::PgPool {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            PgPoolOptions::new().max_connections(10).connect(url),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("timed out connecting to canonical test database {url}"))
+        .unwrap_or_else(|error| {
+            panic!("could not connect to canonical test database {url}: {error}")
+        })
+    }
+
+    async fn app_with_test_db(test_name: &str) -> Option<axum::Router> {
+        let ready = INIT
+            .get_or_init(|| async {
+                let Some(base_url) = test_database_url() else {
+                    eprintln!("skipping {test_name}: set TEST_DATABASE_URL to run DB-backed test");
+                    return false;
+                };
+                let db = match migrator::test_support::shared_canonical_db(
+                    base_url.as_str(),
+                    SALES_ROUTES_DB,
+                )
+                .await
+                {
+                    Ok(db) => db,
+                    // F01: the URL is configured, so provisioning failure is
+                    // infrastructure breakage — panic, never soft-skip.
+                    Err(error) => panic!("{}", error.panic_message()),
+                };
+                let Some(db) = db else {
+                    eprintln!("skipping {test_name}: unconfigured");
+                    return false;
+                };
+                // Post-migration assertion: the canonical chain must have
+                // produced the sales schema this suite exercises.
+                initialize_schema(&db).await.unwrap_or_else(|error| {
+                    panic!(
+                        "canonical test database `{SALES_ROUTES_DB}` does not carry the \
+                         sales schema this build expects: {error}"
+                    )
+                });
+                db.close().await;
+                true
+            })
+            .await;
+        if !ready {
+            return None;
+        }
+
+        let base_url = test_database_url()?;
+        let db = connect(&database_url_for(&base_url, SALES_ROUTES_DB)).await;
 
         let crm = CrmBackend::postgres(db.clone());
-        crm.initialize().await.unwrap_or_else(|error| {
-            panic!("failed to initialize CRM schema for {test_name}: {error}")
-        });
+        crm.initialize()
+            .await
+            .unwrap_or_else(|error| panic!("failed to verify CRM schema for {test_name}: {error}"));
 
         // Use an unreachable Redis port so the rate limiter deterministically
         // falls back to its in-memory limiter (no dependency on Redis auth).

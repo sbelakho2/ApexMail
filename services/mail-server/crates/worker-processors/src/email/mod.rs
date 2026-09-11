@@ -22,5 +22,5 @@ pub use transport::{
 pub use transport_router::{RoutingTransport, TransportRouter};
 pub use types::{
     Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, PreparedEmail, RateLimitResult,
-    SendOutcome, SendResult, Suppression, WarmupLimits,
+    SendOutcome, SendResult, Suppression, WarmupIpIdentity,
 };

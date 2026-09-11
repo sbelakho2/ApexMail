@@ -25,7 +25,9 @@ use crate::{
     calendar::CalendarService,
     campaigns::CampaignManager,
     config::SalesConfig,
+    control,
     crm::CrmBackend,
+    discovery::{default_sources, DiscoveryJobRunner, DiscoveryQuery},
     dispatcher::ProductionCampaignDispatcher,
     enrichment::EnrichmentService,
     inbox::InboxManager,
@@ -98,351 +100,20 @@ where
     }
 }
 
+/// Verify the database schema this service requires.
+///
+/// Retained under its historical name so existing callers keep compiling, but
+/// the behaviour is now a **verification**, not a bootstrap. This function
+/// used to create every sales table at runtime with `CREATE TABLE IF NOT
+/// EXISTS` / `ALTER TABLE IF NOT EXISTS`, which made the effective schema
+/// depend on which service started first and meant a deployment could serve
+/// traffic against a schema no migration described. Schema ownership is now
+/// deterministic: the canonical migration chain owns it, and this function
+/// refuses to run against anything else.
+///
+/// See [`crate::schema::verify`] for the required/retired manifest.
 pub async fn initialize_schema(db: &PgPool) -> Result<(), SalesError> {
-    // PostgreSQL DDL (CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS)
-    // is **not** safe to run concurrently against the same target — racing
-    // catalog inserts produce
-    // `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`.
-    // Tests in functional-tests and integration-tests call this concurrently,
-    // so guard the whole bootstrap with a session-level advisory lock keyed on
-    // a stable hash of "sales-autopilot:initialize_schema". The lock is
-    // released automatically on connection drop.
-    // Pin the advisory lock to a SINGLE dedicated connection so that the
-    // CREATE TABLE / CREATE INDEX statements that follow run while the same
-    // connection still holds the lock. (deadpool/sqlx may otherwise run
-    // subsequent statements on a different pooled connection that does not
-    // hold the session-scoped lock.)
-    let mut lock_conn = db
-        .acquire()
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-    sqlx::query("SELECT pg_advisory_lock(7723691501421983234)")
-        .execute(&mut *lock_conn)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    let result = initialize_schema_inner(db).await;
-
-    let _ = sqlx::query("SELECT pg_advisory_unlock(7723691501421983234)")
-        .execute(&mut *lock_conn)
-        .await;
-    drop(lock_conn);
-
-    result
-}
-
-async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS enriched_companies (
-                id UUID PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                domain TEXT NOT NULL,
-                company_name TEXT,
-                industry TEXT,
-                employee_count TEXT,
-                annual_revenue TEXT,
-                funding_stage TEXT,
-                headquarters TEXT,
-                founded_year INTEGER,
-                description TEXT,
-                linkedin_url TEXT,
-                email_provider TEXT,
-                confidence_score DOUBLE PRECISION NOT NULL DEFAULT 0,
-                last_enriched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                UNIQUE (tenant_id, domain)
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_enriched_companies_last_enriched_at ON enriched_companies(last_enriched_at DESC)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_enriched_companies_industry ON enriched_companies(industry)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // ── Campaigns ──────────────────────────────────────────────────────
-    sqlx::query(
-        r#"
-            -- sales_leads is lazily created by the CRM service (crm_pg),
-            -- but campaign start resolves its audience against it — a
-            -- route-initialized deployment without a CRM touch would fail
-            -- every start with "relation sales_leads does not exist".
-            -- Same canonical shape as crm_pg's bootstrap.
-            CREATE TABLE IF NOT EXISTS sales_leads (
-                id          TEXT PRIMARY KEY,
-                tenant_id   TEXT NOT NULL,
-                company_name TEXT NOT NULL DEFAULT '',
-                domain      TEXT NOT NULL DEFAULT '',
-                contact_email TEXT,
-                contact_name TEXT,
-                email       TEXT,
-                title       TEXT NOT NULL DEFAULT '',
-                score       INTEGER NOT NULL DEFAULT 0,
-                source      TEXT NOT NULL DEFAULT '',
-                status      TEXT NOT NULL DEFAULT 'new',
-                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS sales_campaigns (
-                id UUID PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                template_id TEXT NOT NULL,
-                audience TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'draft',
-                sent BIGINT NOT NULL DEFAULT 0,
-                opened BIGINT NOT NULL DEFAULT 0,
-                clicked BIGINT NOT NULL DEFAULT 0,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_campaigns_tenant_id ON sales_campaigns(tenant_id)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_campaigns_status ON sales_campaigns(status)")
-        .execute(db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // ── Campaign recipients ────────────────────────────────────────────
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS sales_campaign_recipients (
-                campaign_id UUID NOT NULL REFERENCES sales_campaigns(id) ON DELETE CASCADE,
-                email TEXT NOT NULL,
-                PRIMARY KEY (campaign_id, email)
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // Send ledger for campaign recipients (see CampaignManager::get_recipients):
-    // `sent_at` is stamped after a successful dispatch so that pausing and
-    // re-starting a campaign does not re-dispatch the entire recipient list.
-    sqlx::query(
-        "ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // Links each dispatched recipient to its platform `messages` row — used
-    // by the campaign stats reconciliation (opens/clicks are maintained on
-    // `messages` by the platform tracking service).
-    sqlx::query("ALTER TABLE sales_campaign_recipients ADD COLUMN IF NOT EXISTS message_id UUID")
-        .execute(db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // Error state for paused campaigns (e.g. "email quota exhausted") — a
-    // stalled campaign must never be a silent partial send.
-    sqlx::query("ALTER TABLE sales_campaigns ADD COLUMN IF NOT EXISTS last_error TEXT")
-        .execute(db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // ── Suppression list (fix I-2, CAN-SPAM) ──────────────────────────
-    // Recipients on this list are excluded from every campaign send; the
-    // dispatch path also enforces a per-recipient frequency cap (see
-    // CampaignManager::get_recipients).
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS sales_unsubscribes (
-                tenant_id TEXT NOT NULL,
-                email TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (tenant_id, email)
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_unsubscribes_tenant ON sales_unsubscribes(tenant_id)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // ── Calendar events ────────────────────────────────────────────────
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS sales_calendar_events (
-                id UUID PRIMARY KEY,
-                tenant_id TEXT NOT NULL DEFAULT '',
-                title TEXT NOT NULL,
-                attendees TEXT[] NOT NULL DEFAULT '{}',
-                start_at TIMESTAMPTZ NOT NULL,
-                end_at TIMESTAMPTZ NOT NULL,
-                meeting_link TEXT
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_calendar_events_tenant_id_start_at ON sales_calendar_events(tenant_id, start_at)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_calendar_events_start_at ON sales_calendar_events(start_at)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // Race-free double-booking prevention: a GiST exclusion constraint on
-    // (tenant_id, [start_at, end_at)) makes overlapping inserts impossible
-    // even when two concurrent requests both pass the COUNT pre-check in
-    // CalendarService::create_event (the pre-check remains as a friendly
-    // fast path; violations surface as SalesError::SlotUnavailable).
-    // btree_gist provides the `=` operator for the scalar tenant_id column
-    // inside a GiST index. The DO block drops any existing constraint first
-    // so re-running this migration is idempotent.
-    //
-    // NOTE: the range constructor must be `tstzrange` — the columns are
-    // TIMESTAMPTZ and `tsrange(timestamptz, timestamptz)` does not exist,
-    // which made this DO block (and therefore ALL of initialize_schema)
-    // fail on every fresh database; the service could not bootstrap and the
-    // integration tests silently soft-skipped.
-    sqlx::query("CREATE EXTENSION IF NOT EXISTS btree_gist")
-        .execute(db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        r#"
-            DO $$
-            BEGIN
-                ALTER TABLE sales_calendar_events DROP CONSTRAINT IF EXISTS no_overlapping_events;
-                ALTER TABLE sales_calendar_events ADD CONSTRAINT no_overlapping_events
-                    EXCLUDE USING gist (tenant_id WITH =, tstzrange(start_at, end_at) WITH &&);
-            END $$;
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // ── Inbox messages ─────────────────────────────────────────────────
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS sales_inbox_messages (
-                id UUID PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                sender TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                category TEXT NOT NULL DEFAULT 'other',
-                replied BOOLEAN NOT NULL DEFAULT false
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_inbox_messages_tenant_id ON sales_inbox_messages(tenant_id)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_inbox_messages_category ON sales_inbox_messages(category)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_inbox_messages_received_at ON sales_inbox_messages(received_at)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // ── Conversion tracking (SALES-03) ───────────────────────────────────
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS sales_conversions (
-                id UUID PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                campaign_id UUID NOT NULL,
-                lead_id UUID NOT NULL,
-                revenue DOUBLE PRECISION NOT NULL DEFAULT 0,
-                description TEXT NOT NULL DEFAULT '',
-                converted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        "#,
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_conversions_tenant_id ON sales_conversions(tenant_id)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_conversions_campaign_id ON sales_conversions(campaign_id)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_sales_conversions_lead_id ON sales_conversions(lead_id)",
-    )
-    .execute(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    Ok(())
+    crate::schema::verify(db).await
 }
 
 /// Build the axum `Router` with all sales-autopilot routes.
@@ -479,6 +150,36 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/conversions",
             get(list_conversions).post(create_conversion),
+        )
+        // ── Discovery (provider-backed; the CP proxies POST /discovery/jobs) ─
+        .route("/discovery/jobs", post(create_discovery_job))
+        .route("/discovery/jobs/:id", get(get_discovery_job))
+        .route("/discovery/jobs/:id/run", post(run_discovery_job))
+        // ── Control surface ────────────────────────────────────────────────
+        // The authenticated read/steer API the ApexMail control plane proxies
+        // to. This is the ONLY sales brain; the CP holds no decision logic of
+        // its own.
+        .route("/control/overview", get(control::overview))
+        .route("/control/decisions", get(control::decisions))
+        .route("/control/exceptions", get(control::exceptions))
+        .route("/control/actions", get(control::actions))
+        .route("/control/mode", post(control::set_mode))
+        .route("/control/pause", post(control::pause))
+        .route("/control/resume", post(control::resume))
+        .route("/control/kill-switch", post(control::kill_switch))
+        .route(
+            "/control/decisions/:id/review",
+            post(control::review_decision),
+        )
+        .route("/control/actions/:id/replay", post(control::replay_action))
+        // ── Enrollments (canonical outreach command + read model) ──────────
+        .route(
+            "/enrollments",
+            get(control::list_enrollments).post(control::start_outreach),
+        )
+        .route(
+            "/enrollments/:id/:action",
+            post(control::set_enrollment_state),
         )
         .with_state(shared.clone())
         .layer(DefaultBodyLimit::max(256 * 1024)) // 256 KB
@@ -1031,56 +732,212 @@ async fn enrich(
     let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
     let span = tracing::info_span!("enrich", tenant_id = %tenant_id, operation = "enrich");
     async move {
-        enforce_enrichment_rate_limit(
-            &state.redis,
-            &tenant_id,
-            Some(&state.rate_limit_fallback),
-        )
-        .await?;
+        enforce_enrichment_rate_limit(&state.redis, &tenant_id, Some(&state.rate_limit_fallback))
+            .await?;
 
-        let company = if let Some(email) = body.email.as_deref() {
-            state.enrichment.enrich_lead(email).await?
+        // Resolve the company domain and keep the email (when present) so the
+        // waterfall can also target people/deliverability fields.
+        let (domain, email) = if let Some(email) = body.email.as_deref() {
+            let domain = EnrichmentService::extract_domain(email)
+                .ok_or_else(|| SalesError::InvalidInput(format!("bad email: {email}")))?;
+            (domain, Some(email))
         } else if let Some(domain) = body.domain.as_deref() {
-            state.enrichment.enrich_company(domain).await?
+            (domain.trim().to_ascii_lowercase(), None)
         } else {
             return Err(SalesError::InvalidInput(
                 "email or domain is required".into(),
             ));
         };
 
-        // Persist to enriched_companies table (non-fatal on failure — enrichment
-        // data is still returned to the caller even if the cache write fails).
-        if let Err(error) = sqlx::query(
-            "INSERT INTO enriched_companies (
-                id, tenant_id, domain, company_name, industry, employee_count,
-                annual_revenue, confidence_score, last_enriched_at, created_at, updated_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $9)
-             ON CONFLICT (tenant_id, domain) DO UPDATE SET
-                company_name = EXCLUDED.company_name,
-                industry = EXCLUDED.industry,
-                employee_count = EXCLUDED.employee_count,
-                annual_revenue = EXCLUDED.annual_revenue,
-                confidence_score = EXCLUDED.confidence_score,
-                last_enriched_at = EXCLUDED.last_enriched_at,
-                updated_at = EXCLUDED.updated_at",
-        )
-        .bind(company.id)
-        .bind(&tenant_id)
-        .bind(&company.domain)
-        .bind(&company.name)
-        .bind(&company.industry)
-        .bind(&company.size)
-        .bind(&company.revenue_range)
-        .bind(0.85f64) // Default confidence score
-        .bind(company.enriched_at)
-        .execute(&state.db)
-        .await
+        // Durable path: routed waterfall → sales_evidence + provenance-
+        // carrying `sales_enrichment_facts` → `enriched_companies` projection.
+        //
+        // When the database is unavailable the enrichment answer is still
+        // returned (matching the historical non-fatal cache-write semantics),
+        // but it is explicitly unpersisted and logged — never silent.
+        let company = match state
+            .enrichment
+            .enrich_persisted(&state.db, &tenant_id, &domain, email, None)
+            .await
         {
-            warn!(email = ?body.email, domain = ?body.domain, tenant_id = %tenant_id, error = %error, "Failed to persist enriched company cache entry");
-        }
+            Ok(persisted) => persisted.company,
+            Err(SalesError::Database(error)) => {
+                warn!(
+                    tenant_id = %tenant_id,
+                    domain = %domain,
+                    error = %error,
+                    "enrichment persistence unavailable — returning unpersisted company"
+                );
+                state.enrichment.enrich_company(&domain).await?
+            }
+            Err(other) => return Err(other),
+        };
 
         json_response(&company)
-    }.instrument(span).await
+    }
+    .instrument(span)
+    .await
+}
+
+// -- Discovery --------------------------------------------------------------
+
+/// Body accepted from the control plane's `POST /v1/admin/sales/discovery/run`
+/// proxy (`DiscoveryRequest` in api-server's `routes/admin/sales.rs`, which
+/// serializes camelCase: `sources`, `categories`, `maxPages`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateDiscoveryJobBody {
+    #[serde(default)]
+    sources: Vec<String>,
+    #[serde(default)]
+    categories: Option<Vec<String>>,
+    #[serde(default)]
+    keywords: Option<Vec<String>>,
+    #[serde(default)]
+    industries: Option<Vec<String>>,
+    #[serde(default)]
+    countries: Option<Vec<String>>,
+    /// The CP sends `maxPages`; `max_pages` is accepted for direct callers.
+    #[serde(default, alias = "maxPages")]
+    max_pages: Option<i32>,
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+fn discovery_runner(state: &AppState, tenant_id: &str) -> DiscoveryJobRunner {
+    DiscoveryJobRunner::new(
+        state.db.clone(),
+        default_sources(&state.db, &state.config, tenant_id),
+    )
+}
+
+fn trimmed_terms(values: Option<Vec<String>>, max_terms: usize) -> Vec<String> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .take(max_terms)
+        .collect()
+}
+
+/// `POST /discovery/jobs` — create a queued discovery job.
+async fn create_discovery_job(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Json(body): Json<CreateDiscoveryJobBody>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = required_tenant_id(&tenant_id.0, body.tenant_id.as_deref())?;
+    let span = tracing::info_span!(
+        "create_discovery_job",
+        tenant_id = %tenant_id,
+        operation = "create_discovery_job"
+    );
+    async move {
+        // Accepted values come from either the CP form (categories) or a
+        // direct caller (industries); cap every term list so a hostile body
+        // cannot build an unbounded job payload.
+        let mut industries = trimmed_terms(body.industries, 32);
+        if industries.is_empty() {
+            industries = trimmed_terms(body.categories.clone(), 32);
+        }
+        let query = DiscoveryQuery {
+            keywords: trimmed_terms(body.keywords, 32),
+            industries,
+            countries: trimmed_terms(body.countries, 32),
+            max_results: body.max_pages.unwrap_or(3).clamp(1, 10) as usize * 25,
+            categories: trimmed_terms(body.categories, 32),
+        };
+
+        let runner = discovery_runner(&state, &tenant_id);
+        // Unknown source names are recorded as requested but do not disable
+        // discovery: the runner falls back to every configured source.
+        let job = runner.create_job(&tenant_id, &query, &body.sources).await?;
+
+        Ok(Json(serde_json::json!({
+            "jobId": job.id,
+            "id": job.id,
+            "status": job.status,
+            "sources": job.sources,
+            "discovered": job.discovered,
+            "imported": job.imported,
+            "costEur": job.cost_eur,
+            "cursor": job.cursor,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// `GET /discovery/jobs/:id` — tenant-scoped job status.
+async fn get_discovery_job(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "get_discovery_job",
+        tenant_id = %tenant_id,
+        job_id = %id,
+        operation = "get_discovery_job"
+    );
+    async move {
+        let runner = discovery_runner(&state, &tenant_id);
+        let job = runner.get_job(&tenant_id, id).await?;
+        Ok(Json(serde_json::json!({
+            "jobId": job.id,
+            "id": job.id,
+            "status": job.status,
+            "query": job.query,
+            "sources": job.sources,
+            "cursor": job.cursor,
+            "discovered": job.discovered,
+            "imported": job.imported,
+            "costEur": job.cost_eur,
+            "error": job.error,
+            "createdAt": job.created_at,
+            "startedAt": job.started_at,
+            "completedAt": job.completed_at,
+        })))
+    }
+    .instrument(span)
+    .await
+}
+
+/// `POST /discovery/jobs/:id/run` — execute one bounded batch (resumes from
+/// the persisted cursor; a batch may complete the job).
+async fn run_discovery_job(
+    State(state): State<Arc<AppState>>,
+    tenant_id: TenantId,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, SalesError> {
+    let tenant_id = tenant_id.0;
+    let span = tracing::info_span!(
+        "run_discovery_job",
+        tenant_id = %tenant_id,
+        job_id = %id,
+        operation = "run_discovery_job"
+    );
+    async move {
+        let runner = discovery_runner(&state, &tenant_id);
+        let job = runner
+            .run_job(&tenant_id, id, crate::discovery::MAX_PAGES_PER_RUN)
+            .await?;
+        Ok(Json(serde_json::json!({
+            "jobId": job.id,
+            "id": job.id,
+            "status": job.status,
+            "sources": job.sources,
+            "cursor": job.cursor,
+            "discovered": job.discovered,
+            "imported": job.imported,
+            "costEur": job.cost_eur,
+            "error": job.error,
+        })))
+    }
+    .instrument(span)
+    .await
 }
 
 // -- Conversions (SALES-03) -------------------------------------------------
@@ -1700,6 +1557,12 @@ async fn cancel_calendar_event(
 #[serde(deny_unknown_fields)]
 struct SlotQuery {
     date: Option<String>,
+    /// Optional IANA timezone (audit §29). When present the handler returns
+    /// DST-correct local slots honouring the configured working hours,
+    /// buffers, minimum notice, weekday allowlist, per-day cap and
+    /// round-robin salesperson selection. When absent the historical
+    /// 09:00–17:00 UTC behaviour is preserved for existing callers.
+    timezone: Option<String>,
     #[serde(default)]
     tenant_id: Option<String>,
 }
@@ -1724,6 +1587,38 @@ async fn find_calendar_slots(
             })?,
             None => chrono::Utc::now(),
         };
+
+        // IANA-timezone mode: the date is interpreted as a local calendar
+        // date in the requested zone and every policy dimension is applied.
+        if let Some(raw_timezone) = q.timezone.as_deref() {
+            let timezone = crate::calendar::parse_iana_zone(raw_timezone).ok_or_else(|| {
+                SalesError::InvalidInput(format!(
+                    "timezone must be a valid IANA zone name (e.g. Europe/Tallinn), got {raw_timezone:?}"
+                ))
+            })?;
+            let mut request =
+                state
+                    .calendar
+                    .config()
+                    .availability_request(&tenant_id, date.date_naive(), chrono::Utc::now());
+            request.timezone = timezone;
+            let slots = state.calendar.availability(&request).await?;
+            let slots: Vec<serde_json::Value> = slots
+                .iter()
+                .map(|slot| {
+                    serde_json::json!({
+                        "start": slot.start,
+                        "end": slot.end,
+                        "local_start": slot.local_start,
+                        "timezone": slot.timezone.name(),
+                        "salesperson": slot.salesperson,
+                    })
+                })
+                .collect();
+            return json_response(&slots);
+        }
+
+        // Legacy UTC mode (unchanged contract).
         let slots = state
             .calendar
             .find_available_slots(&tenant_id, date)
@@ -1886,70 +1781,84 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
 
-    fn test_app() -> Router {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let db = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                PgPoolOptions::new()
-                    .max_connections(1)
-                    .acquire_timeout(Duration::from_millis(100))
-                    .connect("postgres://localhost/unused")
-                    .await
-            })
-            .await
-            .unwrap_or_else(|_| panic!("DB connection timed out after 2s"))
-            .unwrap_or_else(|_| panic!("DB connection failed"))
-        });
-        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("failed to create lazy test redis pool");
-        let state = AppState {
-            db: db.clone(),
-            redis,
-            config: Default::default(),
-            crm: CrmBackend::postgres(db.clone()),
-            enrichment: EnrichmentService::mock(),
-            campaigns: CampaignManager::new(10, db.clone()),
-            dispatcher: None,
-            calendar: CalendarService::new(db.clone()),
-            inbox: InboxManager::new(db),
-            service_token: "test-key".into(),
-            rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
-        };
-        router(state)
+    /// Test dispatcher reporting every requested recipient as enqueued, so
+    /// `CampaignManager::start_campaign` completes the Active transition.
+    /// Production wiring uses `ProductionCampaignDispatcher`; this double
+    /// never sends anything.
+    #[derive(Debug)]
+    struct TestCampaignDispatcher;
+
+    impl crate::campaigns::CampaignEmailDispatcher for TestCampaignDispatcher {
+        fn dispatch(
+            &self,
+            _tenant_id: &str,
+            _campaign_id: Uuid,
+            _template_id: &str,
+            recipients: &[crate::campaigns::DispatchRecipient],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>
+        {
+            let enqueued = recipients.len();
+            Box::pin(async move { Ok(enqueued) })
+        }
+
+        fn unsubscribe_link(
+            &self,
+            tenant_id: &str,
+            campaign_id: Uuid,
+            recipient_email: &str,
+        ) -> String {
+            format!(
+                "https://sales.apexmail.ee/unsubscribe/{tenant_id}/{campaign_id}/{recipient_email}"
+            )
+        }
     }
 
-    fn test_app_with_service_token(service_token: &str) -> Router {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let db = rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(2), async {
-                PgPoolOptions::new()
-                    .max_connections(1)
-                    .acquire_timeout(Duration::from_millis(100))
-                    .connect("postgres://localhost/unused")
-                    .await
-            })
-            .await
-            .unwrap_or_else(|_| panic!("DB connection timed out after 2s"))
-            .unwrap_or_else(|_| panic!("DB connection failed"))
-        });
+    /// App harness on the canonical provisioned test database. Async so it can
+    /// be awaited directly inside `#[tokio::test]` — the previous
+    /// `Runtime::new().block_on(..)` inside the test runtime panicked with
+    /// "Cannot start a runtime from within a runtime". `None` means the
+    /// environment is unconfigured → the test soft-skips.
+    async fn test_app(test_name: &str) -> Option<Router> {
+        test_app_impl(test_name, "test-key", false).await
+    }
+
+    /// App harness with a working test dispatcher attached, so campaign start
+    /// reaches the state machine instead of the Fix I-1 503 short-circuit.
+    async fn test_app_with_dispatcher(test_name: &str) -> Option<Router> {
+        test_app_impl(test_name, "test-key", true).await
+    }
+
+    async fn test_app_with_service_token(test_name: &str, service_token: &str) -> Option<Router> {
+        test_app_impl(test_name, service_token, false).await
+    }
+
+    async fn test_app_impl(
+        test_name: &str,
+        service_token: &str,
+        with_dispatcher: bool,
+    ) -> Option<Router> {
+        let db = crate::test_db::canonical_test_pool(test_name).await?;
         let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("failed to create lazy test redis pool");
+        let mut campaigns = CampaignManager::new(10, db.clone());
+        if with_dispatcher {
+            campaigns = campaigns.with_email_dispatcher(Arc::new(TestCampaignDispatcher));
+        }
         let state = AppState {
             db: db.clone(),
             redis,
             config: Default::default(),
             crm: CrmBackend::postgres(db.clone()),
             enrichment: EnrichmentService::mock(),
-            campaigns: CampaignManager::new(10, db.clone()),
+            campaigns,
             dispatcher: None,
             calendar: CalendarService::new(db.clone()),
             inbox: InboxManager::new(db),
             service_token: service_token.into(),
             rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
         };
-        router(state)
+        Some(router(state))
     }
 
     // ── Fix I tests: honest failures + tenant scoping ────────────────────
@@ -2147,19 +2056,38 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_health() {
-        let app = test_app();
+        let Some(app) = test_app("routes::tests::test_health").await else {
+            return;
+        };
         let resp = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        // Canonical truth (health handler, routes.rs:198): with the
+        // provisioned database reachable, /health reports 200 healthy/"up".
+        // The previous SERVICE_UNAVAILABLE assertion only held because the
+        // fixture pointed at a dead `unused` DSN.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["database"], "up");
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
     #[ignore]
     #[tokio::test]
     async fn test_create_and_list_leads() {
-        let app = test_app();
+        let Some(app) = test_app("routes::tests::test_create_and_list_leads").await else {
+            return;
+        };
+        // Unique tenant per run: `sales_leads` has a per-tenant unique email
+        // index, so a fixed name would fail on the second run against the
+        // reused canonical database.
+        let tenant = crate::test_db::unique_test_tenant("routes-leads");
         let body = serde_json::json!({
             "email": "alice@acme.com",
             "name": "Alice",
@@ -2170,7 +2098,7 @@ mod tests {
             .oneshot(
                 Request::post("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2184,7 +2112,7 @@ mod tests {
             .oneshot(
                 Request::get("/leads")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2197,14 +2125,17 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_enrich_endpoint() {
-        let app = test_app();
+        let Some(app) = test_app("routes::tests::test_enrich_endpoint").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-enrich");
         let body = serde_json::json!({ "email": "bob@beta.io" });
         let resp = app
             .clone()
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -2222,7 +2153,7 @@ mod tests {
             .oneshot(
                 Request::post("/enrich")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant)
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&domain_body).unwrap()))
                     .unwrap(),
@@ -2240,12 +2171,20 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_campaign_lifecycle_endpoints() {
-        let app = test_app();
+        // A working test dispatcher is attached so start exercises the REAL
+        // transition (the no-dispatcher 503 path is asserted separately by
+        // the non-ignored `test_campaign_start_returns_503_without_dispatcher`).
+        let Some(app) =
+            test_app_with_dispatcher("routes::tests::test_campaign_lifecycle_endpoints").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-campaign");
         let create_body = serde_json::json!({
             "name": "Migration wave",
             "template_id": "tmpl_competitor_migration",
             "audience": "selected-leads",
-            "tenant_id": "tenant-a"
+            "tenant_id": tenant
         });
 
         let create_resp = app
@@ -2253,7 +2192,7 @@ mod tests {
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                     .unwrap(),
@@ -2278,7 +2217,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/recipients"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&recipients_body).unwrap()))
                     .unwrap(),
@@ -2287,29 +2226,33 @@ mod tests {
             .unwrap();
         assert_eq!(recipients_resp.status(), StatusCode::OK);
 
-        // Fix I-1 note: this test harness wires no CampaignEmailDispatcher,
-        // so start must now fail loudly with 503 (previously it returned
-        // 200 'active' while sending nothing). Updated from the old
-        // `assert_eq!(start_resp.status(), StatusCode::OK)` which asserted
-        // the vulnerable silent-no-send behavior.
+        // With the test dispatcher wired, start performs the real transition
+        // and reports the campaign active.
         let start_resp = app
             .clone()
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/start"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant.clone())
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(start_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(start_resp.status(), StatusCode::OK);
+        let started: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(start_resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(started["status"], "active");
 
         let pause_resp = app
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/pause"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2330,12 +2273,22 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_campaign_routes_reject_cross_tenant_mutation() {
-        let app = test_app();
+        // The dispatcher must be wired, otherwise the unconditional Fix I-1
+        // 503 short-circuit would mask the tenant-scoped 404 under test.
+        let Some(app) = test_app_with_dispatcher(
+            "routes::tests::test_campaign_routes_reject_cross_tenant_mutation",
+        )
+        .await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-campaign-owner");
+        let other_tenant = crate::test_db::unique_test_tenant("routes-campaign-other");
         let create_body = serde_json::json!({
             "name": "Tenant scoped",
             "template_id": "tmpl_scoped",
             "audience": "selected-leads",
-            "tenant_id": "tenant-a"
+            "tenant_id": tenant
         });
 
         let create_resp = app
@@ -2343,7 +2296,7 @@ mod tests {
             .oneshot(
                 Request::post("/campaigns")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant.clone())
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
                     .unwrap(),
@@ -2364,7 +2317,7 @@ mod tests {
             .oneshot(
                 Request::post(format!("/campaigns/{campaign_id}/start"))
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-b")
+                    .header("x-tenant-id", other_tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2377,7 +2330,10 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_list_leads_respects_pagination() {
-        let app = test_app();
+        let Some(app) = test_app("routes::tests::test_list_leads_respects_pagination").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-pagination");
 
         for index in 0..3 {
             let body = serde_json::json!({
@@ -2390,7 +2346,7 @@ mod tests {
                 .oneshot(
                     Request::post("/leads")
                         .header("x-api-key", "test-key")
-                        .header("x-tenant-id", "tenant-a")
+                        .header("x-tenant-id", tenant.clone())
                         .header("content-type", "application/json")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
@@ -2404,7 +2360,7 @@ mod tests {
             .oneshot(
                 Request::get("/leads?limit=1&offset=1")
                     .header("x-api-key", "test-key")
-                    .header("x-tenant-id", "tenant-a")
+                    .header("x-tenant-id", tenant)
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2425,7 +2381,14 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_protected_routes_reject_requests_when_service_token_missing() {
-        let app = test_app_with_service_token("");
+        let Some(app) = test_app_with_service_token(
+            "routes::tests::test_protected_routes_reject_requests_when_service_token_missing",
+            "",
+        )
+        .await
+        else {
+            return;
+        };
         let response = app
             .oneshot(Request::get("/leads").body(Body::empty()).unwrap())
             .await
@@ -2438,7 +2401,9 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_enrich_requires_tenant_scope() {
-        let app = test_app();
+        let Some(app) = test_app("routes::tests::test_enrich_requires_tenant_scope").await else {
+            return;
+        };
         let body = serde_json::json!({ "domain": "acme.com" });
         let response = app
             .oneshot(
@@ -2500,5 +2465,142 @@ mod tests {
                 "request exceeding limit should be rejected"
             );
         });
+    }
+
+    // ── Discovery routes ─────────────────────────────────────────────────
+
+    /// The CP proxies to `POST {base}/discovery/jobs`; the path must exist
+    /// and stay behind the shared service-token middleware.
+    #[tokio::test]
+    async fn test_discovery_routes_require_auth_and_exist() {
+        let app = lazy_test_app();
+
+        // No token → 401, before any routing to the handler matters.
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::post("/discovery/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sources":["provider_api"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        // Token but no tenant header → the handler rejects with 400 (the
+        // route exists; a missing route would be 404).
+        let no_tenant = app
+            .clone()
+            .oneshot(
+                Request::post("/discovery/jobs")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sources":["provider_api"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_tenant.status(), StatusCode::BAD_REQUEST);
+        assert_ne!(no_tenant.status(), StatusCode::NOT_FOUND);
+
+        // Authenticated and tenant-scoped: the lazy test pool cannot serve
+        // the insert, so a 5xx proves the handler was reached (not 404).
+        let reached = app
+            .clone()
+            .oneshot(
+                Request::post("/discovery/jobs")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sources":["provider_api"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(reached.status(), StatusCode::NOT_FOUND);
+
+        // GET /discovery/jobs/:id must exist too.
+        let get_reached = app
+            .oneshot(
+                Request::get(format!("/discovery/jobs/{}", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(get_reached.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `POST /discovery/jobs/:id/run` exists and validates the tenant before
+    /// touching the database.
+    #[tokio::test]
+    async fn test_run_discovery_job_route_exists() {
+        let app = lazy_test_app();
+        let run_reached = app
+            .oneshot(
+                Request::post(format!("/discovery/jobs/{}/run", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(run_reached.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The CP payload uses camelCase and `maxPages`; it must be accepted.
+    #[tokio::test]
+    async fn test_create_discovery_job_accepts_cp_payload_shape() {
+        let app = lazy_test_app();
+        let body = serde_json::json!({
+            "sources": ["provider_api"],
+            "categories": ["SaaS"],
+            "maxPages": 3
+        });
+        let response = app
+            .oneshot(
+                Request::post("/discovery/jobs")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Reached the handler (DB down in this harness) rather than a 4xx
+        // payload rejection.
+        assert!(
+            response.status().is_server_error(),
+            "CP payload must parse, got {}",
+            response.status()
+        );
+    }
+
+    /// A payload tenant_id that disagrees with the header is rejected before
+    /// any database work.
+    #[tokio::test]
+    async fn test_create_discovery_job_rejects_tenant_mismatch() {
+        let app = lazy_test_app();
+        let body = serde_json::json!({
+            "sources": ["provider_api"],
+            "tenant_id": "tenant-b"
+        });
+        let response = app
+            .oneshot(
+                Request::post("/discovery/jobs")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

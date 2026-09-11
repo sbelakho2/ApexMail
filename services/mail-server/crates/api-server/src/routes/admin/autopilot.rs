@@ -1,32 +1,193 @@
-//! Autopilot control endpoints backed by the sales data model.
+//! Autopilot control endpoints — a thin proxy to the sales-autopilot service.
 //!
-//! The original control-plane autopilot route was migrated as a proxy to a
-//! downstream operator API that no longer exists in the current workspace.
-//! This module restores the control surface against the data that the admin
-//! sales routes actually manage today.
+//! The control plane owns no sales brain. There is no worker loop, no
+//! qualification threshold and no lead-status mutation here: the canonical
+//! sales-autopilot service (`SALES_AUTOPILOT_BASE_URL`) is the only place that
+//! thinks, decides and acts. This module exposes the operator
+//! control surface over that service's `/control/*` API, forwarding the
+//! internal service token (`x-api-key`) plus the `x-tenant-id` header.
+//!
+//! Mutating calls are audit-logged (`resource_type = "sales_autopilot"`) with
+//! the upstream status. When the service is not configured the handlers fail
+//! closed with `ServiceUnavailable` — the CP never fabricates a payload and
+//! never falls back to local writes.
 
-use super::super::helpers::table_exists;
-use axum::extract::{Query, State};
-use axum::routing::get;
+use std::time::Duration;
+
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::Response;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::OnceLock;
-use std::time::Duration;
-use tokio::task::JoinHandle;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
-const PENDING_APPROVAL_SCORE: i32 = 80;
-const AUTOPILOT_POLL_INTERVAL_SECS: u64 = 30;
+/// Upstream calls are bounded: a hung sales-autopilot must not pin a CP
+/// request slot forever.
+const PROXY_TIMEOUT_SECS: u64 = 30;
 
-static AUTOPILOT_WORKER: OnceLock<tokio::sync::Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
+/// The autonomy levels the canonical `sales_autonomy_state.mode` column
+/// accepts (migration 200).
+const AUTONOMY_MODES: [&str; 5] = [
+    "disabled",
+    "shadow",
+    "assisted",
+    "approval_required",
+    "autonomous_guarded",
+];
+
+const REVIEW_OUTCOMES: [&str; 2] = ["approved", "rejected"];
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", get(get_autopilot).post(post_autopilot))
+    Router::new()
+        .route("/overview", get(get_overview))
+        .route("/decisions", get(get_decisions))
+        .route("/exceptions", get(get_exceptions))
+        .route("/actions", get(get_actions))
+        .route("/mode", post(post_mode))
+        .route("/pause", post(post_pause))
+        .route("/resume", post(post_resume))
+        .route("/kill-switch", post(post_kill_switch))
+        .route("/decisions/:id/review", post(post_decision_review))
+        .route("/actions/:id/replay", post(post_action_replay))
+}
+
+// ──────────────────────────────────────────
+// Proxy plumbing
+// ──────────────────────────────────────────
+
+/// The configured sales-autopilot base URL, or a fail-closed error. An empty
+/// value is "not configured" — the CP has no local autopilot to fall back to.
+fn sales_autopilot_base_url(state: &AppState) -> Result<String, ApiError> {
+    let base = state
+        .config
+        .sales_autopilot_base_url
+        .trim()
+        .trim_end_matches('/');
+    if base.is_empty() {
+        return Err(ApiError::ServiceUnavailable(
+            "sales-autopilot is not configured (SALES_AUTOPILOT_BASE_URL is empty); \
+             the control plane has no local autopilot"
+                .into(),
+        ));
+    }
+    Ok(base.to_string())
+}
+
+fn with_internal_service_auth(
+    request: reqwest::RequestBuilder,
+    state: &AppState,
+) -> reqwest::RequestBuilder {
+    if let Some(token) = state.config.internal_service_token.as_deref() {
+        request.header("x-api-key", token)
+    } else {
+        request
+    }
+}
+
+/// A buffered upstream response, forwarded to the caller verbatim (status,
+/// content type and body) so the admin surface never rewrites service errors.
+struct UpstreamResponse {
+    status: StatusCode,
+    content_type: Option<HeaderValue>,
+    body: Bytes,
+}
+
+impl UpstreamResponse {
+    fn status_u16(&self) -> u16 {
+        self.status.as_u16()
+    }
+
+    fn into_axum_response(self) -> Response {
+        let mut response = Response::new(Body::from(self.body));
+        *response.status_mut() = self.status;
+        if let Some(content_type) = self.content_type {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, content_type);
+        }
+        response
+    }
+}
+
+async fn proxy_request(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<UpstreamResponse, ApiError> {
+    let base = sales_autopilot_base_url(state)?;
+    let mut request = state
+        .http_client
+        .request(method, format!("{base}{path}"))
+        .header("x-tenant-id", "system")
+        .timeout(Duration::from_secs(PROXY_TIMEOUT_SECS));
+    request = with_internal_service_auth(request, state);
+    if let Some(payload) = body {
+        request = request.json(&payload);
+    }
+
+    let response = request.send().await.map_err(|error| {
+        tracing::error!(error = %error, path, "sales-autopilot proxy request failed");
+        ApiError::ServiceUnavailable(format!("sales-autopilot is unreachable at {base}"))
+    })?;
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| HeaderValue::from_bytes(value.as_bytes()).ok());
+    let body = response.bytes().await.map_err(|error| {
+        tracing::error!(error = %error, path, "failed to read the sales-autopilot response");
+        ApiError::ServiceUnavailable("sales-autopilot returned an unreadable response".into())
+    })?;
+
+    Ok(UpstreamResponse {
+        status,
+        content_type,
+        body,
+    })
+}
+
+async fn proxy_control_get(state: &AppState, path: &str) -> Result<Response, ApiError> {
+    Ok(proxy_request(state, reqwest::Method::GET, path, None)
+        .await?
+        .into_axum_response())
+}
+
+/// Proxy a mutating control call and audit-log it. The audit entry is written
+/// whether the upstream call succeeded or not — an attempted autonomy change
+/// is always recorded.
+async fn proxy_control_mutation(
+    state: &AppState,
+    auth: &AuthUser,
+    method: reqwest::Method,
+    path: &str,
+    payload: serde_json::Value,
+    audit_action: &str,
+) -> Result<Response, ApiError> {
+    let result = proxy_request(state, method, path, Some(payload.clone())).await;
+    let upstream_status = result.as_ref().ok().map(UpstreamResponse::status_u16);
+
+    log_autopilot_audit(
+        &state.db,
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
+        audit_action,
+        json!({
+            "request": payload,
+            "upstreamStatus": upstream_status,
+        }),
+    )
+    .await;
+
+    result.map(UpstreamResponse::into_axum_response)
 }
 
 async fn log_autopilot_audit(
@@ -42,7 +203,7 @@ async fn log_autopilot_audit(
         user_id,
         action,
         "sales_autopilot",
-        Some("default"),
+        None,
         metadata,
         None,
         None,
@@ -50,819 +211,372 @@ async fn log_autopilot_audit(
     .await;
 }
 
+/// Path ids are composed into the upstream URL, so only conservative
+/// identifiers (UUIDs / nanoids) are accepted.
+fn validate_path_id(id: &str) -> Result<(), ApiError> {
+    let safe = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if safe {
+        Ok(())
+    } else {
+        Err(ApiError::Validation(vec!["invalid id".into()]))
+    }
+}
+
+// ──────────────────────────────────────────
+// Request bodies
+// ──────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
-pub struct AutopilotQuery {
-    pub section: Option<String>,
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ModeRequest {
+    pub mode: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AutopilotAction {
-    pub action: String,
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct KillSwitchRequest {
+    pub engaged: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DecisionReviewRequest {
+    pub outcome: String,
     #[serde(default)]
-    pub candidate_id: Option<String>,
-    #[serde(flatten)]
-    pub extra: serde_json::Value,
+    pub note: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct AutopilotStateRow {
-    status: String,
-    safe_mode: bool,
-    last_action: Option<String>,
-    last_action_at: Option<DateTime<Utc>>,
-    rules: serde_json::Value,
+// ──────────────────────────────────────────
+// Read endpoints
+// ──────────────────────────────────────────
+
+async fn get_overview(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    proxy_control_get(&state, "/control/overview").await
 }
 
-/// API-114/115: Track whether the autopilot state table has been ensured
-/// to avoid running DDL on every request (causes latency and lock contention).
-static AUTOPILOT_TABLE_ENSURE: OnceLock<()> = OnceLock::new();
+async fn get_decisions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-async fn ensure_autopilot_state_table(db: &sqlx::PgPool) -> Result<(), ApiError> {
-    // Only run DDL once per process lifetime; tables should be created via migrations.
-    if AUTOPILOT_TABLE_ENSURE.get().is_some() {
-        return Ok(());
+    proxy_control_get(&state, "/control/decisions").await
+}
+
+async fn get_exceptions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    proxy_control_get(&state, "/control/exceptions").await
+}
+
+async fn get_actions(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    proxy_control_get(&state, "/control/actions").await
+}
+
+// ──────────────────────────────────────────
+// Mutations
+// ──────────────────────────────────────────
+
+async fn post_mode(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ModeRequest>,
+) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    if !AUTONOMY_MODES.contains(&body.mode.as_str()) {
+        return Err(ApiError::Validation(vec![format!(
+            "mode must be one of: {}",
+            AUTONOMY_MODES.join(", ")
+        )]));
     }
-    sqlx::query(
-        "INSERT INTO sales_autopilot_state (tenant_id, status, safe_mode, rules, updated_at)
-         VALUES ('system', 'stopped', false, '[]'::jsonb, NOW())
-         ON CONFLICT (tenant_id) DO NOTHING",
+
+    proxy_control_mutation(
+        &state,
+        &auth,
+        reqwest::Method::POST,
+        "/control/mode",
+        json!({ "mode": body.mode }),
+        "control_plane.autopilot.mode_changed",
     )
-    .execute(db)
-    .await?;
-
-    // Mark as ensured so subsequent calls skip the DDL entirely.
-    let _ = AUTOPILOT_TABLE_ENSURE.set(());
-    Ok(())
-}
-
-async fn load_autopilot_state(db: &sqlx::PgPool) -> Result<AutopilotStateRow, ApiError> {
-    ensure_autopilot_state_table(db).await?;
-
-    let row: (
-        String,
-        bool,
-        Option<String>,
-        Option<DateTime<Utc>>,
-        serde_json::Value,
-    ) = sqlx::query_as(
-        "SELECT status, safe_mode, last_action, last_action_at, rules
-         FROM sales_autopilot_state
-         WHERE tenant_id = 'system'",
-    )
-    .fetch_one(db)
-    .await?;
-
-    Ok(AutopilotStateRow {
-        status: row.0,
-        safe_mode: row.1,
-        last_action: row.2,
-        last_action_at: row.3,
-        rules: row.4,
-    })
-}
-
-async fn persist_autopilot_state(
-    db: &sqlx::PgPool,
-    current: &AutopilotStateRow,
-    action: &str,
-    next_status: Option<&str>,
-    next_safe_mode: Option<bool>,
-    next_rules: Option<serde_json::Value>,
-) -> Result<AutopilotStateRow, ApiError> {
-    ensure_autopilot_state_table(db).await?;
-
-    let row: (
-        String,
-        bool,
-        Option<String>,
-        Option<DateTime<Utc>>,
-        serde_json::Value,
-    ) = sqlx::query_as(
-        "UPDATE sales_autopilot_state
-         SET status = $1,
-             safe_mode = $2,
-             last_action = $3,
-             last_action_at = NOW(),
-             rules = $4,
-             updated_at = NOW()
-         WHERE tenant_id = 'system'
-         RETURNING status, safe_mode, last_action, last_action_at, rules",
-    )
-    .bind(next_status.unwrap_or(&current.status))
-    .bind(next_safe_mode.unwrap_or(current.safe_mode))
-    .bind(action)
-    .bind(next_rules.unwrap_or_else(|| current.rules.clone()))
-    .fetch_one(db)
-    .await?;
-
-    Ok(AutopilotStateRow {
-        status: row.0,
-        safe_mode: row.1,
-        last_action: row.2,
-        last_action_at: row.3,
-        rules: row.4,
-    })
-}
-
-fn worker_handle() -> &'static tokio::sync::Mutex<Option<JoinHandle<()>>> {
-    AUTOPILOT_WORKER.get_or_init(|| tokio::sync::Mutex::new(None))
-}
-
-fn max_approvals_per_cycle(rules: &serde_json::Value) -> i64 {
-    rules
-        .get("maxApprovalsPerCycle")
-        .and_then(|value| value.as_i64())
-        .unwrap_or(5)
-        .clamp(1, 25)
-}
-
-/// Process one autopilot cycle, scoped to a specific tenant.
-/// API-102: Background autopilot worker now filters by tenant_id.
-async fn process_autopilot_cycle(
-    state: &AppState,
-    tenant_id: &str,
-    rules: &serde_json::Value,
-) -> Result<usize, ApiError> {
-    if !table_exists(&state.db, "sales_leads").await {
-        return Ok(0);
-    }
-
-    let approved_ids: Vec<String> = sqlx::query_scalar(
-        "UPDATE sales_leads
-         SET status = 'qualified', updated_at = NOW()
-         WHERE id IN (
-             SELECT id
-             FROM sales_leads
-             WHERE status IN ('new', 'prospect')
-               AND COALESCE(score, 0) >= $1
-               AND tenant_id = $3
-             ORDER BY COALESCE(score, 0) DESC, created_at ASC
-             LIMIT $2
-         )
-         RETURNING id",
-    )
-    .bind(PENDING_APPROVAL_SCORE)
-    .bind(max_approvals_per_cycle(rules))
-    .bind(tenant_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    if !approved_ids.is_empty() {
-        log_autopilot_audit(
-            &state.db,
-            Some(tenant_id),
-            None,
-            "control_plane.autopilot.cycle_applied",
-            json!({
-                "approved": approved_ids.len(),
-                "leadIds": approved_ids,
-            }),
-        )
-        .await;
-    }
-
-    Ok(approved_ids.len())
-}
-
-async fn run_autopilot_worker(state: AppState, tenant_id: String) {
-    loop {
-        let current = match load_autopilot_state(&state.db).await {
-            Ok(current) => current,
-            Err(error) => {
-                tracing::warn!(error = %error, tenant_id = %tenant_id, "autopilot worker failed to load state");
-                break;
-            }
-        };
-
-        if current.status != "running" {
-            break;
-        }
-
-        if !current.safe_mode {
-            // API-102: Process only leads for this specific tenant.
-            if let Err(error) = process_autopilot_cycle(&state, &tenant_id, &current.rules).await {
-                tracing::warn!(error = %error, tenant_id = %tenant_id, "autopilot worker cycle failed");
-            }
-        }
-
-        tokio::time::sleep(Duration::from_secs(AUTOPILOT_POLL_INTERVAL_SECS)).await;
-    }
-}
-
-/// API-105: Spawn autopilot worker scoped to a specific tenant.
-async fn ensure_autopilot_worker_running(state: AppState, tenant_id: String) {
-    let mut guard = worker_handle().lock().await;
-    if guard
-        .as_ref()
-        .map(|handle| !handle.is_finished())
-        .unwrap_or(false)
-    {
-        return;
-    }
-
-    let tid = tenant_id.clone();
-    *guard = Some(tokio::spawn(async move {
-        run_autopilot_worker(state, tid).await;
-    }));
-}
-
-async fn stop_autopilot_worker() {
-    let mut guard = worker_handle().lock().await;
-    if let Some(handle) = guard.take() {
-        handle.abort();
-    }
-}
-
-/// Pending approval candidates, scoped to `tenant_id` so that what the CP
-/// shows matches what the approve/reject mutations can actually act on.
-async fn pending_candidates(
-    db: &sqlx::PgPool,
-    tenant_id: &str,
-) -> Result<Vec<serde_json::Value>, ApiError> {
-    if !table_exists(db, "sales_leads").await {
-        return Ok(Vec::new());
-    }
-
-    let rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-        Option<String>,
-        DateTime<Utc>,
-    )> = sqlx::query_as(build_pending_candidates_sql(true))
-        .bind(tenant_id)
-        .bind(PENDING_APPROVAL_SCORE)
-        .fetch_all(db)
-        .await?;
-
-    Ok(map_pending_candidates(rows))
-}
-
-fn build_pending_candidates_sql(tenant_scoped: bool) -> &'static str {
-    if tenant_scoped {
-        "SELECT id, company_name, domain, contact_email, score, source, created_at
-         FROM sales_leads
-         WHERE tenant_id = $1
-           AND status IN ('new', 'prospect')
-           AND COALESCE(score, 0) >= $2
-         ORDER BY COALESCE(score, 0) DESC, created_at DESC
-         LIMIT 25"
-    } else {
-        "SELECT id, company_name, domain, contact_email, score, source, created_at
-         FROM sales_leads
-         WHERE status IN ('new', 'prospect')
-           AND COALESCE(score, 0) >= $1
-         ORDER BY COALESCE(score, 0) DESC, created_at DESC
-         LIMIT 25"
-    }
-}
-
-fn map_pending_candidates(
-    rows: Vec<(
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<i32>,
-        Option<String>,
-        DateTime<Utc>,
-    )>,
-) -> Vec<serde_json::Value> {
-    rows.into_iter()
-        .map(
-            |(id, company_name, domain, contact_email, score, source, created_at)| {
-                serde_json::json!({
-                    "id": id,
-                    "companyName": company_name,
-                    "domain": domain,
-                    "contactEmail": contact_email,
-                    "score": score.unwrap_or(0),
-                    "source": source,
-                    "createdAt": created_at.to_rfc3339(),
-                })
-            },
-        )
-        .collect()
-}
-
-async fn load_sales_settings(db: &sqlx::PgPool) -> Result<serde_json::Value, ApiError> {
-    let row: Option<(serde_json::Value, serde_json::Value, serde_json::Value)> = sqlx::query_as(
-        "SELECT scoring_weights, schedule, notifications FROM sales_settings LIMIT 1",
-    )
-    .fetch_optional(db)
     .await
-    .ok()
-    .flatten();
-
-    Ok(match row {
-        Some((scoring_weights, schedule, notifications)) => serde_json::json!({
-            "scoringWeights": scoring_weights,
-            "schedule": schedule,
-            "notifications": notifications,
-        }),
-        None => serde_json::json!({
-            "scoringWeights": {},
-            "schedule": {},
-            "notifications": {},
-        }),
-    })
 }
 
-async fn metrics_payload(
-    db: &sqlx::PgPool,
-    autopilot: &AutopilotStateRow,
-    pending_count: usize,
-) -> Result<serde_json::Value, ApiError> {
-    let has_sales_leads = table_exists(db, "sales_leads").await;
-    let has_drip_campaigns = table_exists(db, "drip_campaigns").await;
-    let has_campaign_recipients = table_exists(db, "campaign_recipients").await;
-
-    let total_leads: i64 = if has_sales_leads {
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_leads")
-            .fetch_one(db)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let active_leads: i64 = if has_sales_leads {
-        sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM sales_leads WHERE status NOT IN ('converted', 'lost', 'unqualified')",
-        )
-        .fetch_one(db)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
-    let converted_leads: i64 = if has_sales_leads {
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_leads WHERE status = 'converted'")
-            .fetch_one(db)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let average_score: f64 = if has_sales_leads {
-        sqlx::query_scalar::<_, Option<f64>>("SELECT AVG(score)::float8 FROM sales_leads")
-            .fetch_one(db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
-    let active_campaigns: i64 = if has_drip_campaigns {
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM drip_campaigns WHERE status = 'active'")
-            .fetch_one(db)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let queued_recipients: i64 = if has_campaign_recipients {
-        sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM campaign_recipients WHERE status = 'queued'",
-        )
-        .fetch_one(db)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
-    let replied_recipients: i64 = if has_campaign_recipients {
-        sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM campaign_recipients WHERE replied_at IS NOT NULL",
-        )
-        .fetch_one(db)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let conversion_rate = if active_leads + converted_leads == 0 {
-        0.0
-    } else {
-        converted_leads as f64 / (active_leads + converted_leads) as f64
-    };
-
-    Ok(serde_json::json!({
-        "status": autopilot.status,
-        "safeMode": autopilot.safe_mode,
-        "pipeline": {
-            "totalLeads": total_leads,
-            "activeLeads": active_leads,
-            "convertedLeads": converted_leads,
-            "conversionRate": conversion_rate,
-            "averageScore": average_score,
-            "pendingApprovals": pending_count,
-        },
-        "campaigns": {
-            "active": active_campaigns,
-            "queuedRecipients": queued_recipients,
-            "repliedRecipients": replied_recipients,
-        },
-        "lastAction": autopilot.last_action,
-        "lastActionAt": autopilot.last_action_at.map(|ts| ts.to_rfc3339()),
-    }))
-}
-
-async fn outcomes_payload(db: &sqlx::PgPool) -> Result<serde_json::Value, ApiError> {
-    let recent_campaigns = if table_exists(db, "drip_campaigns").await {
-        let rows: Vec<(String, String, String, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT id, name, status, created_at FROM drip_campaigns ORDER BY created_at DESC LIMIT 10",
-        )
-        .fetch_all(db)
-        .await?;
-
-        rows.into_iter()
-            .map(|(id, name, status, created_at)| {
-                serde_json::json!({
-                    "id": id,
-                    "name": name,
-                    "status": status,
-                    "createdAt": created_at.to_rfc3339(),
-                })
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-
-    let converted_leads = if table_exists(db, "sales_leads").await {
-        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_leads WHERE status = 'converted'")
-            .fetch_one(db)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    Ok(serde_json::json!({
-        "recentCampaigns": recent_campaigns,
-        "convertedLeads": converted_leads,
-    }))
-}
-
-async fn get_autopilot(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Query(params): Query<AutopilotQuery>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn post_pause(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    let section = params.section.as_deref().unwrap_or("overview");
-    let allowed = [
-        "overview",
-        "metrics",
-        "baseline",
-        "candidates",
-        "outcomes",
-        "pending",
-        "actions",
-        "safety",
-    ];
-    if !allowed.contains(&section) {
-        return Err(ApiError::Validation(vec!["Invalid section".into()]));
-    }
-
-    let autopilot = load_autopilot_state(&state.db).await?;
-
-    // If the DB says autopilot is running but this process has no live worker
-    // (e.g. after a process restart), re-spawn it so cycles actually resume.
-    if autopilot.status == "running" {
-        ensure_autopilot_worker_running(state.clone(), auth.tenant_id.clone()).await;
-    }
-
-    // Pending candidates are scoped to the caller's tenant so they match the
-    // tenant-scoped approve/reject mutations.
-    let pending = pending_candidates(&state.db, &auth.tenant_id).await?;
-
-    let payload = match section {
-        "overview" => {
-            let metrics = metrics_payload(&state.db, &autopilot, pending.len()).await?;
-            serde_json::json!({
-                "status": autopilot.status,
-                "safeMode": autopilot.safe_mode,
-                "rules": autopilot.rules,
-                "metrics": metrics,
-                "recentCandidates": pending.iter().take(5).cloned().collect::<Vec<_>>(),
-                "lastAction": autopilot.last_action,
-                "lastActionAt": autopilot.last_action_at.map(|ts| ts.to_rfc3339()),
-            })
-        }
-        "metrics" => metrics_payload(&state.db, &autopilot, pending.len()).await?,
-        "baseline" => serde_json::json!({
-            "status": autopilot.status,
-            "safeMode": autopilot.safe_mode,
-            "rules": autopilot.rules,
-            "settings": load_sales_settings(&state.db).await?,
-        }),
-        "candidates" => serde_json::json!({
-            "status": autopilot.status,
-            "threshold": PENDING_APPROVAL_SCORE,
-            "candidates": pending,
-        }),
-        "outcomes" => outcomes_payload(&state.db).await?,
-        "pending" => serde_json::json!({
-            "status": autopilot.status,
-            "approvals": pending,
-        }),
-        "actions" => serde_json::json!({
-            "status": autopilot.status,
-            "safeMode": autopilot.safe_mode,
-            "available": ["start", "stop", "approve", "reject", "approve-all", "exit-safe-mode"],
-            "lastAction": autopilot.last_action,
-            "lastActionAt": autopilot.last_action_at.map(|ts| ts.to_rfc3339()),
-        }),
-        "safety" => serde_json::json!({
-            "status": autopilot.status,
-            "safeMode": autopilot.safe_mode,
-            "pendingApprovals": pending.len(),
-            "lastAction": autopilot.last_action,
-            "lastActionAt": autopilot.last_action_at.map(|ts| ts.to_rfc3339()),
-        }),
-        unknown => {
-            return Err(ApiError::BadRequest(format!(
-                "unknown autopilot section '{}'. Valid: overview, metrics, baseline, candidates, outcomes, pending, actions, safety",
-                unknown
-            )));
-        }
-    };
-
-    Ok(Json(payload))
+    proxy_control_mutation(
+        &state,
+        &auth,
+        reqwest::Method::POST,
+        "/control/pause",
+        json!({}),
+        "control_plane.autopilot.paused",
+    )
+    .await
 }
 
-fn extract_candidate_id(body: &AutopilotAction) -> Option<String> {
-    body.candidate_id
-        .clone()
-        .or_else(|| {
-            body.extra
-                .get("candidateId")
-                .and_then(|value| value.as_str())
-                .map(String::from)
-        })
-        .or_else(|| {
-            body.extra
-                .get("id")
-                .and_then(|value| value.as_str())
-                .map(String::from)
-        })
-}
-
-async fn post_autopilot(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(body): Json<AutopilotAction>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn post_resume(State(state): State<AppState>, auth: AuthUser) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    let allowed = [
-        "start",
-        "stop",
-        "approve",
-        "reject",
-        "approve-all",
-        "exit-safe-mode",
-    ];
-    if !allowed.contains(&body.action.as_str()) {
-        return Err(ApiError::Validation(vec!["Invalid action".into()]));
+    proxy_control_mutation(
+        &state,
+        &auth,
+        reqwest::Method::POST,
+        "/control/resume",
+        json!({}),
+        "control_plane.autopilot.resumed",
+    )
+    .await
+}
+
+async fn post_kill_switch(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<KillSwitchRequest>,
+) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+
+    proxy_control_mutation(
+        &state,
+        &auth,
+        reqwest::Method::POST,
+        "/control/kill-switch",
+        json!({ "engaged": body.engaged }),
+        "control_plane.autopilot.kill_switch_changed",
+    )
+    .await
+}
+
+async fn post_decision_review(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<DecisionReviewRequest>,
+) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+    validate_path_id(&id)?;
+
+    if !REVIEW_OUTCOMES.contains(&body.outcome.as_str()) {
+        return Err(ApiError::Validation(vec![
+            "outcome must be either 'approved' or 'rejected'".into(),
+        ]));
     }
 
-    let current = load_autopilot_state(&state.db).await?;
+    let mut payload = json!({ "outcome": body.outcome });
+    if let Some(note) = body.note.as_deref() {
+        payload["note"] = json!(note);
+    }
 
-    let payload = match body.action.as_str() {
-        "start" => {
-            let next_rules = body.extra.get("rules").cloned();
-            let next_safe_mode = body.extra.get("safeMode").and_then(|value| value.as_bool());
-            let updated = persist_autopilot_state(
-                &state.db,
-                &current,
-                "start",
-                Some("running"),
-                next_safe_mode,
-                next_rules,
-            )
-            .await?;
+    proxy_control_mutation(
+        &state,
+        &auth,
+        reqwest::Method::POST,
+        &format!("/control/decisions/{id}/review"),
+        payload,
+        "control_plane.autopilot.decision_reviewed",
+    )
+    .await
+}
 
-            // API-105: Pass tenant_id to scope the autopilot worker.
-            ensure_autopilot_worker_running(state.clone(), auth.tenant_id.clone()).await;
+async fn post_action_replay(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
+    validate_path_id(&id)?;
 
-            log_autopilot_audit(
-                &state.db,
-                Some(auth.tenant_id.as_str()),
-                auth.user_id.as_deref(),
-                "control_plane.autopilot.started",
-                json!({
-                    "safeMode": updated.safe_mode,
-                    "rules": updated.rules,
-                }),
-            )
-            .await;
-
-            serde_json::json!({
-                "success": true,
-                "status": updated.status,
-                "safeMode": updated.safe_mode,
-                "rules": updated.rules,
-            })
-        }
-        "stop" => {
-            let updated =
-                persist_autopilot_state(&state.db, &current, "stop", Some("stopped"), None, None)
-                    .await?;
-
-            stop_autopilot_worker().await;
-
-            log_autopilot_audit(
-                &state.db,
-                Some(auth.tenant_id.as_str()),
-                auth.user_id.as_deref(),
-                "control_plane.autopilot.stopped",
-                json!({ "previousStatus": current.status }),
-            )
-            .await;
-
-            serde_json::json!({
-                "success": true,
-                "status": updated.status,
-                "safeMode": updated.safe_mode,
-            })
-        }
-        "approve" => {
-            if current.safe_mode {
-                return Err(ApiError::Conflict("autopilot is in safe mode".into()));
-            }
-
-            let candidate_id = extract_candidate_id(&body)
-                .ok_or_else(|| ApiError::Validation(vec!["candidateId is required".into()]))?;
-            // API-101: Scope approve by tenant_id to prevent IDOR.
-            let result = sqlx::query(
-                "UPDATE sales_leads
-                 SET status = 'qualified', updated_at = NOW()
-                 WHERE id = $1 AND tenant_id = $3 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $2",
-            )
-            .bind(&candidate_id)
-            .bind(PENDING_APPROVAL_SCORE)
-            .bind(&auth.tenant_id)
-            .execute(&state.db)
-            .await?;
-
-            if result.rows_affected() == 0 {
-                return Err(ApiError::NotFound("candidate not found".into()));
-            }
-
-            persist_autopilot_state(&state.db, &current, "approve", None, None, None).await?;
-            log_autopilot_audit(
-                &state.db,
-                Some(auth.tenant_id.as_str()),
-                auth.user_id.as_deref(),
-                "control_plane.autopilot.approved",
-                json!({ "candidateId": candidate_id }),
-            )
-            .await;
-            serde_json::json!({
-                "success": true,
-                "candidateId": candidate_id,
-                "status": "qualified",
-            })
-        }
-        "reject" => {
-            let candidate_id = extract_candidate_id(&body)
-                .ok_or_else(|| ApiError::Validation(vec!["candidateId is required".into()]))?;
-            // API-101: Scope reject by tenant_id to prevent IDOR.
-            let result = sqlx::query(
-                "UPDATE sales_leads
-                 SET status = 'unqualified', updated_at = NOW()
-                 WHERE id = $1 AND tenant_id = $3 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $2",
-            )
-            .bind(&candidate_id)
-            .bind(PENDING_APPROVAL_SCORE)
-            .bind(&auth.tenant_id)
-            .execute(&state.db)
-            .await?;
-
-            if result.rows_affected() == 0 {
-                return Err(ApiError::NotFound("candidate not found".into()));
-            }
-
-            persist_autopilot_state(&state.db, &current, "reject", None, None, None).await?;
-            log_autopilot_audit(
-                &state.db,
-                Some(auth.tenant_id.as_str()),
-                auth.user_id.as_deref(),
-                "control_plane.autopilot.rejected",
-                json!({ "candidateId": candidate_id }),
-            )
-            .await;
-            serde_json::json!({
-                "success": true,
-                "candidateId": candidate_id,
-                "status": "unqualified",
-            })
-        }
-        "approve-all" => {
-            if current.safe_mode {
-                return Err(ApiError::Conflict("autopilot is in safe mode".into()));
-            }
-
-            // API-100: Scope approve-all by tenant_id to prevent cross-tenant modification.
-            let result = sqlx::query(
-                "UPDATE sales_leads
-                 SET status = 'qualified', updated_at = NOW()
-                 WHERE tenant_id = $2 AND status IN ('new', 'prospect') AND COALESCE(score, 0) >= $1",
-            )
-            .bind(PENDING_APPROVAL_SCORE)
-            .bind(&auth.tenant_id)
-            .execute(&state.db)
-            .await?;
-
-            persist_autopilot_state(&state.db, &current, "approve-all", None, None, None).await?;
-            log_autopilot_audit(
-                &state.db,
-                Some(auth.tenant_id.as_str()),
-                auth.user_id.as_deref(),
-                "control_plane.autopilot.approved_all",
-                json!({ "approved": result.rows_affected() }),
-            )
-            .await;
-            serde_json::json!({
-                "success": true,
-                "approved": result.rows_affected(),
-            })
-        }
-        "exit-safe-mode" => {
-            let updated = persist_autopilot_state(
-                &state.db,
-                &current,
-                "exit-safe-mode",
-                None,
-                Some(false),
-                None,
-            )
-            .await?;
-
-            log_autopilot_audit(
-                &state.db,
-                Some(auth.tenant_id.as_str()),
-                auth.user_id.as_deref(),
-                "control_plane.autopilot.exited_safe_mode",
-                json!({ "status": updated.status }),
-            )
-            .await;
-
-            serde_json::json!({
-                "success": true,
-                "status": updated.status,
-                "safeMode": updated.safe_mode,
-            })
-        }
-        // All actions are validated by pre-check above, this is unreachable
-        _ => return Err(ApiError::Internal("unreachable action".into())),
-    };
-
-    Ok(Json(payload))
+    proxy_control_mutation(
+        &state,
+        &auth,
+        reqwest::Method::POST,
+        &format!("/control/actions/{id}/replay"),
+        json!({}),
+        "control_plane.autopilot.action_replayed",
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::{test_config, test_state_over_with_config};
+    use axum::body::Body;
+    use axum::http::Request;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
 
+    /// A router exposing the handlers at their production paths over a real
+    /// (lazily connected) AppState. Routes are registered directly rather than
+    /// with `nest` because nesting strips the URI prefix, and the
+    /// control-plane static API key path guard inspects the full path.
+    async fn test_app_with_config(mut config: crate::config::Config) -> Router {
+        config.control_plane_api_key = Some("test-cp-key".into());
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy test pool");
+        let state = test_state_over_with_config(db, config).await;
+        Router::new()
+            .route("/v1/admin/autopilot/overview", get(get_overview))
+            .route("/v1/admin/autopilot/mode", post(post_mode))
+            .route(
+                "/v1/admin/autopilot/decisions/:id/review",
+                post(post_decision_review),
+            )
+            .with_state(state)
+    }
+
+    fn cp_request(method: &str, path: &str, body: Option<serde_json::Value>) -> Request<Body> {
+        let builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "localhost")
+            .header("x-api-key", "test-cp-key");
+        match body {
+            Some(payload) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        }
+    }
+
+    /// The task's core invariant: no worker, no local lead qualification, no
+    /// legacy candidate-id helper survives in this module. Fragments are
+    /// assembled at runtime so the test source itself does not contain the
+    /// forbidden strings it scans for.
     #[test]
-    fn extracts_candidate_id_from_legacy_payload() {
-        let body = AutopilotAction {
-            action: "approve".into(),
-            candidate_id: None,
-            extra: serde_json::json!({ "id": "lead_123" }),
-        };
-
-        assert_eq!(extract_candidate_id(&body).as_deref(), Some("lead_123"));
+    fn legacy_local_autopilot_brain_is_gone() {
+        let source = include_str!("autopilot.rs");
+        let forbidden = [
+            ["PENDING", "APPROVAL", "SCORE"].join("_"),
+            ["AUTOPILOT", "POLL", "INTERVAL", "SECS"].join("_"),
+            ["process", "autopilot", "cycle"].join("_"),
+            ["run", "autopilot", "worker"].join("_"),
+            ["ensure", "autopilot", "worker", "running"].join("_"),
+            ["stop", "autopilot", "worker"].join("_"),
+            ["ensure", "autopilot", "state", "table"].join("_"),
+            ["extract", "candidate", "id"].join("_"),
+            ["tokio", "::", "spawn"].concat(),
+            ["sales", "autopilot", "state"].join("_"),
+            ["UPDATE", "sales", "leads"].join(" "),
+            ["drip", "campaigns"].join("_"),
+        ];
+        for fragment in forbidden {
+            assert!(
+                !source.contains(&fragment),
+                "autopilot.rs must not contain the removed local-brain artifact `{fragment}`"
+            );
+        }
     }
 
     #[test]
-    fn build_pending_candidates_sql_scopes_non_system_tenants() {
-        let sql = build_pending_candidates_sql(true);
-
-        assert!(sql.contains("WHERE tenant_id = $1"));
-        assert!(sql.contains("COALESCE(score, 0) >= $2"));
-    }
-
-    #[test]
-    fn max_approvals_per_cycle_honors_rules_override() {
-        let rules = serde_json::json!({ "maxApprovalsPerCycle": 12 });
-
-        assert_eq!(max_approvals_per_cycle(&rules), 12);
-        assert_eq!(max_approvals_per_cycle(&serde_json::json!({})), 5);
+    fn autonomy_modes_match_the_canonical_check_constraint() {
         assert_eq!(
-            max_approvals_per_cycle(&serde_json::json!({ "maxApprovalsPerCycle": 100 })),
-            25
+            AUTONOMY_MODES,
+            [
+                "disabled",
+                "shadow",
+                "assisted",
+                "approval_required",
+                "autonomous_guarded"
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn overview_fails_closed_when_the_service_is_unconfigured() {
+        let mut config = test_config();
+        config.sales_autopilot_base_url = "  ".into();
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(cp_request("GET", "/v1/admin/autopilot/overview", None))
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "body: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    #[tokio::test]
+    async fn mutating_control_fails_closed_when_the_service_is_unconfigured() {
+        let mut config = test_config();
+        config.sales_autopilot_base_url = String::new();
+        let app = test_app_with_config(config).await;
+
+        let response = app
+            .oneshot(cp_request(
+                "POST",
+                "/v1/admin/autopilot/mode",
+                Some(json!({ "mode": "shadow" })),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn invalid_mode_is_rejected_before_any_upstream_call() {
+        let app = test_app_with_config(test_config()).await;
+
+        let response = app
+            .oneshot(cp_request(
+                "POST",
+                "/v1/admin/autopilot/mode",
+                Some(json!({ "mode": "full_send" })),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invalid_review_outcome_is_rejected() {
+        let app = test_app_with_config(test_config()).await;
+
+        let response = app
+            .oneshot(cp_request(
+                "POST",
+                "/v1/admin/autopilot/decisions/11111111-1111-1111-1111-111111111111/review",
+                Some(json!({ "outcome": "maybe" })),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

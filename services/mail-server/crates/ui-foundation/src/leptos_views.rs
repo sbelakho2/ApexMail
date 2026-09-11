@@ -9,7 +9,10 @@
 use crate::icons::{render_icon, IconRenderOptions};
 use crate::primitives::*;
 use crate::shell::*;
-use crate::view_data::{render_data_cell, ListPageData};
+use crate::view_data::{
+    render_data_cell, ListPageData, SalesAutonomyData, SalesDeadLetterData, SalesDecisionData,
+    SalesOverviewData, SalesPageData,
+};
 
 fn ui_icon(name: &str, class_name: &str) -> String {
     render_icon(
@@ -66,6 +69,14 @@ pub fn control_plane_root_layout(child_html: &str) -> String {
     )
 }
 
+/// Placeholder rendered into the sidebar's `data-user-role` attribute by
+/// layout renders that do not know the authenticated CP role yet. The
+/// api-server knows the verified CP claim role and substitutes it with
+/// [`crate::shell::apply_control_plane_role`]; a render with no session
+/// must not claim a role, so the placeholder is deliberately neutral and
+/// documented here instead of being a bare literal.
+pub const CONTROL_PLANE_ROLE_PLACEHOLDER: &str = "admin";
+
 /// Shared control-plane application shell for authenticated admin pages.
 pub fn control_plane_app_layout(child_html: &str) -> String {
     control_plane_app_layout_with_title(
@@ -80,6 +91,11 @@ pub fn control_plane_app_layout(child_html: &str) -> String {
 /// Shared control-plane application shell with route-specific mobile context.
 /// `csrf_token` is embedded in the shell's sign-out form (native POST —
 /// no JavaScript anywhere in the console).
+///
+/// The role renders the [`CONTROL_PLANE_ROLE_PLACEHOLDER`]; callers that
+/// already hold the authenticated CP role use
+/// [`control_plane_app_layout_with_role`] so the real role is emitted
+/// directly (the substitution path then becomes a no-op).
 pub fn control_plane_app_layout_with_title(
     child_html: &str,
     page_title: &str,
@@ -87,9 +103,37 @@ pub fn control_plane_app_layout_with_title(
     current_path: &str,
     csrf_token: &str,
 ) -> String {
+    control_plane_app_layout_with_role(
+        child_html,
+        page_title,
+        page_description,
+        current_path,
+        csrf_token,
+        CONTROL_PLANE_ROLE_PLACEHOLDER,
+    )
+}
+
+/// Shared control-plane application shell that emits the AUTHENTICATED
+/// operator role (owner/admin/operator/…) into the sidebar's
+/// `data-user-role` attribute. The role is HTML-escaped like every other
+/// shell input; an empty role falls back to
+/// [`CONTROL_PLANE_ROLE_PLACEHOLDER`] so the api-server's substitution
+/// contract stays intact.
+pub fn control_plane_app_layout_with_role(
+    child_html: &str,
+    page_title: &str,
+    page_description: &str,
+    current_path: &str,
+    csrf_token: &str,
+    user_role: &str,
+) -> String {
     let shell = ControlPlaneShell {
         mobile_menu_open: false,
-        user_role: "admin",
+        user_role: if user_role.is_empty() {
+            CONTROL_PLANE_ROLE_PLACEHOLDER
+        } else {
+            user_role
+        },
         page_title,
         page_description,
         banners: Vec::new(),
@@ -1454,31 +1498,31 @@ pub fn control_plane_home_page() -> String {
                 <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-primary">Operator Command Center</p>
                 <h1 class="mt-3 text-3xl font-bold tracking-tight text-surface-950 sm:text-4xl">Control Plane</h1>
                 <p class="mt-4 max-w-3xl text-sm leading-6 text-surface-600">ApexMail administration and monitoring across trust evidence, tenant readiness, incident response, and expansion pipeline. This command deck is tuned for fast escalation, not static reporting.</p>
-                <p class="mt-2"><span data-sample-data class="inline-flex items-center rounded-sm border border-surface-300 bg-surface-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-600">Sample data</span></p>
+                <p class="mt-3 max-w-3xl text-xs leading-5 text-surface-500">Every figure on this page is read from the database at request time. Counts live on the pages below rather than being summarised here, so nothing on this screen can drift from the underlying record.</p>
                 <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                    <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Tenants armed</p>
-                        <p class="mt-2 text-2xl font-bold tracking-tight text-surface-950">12</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">9 production, 3 launch window</p>
-                    </article>
-                    <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Live incidents</p>
-                        <p class="mt-2 text-2xl font-bold tracking-tight text-warning-700">1</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">Queue latency breach in eu-central</p>
-                    </article>
-                    <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Approvals pending</p>
-                        <p class="mt-2 text-2xl font-bold tracking-tight text-surface-950">7</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">Security + sales handoff backlog</p>
-                    </article>
-                    <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Expansion ARR</p>
-                        <p class="mt-2 text-2xl font-bold tracking-tight text-success-700">$196k</p>
-                        <p class="mt-1 text-xs text-surface-500 break-words">Weighted by confidence score</p>
-                    </article>
+                    <a href="/tenants" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Tenant readiness</p>
+                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Tenants and provisioning state</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">Live tenant counts, plans, and readiness.</p>
+                    </a>
+                    <a href="/alerts" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Incident response</p>
+                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Alert rail</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">Active system alerts with acknowledgement.</p>
+                    </a>
+                    <a href="/sales" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Sales autopilot</p>
+                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Autonomy and exceptions</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">What the engine decided, and what needs a human.</p>
+                    </a>
+                    <a href="/analytics" class="rounded-sm border border-surface-200 bg-surface-50 p-4 transition-colors hover:border-surface-950">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Delivery and revenue</p>
+                        <p class="mt-2 text-sm font-bold tracking-tight text-surface-950">Analytics</p>
+                        <p class="mt-1 text-xs text-surface-500 break-words">Distinct-message delivery and revenue metrics.</p>
+                    </a>
                 </div>
                 <div class="mt-6 flex flex-wrap gap-3">
-                    <a href="/sales" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-surface-950 px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-surface-800">Open Sales Console</a>
+                    <a href="/sales" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-surface-950 px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-surface-800">Sales Autopilot</a>
                     <a href="/alerts" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-5 py-3 text-xs font-bold text-white transition-colors hover:bg-brand-700">Open Incident Rail</a>
                     <a href="/audit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950">Review Trust Evidence</a>
                     <a href="mailto:security@apexmail.ee" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-5 py-3 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950">Contact Security</a>
@@ -1487,22 +1531,23 @@ pub fn control_plane_home_page() -> String {
             <aside class="border-t border-surface-200 bg-surface-950 px-6 py-6 text-white lg:border-l lg:border-t-0 md:px-8 md:py-8">
                 <p class="text-[11px] font-bold uppercase tracking-[0.28em] text-white/60">Incident Rail</p>
                 <h2 class="mt-3 text-2xl font-bold tracking-tight">Active Escalations</h2>
+                <p class="mt-3 text-sm leading-6 text-white/70">Escalations are read from the alert store, not summarised here. Open the rail to see the current incidents, their severity, and their acknowledgement state.</p>
                 <div class="mt-5 space-y-3 text-sm">
-                    <article class="rounded-sm border border-warning-300/35 bg-warning-300/10 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-warning-100">SEV-2 · Queue pressure</p>
-                        <p class="mt-2 text-sm font-bold text-white">eu-central outbound queue exceeded target by 19% over 12m</p>
-                        <p class="mt-1 text-xs text-white/70">Owner: Infra desk · ETA containment: 14m</p>
-                    </article>
-                    <article class="rounded-sm border border-white/15 bg-black/15 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Trust Desk</p>
-                        <p class="mt-2 text-sm font-bold text-white">Two enterprise SIG packs awaiting legal signoff</p>
-                        <p class="mt-1 text-xs text-white/70">Next gate: DPA revision package</p>
-                    </article>
-                    <article class="rounded-sm border border-white/15 bg-black/15 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Revenue Desk</p>
-                        <p class="mt-2 text-sm font-bold text-white">Three at-risk expansions require exec outreach today</p>
-                        <p class="mt-1 text-xs text-white/70">Pipeline confidence dip: -6.2%</p>
-                    </article>
+                    <a href="/alerts" class="block rounded-sm border border-white/15 bg-black/15 p-4 transition-colors hover:border-white/40">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Incident rail</p>
+                        <p class="mt-2 text-sm font-bold text-white">Open active alerts</p>
+                        <p class="mt-1 text-xs text-white/70">Live severity, acknowledgement, and routing.</p>
+                    </a>
+                    <a href="/infrastructure/queues" class="block rounded-sm border border-white/15 bg-black/15 p-4 transition-colors hover:border-white/40">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Delivery health</p>
+                        <p class="mt-2 text-sm font-bold text-white">Queue depth and backlog health</p>
+                        <p class="mt-1 text-xs text-white/70">Per-queue depth, age, and health classification.</p>
+                    </a>
+                    <a href="/audit" class="block rounded-sm border border-white/15 bg-black/15 p-4 transition-colors hover:border-white/40">
+                        <p class="text-[10px] font-bold uppercase tracking-[0.2em] text-white/55">Evidence</p>
+                        <p class="mt-2 text-sm font-bold text-white">Audit trail</p>
+                        <p class="mt-1 text-xs text-white/70">Who changed what, and when.</p>
+                    </a>
                 </div>
             </aside>
         </div>
@@ -1549,7 +1594,7 @@ pub fn control_plane_home_page() -> String {
                 <a href="/alerts/rules" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Alert Rulebook</a>
                 <a href="/settings/security" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Security Policy</a>
                 <a href="/audit" class="rounded-sm border border-surface-300 bg-surface-50 px-4 py-3 text-surface-900 transition-colors hover:border-surface-950">Audit Stream</a>
-                <a href="/sales" class="rounded-sm border border-primary bg-primary px-4 py-3 text-white transition-colors hover:bg-brand-700">Sales Cockpit</a>
+                <a href="/sales" class="rounded-sm border border-primary bg-primary px-4 py-3 text-white transition-colors hover:bg-brand-700">Sales Autopilot</a>
             </div>
         </article>
     </section>
@@ -1616,231 +1661,793 @@ pub fn control_plane_audit_page() -> String {
     )
 }
 
-/// Rust SSR sales console shell for the control-plane migration.
+// ─── Sales autopilot control surface ────────────────────────
+//
+// Audit §30: this surface answers one question — "Is the machine generating
+// qualified pipeline profitably and safely right now?" Every figure is a
+// value from the sales-autopilot control data; a gap renders as an explicit
+// unavailable/empty state, never as a placeholder number. Zero JavaScript:
+// the only mutations are plain server-rendered form posts to the SSR
+// handlers that actually exist.
+
+/// Canonical meaning of each of the five autonomy modes, mirroring the
+/// engine's `mode_description` table. Used only when the control API omits
+/// `modeDescription`; the API value always wins.
+fn autonomy_mode_meaning(mode: &str) -> Option<&'static str> {
+    match mode {
+        "disabled" => Some("The engine does nothing: no thinking, no generation, no sending."),
+        "shadow" => Some(
+            "The engine runs the whole brain and records what it would have done, but sends nothing.",
+        ),
+        "assisted" => Some("The engine plans and drafts; an operator sends."),
+        "approval_required" => Some("The engine executes only decisions an operator approved."),
+        "autonomous_guarded" => Some(
+            "The engine executes automatically when every policy and confidence constraint passes.",
+        ),
+        _ => None,
+    }
+}
+
+/// Dark-panel section wrapper shared by every sales section.
+fn sales_panel(id: &str, eyebrow: &str, title: &str, body: &str) -> String {
+    format!(
+        r#"<section id="{id}" class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6"><p class="text-xs uppercase tracking-[0.28em] text-surface-500">{eyebrow}</p><h2 class="mt-2 text-2xl font-bold tracking-tight text-white break-words">{title}</h2>{body}</section>"#,
+        id = id,
+        eyebrow = html_escape(eyebrow),
+        title = html_escape(title),
+        body = body,
+    )
+}
+
+/// Honest empty/unavailable statement — never a fake row.
+fn sales_note(text: &str) -> String {
+    format!(
+        r#"<p class="mt-5 rounded-sm border border-white/10 bg-black/20 p-4 text-sm leading-6 text-surface-300">{}</p>"#,
+        html_escape(text)
+    )
+}
+
+/// Warning-toned statement: an engaged kill switch or a data-availability gap.
+fn sales_warning_note(text: &str) -> String {
+    format!(
+        r#"<p class="mt-5 rounded-sm border border-warning-300/35 bg-warning-300/10 p-4 text-sm leading-6 text-warning-100">{}</p>"#,
+        html_escape(text)
+    )
+}
+
+/// One hero KPI tile (same classes as the previous revision).
+fn sales_kpi_tile(label: &str, value: &str, hint: &str) -> String {
+    format!(
+        r#"<article class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">{label}</p><p class="mt-2 text-2xl font-bold tracking-tight text-white break-words">{value}</p><p class="mt-1 text-xs text-surface-500 break-words">{hint}</p></article>"#,
+        label = html_escape(label),
+        value = html_escape(value),
+        hint = html_escape(hint),
+    )
+}
+
+/// `12345` → `12,345`.
+fn group_thousands(digits: &str) -> String {
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    let length = digits.len();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (length - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// EUR formatting for control-API values: grouped whole euros, cents only
+/// when non-zero. A non-finite value renders the explicit "unavailable"
+/// text, never a made-up number.
+fn format_eur_amount(value: f64) -> String {
+    if !value.is_finite() {
+        return "unavailable".to_string();
+    }
+    let total_cents = (value.abs() * 100.0).round() as u64;
+    let whole = group_thousands(&(total_cents / 100).to_string());
+    let cents = total_cents % 100;
+    let sign = if value < 0.0 { "-" } else { "" };
+    if cents == 0 {
+        format!("{sign}€{whole}")
+    } else {
+        format!("{sign}€{whole}.{cents:02}")
+    }
+}
+
+/// Confidence from the control API is a 0..=1 fraction; `None` or a
+/// non-finite value renders "unavailable" — never a fabricated zero percent.
+fn format_confidence(confidence: Option<f64>) -> String {
+    match confidence {
+        Some(value) if value.is_finite() => {
+            let percent = (value.clamp(0.0, 1.0) * 100.0).round() as i64;
+            format!("{percent}%")
+        }
+        _ => "unavailable".to_string(),
+    }
+}
+
+/// Extract `HH:MM:SS` from an RFC 3339 timestamp.
+fn rfc3339_clock(value: &str) -> Option<&str> {
+    let (_, time) = value.split_once('T')?;
+    let clock = time.get(..8)?;
+    (clock.as_bytes().get(2) == Some(&b':') && clock.as_bytes().get(5) == Some(&b':'))
+        .then_some(clock)
+}
+
+/// Exact UTC rendering of a timestamp (`2026-09-11 13:42:11 UTC`). The
+/// console never converts to a local zone it cannot verify.
+fn rfc3339_utc_label(value: &str) -> Option<String> {
+    let (date, _) = value.split_once('T')?;
+    Some(format!("{date} {} UTC", rfc3339_clock(value)?))
+}
+
+/// Trimmed, escaped data value — or the explicit absence marker.
+fn sales_value_or(value: Option<&str>, fallback: &str) -> String {
+    match value {
+        Some(text) if !text.trim().is_empty() => html_escape(text.trim()),
+        _ => fallback.to_string(),
+    }
+}
+
+/// Decision action verb: data, uppercased. An empty action is explicitly
+/// unknown rather than silently blank. The vocabulary is ENRICH / CONTACT /
+/// SKIP — the engine's own decision verbs.
+fn sales_decision_action(decision: &SalesDecisionData) -> String {
+    if decision.action.trim().is_empty() {
+        "UNKNOWN".to_string()
+    } else {
+        html_escape(decision.action.trim()).to_uppercase()
+    }
+}
+
+/// One row of the live autonomous decision stream (audit §31):
+/// `13:42:11  ACME GmbH  CONTACT → CTO  Confidence 91%  Reason: …  …`.
+/// Every segment is either a data value or an explicit absence marker.
+fn sales_decision_stream_row(decision: &SalesDecisionData) -> String {
+    let time = match decision.created_at.as_deref().and_then(rfc3339_clock) {
+        Some(clock) => format!(
+            r#"<time datetime="{}" class="font-mono text-surface-500">{clock}</time>"#,
+            escape_attribute_value(decision.created_at.as_deref().unwrap_or_default()),
+        ),
+        None => r#"<span class="text-surface-500">time unavailable</span>"#.to_string(),
+    };
+    let scheduled = decision
+        .execute_after
+        .as_deref()
+        .and_then(rfc3339_clock)
+        .map(|clock| format!(r#"<span>Scheduled: {} UTC</span>"#, &clock[..5]))
+        .unwrap_or_default();
+    let expected = match decision.expected_value_eur {
+        Some(value) => format!(
+            r#"<span>Expected value: {}</span>"#,
+            format_eur_amount(value)
+        ),
+        None => r#"<span>Expected value: not scored</span>"#.to_string(),
+    };
+    let legal = if decision.blocked {
+        "blocked"
+    } else {
+        "allowed"
+    };
+    let blocked_marker = if decision.blocked {
+        r#"<span class="font-bold text-warning-200">BLOCKED</span>"#
+    } else {
+        ""
+    };
+    let mut reasons: Vec<String> = Vec::new();
+    if !decision.rationale.trim().is_empty() {
+        reasons.push(html_escape(decision.rationale.trim()));
+    }
+    if decision.blocked {
+        for reason in &decision.block_reasons {
+            if !reason.trim().is_empty() {
+                reasons.push(html_escape(reason.trim()));
+            }
+        }
+    }
+    let reason_line = if reasons.is_empty() {
+        r#"<p class="mt-1 text-xs leading-5 text-surface-400">Reason: no rationale recorded.</p>"#
+            .to_string()
+    } else {
+        format!(
+            r#"<p class="mt-1 text-xs leading-5 text-surface-300">Reason: {}</p>"#,
+            reasons.join(" · ")
+        )
+    };
+    format!(
+        r#"<li class="rounded-sm border border-white/10 bg-black/20 p-3"><p class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-surface-200">{time}<span class="font-bold text-white">{account}</span><span class="font-mono font-bold text-brand-200">{action}</span><span class="text-surface-400">&rarr; {contact}</span><span>Confidence {confidence}</span><span>Variant: {variant}</span><span>Sender: {sender}</span><span>Legal policy: {legal}</span>{expected}{scheduled}{blocked_marker}</p>{reason_line}</li>"#,
+        time = time,
+        account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
+        action = sales_decision_action(decision),
+        contact = sales_value_or(decision.contact_id.as_deref(), "unidentified contact"),
+        confidence = format_confidence(decision.confidence),
+        variant = sales_value_or(decision.selected_variant.as_deref(), "not selected"),
+        sender = sales_value_or(decision.selected_sender.as_deref(), "not selected"),
+        legal = legal,
+        expected = expected,
+        scheduled = scheduled,
+        blocked_marker = blocked_marker,
+        reason_line = reason_line,
+    )
+}
+
+/// Decisions ordered newest first. RFC 3339 UTC timestamps sort
+/// lexicographically; a missing timestamp sorts last. The stream/table
+/// contract is chronological regardless of the order the loader passes.
+fn sales_decisions_newest_first(decisions: &[SalesDecisionData]) -> Vec<&SalesDecisionData> {
+    let mut ordered: Vec<&SalesDecisionData> = decisions.iter().collect();
+    ordered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    ordered
+}
+
+/// One row of the decisions table (action, confidence, expected value,
+/// selected variant/sender, rationale).
+fn sales_decision_table_row(decision: &SalesDecisionData) -> String {
+    let expected = match decision.expected_value_eur {
+        Some(value) => format_eur_amount(value),
+        None => "not scored".to_string(),
+    };
+    let rationale = if decision.rationale.trim().is_empty() {
+        "No rationale recorded.".to_string()
+    } else {
+        html_escape(decision.rationale.trim())
+    };
+    let offer = sales_value_or(decision.selected_offer.as_deref(), "none");
+    let sequence = sales_value_or(decision.selected_sequence.as_deref(), "none");
+    format!(
+        r#"<tr class="align-top"><td class="px-4 py-3 font-mono text-xs font-bold text-surface-100">{action}</td><td class="px-4 py-3 text-xs text-surface-300">{account}</td><td class="px-4 py-3 text-xs text-surface-200">{confidence}</td><td class="px-4 py-3 text-xs text-surface-200">{expected}</td><td class="px-4 py-3 text-xs text-surface-300">{variant}</td><td class="px-4 py-3 text-xs text-surface-300">{sender}</td><td class="px-4 py-3 text-xs text-surface-400">{offer} / {sequence}</td><td class="px-4 py-3 text-xs leading-5 text-surface-400">{rationale}</td></tr>"#,
+        action = sales_decision_action(decision),
+        account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
+        confidence = format_confidence(decision.confidence),
+        expected = expected,
+        variant = sales_value_or(decision.selected_variant.as_deref(), "not selected"),
+        sender = sales_value_or(decision.selected_sender.as_deref(), "not selected"),
+        offer = offer,
+        sequence = sequence,
+        rationale = rationale,
+    )
+}
+
+/// One exception item. Blocked decisions list EVERY hard-gate reason
+/// verbatim; pending-approval decisions render their rationale.
+fn sales_exception_item(decision: &SalesDecisionData) -> String {
+    let reasons = if decision.blocked && !decision.block_reasons.is_empty() {
+        let items = decision
+            .block_reasons
+            .iter()
+            .filter(|reason| !reason.trim().is_empty())
+            .map(|reason| format!("<li>{}</li>", html_escape(reason.trim())))
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            r#"<ul class="mt-3 list-disc space-y-1 pl-5 text-xs leading-5 text-warning-100">{items}</ul>"#
+        )
+    } else {
+        String::new()
+    };
+    let (tone, badge) = if decision.blocked {
+        (
+            "border-warning-300/35 bg-warning-300/10",
+            "text-warning-100",
+        )
+    } else {
+        ("border-white/10 bg-black/20", "text-surface-400")
+    };
+    let heading = if decision.blocked {
+        "Blocked decision"
+    } else {
+        "Pending operator approval"
+    };
+    let rationale = if decision.rationale.trim().is_empty() {
+        "No rationale recorded.".to_string()
+    } else {
+        html_escape(decision.rationale.trim())
+    };
+    format!(
+        r#"<li class="rounded-sm border {tone} p-4"><p class="text-[10px] font-bold uppercase tracking-[0.2em] {badge}">{heading} · {action}</p><p class="mt-2 text-sm font-bold text-white">{account} &rarr; {contact}</p>{reasons}<p class="mt-2 text-xs leading-5 text-surface-300">Rationale: {rationale}</p></li>"#,
+        tone = tone,
+        badge = badge,
+        heading = heading,
+        action = sales_decision_action(decision),
+        account = sales_value_or(decision.account_id.as_deref(), "unidentified account"),
+        contact = sales_value_or(decision.contact_id.as_deref(), "unidentified contact"),
+        reasons = reasons,
+        rationale = rationale,
+    )
+}
+
+/// Compact dead-letter row (Exceptions section).
+fn sales_dead_letter_summary(letter: &SalesDeadLetterData) -> String {
+    format!(
+        r#"<li class="rounded-sm border border-white/10 bg-black/20 p-4"><p class="font-mono text-xs text-surface-200">{id}</p><p class="mt-1 text-xs text-surface-300">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-300">Last error: {last_error}</p></li>"#,
+        id = html_escape(&letter.id),
+        action_type = html_escape(&letter.action_type),
+        entity_type = html_escape(&letter.entity_type),
+        entity_id = html_escape(&letter.entity_id),
+        attempt = letter.attempt,
+        max_attempts = letter.max_attempts,
+        last_error = sales_value_or(letter.last_error.as_deref(), "no error recorded"),
+    )
+}
+
+/// Dead-letter row with the replay control (Actions section). Replay is a
+/// JSON mutation with no SSR form handler — the control is read-only and
+/// says why, instead of posting a form the server cannot accept.
+fn sales_dead_letter_replay_control(letter: &SalesDeadLetterData) -> String {
+    let due = letter
+        .due_at
+        .as_deref()
+        .and_then(rfc3339_utc_label)
+        .unwrap_or_else(|| "not recorded".to_string());
+    format!(
+        r#"<li class="rounded-sm border border-white/10 bg-black/20 p-4"><p class="font-mono text-xs text-surface-200">{id}</p><p class="mt-1 text-xs text-surface-300">{action_type} · {entity_type} {entity_id} · attempt {attempt} of {max_attempts}</p><p class="mt-1 text-xs text-surface-300">Last error: {last_error}</p><p class="mt-1 text-xs text-surface-500">Due: {due}</p><div class="mt-3 flex flex-wrap items-center gap-3"><button type="button" disabled aria-disabled="true" class="inline-flex min-h-[44px] items-center justify-center rounded-sm border border-white/10 bg-black/25 px-4 py-2 text-xs font-bold text-surface-500 opacity-60">Replay</button><p class="text-xs leading-5 text-surface-400">Read-only: replay is the JSON mutation <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">POST /v1/admin/autopilot/actions/:id/replay</code> and no SSR form handler is mounted for it, so this zero-JavaScript console cannot post it.</p></div></li>"#,
+        id = html_escape(&letter.id),
+        action_type = html_escape(&letter.action_type),
+        entity_type = html_escape(&letter.entity_type),
+        entity_id = html_escape(&letter.entity_id),
+        attempt = letter.attempt,
+        max_attempts = letter.max_attempts,
+        last_error = sales_value_or(letter.last_error.as_deref(), "no error recorded"),
+        due = html_escape(&due),
+    )
+}
+
+/// Hero: the page question, the four headline figures, and the session card.
+fn sales_hero(data: &SalesPageData) -> String {
+    let overview = data.overview.as_ref();
+    let (revenue_value, revenue_hint) = match overview {
+        Some(overview) if !overview.revenue.is_empty() => (
+            format_eur_amount(overview.revenue.iter().map(|row| row.eur).sum()),
+            "Sum of revenue outcomes in the last 30 days.",
+        ),
+        Some(_) => (
+            "No revenue recorded".to_string(),
+            "No revenue outcomes in the last 30 days.",
+        ),
+        None => (
+            "Unavailable".to_string(),
+            "The sales-autopilot control API did not answer.",
+        ),
+    };
+    let (meetings_value, meetings_hint) = match overview {
+        Some(overview) => (
+            overview.meetings_booked.to_string(),
+            "Meetings booked in the last 30 days.",
+        ),
+        None => (
+            "Unavailable".to_string(),
+            "The sales-autopilot control API did not answer.",
+        ),
+    };
+    let (decisions_value, decisions_hint) = match overview {
+        Some(overview) => (
+            overview.decisions_last_24h.to_string(),
+            "Decisions recorded in the last 24 hours.",
+        ),
+        None => (
+            "Unavailable".to_string(),
+            "The sales-autopilot control API did not answer.",
+        ),
+    };
+    let (blocked_value, blocked_hint) = match overview {
+        Some(overview) => (
+            overview.blocked_last_24h.to_string(),
+            "Hard-gate refusals in the last 24 hours.",
+        ),
+        None => (
+            "Unavailable".to_string(),
+            "The sales-autopilot control API did not answer.",
+        ),
+    };
+    let gap_banner = if overview.is_none() {
+        sales_warning_note(
+            "Live overview data is unavailable: the sales-autopilot control API did not answer. Each section below states its own gap; nothing is estimated.",
+        )
+    } else {
+        String::new()
+    };
+    let session = r#"<section class="rounded-sm border border-white/10 bg-surface-950 p-5"><p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p><h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2><p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p><p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p></section>"#;
+    format!(
+        r#"<header class="apex-cp-dark-hero rounded-sm border border-white/10 bg-black/25 p-6 shadow-premium-black/30"><div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]"><div><p class="text-[11px] font-bold uppercase tracking-[0.32em] text-brand-400">Autonomous Sales</p><h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Sales Autopilot</h1><p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Is the machine generating qualified pipeline profitably and safely right now? This surface reports the live sales-autopilot control state — revenue outcomes, autonomy, decisions, exceptions, queue health, enrollments, and the hard compliance gate. Every value is served by the engine; when the control API does not answer, the section says so instead of estimating. Zero JavaScript: every mutating form is a plain server-rendered post.</p>{gap_banner}<div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">{revenue_tile}{meetings_tile}{decisions_tile}{blocked_tile}</div></div>{session}</div></header>"#,
+        gap_banner = gap_banner,
+        revenue_tile = sales_kpi_tile("Revenue (30d)", &revenue_value, revenue_hint),
+        meetings_tile = sales_kpi_tile("Meetings booked (30d)", &meetings_value, meetings_hint),
+        decisions_tile = sales_kpi_tile("Decisions (24h)", &decisions_value, decisions_hint),
+        blocked_tile = sales_kpi_tile("Blocked by policy (24h)", &blocked_value, blocked_hint),
+        session = session,
+    )
+}
+
+/// Revenue: outcomes30d.revenueEur, meetings booked, decisions in the window.
+fn sales_revenue_section(overview: Option<&SalesOverviewData>) -> String {
+    let body = match overview {
+        None => sales_note(
+            "Revenue is unavailable: the sales-autopilot control API did not answer. No figure is estimated.",
+        ),
+        Some(overview) => {
+            let window = format!(
+                r#"<p class="mt-4 text-sm leading-6 text-surface-300">Meetings booked (30d): <span class="font-bold text-white">{meetings}</span> · Decisions in the window (24h): <span class="font-bold text-white">{decisions}</span> · Blocked by a hard gate (24h): <span class="font-bold text-white">{blocked}</span></p>"#,
+                meetings = overview.meetings_booked,
+                decisions = overview.decisions_last_24h,
+                blocked = overview.blocked_last_24h,
+            );
+            if overview.revenue.is_empty() {
+                format!(
+                    "{}{}",
+                    sales_note(
+                        "No revenue outcomes recorded in the last 30 days — the outcomes feed is empty, not zero-filled.",
+                    ),
+                    window,
+                )
+            } else {
+                let rows = overview
+                    .revenue
+                    .iter()
+                    .map(|row| {
+                        format!(
+                            r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-200">{outcome}</td><td class="px-4 py-3 text-xs font-bold text-white">{eur}</td></tr>"#,
+                            outcome = html_escape(&row.outcome),
+                            eur = format_eur_amount(row.eur),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                let total = format_eur_amount(overview.revenue.iter().map(|row| row.eur).sum());
+                format!(
+                    r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Revenue outcomes for the last 30 days</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">Outcome</th><th scope="col" class="px-4 py-3 font-medium">Revenue (EUR)</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}<tr class="bg-black/20"><td class="px-4 py-3 text-xs font-bold text-white">Total</td><td class="px-4 py-3 text-xs font-bold text-white">{total}</td></tr></tbody></table></div>{window}"#,
+                    rows = rows,
+                    total = total,
+                    window = window,
+                )
+            }
+        }
+    };
+    sales_panel("sales-revenue", "Revenue", "Revenue and pipeline", &body)
+}
+
+/// The autonomy body: current mode + meaning, kill switch behaviour,
+/// brain/execution flags, and the last steering action.
+fn sales_autonomy_body(autonomy: &SalesAutonomyData) -> String {
+    let mode = sales_value_or(Some(autonomy.mode.as_str()), "unknown");
+    let meaning = if !autonomy.mode_description.trim().is_empty() {
+        html_escape(autonomy.mode_description.trim())
+    } else if let Some(canonical) = autonomy_mode_meaning(autonomy.mode.trim()) {
+        canonical.to_string()
+    } else {
+        format!("No meaning is published for mode '{mode}'.")
+    };
+    let kill_switch = if autonomy.kill_switch {
+        sales_warning_note(
+            "Kill switch engaged — outbound is halted: no new outbound action will be queued or executed. Inbound reply processing continues while the kill switch is engaged.",
+        )
+    } else {
+        sales_note(
+            "Kill switch released — outbound execution follows the current autonomy mode and its policy gates.",
+        )
+    };
+    let brain = if autonomy.runs_brain {
+        "Running"
+    } else {
+        "Not running"
+    };
+    let execute = if autonomy.may_execute {
+        "Permitted"
+    } else {
+        "Not permitted"
+    };
+    let last_action = sales_value_or(autonomy.last_action.as_deref(), "none recorded");
+    let last_action_at = autonomy
+        .last_action_at
+        .as_deref()
+        .and_then(rfc3339_utc_label)
+        .map(|label| html_escape(&label))
+        .unwrap_or_else(|| "not recorded".to_string());
+    format!(
+        r#"<p class="mt-4 text-sm leading-6 text-surface-300">Current mode: <span class="font-mono font-bold text-white">{mode}</span></p><p class="mt-2 text-sm leading-6 text-surface-200">{meaning}</p>{kill_switch}<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Decision brain</dt><dd class="mt-2 text-sm font-bold text-white">{brain}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Execution authority</dt><dd class="mt-2 text-sm font-bold text-white">{execute}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last autonomy action</dt><dd class="mt-2 break-words text-sm font-bold text-white">{last_action}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Last action at</dt><dd class="mt-2 text-sm font-bold text-white">{last_action_at}</dd></div></dl><p class="mt-5 text-xs leading-5 text-surface-400">Mode changes, pause/resume, and the kill switch are JSON control-API mutations (<code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">POST /v1/admin/autopilot/mode</code>, <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/pause</code>, <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/resume</code>, <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/kill-switch</code>). This zero-JavaScript console mounts no SSR form handler for them, so they are read-only here; the control API is the mutation path.</p>"#,
+        mode = mode,
+        meaning = meaning,
+        kill_switch = kill_switch,
+        brain = brain,
+        execute = execute,
+        last_action = last_action,
+        last_action_at = last_action_at,
+    )
+}
+
+fn sales_autonomy_section(overview: Option<&SalesOverviewData>) -> String {
+    let body = match overview {
+        None => sales_note(
+            "Autonomy state is unavailable: the sales-autopilot control API did not answer. No mode or kill-switch state is assumed.",
+        ),
+        Some(overview) => sales_autonomy_body(&overview.autonomy),
+    };
+    sales_panel(
+        "sales-autonomy",
+        "Autonomy",
+        "Autonomy and safety state",
+        &body,
+    )
+}
+
+/// The live autonomous decision stream (§31) — chronological, newest first.
+fn sales_decision_stream_section(data: &SalesPageData) -> String {
+    let body = match data.decisions.as_ref() {
+        None => sales_note(
+            "The decision stream is unavailable: the control API did not answer, so no rows are shown and nothing is inferred.",
+        ),
+        Some(decisions) if decisions.is_empty() => sales_note(
+            "No decisions yet — the engine has not recorded a decision for this tenant. The stream fills as soon as the engine decides.",
+        ),
+        Some(decisions) => format!(
+            r#"<p class="mt-4 text-xs leading-5 text-surface-400">Chronological, newest first. Action vocabulary: <span class="font-mono text-surface-200">ENRICH</span> gathers evidence, <span class="font-mono text-surface-200">CONTACT</span> starts or advances outreach, <span class="font-mono text-surface-200">SKIP</span> refuses the decision and sends nothing.</p><ol class="mt-4 space-y-3">{rows}</ol>"#,
+            rows = sales_decisions_newest_first(decisions)
+                .into_iter()
+                .map(sales_decision_stream_row)
+                .collect::<Vec<_>>()
+                .join(""),
+        ),
+    };
+    sales_panel(
+        "sales-decision-stream",
+        "Decision Stream",
+        "Live autonomous decision stream",
+        &body,
+    )
+}
+
+/// The decisions table: action, confidence, expected value, variant/sender,
+/// rationale.
+fn sales_decisions_section(data: &SalesPageData) -> String {
+    let body = match data.decisions.as_ref() {
+        None => sales_note(
+            "Recent decisions are unavailable: the control API did not answer. No rows are shown.",
+        ),
+        Some(decisions) if decisions.is_empty() => sales_note(
+            "No decisions recorded yet — the engine has not produced a decision for this tenant.",
+        ),
+        Some(decisions) => {
+            let rows = sales_decisions_newest_first(decisions)
+                .into_iter()
+                .map(sales_decision_table_row)
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Recent sales-autopilot decisions</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">Action</th><th scope="col" class="px-4 py-3 font-medium">Account</th><th scope="col" class="px-4 py-3 font-medium">Confidence</th><th scope="col" class="px-4 py-3 font-medium">Expected value</th><th scope="col" class="px-4 py-3 font-medium">Variant</th><th scope="col" class="px-4 py-3 font-medium">Sender</th><th scope="col" class="px-4 py-3 font-medium">Offer / sequence</th><th scope="col" class="px-4 py-3 font-medium">Rationale</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}</tbody></table></div>"#,
+                rows = rows,
+            )
+        }
+    };
+    sales_panel("sales-decisions", "Decisions", "Recent decisions", &body)
+}
+
+/// Exceptions: blocked decisions with every block reason, pending approvals,
+/// and the dead-letter queue.
+fn sales_exceptions_section(data: &SalesPageData) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    match data.exceptions.as_ref() {
+        None => parts.push(sales_note(
+            "Blocked and pending-approval decisions are unavailable: the control API did not answer.",
+        )),
+        Some(exceptions) if exceptions.is_empty() => parts.push(sales_note(
+            "No blocked or pending-approval decisions — nothing requires operator action.",
+        )),
+        Some(exceptions) => {
+            let items = exceptions
+                .iter()
+                .map(sales_exception_item)
+                .collect::<Vec<_>>()
+                .join("");
+            parts.push(format!(r#"<ul class="mt-5 space-y-3">{items}</ul>"#));
+        }
+    }
+    parts.push(r#"<p class="mt-5 text-xs leading-5 text-surface-400">Reviewing a decision (approve or reject with a note) is the JSON mutation <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">POST /v1/admin/autopilot/decisions/:id/review</code>. No SSR form handler is mounted for it, so review is read-only here.</p>"#.to_string());
+    match data.dead_letters.as_ref() {
+        None => parts.push(sales_note(
+            "The dead-letter feed is unavailable: the control API did not answer.",
+        )),
+        Some(letters) if letters.is_empty() => parts.push(sales_note(
+            "No dead letters — every queued action completed or is still retrying within its attempt budget.",
+        )),
+        Some(letters) => {
+            let items = letters
+                .iter()
+                .map(sales_dead_letter_summary)
+                .collect::<Vec<_>>()
+                .join("");
+            parts.push(format!(
+                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Dead letters</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
+            ));
+        }
+    }
+    sales_panel(
+        "sales-exceptions",
+        "Exceptions",
+        "Exceptions requiring an operator",
+        &parts.concat(),
+    )
+}
+
+/// Queue health: counts by state, due now, dead-lettered, plus the
+/// per-dead-letter replay control and a manual enrichment trigger.
+fn sales_actions_section(data: &SalesPageData) -> String {
+    let Some(overview) = data.overview.as_ref() else {
+        return sales_panel(
+            "sales-actions",
+            "Queue",
+            "Action queue health",
+            &sales_note(
+                "Action queue stats are unavailable: the sales-autopilot control API did not answer. No counts are estimated.",
+            ),
+        );
+    };
+    let stats = &overview.action_stats;
+    let tiles = format!(
+        r#"<dl class="mt-5 grid gap-3 break-words text-xs sm:grid-cols-2 xl:grid-cols-4"><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Total actions</dt><dd class="mt-2 text-2xl font-bold text-white">{total}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Due now</dt><dd class="mt-2 text-2xl font-bold text-warning-200">{due_now}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">Dead-lettered</dt><dd class="mt-2 text-2xl font-bold text-warning-200">{dead_lettered}</dd></div><div class="rounded-sm border border-white/10 bg-black/15 p-4"><dt class="uppercase tracking-[0.2em] text-surface-500">States reported</dt><dd class="mt-2 text-2xl font-bold text-white">{states}</dd></div></dl>"#,
+        total = stats.total,
+        due_now = stats.due_now,
+        dead_lettered = stats.dead_lettered,
+        states = stats.by_state.len(),
+    );
+    let by_state = if stats.by_state.is_empty() {
+        sales_note("No actions are queued for this tenant — there is no action row to count.")
+    } else {
+        let rows = stats
+            .by_state
+            .iter()
+            .map(|(state, count)| {
+                format!(
+                    r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-200">{state}</td><td class="px-4 py-3 text-xs font-bold text-white">{count}</td></tr>"#,
+                    state = html_escape(state),
+                    count = count,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!(
+            r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Action queue counts by state</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Count</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}</tbody></table></div>"#,
+        )
+    };
+    let replay = match data.dead_letters.as_ref() {
+        None => sales_note(
+            "The dead-letter replay list is unavailable: the control API did not answer.",
+        ),
+        Some(letters) if letters.is_empty() => {
+            sales_note("No dead letters to replay — the queue has no exhausted action.")
+        }
+        Some(letters) => {
+            let items = letters
+                .iter()
+                .map(sales_dead_letter_replay_control)
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                r#"<h3 class="mt-6 text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Dead letters · replay</h3><ul class="mt-3 space-y-3">{items}</ul>"#,
+            )
+        }
+    };
+    let enrichment = format!(
+        r#"<form method="post" action="/web/admin/sales/discovery/run" class="mt-6 grid gap-4 rounded-sm border border-white/10 bg-black/15 p-4">{csrf}{notice}<div class="space-y-2 text-sm"><label for="sales-enrich-sources" class="block text-surface-300">Source domains (comma-separated)</label><input id="sales-enrich-sources" name="sources" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div><button type="submit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Run enrichment</button></div><p class="text-xs leading-5 text-surface-400">Manual enrichment trigger — normal discovery is engine-driven; this asks the engine to enrich the listed domains now.</p></form>"#,
+        csrf = csrf_hidden_input_for_sales(data),
+        notice = sales_csrf_notice(data),
+    );
+    sales_panel(
+        "sales-actions",
+        "Queue",
+        "Action queue health",
+        &format!("{tiles}{by_state}{replay}{enrichment}"),
+    )
+}
+
+/// Enrollments: counts by state (the live replacement for the campaign
+/// table) plus the enrollment command form.
+fn sales_enrollments_section(data: &SalesPageData) -> String {
+    let counts = match data.overview.as_ref() {
+        None => sales_note(
+            "Enrollment counts are unavailable: the sales-autopilot control API did not answer.",
+        ),
+        Some(overview) if overview.enrollments.is_empty() => {
+            sales_note("No enrollments yet — no contact is currently enrolled in a sequence.")
+        }
+        Some(overview) => {
+            let rows = overview
+                .enrollments
+                .iter()
+                .map(|row| {
+                    format!(
+                        r#"<tr><td class="px-4 py-3 font-mono text-xs text-surface-200">{state}</td><td class="px-4 py-3 text-xs font-bold text-white">{count}</td></tr>"#,
+                        state = html_escape(&row.state),
+                        count = row.count,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                r#"<div class="mt-5 overflow-x-auto rounded-sm border border-white/10"><table class="min-w-full divide-y divide-white/10 text-left text-sm"><caption class="sr-only">Contact enrollments by state</caption><thead class="bg-black/30 text-surface-300"><tr><th scope="col" class="px-4 py-3 font-medium">State</th><th scope="col" class="px-4 py-3 font-medium">Enrolled</th></tr></thead><tbody class="divide-y divide-white/10 text-surface-200">{rows}</tbody></table></div>"#,
+            )
+        }
+    };
+    let form = format!(
+        r#"<form method="post" action="/web/admin/sales/outreach/launch" class="mt-6 grid gap-4 rounded-sm border border-white/10 bg-black/15 p-4"><h3 class="text-sm font-bold uppercase tracking-[0.2em] text-surface-400">Enroll contacts into a sequence</h3>{csrf}{notice}<div class="space-y-2 text-sm"><label for="sales-enroll-sequence" class="block text-surface-300">Sequence id</label><input id="sales-enroll-sequence" name="sequence_id" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-policy" class="block text-surface-300">Autonomy policy id</label><input id="sales-enroll-policy" name="autonomy_policy_id" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div class="space-y-2 text-sm"><label for="sales-enroll-contacts" class="block text-surface-300">Contact ids (comma-separated, 1-100)</label><input id="sales-enroll-contacts" name="contact_ids" required class="w-full min-h-[44px] rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" /></div><div><button type="submit" class="inline-flex min-h-[44px] items-center justify-center rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Enqueue enrollment</button></div><p class="text-xs leading-5 text-surface-400">Enrollment is an engine command: the control plane creates no campaign and no recipient row. The engine's accepted/rejected counts return as a flash.</p></form>"#,
+        csrf = csrf_hidden_input_for_sales(data),
+        notice = sales_csrf_notice(data),
+    );
+    sales_panel(
+        "sales-enrollments",
+        "Pipeline",
+        "Enrollments",
+        &format!("{counts}{form}"),
+    )
+}
+
+/// The double-submit CSRF input for the sales SSR forms.
+fn csrf_hidden_input_for_sales(data: &SalesPageData) -> String {
+    format!(
+        r#"<input type="hidden" name="_csrf" value="{}" />"#,
+        escape_attribute_value(&data.csrf_token)
+    )
+}
+
+/// Honest notice when the render carried no CSRF token: the forms below
+/// would be rejected by the double-submit check, so the page says why
+/// instead of letting the operator discover it via a session-expired flash.
+fn sales_csrf_notice(data: &SalesPageData) -> &'static str {
+    if data.csrf_token.trim().is_empty() {
+        r#"<p class="rounded-sm border border-warning-300/35 bg-warning-300/10 p-3 text-xs leading-5 text-warning-100">This render carries no CSRF token, so the post below cannot pass the double-submit check yet. The console render pipeline supplies the token once the sales data loader is wired.</p>"#
+    } else {
+        ""
+    }
+}
+
+/// Compliance: the legal policy hard gate.
+fn sales_compliance_section() -> String {
+    sales_panel(
+        "sales-compliance",
+        "Governance",
+        "Compliance",
+        r#"<p class="mt-4 text-sm leading-6 text-surface-300">Legal policy is a hard gate, not a warning: every decision resolves the recipient's jurisdiction against the approved policy before anything is sent. A jurisdiction that is unknown, unlisted, or below the country-confidence floor blocks the decision.</p><p class="mt-3 text-sm leading-6 text-surface-300">Blocked decisions and their block reasons appear under Exceptions. An unapproved jurisdiction cannot send — there is no override on this page or in the control API's review flow.</p>"#,
+    )
+}
+
+/// Costs: explicitly not yet instrumented — no fabricated figure.
+fn sales_costs_section() -> String {
+    sales_panel(
+        "sales-costs",
+        "Unit Economics",
+        "Costs",
+        r#"<p class="mt-4 text-sm leading-6 text-surface-300">Enrichment and sending cost are not yet instrumented: the sales-autopilot control API exposes no spend or cost counter. This console renders an explicit not-yet-instrumented note rather than a fabricated figure. A cost section ships when the engine reports actual spend per action.</p>"#,
+    )
+}
+
+/// Data-backed control-plane sales autopilot page (audit §30/§31).
+///
+/// The api-server loads [`SalesPageData`] from the authenticated
+/// `sales-autopilot` control API (overview / decisions / exceptions /
+/// actions) and hands it here. Every rendered figure traces back to that
+/// data; unavailable sections say so explicitly.
+pub fn control_plane_sales_page_with_data(data: &SalesPageData) -> String {
+    let overview = data.overview.as_ref();
+    format!(
+        r#"<section class="apex-cp-sales rounded-sm bg-surface-950 px-4 py-6 text-white md:px-6 md:py-8"><div class="mx-auto max-w-7xl space-y-6">{hero}{revenue}{autonomy}{stream}{decisions}{exceptions}{actions}{enrollments}{compliance}{costs}</div></section>"#,
+        hero = sales_hero(data),
+        revenue = sales_revenue_section(overview),
+        autonomy = sales_autonomy_section(overview),
+        stream = sales_decision_stream_section(data),
+        decisions = sales_decisions_section(data),
+        exceptions = sales_exceptions_section(data),
+        actions = sales_actions_section(data),
+        enrollments = sales_enrollments_section(data),
+        compliance = sales_compliance_section(),
+        costs = sales_costs_section(),
+    )
+}
+
+/// Rust SSR sales console fallback for renders with no loaded control data:
+/// the same information architecture against the honest unavailable state —
+/// no sample badge, no fabricated figure, no invented row.
 pub fn control_plane_sales_page() -> String {
-    r#"
-<section class="apex-cp-sales rounded-sm bg-surface-950 px-4 py-6 text-white md:px-6 md:py-8">
-    <div class="mx-auto max-w-7xl space-y-6">
-        <header class="apex-cp-dark-hero rounded-sm border border-white/10 bg-black/25 p-6 shadow-premium-black/30">
-            <div class="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-                <div>
-                    <p class="text-[11px] font-bold uppercase tracking-[0.32em] text-brand-400">Revenue Command Deck</p>
-                    <h1 class="mt-3 text-4xl font-bold tracking-tight text-white">Operator console: Sales Cockpit</h1>
-                    <span data-sample-data class="mt-3 inline-flex items-center rounded-sm border border-brand-400/40 bg-brand-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-brand-100">Sample data</span>
-                    <p class="mt-3 max-w-3xl text-sm leading-6 text-surface-300">Operator console for discovery, outreach, and autopilot approvals. This is a triage-first operating surface for enterprise expansion where operators qualify, approve, and launch outreach from one deterministic command flow via <code class="rounded bg-black/30 px-1.5 py-0.5 text-brand-100">/v1/admin/sales/*</code>. Every action below is a plain server-rendered form post — no scripts.</p>
-                    <div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4">
-                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
-                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
-                            <p class="mt-1 text-xs text-surface-500 break-words">Weighted annual contract value</p>
-                        </article>
-                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
-                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Approvals queue</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p>
-                            <p class="mt-1 text-xs text-surface-500 break-words">7 high confidence, 4 review required</p>
-                        </article>
-                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
-                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Campaigns live</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p>
-                            <p class="mt-1 text-xs text-surface-500 break-words">1,268 recipients in active cadence</p>
-                        </article>
-                        <article class="rounded-sm border border-white/10 bg-black/25 p-4">
-                            <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Conversion pace</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
-                            <p class="mt-1 text-xs text-surface-500 break-words">From qualified to contract signature</p>
-                        </article>
-                    </div>
-                </div>
-
-                <section class="rounded-sm border border-white/10 bg-surface-950 p-5">
-                    <div>
-                        <p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p>
-                        <h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2>
-                    </div>
-                    <p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p>
-                    <p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p>
-                </section>
-            </div>
-        </header>
-
-        <section class="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-            <div class="min-w-0 space-y-6">
-                <section class="apex-cp-dark-panel apex-cp-dark-panel--accent min-w-0 rounded-sm border border-white/10 bg-white/5 p-6">
-                    <form method="get" action="/sales" role="search" class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                        <div class="min-w-0">
-                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Triage Queue</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight break-words">Lead inventory</h2>
-                        </div>
-                        <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)_auto]">
-                            <div>
-                                <label for="sales-query" class="sr-only">Search leads</label>
-                                <input id="sales-query" type="search" name="query" placeholder="Search company, owner, signal, or domain" class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
-                            </div>
-                            <div>
-                                <label for="sales-stage" class="sr-only">Filter by stage</label>
-                                <select id="sales-stage" name="stage" class="w-full min-w-0 rounded-sm border border-white/10 bg-surface-900 px-4 py-3 text-sm text-white outline-none transition focus:border-primary">
-                                    <option value="">all stages</option>
-                                    <option value="qualification">qualification</option>
-                                    <option value="security review">security review</option>
-                                    <option value="proposal">proposal</option>
-                                    <option value="negotiation">negotiation</option>
-                                </select>
-                            </div>
-                            <button type="submit" class="rounded-sm bg-primary px-4 py-3 text-xs font-bold text-white transition hover:bg-brand-700">Apply filters</button>
-                        </div>
-                    </form>
-
-                    <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500 break-words">Across all active stages</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-500 break-words">No blockers, proposal eligible</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-500 break-words">DPA or procurement exception</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500 break-words">Weighted by buying intent + fit</p></div>
-                    </div>
-
-                    <form method="post" action="/web/admin/sales/leads/update" class="mt-6 block">
-                        <div class="overflow-x-auto rounded-sm border border-white/10">
-                            <table class="min-w-full divide-y divide-white/10 text-left text-sm">
-                                <thead class="bg-black/30 text-surface-300">
-                                    <tr>
-                                        <th class="px-4 py-3 font-medium" scope="col">Pick</th>
-                                        <th class="px-4 py-3 font-medium" scope="col">Account</th>
-                                        <th class="px-4 py-3 font-medium" scope="col">Stage</th>
-                                        <th class="px-4 py-3 font-medium" scope="col">Confidence</th>
-                                        <th class="px-4 py-3 font-medium" scope="col">Blocker</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-white/10 text-surface-200">
-                                    <tr>
-                                        <td class="px-4 py-3 text-surface-500" colspan="5">No leads loaded — rows appear here when the discovery pipeline has data for this tenant.</td>
-                                    </tr>
-                                    </tbody>
-                            </table>
-                        </div>
-                        <div class="mt-4 flex flex-wrap items-center gap-3">
-                            <label for="lead-stage" class="text-xs uppercase tracking-[0.2em] text-surface-500">Move selected to</label>
-                            <select id="lead-stage" name="status" class="rounded-sm border border-white/10 bg-surface-900 px-3 py-2 text-sm text-white outline-none focus:border-primary">
-                                <option value="qualified">qualified</option>
-                                <option value="proposal">proposal</option>
-                                <option value="approved">approved</option>
-                                <option value="escalated">escalated</option>
-                            </select>
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-xs font-bold text-white transition hover:border-white/30 hover:bg-white/10">Update selected</button>
-                        </div>
-                    </form>
-
-                    <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
-                        <div class="flex items-center gap-2 text-xs text-surface-500">
-                            <span>Sample view — the live lead inventory and its real pagination render once the database is connected</span>
-                        </div>
-                        <div class="flex items-center gap-2">
-                            <span class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-600 opacity-40" aria-disabled="true" tabindex="-1">&larr; Previous</span>
-                            <a href="/sales?page=2" class="inline-flex items-center justify-center rounded-sm border border-white/10 bg-black/25 px-3 py-1.5 text-xs font-medium text-surface-300 transition hover:bg-white/10 hover:text-white">Next &rarr;</a>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-950 p-6">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Stage Flow</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Outreach inventory</h2>
-                        </div>
-                    </div>
-                    <div class="mt-5 grid gap-3 break-words sm:grid-cols-2 xl:grid-cols-4 text-xs">
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Qualify</p><p class="mt-2 text-2xl font-bold text-white">63</p><p class="mt-1 text-surface-500">Intent verified</p></article>
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Security</p><p class="mt-2 text-2xl font-bold text-white">29</p><p class="mt-1 text-surface-500">Questionnaire + legal</p></article>
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Proposal</p><p class="mt-2 text-2xl font-bold text-white">18</p><p class="mt-1 text-surface-500">Commercial package sent</p></article>
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Contract</p><p class="mt-2 text-2xl font-bold text-white">7</p><p class="mt-1 text-surface-500">Final approvals in flight</p></article>
-                    </div>
-                </section>
-            </div>
-
-            <div class="min-w-0 space-y-6">
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
-                    <div class="flex items-center justify-between gap-3">
-                        <div>
-                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Approval loop</p>
-                            <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Autopilot loop</h2>
-                        </div>
-                        <span class="rounded-sm bg-warning-300/15 px-3 py-1 text-xs font-bold text-warning-100">Safe mode</span>
-                    </div>
-                    <div class="mt-5 grid gap-3 text-sm">
-                        <form method="post" action="/web/admin/sales/discovery" class="contents">
-                            <input type="hidden" name="action" value="start-cycle" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-500">Fetch candidates and stage risk filters</span></button>
-                        </form>
-                        <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
-                            <input type="hidden" name="status" value="approved" />
-                            <label for="sales-approve-ids" class="text-xs text-surface-500">Lead IDs to approve (comma-separated, from the queue)</label>
-                            <input id="sales-approve-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve listed leads</span><span class="mt-1 block text-xs text-surface-500">Promote high-confidence accounts only</span></button>
-                        </form>
-                        <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
-                            <input type="hidden" name="status" value="escalated" />
-                            <label for="sales-escalate-ids" class="text-xs text-surface-500">Lead IDs to escalate (comma-separated)</label>
-                            <input id="sales-escalate-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate listed leads</span><span class="mt-1 block text-xs text-surface-500">Route legal or security blockers to desk owners</span></button>
-                        </form>
-                    </div>
-                </section>
-
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-950 p-6">
-                    <div>
-                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Discovery</p>
-                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Source intake</h2>
-                        <p class="mt-2 text-xs text-surface-500">Import from enriched company cache</p>
-                    </div>
-                    <form method="post" action="/web/admin/sales/discovery" class="mt-5 grid gap-4">
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-discovery-sources" class="block text-surface-300">Sources (comma-separated)</label>
-                            <input id="sales-discovery-sources" name="sources" value="product_hunt, g2, capterra" required class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
-                        </div>
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-discovery-categories" class="block text-surface-300">Categories (comma-separated)</label>
-                            <input id="sales-discovery-categories" name="categories" value="Email Infrastructure, Regulated SaaS" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
-                        </div>
-                        <button type="submit" class="rounded-sm bg-primary px-4 py-2 text-sm font-bold text-white transition hover:bg-brand-700">Run discovery</button>
-                    </form>
-                </section>
-
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-900 p-6">
-                    <div>
-                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Outreach Command</p>
-                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Launch campaign from selected leads</h2>
-                    </div>
-                    <form method="post" action="/web/admin/sales/outreach" class="mt-5 grid gap-4">
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-offer-id" class="block text-surface-300">Offer id</label>
-                            <input id="sales-offer-id" name="offer_id" value="deliverability_audit" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
-                        </div>
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-template-name" class="block text-surface-300">Template</label>
-                            <input id="sales-template-name" name="template_name" value="enterprise_owner_intro" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
-                        </div>
-                        <div class="space-y-2 text-sm">
-                            <label for="sales-lead-ids" class="block text-surface-300">Lead IDs (comma-separated)</label>
-                            <input id="sales-lead-ids" name="lead_ids" value="" required class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
-                        </div>
-                        <button type="submit" class="rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Launch outreach for the listed leads</button>
-                    </form>
-                </section>
-
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
-                    <div>
-                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Runtime Policy</p>
-                        <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Sales runtime configuration</h2>
-                    </div>
-                    <div class="mt-5 rounded-sm border border-white/10 bg-black/15 p-4 text-xs text-surface-300">
-                        Autopilot scoring, cadence windows, and approval safeguards are managed through the admin API and reviewed on the audit page.
-                    </div>
-                </section>
-            </div>
-        </section>
-    </div>
-</section>
-"#
-        .trim()
-        .to_string()
+    control_plane_sales_page_with_data(&SalesPageData::default())
 }
 
 // ─── Marketing pages ────────────────────────────────────────
@@ -2360,11 +2967,9 @@ pub fn web_dashboard_page() -> String {
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
 <article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
-<h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Delivery Health <span class=\"ml-2 rounded-sm border border-surface-300 bg-surface-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\" data-sample-data>Sample data</span></h3>\
-<div class=\"flex items-center gap-3\">\
-<span class=\"text-3xl font-bold text-success-600\">99.9%</span>\
-<span class=\"text-xs font-bold text-surface-500\">success rate</span>\
-</div>\
+<h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Delivery Health</h3>\
+<p class=\"text-sm leading-6 text-surface-600\">Per-message delivery rates are computed from your own send events. Open Analytics for the current window.</p>\
+<a href=\"/analytics\" class=\"mt-3 inline-flex min-h-[44px] items-center justify-center rounded-sm border border-surface-300 bg-card px-4 py-2 text-xs font-bold text-surface-950 transition-colors hover:border-surface-950\">Open Analytics</a>\
 </article>\
 <article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
 <h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Account Status</h3>\
@@ -4986,12 +5591,29 @@ mod tests {
         assert!(ok.contains("name=\"return_to\" value=\"/billing?tab=plans\""));
     }
 
-    /// Fabricated KPIs must never present as live data.
+    /// No control-plane page may present invented numbers as live data.
+    ///
+    /// The previous contract was "fabricated KPIs must carry a sample-data
+    /// badge". The stronger contract now is that there is nothing to badge:
+    /// every figure is read from the database, and a page that cannot load its
+    /// data says so explicitly instead. A `data-sample-data` marker
+    /// reappearing anywhere is therefore a regression, not a mitigation.
     #[test]
-    fn fabricated_kpis_carry_sample_data_badges() {
-        assert!(control_plane_sales_page().contains("data-sample-data"));
-        assert!(web_dashboard_page().contains("data-sample-data"));
-        assert!(control_plane_home_page().contains("data-sample-data"));
+    fn no_control_plane_page_ships_fabricated_metrics() {
+        for (name, html) in [
+            ("sales", control_plane_sales_page()),
+            (
+                "sales_with_data",
+                control_plane_sales_page_with_data(&sales_page_data_fixture()),
+            ),
+            ("home", control_plane_home_page()),
+            ("dashboard", web_dashboard_page()),
+        ] {
+            assert!(
+                !html.contains("data-sample-data"),
+                "{name} carries a sample-data marker — fabricated metrics must not ship"
+            );
+        }
     }
 
     /// SSO buttons link to the real OAuth endpoints.
@@ -5152,19 +5774,518 @@ mod tests {
         assert!(html.contains("<table"));
     }
 
+    // ─── Sales autopilot surface (audit §30/§31) ────────────
+    //
+    // These tests are adversarial on purpose: they fail if the surface
+    // regresses into fiction (sample badges, hardcoded metrics, blank mode
+    // meanings, zero-filled rows) or loses an action.
+
+    use crate::view_data::{SalesActionStatsData, SalesEnrollmentCountData, SalesRevenueData};
+
+    /// Two decisions, one allowed and one blocked, plus a dead letter —
+    /// enough to exercise every section with real input data.
+    fn sales_page_data_fixture() -> SalesPageData {
+        SalesPageData {
+            csrf_token: "csrf-test-token".to_string(),
+            overview: Some(SalesOverviewData {
+                autonomy: SalesAutonomyData {
+                    mode: "autonomous_guarded".to_string(),
+                    mode_description: String::new(),
+                    kill_switch: false,
+                    runs_brain: true,
+                    may_execute: true,
+                    last_action: Some("mode:autonomous_guarded".to_string()),
+                    last_action_at: Some("2026-09-11T13:40:00+00:00".to_string()),
+                },
+                action_stats: SalesActionStatsData {
+                    total: 12,
+                    due_now: 3,
+                    dead_lettered: 1,
+                    by_state: vec![("queued".to_string(), 11), ("dead_letter".to_string(), 1)],
+                },
+                enrollments: vec![SalesEnrollmentCountData {
+                    state: "active".to_string(),
+                    count: 4,
+                }],
+                decisions_last_24h: 7,
+                blocked_last_24h: 2,
+                meetings_booked: 3,
+                revenue: vec![
+                    SalesRevenueData {
+                        outcome: "paid_subscription".to_string(),
+                        eur: 12_480.0,
+                    },
+                    SalesRevenueData {
+                        outcome: "trial".to_string(),
+                        eur: 143.5,
+                    },
+                ],
+            }),
+            decisions: Some(vec![
+                SalesDecisionData {
+                    id: "d-1".to_string(),
+                    account_id: Some("acme-gmbh".to_string()),
+                    contact_id: Some("cto".to_string()),
+                    action: "CONTACT".to_string(),
+                    expected_value_eur: Some(143.0),
+                    confidence: Some(0.91),
+                    selected_offer: Some("deliverability_audit".to_string()),
+                    selected_sequence: Some("owner_intro".to_string()),
+                    selected_variant: Some("control".to_string()),
+                    selected_sender: Some("sender-a".to_string()),
+                    rationale: "recipient matched the ICP and the send window is open".to_string(),
+                    blocked: false,
+                    block_reasons: Vec::new(),
+                    execute_after: Some("2026-09-11T14:11:00+00:00".to_string()),
+                    created_at: Some("2026-09-11T13:42:11+00:00".to_string()),
+                },
+                SalesDecisionData {
+                    id: "d-2".to_string(),
+                    account_id: Some("northwind".to_string()),
+                    contact_id: Some("vp-eng".to_string()),
+                    action: "SKIP".to_string(),
+                    expected_value_eur: Some(143.0),
+                    confidence: Some(0.12),
+                    rationale: "country confidence below the floor".to_string(),
+                    blocked: true,
+                    block_reasons: vec![
+                        "insufficient jurisdiction confidence".to_string(),
+                        "suppression list match".to_string(),
+                    ],
+                    execute_after: None,
+                    created_at: Some("2026-09-11T13:44:02+00:00".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            exceptions: Some(vec![SalesDecisionData {
+                id: "d-2".to_string(),
+                account_id: Some("northwind".to_string()),
+                contact_id: Some("vp-eng".to_string()),
+                action: "SKIP".to_string(),
+                expected_value_eur: Some(143.0),
+                confidence: Some(0.12),
+                rationale: "country confidence below the floor".to_string(),
+                blocked: true,
+                block_reasons: vec![
+                    "insufficient jurisdiction confidence".to_string(),
+                    "suppression list match".to_string(),
+                ],
+                created_at: Some("2026-09-11T13:44:02+00:00".to_string()),
+                ..Default::default()
+            }]),
+            dead_letters: Some(vec![SalesDeadLetterData {
+                id: "action-1".to_string(),
+                action_type: "send_email".to_string(),
+                entity_type: "contact".to_string(),
+                entity_id: "contact-9".to_string(),
+                state: "dead_letter".to_string(),
+                attempt: 5,
+                max_attempts: 5,
+                last_error: Some("smtp 550 permanent failure".to_string()),
+                due_at: Some("2026-09-11T12:00:00+00:00".to_string()),
+                created_at: Some("2026-09-10T12:00:00+00:00".to_string()),
+            }]),
+        }
+    }
+
+    /// Extract every EUR amount and every percentage rendered on the page.
+    fn money_and_percent_tokens(html: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        for piece in html.split('€').skip(1) {
+            let digits: String = piece
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit() || *ch == ',' || *ch == '.')
+                .collect();
+            if !digits.is_empty() {
+                tokens.push(format!("€{digits}"));
+            }
+        }
+        for piece in html.split('%') {
+            let digits: String = piece
+                .chars()
+                .rev()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if !digits.is_empty() {
+                tokens.push(format!("{digits}%"));
+            }
+        }
+        tokens.sort();
+        tokens
+    }
+
+    /// Slice one `id="sales-…"` section out of the rendered page.
+    fn sales_section<'a>(html: &'a str, id: &str) -> &'a str {
+        let marker = format!("id=\"{id}\"");
+        let start = html
+            .find(&marker)
+            .unwrap_or_else(|| panic!("sales section `{id}` missing from the page"));
+        let rest = &html[start..];
+        let end = rest[marker.len()..]
+            .find("id=\"sales-")
+            .map(|offset| offset + marker.len())
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Audit §30 adversarial: the sales surface must never regress into
+    /// labelled fiction — no sample-data marker anywhere, in any state.
     #[test]
-    fn control_plane_sales_page_renders_operator_shell() {
-        let html = control_plane_sales_page();
-        assert!(html.contains("Operator console for discovery, outreach, and autopilot approvals."));
+    fn sales_page_never_carries_sample_data_marker() {
+        for html in [
+            control_plane_sales_page(),
+            control_plane_sales_page_with_data(&sales_page_data_fixture()),
+        ] {
+            assert!(
+                !html.contains("data-sample-data"),
+                "the sales page must not emit a sample-data marker"
+            );
+            assert!(
+                !html.to_lowercase().contains("sample data"),
+                "the sales page must not label data as sample data"
+            );
+        }
+    }
+
+    /// Audit §30 adversarial: money and percentages must derive from the
+    /// input data. Two different datasets must produce different money /
+    /// percentage token sets — a hardcoded figure would be identical in
+    /// both renders.
+    #[test]
+    fn sales_page_money_and_percentages_follow_the_input_data() {
+        let first = sales_page_data_fixture();
+        let mut second = sales_page_data_fixture();
+        {
+            let overview = second.overview.as_mut().expect("fixture overview");
+            overview.revenue = vec![SalesRevenueData {
+                outcome: "trial".to_string(),
+                eur: 777.0,
+            }];
+        }
+        for decision in second
+            .decisions
+            .as_mut()
+            .expect("fixture decisions")
+            .iter_mut()
+            .chain(
+                second
+                    .exceptions
+                    .as_mut()
+                    .expect("fixture exceptions")
+                    .iter_mut(),
+            )
+        {
+            decision.confidence = Some(0.42);
+            decision.expected_value_eur = Some(777.0);
+        }
+
+        let first_html = control_plane_sales_page_with_data(&first);
+        let second_html = control_plane_sales_page_with_data(&second);
+        let first_tokens = money_and_percent_tokens(&first_html);
+        let second_tokens = money_and_percent_tokens(&second_html);
+
+        assert!(
+            !first_tokens.is_empty() && !second_tokens.is_empty(),
+            "fixtures must render money/percentage values"
+        );
+        assert_ne!(
+            first_tokens, second_tokens,
+            "money/percentage output must change when the input data changes — \
+             identical sets mean a hardcoded figure leaked in"
+        );
+        assert!(
+            first_html.contains("€143"),
+            "the first dataset's €143 must render"
+        );
+        assert!(
+            second_html.contains("€777"),
+            "the second dataset's €777 must render"
+        );
+        assert!(
+            !second_html.contains("€143"),
+            "the first dataset's figure must not leak into the second render"
+        );
+    }
+
+    /// Audit §30: an engaged kill switch must be unmistakable and must state
+    /// the documented behaviour — outbound halted, inbound replies continue.
+    #[test]
+    fn sales_page_kill_switch_states_outbound_halt_and_inbound_continuation() {
+        let mut data = sales_page_data_fixture();
+        data.overview
+            .as_mut()
+            .expect("fixture overview")
+            .autonomy
+            .kill_switch = true;
+        let engaged = control_plane_sales_page_with_data(&data).to_lowercase();
+        assert!(engaged.contains("kill switch engaged"));
+        assert!(engaged.contains("outbound is halted"));
+        assert!(engaged.contains("inbound reply processing continues"));
+
+        data.overview
+            .as_mut()
+            .expect("fixture overview")
+            .autonomy
+            .kill_switch = false;
+        let released = control_plane_sales_page_with_data(&data).to_lowercase();
+        assert!(released.contains("kill switch released"));
+        assert!(!released.contains("outbound is halted"));
+        assert!(!released.contains("kill switch engaged"));
+    }
+
+    /// Every one of the five autonomy modes must render its meaning — a
+    /// mode with no description is a UX defect. The API description wins
+    /// when present; the canonical shipped meaning is the fallback.
+    #[test]
+    fn sales_page_explains_every_autonomy_mode() {
+        let modes = [
+            ("disabled", "no thinking, no generation, no sending"),
+            ("shadow", "records what it would have done"),
+            ("assisted", "plans and drafts"),
+            ("approval_required", "only decisions an operator approved"),
+            (
+                "autonomous_guarded",
+                "every policy and confidence constraint passes",
+            ),
+        ];
+        for (mode, meaning) in modes {
+            let mut data = sales_page_data_fixture();
+            let autonomy = &mut data.overview.as_mut().expect("fixture overview").autonomy;
+            autonomy.mode = mode.to_string();
+            autonomy.mode_description = String::new(); // force the canonical fallback
+            let html = control_plane_sales_page_with_data(&data);
+            assert!(html.contains(mode), "mode `{mode}` must render");
+            assert!(
+                html.contains(meaning),
+                "mode `{mode}` must render its meaning (`{meaning}`)"
+            );
+        }
+
+        let mut described = sales_page_data_fixture();
+        described
+            .overview
+            .as_mut()
+            .expect("fixture overview")
+            .autonomy
+            .mode_description = "Operator-supplied meaning.".to_string();
+        assert!(
+            control_plane_sales_page_with_data(&described).contains("Operator-supplied meaning.")
+        );
+    }
+
+    /// Blocked decisions must show EVERY block reason verbatim in the
+    /// Exceptions section.
+    #[test]
+    fn sales_page_blocked_decisions_show_every_block_reason() {
+        let html = control_plane_sales_page_with_data(&sales_page_data_fixture());
+        let exceptions = sales_section(&html, "sales-exceptions");
+        assert!(exceptions.contains("Blocked decision"));
+        assert!(exceptions.contains("insufficient jurisdiction confidence"));
+        assert!(exceptions.contains("suppression list match"));
+        assert!(exceptions.contains("Rationale: country confidence below the floor"));
+    }
+
+    /// Empty data must render explicit empty states — never a zero-filled
+    /// table row that implies activity.
+    #[test]
+    fn sales_page_empty_states_are_explicit_not_zero_rows() {
+        let data = SalesPageData {
+            csrf_token: "t".to_string(),
+            overview: Some(SalesOverviewData::default()),
+            decisions: Some(Vec::new()),
+            exceptions: Some(Vec::new()),
+            dead_letters: Some(Vec::new()),
+        };
+        let html = control_plane_sales_page_with_data(&data);
+        let stream = sales_section(&html, "sales-decision-stream");
+        let decisions = sales_section(&html, "sales-decisions");
+        let exceptions = sales_section(&html, "sales-exceptions");
+        let actions = sales_section(&html, "sales-actions");
+        let enrollments = sales_section(&html, "sales-enrollments");
+
+        assert!(stream.to_lowercase().contains("no decisions yet"));
+        assert!(decisions
+            .to_lowercase()
+            .contains("no decisions recorded yet"));
+        assert!(
+            !decisions.contains("<table"),
+            "empty decisions must not render a zero-filled table"
+        );
+        assert!(!decisions.contains("Confidence 0%"));
+        assert!(!decisions.contains("€0"));
+        assert!(exceptions
+            .to_lowercase()
+            .contains("no blocked or pending-approval decisions"));
+        assert!(exceptions.to_lowercase().contains("no dead letters"));
+        assert!(actions.to_lowercase().contains("no actions are queued"));
+        assert!(enrollments.to_lowercase().contains("no enrollments yet"));
+        assert!(
+            !enrollments.contains("<table"),
+            "empty enrollment counts must not render a zero-filled table"
+        );
+    }
+
+    /// The live stream must show the action verb and the reason for each
+    /// row, with the engine's ENRICH/CONTACT/SKIP vocabulary.
+    #[test]
+    fn sales_page_decision_stream_renders_action_and_reason() {
+        let html = control_plane_sales_page_with_data(&sales_page_data_fixture());
+        let stream = sales_section(&html, "sales-decision-stream");
+        assert!(stream.contains("ENRICH"));
+        assert!(stream.contains("CONTACT"));
+        assert!(stream.contains("SKIP"));
+        assert!(stream.contains("13:42:11"));
+        assert!(stream.contains("Reason: recipient matched the ICP and the send window is open"));
+        assert!(stream.contains("insufficient jurisdiction confidence"));
+        assert!(stream.contains("Variant: control"));
+        assert!(stream.contains("Sender: sender-a"));
+        assert!(stream.contains("Legal policy: allowed"));
+        assert!(stream.contains("Legal policy: blocked"));
+        assert!(stream.contains("Expected value: €143"));
+        assert!(
+            stream.contains("14:11 UTC"),
+            "the scheduled time must render"
+        );
+        assert!(
+            stream.matches("Reason: ").count() >= 2,
+            "every decision row must carry a reason"
+        );
+        // Newest first, regardless of the order the loader passes.
+        let newest = stream.find("13:44:02").expect("newest decision time");
+        let older = stream.find("13:42:11").expect("older decision time");
+        assert!(newest < older, "the stream must render newest first");
+    }
+
+    /// Every form action must target a prefix the owning agents actually
+    /// expose. A form pointed at a deleted route fails this test.
+    #[test]
+    fn sales_page_forms_post_to_existing_owner_paths() {
+        let html = control_plane_sales_page_with_data(&sales_page_data_fixture());
+        let mut actions = Vec::new();
+        let mut rest = html.as_str();
+        while let Some(index) = rest.find("action=\"") {
+            rest = &rest[index + "action=\"".len()..];
+            let end = rest.find('"').expect("unterminated action attribute");
+            actions.push(rest[..end].to_string());
+            rest = &rest[end..];
+        }
+        assert!(
+            actions.len() >= 2,
+            "the sales page must keep its SSR mutation forms; found {actions:?}"
+        );
+        for action in &actions {
+            assert!(
+                action.starts_with("/web/admin/sales/") || action.starts_with("/v1/admin/"),
+                "form action `{action}` is outside the owner-provided SSR/control prefixes"
+            );
+        }
+        assert!(
+            actions
+                .iter()
+                .any(|action| action == "/web/admin/sales/outreach/launch"),
+            "the enrollment command form must post to the live SSR handler"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action == "/web/admin/sales/discovery/run"),
+            "the enrichment form must post to the live SSR handler"
+        );
+        assert!(
+            !html.contains("action=\"/sales\""),
+            "the retired triage console's GET search form must not return"
+        );
+    }
+
+    /// Audit §30: the page answers the autopilot question with the required
+    /// sections, and the triage-console copy is gone.
+    #[test]
+    fn control_plane_sales_page_answers_the_autopilot_question() {
+        let html = control_plane_sales_page_with_data(&sales_page_data_fixture());
+        assert!(html.contains(
+            "Is the machine generating qualified pipeline profitably and safely right now?"
+        ));
+        for heading in [
+            "Revenue and pipeline",
+            "Autonomy and safety state",
+            "Live autonomous decision stream",
+            "Recent decisions",
+            "Exceptions requiring an operator",
+            "Action queue health",
+            "Enrollments",
+            "Compliance",
+            "Costs",
+        ] {
+            assert!(
+                html.contains(heading),
+                "sales page is missing the `{heading}` section"
+            );
+        }
         assert!(html.contains("Same-origin operator session"));
-        assert!(html.contains("action=\"/web/admin/sales/discovery\""));
-        assert!(html.contains("action=\"/web/admin/sales/outreach\""));
-        assert!(html.contains("action=\"/web/admin/sales/leads/update\""));
-        assert!(html.contains("name=\"lead_ids\""));
-        assert!(html.contains("Approval loop"));
-        assert!(html.contains("Launch campaign from selected leads"));
-        assert!(html.contains("/v1/admin/sales/*"));
-        assert!(!html.contains("<script"));
+        assert!(html.contains("not yet instrumented"));
+        assert!(
+            !html.contains("<script"),
+            "the sales page ships zero scripts"
+        );
+        for retired in ["Sales Cockpit", "Operator console", "triage-first"] {
+            assert!(
+                !html.contains(retired),
+                "retired triage-console copy `{retired}` must not return"
+            );
+        }
+    }
+
+    /// Fix 2: the CP layout takes/emits the authenticated role, escaped,
+    /// while an empty role keeps the substitution placeholder contract.
+    #[test]
+    fn control_plane_layout_emits_the_authenticated_role() {
+        let owner = control_plane_app_layout_with_role(
+            "<p>ops</p>",
+            "Operations",
+            "Monitor.",
+            "/dashboard",
+            "t",
+            "owner",
+        );
+        assert!(owner.contains("data-user-role=\"owner\""));
+        assert!(!owner.contains("data-user-role=\"admin\""));
+
+        let placeholder = control_plane_app_layout_with_title(
+            "<p>ops</p>",
+            "Operations",
+            "Monitor.",
+            "/dashboard",
+            "t",
+        );
+        assert!(placeholder.contains(&format!(
+            "data-user-role=\"{CONTROL_PLANE_ROLE_PLACEHOLDER}\""
+        )));
+
+        let empty = control_plane_app_layout_with_role(
+            "<p>ops</p>",
+            "Operations",
+            "Monitor.",
+            "/dashboard",
+            "t",
+            "",
+        );
+        assert!(empty.contains("data-user-role=\"admin\""));
+
+        let hostile = control_plane_app_layout_with_role(
+            "<p>ops</p>",
+            "Operations",
+            "Monitor.",
+            "/dashboard",
+            "t",
+            "\"><script>alert(1)</script>",
+        );
+        assert!(!hostile.contains("<script"));
+        assert!(
+            hostile.contains("data-user-role=\"&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;\"")
+        );
     }
 
     // ─── Login page parity ──────────────────────────────────
@@ -5662,8 +6783,8 @@ mod tests {
     }
 
     /// Item 19 (sample purge): the CP dashboard fallback no longer ships
-    /// unbadged fabricated numbers, and the sales pager carries no
-    /// fabricated page counts.
+    /// unbadged fabricated numbers, and the sales surface ships neither the
+    /// retired lead pager nor a sample-data badge.
     #[test]
     fn cp_fallbacks_carry_no_unbadged_sample_numbers() {
         let dashboard = control_plane_dashboard_page();
@@ -5672,8 +6793,7 @@ mod tests {
         let sales = control_plane_sales_page();
         assert!(!sales.contains("Page <strong"));
         assert!(!sales.contains("184 total leads"));
-        // The disabled sales Previous link is no longer focusable.
-        assert!(sales.contains("tabindex=\"-1\""));
+        assert!(!sales.contains("data-sample-data"));
     }
 
     /// Item 26: the discovery static fallback no longer fabricates healthy
@@ -5886,10 +7006,15 @@ mod tests {
     #[test]
     fn cp_sales_renders_runtime_sections() {
         let html = control_plane_sales_page();
-        assert!(html.contains("Lead inventory"));
-        assert!(html.contains("Outreach inventory"));
-        assert!(html.contains("Import from enriched company cache"));
-        assert!(html.contains("Sales runtime configuration"));
+        assert!(html.contains("Revenue and pipeline"));
+        assert!(html.contains("Autonomy and safety state"));
+        assert!(html.contains("Live autonomous decision stream"));
+        assert!(html.contains("Recent decisions"));
+        assert!(html.contains("Exceptions requiring an operator"));
+        assert!(html.contains("Action queue health"));
+        assert!(html.contains("Enrollments"));
+        assert!(html.contains("Compliance"));
+        assert!(html.contains("Costs"));
     }
 
     #[test]

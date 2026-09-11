@@ -40,19 +40,18 @@ Email queued (PostgreSQL)
 ### Self-Hosted SMTP Flow (Opt-In)
 
 ```
-Message enqueued via gRPC → outbound-queue
-  → SmtpSender resolves MX records
-  → IpPool selects source IP (round-robin, warmup-aware)
-  → TcpSocket::bind(source_ip) → connect(mx:25)
-  → STARTTLS + custom DKIM signing
-  → Direct delivery to recipient MX
+Message enqueued in email_queue (PostgreSQL) → worker picks up job
+  → create_transport_from_config() → SmtpTransport
+  → Build RFC 5322 MIME message (mail-builder)
+  → Per-domain DKIM signing (mail-auth) + STARTTLS to the relay
+  → Delivery via the configured SMTP relay (SMTP_HOST/SMTP_PORT)
   → Bounce/complaint via SMTP DSN + FBL servers
 ```
 
 ### Rules
 
 1. SES is the **default and recommended** delivery path. It requires no IP reputation management and provides automatic DKIM/DMARC alignment.
-2. Self-hosted SMTP is opt-in via `EMAIL_TRANSPORT_TYPE=smtp` and `OUTBOUND_IPS=<comma-separated>`. It requires IP warmup, DNSBL monitoring, and reputation management.
+2. Self-hosted SMTP is opt-in via `EMAIL_TRANSPORT_TYPE=smtp` (configured relay: `SMTP_HOST`/`SMTP_PORT`). Dedicated-IP warmup quotas are enforced by the worker. Source-IP binding (`OUTBOUND_IPS`) and the DNSBL sweep have no live implementation since the retired outbound delivery package was removed.
 3. Emails sent via SES are tagged with `delivery_method: 'ses'` in the database.
 4. Emails sent via self-hosted SMTP are tagged with `delivery_method: 'smtp'`.
 5. The `apexmail_ses_emails_sent_total` counter tracks SES sends. The `apexmail_smtp_emails_sent_total` counter tracks self-hosted sends.

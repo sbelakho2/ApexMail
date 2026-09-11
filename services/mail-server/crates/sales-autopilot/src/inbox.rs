@@ -223,14 +223,13 @@ impl InboxMessageRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_db::{canonical_test_pool, unique_test_tenant};
 
-    async fn make_mgr() -> InboxManager {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_millis(100))
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        InboxManager::new(db)
+    /// Manager on the canonical provisioned test database (fresh pool per
+    /// test); `None` means the environment is unconfigured → soft-skip.
+    async fn make_mgr(test_name: &str) -> Option<InboxManager> {
+        let db = canonical_test_pool(test_name).await?;
+        Some(InboxManager::new(db))
     }
 
     /// Fix I-5: unsubscribe/opt-out subjects must classify as Unsubscribe
@@ -282,19 +281,18 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_categorization() {
-        let mgr = make_mgr().await;
+        let Some(mgr) = make_mgr("inbox::tests::test_categorization").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("inbox-categorization");
         let m1 = mgr
-            .categorize_message(
-                "tenant-1",
-                "alice@x.com".into(),
-                "Interested in a demo".into(),
-            )
+            .categorize_message(&tenant, "alice@x.com".into(), "Interested in a demo".into())
             .await;
         assert_eq!(m1.category, MessageCategory::Lead);
 
         let m2 = mgr
             .categorize_message(
-                "tenant-1",
+                &tenant,
                 "noreply@spam.biz".into(),
                 "You won the lottery!".into(),
             )
@@ -302,17 +300,13 @@ mod tests {
         assert_eq!(m2.category, MessageCategory::Spam);
 
         let m3 = mgr
-            .categorize_message(
-                "tenant-1",
-                "bob@y.com".into(),
-                "Support ticket #1234".into(),
-            )
+            .categorize_message(&tenant, "bob@y.com".into(), "Support ticket #1234".into())
             .await;
         assert_eq!(m3.category, MessageCategory::Support);
 
         let m4 = mgr
             .categorize_message(
-                "tenant-1",
+                &tenant,
                 "billing@co.com".into(),
                 "Invoice for subscription".into(),
             )
@@ -324,38 +318,45 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_list_by_category_and_mark_replied() {
-        let mgr = make_mgr().await;
+        let Some(mgr) = make_mgr("inbox::tests::test_list_by_category_and_mark_replied").await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("inbox-list");
         let m = mgr
-            .categorize_message("tenant-1", "a@b.com".into(), "Pricing inquiry".into())
+            .categorize_message(&tenant, "a@b.com".into(), "Pricing inquiry".into())
             .await;
         assert_eq!(m.category, MessageCategory::Lead);
 
         let leads = mgr
-            .list_by_category("tenant-1", MessageCategory::Lead, 100, 0)
+            .list_by_category(&tenant, MessageCategory::Lead, 100, 0)
             .await
             .unwrap();
         assert_eq!(leads.len(), 1);
 
-        mgr.mark_replied("tenant-1", m.id).await.unwrap();
-        assert!(mgr.mark_replied("tenant-1", Uuid::new_v4()).await.is_err()); // non-existent
+        mgr.mark_replied(&tenant, m.id).await.unwrap();
+        assert!(mgr.mark_replied(&tenant, Uuid::new_v4()).await.is_err()); // non-existent
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
     #[ignore]
     #[tokio::test]
     async fn test_reply_rate() {
-        let mgr = make_mgr().await;
-        assert_eq!(mgr.get_reply_rate("tenant-1").await, 0.0);
+        let Some(mgr) = make_mgr("inbox::tests::test_reply_rate").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("inbox-reply-rate");
+        assert_eq!(mgr.get_reply_rate(&tenant).await, 0.0);
 
         let m1 = mgr
-            .categorize_message("tenant-1", "a@b.com".into(), "Hello".into())
+            .categorize_message(&tenant, "a@b.com".into(), "Hello".into())
             .await;
         let _m2 = mgr
-            .categorize_message("tenant-1", "c@d.com".into(), "World".into())
+            .categorize_message(&tenant, "c@d.com".into(), "World".into())
             .await;
-        mgr.mark_replied("tenant-1", m1.id).await.unwrap();
+        mgr.mark_replied(&tenant, m1.id).await.unwrap();
 
-        let rate = mgr.get_reply_rate("tenant-1").await;
+        let rate = mgr.get_reply_rate(&tenant).await;
         assert!((rate - 0.5).abs() < f64::EPSILON);
     }
 }

@@ -5427,7 +5427,7 @@ async fn form_sales_discovery(
     }
     let _categories = field(&form, "categories");
     redirect_success(
-        "Discovery runs are launched from the API console (POST /v1/admin/leads/discovery/run).",
+        "Discovery runs are launched from the API console (POST /v1/admin/sales/discovery/run).",
         "/sales",
         &state.config,
     )
@@ -5460,7 +5460,8 @@ async fn form_sales_outreach(
         );
     }
     redirect_success(
-        "Outreach launches from the API console (POST /v1/admin/autopilot/outreach).",
+        "Outreach is an enrollment command from the API console \
+         (POST /v1/admin/sales/outreach/start with sequenceId, contactIds and autonomyPolicyId).",
         "/sales",
         &state.config,
     )
@@ -5949,21 +5950,32 @@ async fn form_sales_discovery_run(
     }
 }
 
-/// POST /web/admin/sales/outreach/launch — creates a sales campaign via
-/// the engine's documented contract (POST {base}/campaigns →
-/// /campaigns/{id}/recipients → /campaigns/{id}/start) for the selected
-/// leads' contact emails. Quota-pause style errors surface verbatim.
+/// POST /web/admin/sales/outreach/launch — forwards the enrollment command
+/// (POST {base}/enrollments) for the selected contacts. Outreach is an
+/// enrollment command: the CP creates no campaign and no recipient rows
+/// itself, and the engine's answer (accepted/rejected counts, quota-pause
+/// errors) surfaces honestly.
 async fn form_sales_outreach_launch(
     State(state): State<AppState>,
-    axum::Extension(user): axum::Extension<AuthUser>,
+    axum::Extension(_user): axum::Extension<AuthUser>,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/sales", &state.config);
     }
-    let lead_ids: Vec<String> = form
-        .get("lead_ids")
+    let sequence_id = field(&form, "sequence_id").trim().to_string();
+    let autonomy_policy_id = field(&form, "autonomy_policy_id").trim().to_string();
+    if sequence_id.is_empty() || autonomy_policy_id.is_empty() {
+        return redirect_error(
+            "An enrollment command needs a sequence id and an autonomy policy id.",
+            "/sales",
+            &state.config,
+        );
+    }
+    let contact_ids: Vec<String> = form
+        .get("contact_ids")
+        .or_else(|| form.get("lead_ids"))
         .map(|v| {
             v.split(',')
                 .map(str::trim)
@@ -5972,9 +5984,9 @@ async fn form_sales_outreach_launch(
                 .collect()
         })
         .unwrap_or_default();
-    if lead_ids.is_empty() {
+    if contact_ids.is_empty() || contact_ids.len() > 100 {
         return redirect_error(
-            "Pick at least one lead in the queue first.",
+            "Provide 1-100 comma-separated contact ids.",
             "/sales",
             &state.config,
         );
@@ -5986,129 +5998,42 @@ async fn form_sales_outreach_launch(
             &state.config,
         );
     };
-    // Recipient emails come from the leads table (same scoping as the
-    // JSON outreach route).
-    let rows: Vec<(Option<String>,)> = sqlx::query_as(
-        "SELECT contact_email FROM sales_leads WHERE id = ANY($1) AND tenant_id = $2",
-    )
-    .bind(&lead_ids)
-    .bind(user.tenant_id.as_str())
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-    let emails: Vec<String> = rows.into_iter().filter_map(|(email,)| email).collect();
-    if emails.is_empty() {
-        return redirect_error(
-            "None of the selected leads have a contact email.",
-            "/sales",
-            &state.config,
-        );
+
+    let mut payload = json!({
+        "sequenceId": sequence_id,
+        "contactIds": contact_ids,
+        "autonomyPolicyId": autonomy_policy_id,
+    });
+    let experiment_id = field(&form, "experiment_id").trim().to_string();
+    if !experiment_id.is_empty() {
+        payload["experimentId"] = json!(experiment_id);
     }
 
-    let authed = |request: reqwest::RequestBuilder| {
-        if let Some(token) = state.config.internal_service_token.as_deref() {
-            request.header("x-api-key", token)
-        } else {
-            request
-        }
-    };
-    let client = state
+    let request = state
         .http_client
-        .clone()
-        .request(reqwest::Method::POST, format!("{base}/campaigns"))
+        .post(format!("{base}/enrollments"))
         .header("x-tenant-id", "system")
+        .json(&payload)
         .timeout(std::time::Duration::from_secs(30));
-    let template_id = {
-        let requested = field(&form, "template_id");
-        let trimmed = requested.trim();
-        if trimmed.is_empty() {
-            "default".to_string()
-        } else {
-            trimmed.to_string()
-        }
+    let request = if let Some(token) = state.config.internal_service_token.as_deref() {
+        request.header("x-api-key", token)
+    } else {
+        request
     };
-    let create = authed(client)
-        .json(&serde_json::json!({
-            "name": format!("Operator outreach — {}", Utc::now().date_naive()),
-            "template_id": template_id,
-            "audience": "selected-leads",
-            "tenant_id": "system",
-        }))
-        .send()
-        .await;
-    let campaign_id = match create {
-        Ok(response) if response.status().is_success() => response
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|body| {
-                body.get("id")
-                    .or_else(|| body.get("campaignId"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            }),
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return sales_engine_error_flash(status, &body, "/sales", &state.config);
-        }
-        Err(error) => {
-            return redirect_error(
-                &format!("Sales engine not reachable at {base}: {error}"),
+    match request.send().await {
+        Ok(response) if response.status().is_success() => {
+            let body = response
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| json!({}));
+            let accepted = body.get("accepted").and_then(|v| v.as_u64()).unwrap_or(0);
+            let rejected = body.get("rejected").and_then(|v| v.as_u64()).unwrap_or(0);
+            redirect_success(
+                &format!("Outreach enrollment accepted: {accepted} accepted, {rejected} rejected."),
                 "/sales",
                 &state.config,
             )
         }
-    };
-    let Some(campaign_id) = campaign_id else {
-        return redirect_error(
-            "The sales engine created the campaign but returned no id.",
-            "/sales",
-            &state.config,
-        );
-    };
-
-    let recipients = authed(
-        state
-            .http_client
-            .post(format!("{base}/campaigns/{campaign_id}/recipients"))
-            .header("x-tenant-id", "system")
-            .timeout(std::time::Duration::from_secs(30)),
-    )
-    .json(&serde_json::json!({ "emails": emails }))
-    .send()
-    .await;
-    match recipients {
-        Ok(response) if response.status().is_success() => {}
-        Ok(response) => {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return sales_engine_error_flash(status, &body, "/sales", &state.config);
-        }
-        Err(error) => {
-            return redirect_error(
-                &format!("Sales engine not reachable at {base}: {error}"),
-                "/sales",
-                &state.config,
-            )
-        }
-    }
-
-    let start = authed(
-        state
-            .http_client
-            .post(format!("{base}/campaigns/{campaign_id}/start"))
-            .header("x-tenant-id", "system")
-            .timeout(std::time::Duration::from_secs(30)),
-    )
-    .send()
-    .await;
-    match start {
-        Ok(response) if response.status().is_success() => redirect_success(
-            &format!("Outreach campaign {campaign_id} launched."),
-            "/sales",
-            &state.config,
-        ),
         Ok(response) => {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -7523,8 +7448,40 @@ mod tests {
         use std::sync::Arc;
         use tower::ServiceExt;
 
-        /// Real AppState (mirrors app.rs's test fixture).
-        async fn web_test_state() -> AppState {
+        /// Real AppState (mirrors app.rs's test fixture) over the CANONICAL
+        /// isolated test database — `crate::test_db::optional_pg_pool`, i.e.
+        /// `<dbname>_api` carrying the full `migrations/` chain applied by
+        /// the production migrator (audit F01), NOT a lazy pool pointed at
+        /// the raw `TEST_DATABASE_URL` database.
+        ///
+        /// The distinction is load-bearing: a raw developer database can be
+        /// a mixed legacy lineage whose shapes contradict the canonical
+        /// ones the fixtures bind against —
+        ///
+        ///   * `users.id` / `contacts.id` / `lists.id` / `domains.id` /
+        ///     `api_keys.id` / `campaigns.id` / `campaign_jobs.campaign_id`
+        ///     are UUID columns (migrations/052_add_missing_foundation_tables.sql:56,
+        ///     migrations/068_create_lists_tables.sql:6,22,
+        ///     migrations/075_create_missing_tables.sql:120), so fixtures
+        ///     bind `Uuid::new_v4()` and the handlers compare
+        ///     `WHERE id = $n::uuid`;
+        ///   * `webhooks.id` / `templates.id` are VARCHAR(26) with no
+        ///     default (migrations/075_create_missing_tables.sql:12,139),
+        ///     so fixtures mint ids with `generate_id("", 26)` — a 36-char
+        ///     UUID string is a 22001 "value too long" on those columns;
+        ///   * `system_alerts.id` is UUID with `DEFAULT gen_random_uuid()`
+        ///     (migrations/020_ses_monitoring.sql:96), so the ack-bulk
+        ///     fixture intentionally inserts no id;
+        ///   * `webhooks.name` is nullable and `webhooks.secret` is NOT
+        ///     NULL (migrations/075_create_missing_tables.sql:141-143), so
+        ///     the cap fixture supplies url/secret/events but no name.
+        ///
+        /// Against the raw legacy database every one of those assumptions
+        /// broke (23502 / 22001 / silent no-match), which is why the suite
+        /// only passed where no database was reachable. Soft-skips without
+        /// TEST_DATABASE_URL (workspace convention); a configured-but-broken
+        /// database PANICS in `test_db` instead of reading as a skip.
+        async fn web_test_state(test_name: &str) -> Option<AppState> {
             static INSTALL: std::sync::Once = std::sync::Once::new();
             INSTALL.call_once(|| {
                 let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
@@ -7533,13 +7490,7 @@ mod tests {
                 std::env::set_var("AWS_ACCESS_KEY_ID", "test");
                 std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
             });
-            let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://apexmail:apexmail@127.0.0.1:5433/apexmail".to_string()
-            });
-            let db = sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .connect_lazy(&database_url)
-                .expect("lazy test pool");
+            let db = crate::test_db::optional_pg_pool(test_name).await?;
             let redis_url =
                 std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into());
             let redis = deadpool_redis::Config::from_url(&redis_url)
@@ -7556,36 +7507,29 @@ mod tests {
                 "us-east-1".into(),
             ));
             let config = test_config();
-            crate::state::AppStateInner::with_ddos_protector(
-                db.clone(),
-                apexmail_db::pool::PoolPair {
-                    rw: db.clone(),
-                    ro: db.clone(),
-                },
-                redis,
-                config.clone(),
-                reqwest::Client::new(),
-                (*ses_provider).clone(),
-                None,
-                Arc::new(
-                    ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
+            Some(
+                crate::state::AppStateInner::with_ddos_protector(
+                    db.clone(),
+                    apexmail_db::pool::PoolPair {
+                        rw: db.clone(),
+                        ro: db,
+                    },
+                    redis,
+                    config.clone(),
+                    reqwest::Client::new(),
+                    (*ses_provider).clone(),
+                    None,
+                    Arc::new(
+                        ddos_protection::DdosProtector::new(
+                            ddos_protection::ProtectorConfig::default(),
+                        )
                         .await
                         .expect("ddos protector"),
+                    ),
+                    None,
+                    None,
+                    crate::resilience::ResilientClient::new_from_config(&config),
                 ),
-                None,
-                None,
-                crate::resilience::ResilientClient::new_from_config(&config),
-            )
-        }
-
-        async fn db_reachable(db: &sqlx::PgPool) -> bool {
-            matches!(
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db),
-                )
-                .await,
-                Ok(Ok(1))
             )
         }
 
@@ -7780,15 +7724,17 @@ mod tests {
 
         #[tokio::test]
         async fn campaign_start_requires_recipients_then_transitions() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!(
-                    "skipping campaign_start_requires_recipients_then_transitions: no database"
-                );
+            let Some(state) =
+                web_test_state("campaign_start_requires_recipients_then_transitions").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            // campaigns.id is UUID PRIMARY KEY DEFAULT gen_random_uuid()
+            // (migrations/075_create_missing_tables.sql:120) — bind a Uuid,
+            // and keep the URL id the same UUID string the handler casts
+            // with `id = $1::uuid`.
             let campaign = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO campaigns (id, tenant_id, name, subject, status, created_at, updated_at)
@@ -7954,13 +7900,15 @@ mod tests {
 
         #[tokio::test]
         async fn contacts_import_flashes_the_honest_summary() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping contacts_import_flashes_the_honest_summary: no database");
+            let Some(state) = web_test_state("contacts_import_flashes_the_honest_summary").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            // contacts.id is UUID PRIMARY KEY DEFAULT gen_random_uuid()
+            // (migrations/068_create_lists_tables.sql:22) — bind a Uuid, not
+            // a 26/36-char string.
             sqlx::query("INSERT INTO contacts (id, tenant_id, email, status, created_at, updated_at) VALUES ($1, $2, 'dup@t.io', 'subscribed', NOW(), NOW())")
                 .bind(Uuid::new_v4())
                 .bind(&tenant)
@@ -8004,11 +7952,10 @@ mod tests {
 
         #[tokio::test]
         async fn webhook_create_binds_the_checkbox_group() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping webhook_create_binds_the_checkbox_group: no database");
+            let Some(state) = web_test_state("webhook_create_binds_the_checkbox_group").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
             let app = web_handlers(state.clone(), session_user(&tenant));
@@ -8097,13 +8044,11 @@ mod tests {
         /// by the SAME hardened validator the JSON path uses.
         #[tokio::test]
         async fn webhook_create_rejects_ssrf_targets_from_the_form_path() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!(
-                    "skipping webhook_create_rejects_ssrf_targets_from_the_form_path: no database"
-                );
+            let Some(state) =
+                web_test_state("webhook_create_rejects_ssrf_targets_from_the_form_path").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webssrf", 18);
             seed_tenant(&state, &tenant).await;
             let app = web_handlers(state.clone(), session_user(&tenant));
@@ -8146,15 +8091,20 @@ mod tests {
         /// The per-tenant webhook cap (25) applies to the form path too.
         #[tokio::test]
         async fn webhook_create_enforces_the_per_tenant_cap_from_the_form_path() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!(
-                    "skipping webhook_create_enforces_the_per_tenant_cap_from_the_form_path: no database"
-                );
+            let Some(state) =
+                web_test_state("webhook_create_enforces_the_per_tenant_cap_from_the_form_path")
+                    .await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webcap", 18);
             seed_tenant(&state, &tenant).await;
+            // webhooks.id is VARCHAR(26) NOT NULL with NO default
+            // (migrations/075_create_missing_tables.sql:139) — mint it with
+            // generate_id("", 26); a 36-char UUID string is a 22001 "value
+            // too long for type character varying(26)". webhooks.name is
+            // NULLABLE at 075:141, so omitting it is canonical (webhooks.url
+            // and webhooks.secret are the NOT NULL columns, 075:142-143).
             for n in 0..25 {
                 sqlx::query(
                     "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled, status, created_at, updated_at)
@@ -8206,11 +8156,9 @@ mod tests {
         /// above their own.
         #[tokio::test]
         async fn team_invite_gates_on_the_caller_role() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping team_invite_gates_on_the_caller_role: no database");
+            let Some(state) = web_test_state("team_invite_gates_on_the_caller_role").await else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("tgate", 18);
             seed_tenant(&state, &tenant).await;
             // Seed the caller rows the gate re-reads.
@@ -8333,11 +8281,10 @@ mod tests {
         /// invitations may be outstanding.
         #[tokio::test]
         async fn team_invite_enforces_an_open_invitation_cap() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping team_invite_enforces_an_open_invitation_cap: no database");
+            let Some(state) = web_test_state("team_invite_enforces_an_open_invitation_cap").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("teamcap", 18);
             seed_tenant(&state, &tenant).await;
             let admin_id = Uuid::new_v4();
@@ -8609,11 +8556,11 @@ mod tests {
         /// accepting unlimited guesses.
         #[tokio::test]
         async fn mfa_verify_locks_out_after_repeated_wrong_codes() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping mfa_verify_locks_out_after_repeated_wrong_codes: no database");
+            let Some(state) =
+                web_test_state("mfa_verify_locks_out_after_repeated_wrong_codes").await
+            else {
                 return;
-            }
+            };
             // Redis-backed counter: skip when Redis is not under test.
             let mut conn = match state.redis.get().await {
                 Ok(conn) => conn,
@@ -8724,11 +8671,10 @@ mod tests {
         /// larger than one batch (500) imports fully with honest counts.
         #[tokio::test]
         async fn contacts_import_batches_without_losing_rows() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping contacts_import_batches_without_losing_rows: no database");
+            let Some(state) = web_test_state("contacts_import_batches_without_losing_rows").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("csvbig", 16);
             seed_tenant(&state, &tenant).await;
 
@@ -8792,13 +8738,14 @@ mod tests {
 
         #[tokio::test]
         async fn template_update_bumps_the_version_snapshot() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping template_update_bumps_the_version_snapshot: no database");
+            let Some(state) = web_test_state("template_update_bumps_the_version_snapshot").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            // templates.id is VARCHAR(26) PRIMARY KEY with no default
+            // (migrations/075_create_missing_tables.sql:12) — generate_id("", 26).
             let template = apexmail_lib::id::generate_id("", 26);
             sqlx::query(
                 "INSERT INTO templates (id, tenant_id, name, subject, html_body, created_at, updated_at)
@@ -8855,13 +8802,11 @@ mod tests {
 
         #[tokio::test]
         async fn bulk_delete_flows_through_the_signed_confirm_page() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!(
-                    "skipping bulk_delete_flows_through_the_signed_confirm_page: no database"
-                );
+            let Some(state) =
+                web_test_state("bulk_delete_flows_through_the_signed_confirm_page").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
             let first = Uuid::new_v4();
@@ -8973,11 +8918,10 @@ mod tests {
 
         #[tokio::test]
         async fn alerts_ack_bulk_flips_rows_with_honest_counts() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping alerts_ack_bulk_flips_rows_with_honest_counts: no database");
+            let Some(state) = web_test_state("alerts_ack_bulk_flips_rows_with_honest_counts").await
+            else {
                 return;
-            }
+            };
             let system_tenant: String =
                 sqlx::query_scalar("SELECT id::text FROM tenants WHERE slug = 'system' LIMIT 1")
                     .fetch_optional(&state.db)
@@ -8987,6 +8931,10 @@ mod tests {
                     .unwrap_or_else(|| "system".to_string());
             let mut ids: Vec<String> = Vec::new();
             for index in 0..3 {
+                // system_alerts.id is UUID PRIMARY KEY DEFAULT
+                // gen_random_uuid() (migrations/020_ses_monitoring.sql:96) —
+                // the fixture deliberately inserts NO id and reads the
+                // generated one back; id-less inserts are canonical.
                 let id: uuid::Uuid = sqlx::query_scalar(
                     "INSERT INTO system_alerts (alert_type, message, severity, acknowledged, created_at)
                      VALUES ('web_flow_test', $1, 'warning', false, NOW()) RETURNING id",
@@ -9045,11 +8993,11 @@ mod tests {
 
         #[tokio::test]
         async fn gdpr_transition_validates_the_triad_and_audits() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping gdpr_transition_validates_the_triad_and_audits: no database");
+            let Some(state) =
+                web_test_state("gdpr_transition_validates_the_triad_and_audits").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
             let request = apexmail_lib::id::generate_id("", 26);
@@ -9136,11 +9084,11 @@ mod tests {
 
         #[tokio::test]
         async fn tenant_lifecycle_suspends_resumes_and_deletes_with_typing() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping tenant_lifecycle_suspends_resumes_and_deletes_with_typing: no database");
+            let Some(state) =
+                web_test_state("tenant_lifecycle_suspends_resumes_and_deletes_with_typing").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
             let name = format!("Web Flow Test {tenant}");
@@ -9276,13 +9224,16 @@ mod tests {
 
         #[tokio::test]
         async fn events_loader_passes_page_and_total_through_the_data_path() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping events_loader_passes_page_and_total_through_the_data_path: no database");
+            let Some(state) =
+                web_test_state("events_loader_passes_page_and_total_through_the_data_path").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            // events.id is VARCHAR(64) PRIMARY KEY
+            // (migrations/075_create_missing_tables.sql:31) — a 36-char UUID
+            // string fits; a 26-char-only column would 22001 here.
             // 25 events: two pages at PER_PAGE=20.
             for index in 0..25 {
                 sqlx::query(
@@ -9319,13 +9270,16 @@ mod tests {
 
         #[tokio::test]
         async fn domain_detail_reuses_the_dns_record_generation() {
-            let state = web_test_state().await;
-            if !db_reachable(&state.db).await {
-                eprintln!("skipping domain_detail_reuses_the_dns_record_generation: no database");
+            let Some(state) =
+                web_test_state("domain_detail_reuses_the_dns_record_generation").await
+            else {
                 return;
-            }
+            };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            // domains.id is UUID PRIMARY KEY DEFAULT gen_random_uuid()
+            // (migrations/052_add_missing_foundation_tables.sql:144) — bind a
+            // Uuid; the detail loader reads it back as a string.
             let domain = Uuid::new_v4();
             let domain_name = format!("dns-{tenant}.example.org");
             sqlx::query("DELETE FROM domains WHERE name = $1")
@@ -9803,33 +9757,37 @@ mod tests {
                             .collect::<Vec<_>>()
                     );
                 });
-            // The replay guard atomically burns the code's ±1 acceptance
-            // windows, so the confirm above has already claimed this
-            // secret's current window — an immediate sign-in with ANY code
-            // inside it is (correctly) rejected as a replay. Clear this
-            // secret's replay keys to simulate the 30s window having
-            // passed; the key set is fingerprint-unique so parallel tests
-            // sharing the ephemeral Redis are untouched.
-            {
-                use sha2::Digest as _;
-                let fingerprint = hex::encode(sha2::Sha256::digest(secret_b32.as_bytes()));
-                let step = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    / 30;
-                if let Ok(mut conn) = state.redis.get().await {
-                    for claimed in [step.wrapping_sub(1), step, step + 1] {
-                        let _: Result<(), _> = deadpool_redis::redis::cmd("DEL")
-                            .arg(format!(
-                                "apexmail:auth:mfa_totp_replay:{fingerprint}:{claimed}"
-                            ))
-                            .query_async(&mut *conn)
-                            .await;
-                    }
-                }
-            }
-            let code = current_totp_code(&secret_bytes);
+            // The confirm above spent the enrollment secret's single-use F3
+            // replay window. With a reachable TEST_REDIS_URL this used to
+            // clear those Redis keys and re-use the same secret; with the
+            // dead default Redis the guard degrades to the process-wide
+            // in-process fallback, whose claimed windows a test cannot
+            // clear — which turned this bind sweep into a Redis-only skip
+            // (exactly the invisibility this suite exists to avoid).
+            // Rotate the stored secret instead, encrypted at rest exactly
+            // as `form_mfa_confirm` stores it (`secret_at_rest::encrypt_at_rest`
+            // with AAD `user_id={user_id}` — see form_mfa_confirm), so the
+            // sign-in below has an unclaimed window while still proving the
+            // bind under test: `form_mfa_verify` must SELECT `mfa_secret` by
+            // `users.id` (UUID, canonical migration 052) and decrypt it with
+            // the same AAD for the code to validate at all.
+            let mut signin_secret_bytes = [0u8; 20];
+            rand::rngs::OsRng
+                .try_fill_bytes(&mut signin_secret_bytes)
+                .expect("os rng");
+            let signin_secret_b32 = base32_of_20_bytes(&signin_secret_bytes);
+            let encrypted = apexmail_lib::secret_at_rest::encrypt_at_rest(
+                &signin_secret_b32,
+                format!("user_id={user_id}").as_bytes(),
+            )
+            .expect("encrypt the rotated MFA secret");
+            sqlx::query("UPDATE users SET mfa_secret = $1 WHERE id = $2")
+                .bind(&encrypted)
+                .bind(user_id)
+                .execute(&db)
+                .await
+                .expect("rotate the stored MFA secret");
+            let code = current_totp_code(&signin_secret_bytes);
             let verify_body = csrf_body(&state, &[("code", &code), ("email", &email)]);
             let response = login_app
                 .oneshot(
@@ -10084,6 +10042,171 @@ mod tests {
                 }
             }
             db.close().await;
+        }
+
+        // ─── Static canonical-schema contract (no database required) ──────
+        //
+        // The db_backed suite soft-skips whenever TEST_DATABASE_URL is
+        // unset, so in a no-database CI run every fixture/schema mismatch
+        // above is invisible. These constants embed the canonical migration
+        // sources at COMPILE time so the contract test below runs in that
+        // default run — it is the tripwire that fails CI when a migration
+        // changes a declaration the fixtures depend on.
+
+        const MIG_020: &str = include_str!("../../../../migrations/020_ses_monitoring.sql");
+        const MIG_052: &str =
+            include_str!("../../../../migrations/052_add_missing_foundation_tables.sql");
+        const MIG_064: &str =
+            include_str!("../../../../migrations/064_standardize_tenant_id_varchar26.sql");
+        const MIG_068: &str = include_str!("../../../../migrations/068_create_lists_tables.sql");
+        const MIG_069: &str =
+            include_str!("../../../../migrations/069_create_missing_app_tables.sql");
+        const MIG_075: &str = include_str!("../../../../migrations/075_create_missing_tables.sql");
+
+        /// Whitespace-collapsed migration SQL, so a declaration can be
+        /// asserted without depending on column alignment.
+        fn normalized_ddl(sql: &str) -> String {
+            sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        /// The whitespace-collapsed `CREATE TABLE IF NOT EXISTS <table> (…);`
+        /// block from one migration file, so per-table declarations (e.g.
+        /// "`webhooks.name` is nullable") cannot draw false positives from
+        /// another table in the same file.
+        fn create_table_block(sql: &str, table: &str) -> String {
+            let normalized = normalized_ddl(sql);
+            let start = normalized
+                .find(&format!("CREATE TABLE IF NOT EXISTS {table} ("))
+                .unwrap_or_else(|| panic!("no CREATE TABLE for {table} in the migration"));
+            let rest = &normalized[start..];
+            let end = rest
+                .find(");")
+                .unwrap_or_else(|| panic!("unterminated CREATE TABLE {table}"));
+            rest[..end].to_string()
+        }
+
+        fn assert_declaration(block: &str, declaration: &str, fixture_contract: &str) {
+            assert!(
+                block.contains(declaration),
+                "canonical schema drift: expected `{declaration}` — the fixture contract \
+                 depends on it ({fixture_contract}). Update the migration and the fixture \
+                 together, never silently."
+            );
+        }
+
+        /// The canonical-schema contract every `db_backed` fixture above
+        /// binds against — asserted straight from the migration SQL text so
+        /// it runs with or without a database. Findings that motivated this
+        /// test:
+        ///
+        /// * the suite was pointed at the RAW `TEST_DATABASE_URL` database
+        ///   instead of the canonical `<dbname>_api` clone, so fixtures
+        ///   designed for these declarations failed only when a database
+        ///   happened to be reachable;
+        /// * with no database everything skipped, so no CI run could ever
+        ///   notice a migration drifting away from the fixtures.
+        #[test]
+        fn fixtures_match_the_canonical_schema_contract() {
+            // users.id / contacts.id / lists.id / domains.id / api_keys.id /
+            // campaigns.id / campaign_jobs.id+campaign_id are UUID: the
+            // fixtures bind `Uuid::new_v4()` and every handler compares
+            // `WHERE id = $n::uuid`. A regression to VARCHAR is a 22001 on
+            // the bind or a silent `uuid = text` no-match.
+            assert_declaration(
+                &create_table_block(MIG_052, "users"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "seed_canonical_user / team-invite / reset-password fixtures bind Uuid to users.id",
+            );
+            assert_declaration(
+                &create_table_block(MIG_052, "domains"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "domain_detail fixture and the domain handlers bind Uuid to domains.id",
+            );
+            assert_declaration(
+                &create_table_block(MIG_052, "api_keys"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "api-key fixtures bind Uuid to api_keys.id",
+            );
+            assert_declaration(
+                &create_table_block(MIG_068, "contacts"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "contacts-import fixtures rely on the UUID default (they bind Uuid for seeded rows)",
+            );
+            assert_declaration(
+                &create_table_block(MIG_068, "lists"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "campaign-start fixture binds Uuid to lists.id",
+            );
+            assert_declaration(
+                &create_table_block(MIG_068, "list_subscribers"),
+                "contact_id UUID NOT NULL REFERENCES contacts(id)",
+                "campaign-start fixture binds Uuid to list_subscribers.contact_id",
+            );
+            assert_declaration(
+                &create_table_block(MIG_069, "campaign_jobs"),
+                "campaign_id UUID NOT NULL",
+                "campaign-start fixture/recipe probe campaign_jobs by Uuid campaign id",
+            );
+            assert_declaration(
+                &create_table_block(MIG_075, "campaigns"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "campaign fixtures bind Uuid to campaigns.id",
+            );
+
+            // templates.id and webhooks.id are VARCHAR(26) with NO default:
+            // fixtures must mint them with `generate_id("", 26)`; a 36-char
+            // UUID string is a 22001 "value too long for type character
+            // varying(26)".
+            assert_declaration(
+                &create_table_block(MIG_075, "templates"),
+                "id VARCHAR(26) PRIMARY KEY",
+                "template fixtures mint templates.id with generate_id(\"\", 26)",
+            );
+            assert_declaration(
+                &create_table_block(MIG_075, "webhooks"),
+                "id VARCHAR(26) PRIMARY KEY",
+                "webhook fixtures mint webhooks.id with generate_id(\"\", 26)",
+            );
+            // webhooks.secret is NOT NULL (075) and the fixture supplies it;
+            // webhooks.name is deliberately NULLABLE, so the cap fixture
+            // legitimately omits it. Pin both so a future NOT NULL on name
+            // (or a dropped secret) is accompanied by a fixture change.
+            assert_declaration(
+                &create_table_block(MIG_075, "webhooks"),
+                "secret VARCHAR(255) NOT NULL",
+                "webhook fixtures always supply a signing secret",
+            );
+            assert!(
+                !create_table_block(MIG_075, "webhooks").contains("name VARCHAR(255) NOT NULL"),
+                "webhooks.name changed to NOT NULL: the cap fixture intentionally inserts \
+                 rows without a name (075 declares it nullable) — fix both sides"
+            );
+
+            // events.id is VARCHAR(64): the events fixture binds a 36-char
+            // UUID string, which is only legal because the column is wider
+            // than 26.
+            assert_declaration(
+                &create_table_block(MIG_075, "events"),
+                "id VARCHAR(64) PRIMARY KEY",
+                "events_loader fixture binds a UUID string to events.id",
+            );
+
+            // system_alerts.id is UUID with a default: the ack-bulk and
+            // web-id fixtures INSERT without an id and RETURN the generated
+            // value.
+            assert_declaration(
+                &create_table_block(MIG_020, "system_alerts"),
+                "id UUID PRIMARY KEY DEFAULT gen_random_uuid()",
+                "alerts ack fixtures omit system_alerts.id and read back the generated Uuid",
+            );
+
+            // tenants.id is VARCHAR(26) (064): fixtures seed 26-char
+            // tenant ids and every `tenant_id = $n` bind is text.
+            assert_declaration(
+                &create_table_block(MIG_064, "tenants"),
+                "id VARCHAR(26) PRIMARY KEY",
+                "seed_tenant/fixtures seed generate_id-prefixed 26-char tenant ids",
+            );
         }
     }
 }

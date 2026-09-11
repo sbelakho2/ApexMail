@@ -159,7 +159,24 @@ pub struct Domain {
     pub dkim_private_key: Option<String>,
     pub warmup_enabled: bool,
     pub warmup_day: i32,
+    /// The dedicated source IP whose reputation bounds warmup admission for
+    /// this send (the tenant's least-warmed `dedicated_ips` row). `None` when
+    /// warmup is disabled (shared pool) — see `WarmupIpIdentity`.
+    pub warmup_ip: Option<WarmupIpIdentity>,
     pub return_path: Option<String>,
+}
+
+/// The canonical identity of the dedicated IP that carries the warmup
+/// reputation boundary for a tenant send. Warmup admission is keyed on the
+/// `ip_address` (the reputation boundary is the IP, not the domain).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmupIpIdentity {
+    /// `dedicated_ips.id` — the row that owns the warmup state.
+    pub dedicated_ip_id: String,
+    /// Source IP address (`dedicated_ips.ip_address`).
+    pub ip_address: String,
+    /// Canonical warmup start (`dedicated_ips.warmup_started_at`).
+    pub warmup_started_at: DateTime<Utc>,
 }
 
 /// Suppression entry.
@@ -229,61 +246,6 @@ pub enum SendOutcome {
     /// circuit breaker.
     Rejected,
     TransportError,
-}
-
-/// Warmup schedule entry.
-#[derive(Debug, Clone)]
-pub struct WarmupLimits {
-    /// Daily send limit for this warmup day.
-    pub daily_limit: i64,
-    /// Hourly send limit (daily_limit / 24, roughly).
-    pub hourly_limit: i64,
-}
-
-impl WarmupLimits {
-    /// Get warmup limits for a given warmup day.
-    /// Standard warmup schedule:exponential growth over ~30 days.
-    pub fn for_day(day: i32) -> Self {
-        let daily_limit = match day {
-            0 => 50,
-            1 => 100,
-            2 => 200,
-            3 => 400,
-            4 => 800,
-            5 => 1500,
-            6 => 2500,
-            7 => 4000,
-            8 => 6000,
-            9 => 8000,
-            10 => 10000,
-            11 => 15000,
-            12 => 20000,
-            13 => 30000,
-            14 => 40000,
-            15 => 50000,
-            16 => 65000,
-            17 => 80000,
-            18 => 100000,
-            19 => 125000,
-            20 => 150000,
-            21 => 200000,
-            22 => 250000,
-            23 => 300000,
-            24 => 400000,
-            25 => 500000,
-            26 => 650000,
-            27 => 800000,
-            28 => 1000000,
-            _ => i64::MAX, // Fully warmed up
-        };
-
-        let hourly_limit = (daily_limit / 18).max(10); // 18 sending hours per day
-
-        Self {
-            daily_limit,
-            hourly_limit,
-        }
-    }
 }
 
 /// Cached suppression check result.

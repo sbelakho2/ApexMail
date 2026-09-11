@@ -1,8 +1,18 @@
 //! Sales suite endpoints.
 //!
+//! The control plane is a command/read surface here, not a sales engine: it
+//! never creates campaigns or recipients and never runs runtime DDL. Outreach
+//! is an enrollment command forwarded to the canonical sales-autopilot
+//! service; campaign listings proxy its enrollment read model (falling back to
+//! the canonical `sales_enrollments` rows when the service is unconfigured).
 
-use super::super::helpers::{column_exists, table_exists};
+use std::time::Duration;
+
+use super::super::helpers::table_exists;
+use axum::body::{Body, Bytes};
 use axum::extract::{Query, State};
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use deadpool_redis::redis;
@@ -12,6 +22,9 @@ use serde_json::json;
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
+
+/// Outbound calls to the sales-autopilot service are bounded.
+const SALES_PROXY_TIMEOUT_SECS: u64 = 30;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -74,63 +87,87 @@ fn empty_leads_response() -> LeadsResponse {
     }
 }
 
-/// API-114/115: Track whether campaign tables have been ensured to avoid
-/// running DDL on every request (causes latency and lock contention).
-/// Tables should be created via migrations; this is a safety net only.
-use std::sync::OnceLock;
-static CAMPAIGN_TABLES_ENSURE: OnceLock<()> = OnceLock::new();
+/// The sales-autopilot base URL, or a fail-closed error when unconfigured.
+/// An empty value is "not configured" — there is no local fallback engine.
+fn configured_sales_autopilot_base_url(state: &AppState) -> Result<String, ApiError> {
+    let base = sales_autopilot_base_url(state);
+    if base.is_empty() {
+        return Err(ApiError::ServiceUnavailable(
+            "sales-autopilot is not configured (SALES_AUTOPILOT_BASE_URL is empty)".into(),
+        ));
+    }
+    Ok(base)
+}
 
-async fn ensure_campaign_tables(db: &sqlx::PgPool) -> Result<(), ApiError> {
-    // Only run DDL once per process lifetime.
-    if CAMPAIGN_TABLES_ENSURE.get().is_some() {
-        return Ok(());
+/// A buffered upstream response forwarded to the caller verbatim (status,
+/// content type and body) — the CP never rewrites the engine's answer.
+struct UpstreamResponse {
+    status: StatusCode,
+    content_type: Option<HeaderValue>,
+    body: Bytes,
+}
+
+impl UpstreamResponse {
+    fn status_u16(&self) -> u16 {
+        self.status.as_u16()
     }
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS drip_campaigns (
-            id TEXT PRIMARY KEY,
-            tenant_id VARCHAR(26),
-            name TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'draft',
-            campaign_type TEXT,
-            description TEXT,
-            from_email TEXT,
-            from_name TEXT,
-            sequence JSONB NOT NULL DEFAULT '[]'::jsonb,
-            stats JSONB NOT NULL DEFAULT '{}'::jsonb,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            started_at TIMESTAMPTZ,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(db)
-    .await?;
+    /// The body parsed as JSON, when it is JSON — used only for audit
+    /// metadata/ids, never to alter what the caller receives.
+    fn body_json(&self) -> Option<serde_json::Value> {
+        serde_json::from_slice(&self.body).ok()
+    }
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS campaign_recipients (
-            id BIGSERIAL PRIMARY KEY,
-            campaign_id TEXT NOT NULL REFERENCES drip_campaigns(id) ON DELETE CASCADE,
-            lead_id TEXT,
-            email TEXT,
-            status TEXT NOT NULL DEFAULT 'queued',
-            opened_at TIMESTAMPTZ,
-            clicked_at TIMESTAMPTZ,
-            replied_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(db)
-    .await?;
+    fn into_axum_response(self) -> Response {
+        let mut response = Response::new(Body::from(self.body));
+        *response.status_mut() = self.status;
+        if let Some(content_type) = self.content_type {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, content_type);
+        }
+        response
+    }
+}
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign_id
-         ON campaign_recipients(campaign_id)",
-    )
-    .execute(db)
-    .await?;
+async fn proxy_to_sales_service(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<UpstreamResponse, ApiError> {
+    let base = configured_sales_autopilot_base_url(state)?;
+    let mut request = state
+        .http_client
+        .request(method, format!("{base}{path}"))
+        .header("x-tenant-id", "system")
+        .timeout(Duration::from_secs(SALES_PROXY_TIMEOUT_SECS));
+    request = with_internal_service_auth(request, state);
+    if let Some(payload) = body {
+        request = request.json(&payload);
+    }
 
-    let _ = CAMPAIGN_TABLES_ENSURE.set(());
-    Ok(())
+    let response = request.send().await.map_err(|error| {
+        tracing::error!(error = %error, path, "sales-autopilot proxy request failed");
+        ApiError::ServiceUnavailable(format!("sales-autopilot is unreachable at {base}"))
+    })?;
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| HeaderValue::from_bytes(value.as_bytes()).ok());
+    let body = response.bytes().await.map_err(|error| {
+        tracing::error!(error = %error, path, "failed to read the sales-autopilot response");
+        ApiError::ServiceUnavailable("sales-autopilot returned an unreadable response".into())
+    })?;
+
+    Ok(UpstreamResponse {
+        status,
+        content_type,
+        body,
+    })
 }
 
 // ──────────────────────────────────────────
@@ -190,8 +227,6 @@ async fn list_leads(
         return Ok(Json(empty_leads_response()));
     }
 
-    let has_deal_value = column_exists(&state.db, "sales_leads", "deal_value").await;
-
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
 
@@ -215,17 +250,11 @@ async fn list_leads(
         .await
         .unwrap_or(0);
 
+    // deal_value is canonical (migration 200) — selected directly.
     let mut leads_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT id, company_name, domain, contact_email, contact_name,
-                status, source, score, notes, COALESCE(to_jsonb(tags), '[]'::jsonb), ",
-    );
-    if has_deal_value {
-        leads_builder.push("deal_value");
-    } else {
-        leads_builder.push("NULL::double precision");
-    }
-    leads_builder.push(
-        ", created_at, updated_at
+                status, source, score, notes, COALESCE(to_jsonb(tags), '[]'::jsonb),
+                deal_value, created_at, updated_at
          FROM sales_leads WHERE tenant_id = ",
     );
     leads_builder.push_bind(auth.tenant_id.clone());
@@ -384,10 +413,7 @@ async fn update_leads(
         }
     }
 
-    // Build dynamic SET clause
-    // deal_value is not present in any migration; only emit it when the
-    // column actually exists (same guard as list_leads).
-    let has_deal_value = column_exists(&state.db, "sales_leads", "deal_value").await;
+    // Build dynamic SET clause (deal_value is canonical since migration 200).
     let mut sets: Vec<String> = Vec::new();
     let mut bind_idx = 2u32; // $1 = ids array
 
@@ -411,7 +437,7 @@ async fn update_leads(
         sets.push(format!("contact_name = ${bind_idx}"));
         bind_idx += 1;
     }
-    if has_deal_value && body.deal_value.is_some() {
+    if body.deal_value.is_some() {
         sets.push(format!("deal_value = ${bind_idx}"));
         bind_idx += 1;
     }
@@ -446,10 +472,8 @@ async fn update_leads(
     if let Some(ref name) = body.contact_name {
         query = query.bind(name);
     }
-    if has_deal_value {
-        if let Some(deal) = body.deal_value {
-            query = query.bind(deal);
-        }
+    if let Some(deal) = body.deal_value {
+        query = query.bind(deal);
     }
     // Bind tenant_id for WHERE clause scoping
     query = query.bind(&auth.tenant_id);
@@ -646,78 +670,74 @@ pub struct Campaign {
     pub updated_at: String,
 }
 
+/// List outreach campaigns.
+///
+/// Primary path: proxy the canonical enrollment read model
+/// (`GET {base}/enrollments`) so the CP reports exactly what the engine
+/// scheduled. When the service is unconfigured, fall back to the canonical
+/// `sales_enrollments` rows joined to `sales_sequences` — never the retired
+/// CP-local campaign tables.
 async fn list_campaigns(
     State(state): State<AppState>,
     auth: AuthUser,
-) -> Result<Json<Vec<Campaign>>, ApiError> {
+) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    if !table_exists(&state.db, "drip_campaigns").await {
-        return Ok(Json(vec![]));
+    if configured_sales_autopilot_base_url(&state).is_ok() {
+        let upstream =
+            proxy_to_sales_service(&state, reqwest::Method::GET, "/enrollments", None).await?;
+        return Ok(upstream.into_axum_response());
     }
 
-    let has_recipients = table_exists(&state.db, "campaign_recipients").await;
+    Ok(Json(canonical_enrollment_campaigns(&state).await?).into_response())
+}
+
+/// Canonical read-model fallback: one row per enrollment, labelled by its
+/// sequence. Used only when the sales service is unconfigured.
+async fn canonical_enrollment_campaigns(state: &AppState) -> Result<Vec<Campaign>, ApiError> {
+    if !table_exists(&state.db, "sales_enrollments").await
+        || !table_exists(&state.db, "sales_sequences").await
+    {
+        return Ok(Vec::new());
+    }
 
     let rows: Vec<(
         String,
         String,
         String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
         chrono::DateTime<chrono::Utc>,
         chrono::DateTime<chrono::Utc>,
-    )> = if has_recipients {
-        sqlx::query_as(
-            "SELECT c.id, c.name, c.status, COALESCE(c.campaign_type, 'email'),
-                    COUNT(cr.id)::text,
-                    COUNT(cr.id) FILTER (WHERE cr.status IN ('sent', 'delivered'))::text,
-                    COUNT(cr.id) FILTER (WHERE cr.opened_at IS NOT NULL)::text,
-                    COUNT(cr.id) FILTER (WHERE cr.clicked_at IS NOT NULL)::text,
-                    COUNT(cr.id) FILTER (WHERE cr.replied_at IS NOT NULL)::text,
-                    c.created_at, c.updated_at
-             FROM drip_campaigns c
-             LEFT JOIN campaign_recipients cr ON cr.campaign_id = c.id
-             GROUP BY c.id, c.name, c.status, c.campaign_type, c.created_at, c.updated_at
-             ORDER BY c.created_at DESC",
-        )
-        .fetch_all(&state.db)
-        .await?
-    } else {
-        sqlx::query_as(
-            "SELECT id, name, status, COALESCE(campaign_type, 'email'),
-                    '0', '0', '0', '0', '0', created_at, updated_at
-             FROM drip_campaigns
-             ORDER BY created_at DESC",
-        )
-        .fetch_all(&state.db)
-        .await?
-    };
+    )> = sqlx::query_as(
+        "SELECT e.id::text,
+                COALESCE(s.name, 'sequence') AS name,
+                e.state,
+                e.enrolled_at,
+                e.updated_at
+         FROM sales_enrollments e
+         LEFT JOIN sales_sequence_versions v ON v.id = e.sequence_version_id
+         LEFT JOIN sales_sequences s ON s.id = v.sequence_id
+         ORDER BY e.enrolled_at DESC",
+    )
+    .fetch_all(&state.db)
+    .await?;
 
-    let campaigns: Vec<Campaign> = rows
+    Ok(rows
         .into_iter()
-        .map(
-            |(id, name, status, ctype, total, sent, opened, clicked, replied, ca, ua)| Campaign {
-                id,
-                name,
-                status,
-                campaign_type: ctype,
-                total_recipients: total.parse().unwrap_or(0),
-                sent: sent.parse().unwrap_or(0),
-                opened: opened.parse().unwrap_or(0),
-                clicked: clicked.parse().unwrap_or(0),
-                replied: replied.parse().unwrap_or(0),
-                created_at: ca.to_rfc3339(),
-                updated_at: ua.to_rfc3339(),
-            },
-        )
-        .collect();
-
-    Ok(Json(campaigns))
+        .map(|(id, name, status, enrolled_at, updated_at)| Campaign {
+            id,
+            name,
+            status,
+            campaign_type: "sequence".into(),
+            total_recipients: 1,
+            sent: 0,
+            opened: 0,
+            clicked: 0,
+            replied: 0,
+            created_at: enrolled_at.to_rfc3339(),
+            updated_at: updated_at.to_rfc3339(),
+        })
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -727,63 +747,59 @@ pub struct CampaignUpdate {
     pub action: String,
 }
 
+/// Pause/resume/cancel an enrollment batch on the canonical sales service.
+/// The CP does not own enrollment state and never writes it locally.
 async fn update_campaign(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<CampaignUpdate>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    if !table_exists(&state.db, "drip_campaigns").await {
-        return Err(ApiError::NotFound("campaign not found".into()));
-    }
-
-    let new_status = match body.action.as_str() {
-        "pause" => "paused",
-        "resume" => "active",
-        "archive" => "archived",
-        "cancel" => "cancelled",
+    let downstream_action = match body.action.as_str() {
+        "pause" => "pause",
+        "resume" => "resume",
+        "archive" | "cancel" => "cancel",
         _ => return Err(ApiError::Validation(vec!["Invalid action".into()])),
     };
 
-    let result =
-        sqlx::query("UPDATE drip_campaigns SET status = $1, updated_at = NOW() WHERE id = $2")
-            .bind(new_status)
-            .bind(&body.id)
-            .execute(&state.db)
-            .await?;
-
-    if result.rows_affected() == 0 {
-        return Err(ApiError::NotFound("campaign not found".into()));
-    }
+    let enrollment_id = urlencoding::encode(&body.id);
+    let result = proxy_to_sales_service(
+        &state,
+        reqwest::Method::POST,
+        &format!("/enrollments/{enrollment_id}/{downstream_action}"),
+        None,
+    )
+    .await;
+    let upstream_status = result.as_ref().ok().map(UpstreamResponse::status_u16);
 
     log_sales_audit(
         &state.db,
         &auth,
         "control_plane.sales.campaign_updated",
-        "drip_campaign",
+        "sales_enrollment",
         Some(&body.id),
         json!({
             "action": body.action,
-            "status": new_status,
+            "downstreamAction": downstream_action,
+            "upstreamStatus": upstream_status,
         }),
     )
     .await;
 
-    crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
+    if result.is_ok() {
+        crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
+    }
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "status": new_status
-    })))
+    result.map(UpstreamResponse::into_axum_response)
 }
 
 // ──────────────────────────────────────────
 // Discovery
 // ──────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveryRequest {
@@ -798,11 +814,20 @@ fn default_max_pages() -> i32 {
     3
 }
 
+/// Run sales discovery.
+///
+/// The control plane does **not** discover markets: it only imports rows that
+/// were already enriched into `enriched_companies`. Real discovery (provider
+/// fan-out, candidate provenance, budget control) lives in the sales-autopilot
+/// service at `POST {base}/discovery/jobs`; when that service is configured
+/// this handler proxies the command there and returns its answer verbatim.
+/// Without the service the CP degrades to `import_only` mode over
+/// `enriched_companies`.
 async fn run_discovery(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<DiscoveryRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
@@ -810,6 +835,46 @@ async fn run_discovery(
         return Err(ApiError::Validation(vec![
             "At least one source required".into()
         ]));
+    }
+
+    if configured_sales_autopilot_base_url(&state).is_ok() {
+        let payload = serde_json::to_value(&body)
+            .map_err(|error| ApiError::Internal(format!("invalid discovery payload: {error}")))?;
+        let result = proxy_to_sales_service(
+            &state,
+            reqwest::Method::POST,
+            "/discovery/jobs",
+            Some(payload),
+        )
+        .await;
+        let upstream_status = result.as_ref().ok().map(UpstreamResponse::status_u16);
+        let job_id = result
+            .as_ref()
+            .ok()
+            .and_then(UpstreamResponse::body_json)
+            .and_then(|value| {
+                value
+                    .get("jobId")
+                    .or_else(|| value.get("id"))
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            });
+
+        log_sales_audit(
+            &state.db,
+            &auth,
+            "control_plane.sales.discovery_run",
+            "sales_discovery_job",
+            job_id.as_deref(),
+            json!({
+                "sources": body.sources,
+                "categories": body.categories,
+                "upstreamStatus": upstream_status,
+            }),
+        )
+        .await;
+
+        return result.map(UpstreamResponse::into_axum_response);
     }
 
     let job_id = apexmail_lib::id::generate_id("disc", 22);
@@ -833,10 +898,12 @@ async fn run_discovery(
         return Ok(Json(serde_json::json!({
             "jobId": job_id,
             "status": "unavailable",
+            "mode": "import_only",
             "discovered": 0,
             "imported": 0,
             "message": "discovery requires both sales_leads and enriched_companies tables"
-        })));
+        }))
+        .into_response());
     }
 
     let limit = i64::from(body.max_pages.clamp(1, 10)) * 25;
@@ -933,10 +1000,12 @@ async fn run_discovery(
     Ok(Json(serde_json::json!({
         "jobId": job_id,
         "status": "completed",
+        "mode": "import_only",
         "discovered": discovered,
         "imported": imported,
         "source": primary_source,
-    })))
+    }))
+    .into_response())
 }
 
 // ──────────────────────────────────────────
@@ -976,151 +1045,82 @@ async fn check_outreach_rate_limit(state: &AppState, tenant_id: &str) -> Result<
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct OutreachRequest {
-    pub lead_ids: Vec<String>,
-    pub offer_id: Option<String>,
-    pub template_name: Option<String>,
-    pub subject: Option<String>,
+    /// UUID of a `sales_sequences` row.
+    pub sequence_id: String,
+    /// UUIDs of `sales_contacts` rows (1..=100).
+    pub contact_ids: Vec<String>,
+    /// UUID of a `sales_jurisdiction_policies` row.
+    pub autonomy_policy_id: String,
+    #[serde(default)]
+    pub experiment_id: Option<String>,
 }
 
+/// Start outreach by enrolling contacts in a sequence.
+///
+/// This is an enrollment command, not a local campaign writer: the CP creates
+/// no campaign and no recipient rows. It forwards `{"sequenceId",
+/// "contactIds","autonomyPolicyId","experimentId"}` to
+/// `POST {base}/enrollments` and returns the service's response verbatim.
+/// Without a configured service the call fails closed — there is no local
+/// fallback.
 async fn start_outreach(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<OutreachRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    if body.lead_ids.is_empty() || body.lead_ids.len() > 100 {
-        return Err(ApiError::Validation(vec!["1-100 lead IDs allowed".into()]));
-    }
-
-    check_outreach_rate_limit(&state, &auth.tenant_id).await?;
-
-    if !table_exists(&state.db, "sales_leads").await {
-        return Err(ApiError::ServiceUnavailable(
-            "sales leads unavailable".into(),
-        ));
-    }
-
-    ensure_campaign_tables(&state.db).await?;
-
-    // API-103: Scope outreach query by tenant_id to prevent cross-tenant access.
-    let lead_rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT id, contact_email FROM sales_leads WHERE id = ANY($1) AND tenant_id = $2",
-    )
-    .bind(&body.lead_ids)
-    .bind(&auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mut valid_recipients = Vec::new();
-    let mut skipped = Vec::new();
-    for requested_id in &body.lead_ids {
-        match lead_rows.iter().find(|(id, _)| id == requested_id) {
-            Some((lead_id, Some(contact_email))) => {
-                valid_recipients.push((lead_id.clone(), contact_email.clone()));
-            }
-            Some((lead_id, None)) => skipped.push(serde_json::json!({
-                "leadId": lead_id,
-                "reason": "lead is missing a contact email"
-            })),
-            None => skipped.push(serde_json::json!({
-                "leadId": requested_id,
-                "reason": "lead not found"
-            })),
-        }
-    }
-
-    if valid_recipients.is_empty() {
+    if body.contact_ids.is_empty() || body.contact_ids.len() > 100 {
         return Err(ApiError::Validation(vec![
-            "No selected leads are ready for outreach".into(),
+            "1-100 contact IDs allowed".into()
         ]));
     }
 
-    let template = body.template_name.unwrap_or_else(|| "default".into());
-    let campaign_id = apexmail_lib::id::generate_id("cmp", 22);
-    let campaign_name = if let Some(ref offer_id) = body.offer_id {
-        format!(
-            "{} - {}",
-            offer_id.replace('_', " "),
-            chrono::Utc::now().date_naive()
-        )
-    } else {
-        format!("{} - {}", template, chrono::Utc::now().date_naive())
-    };
-    let sequence = serde_json::json!([
-        {
-            "templateName": template,
-            "subject": body.subject,
-            "offerId": body.offer_id,
-        }
-    ]);
-    let stats = serde_json::json!({
-        "queued": valid_recipients.len(),
-        "sent": 0,
-        "opened": 0,
-        "clicked": 0,
-        "replied": 0,
-    });
+    // Keep the existing Redis burst guard on operator-initiated outreach.
+    check_outreach_rate_limit(&state, &auth.tenant_id).await?;
 
-    sqlx::query(
-        "INSERT INTO drip_campaigns (
-            id, tenant_id, name, status, campaign_type, sequence, stats, created_at, started_at, updated_at
-         ) VALUES ($1, $2, $3, 'active', 'email', $4, $5, NOW(), NOW(), NOW())",
-    )
-    .bind(&campaign_id)
-    .bind(&auth.tenant_id)
-    .bind(&campaign_name)
-    .bind(&sequence)
-    .bind(&stats)
-    .execute(&state.db)
-    .await?;
-
-    // RS-069: Batch INSERT instead of N+1 individual INSERT statements.
-    // Build a single query with multiple value tuples for better performance.
-    if !valid_recipients.is_empty() {
-        let mut query_builder = sqlx::QueryBuilder::new(
-            "INSERT INTO campaign_recipients (campaign_id, lead_id, email, status, created_at) ",
-        );
-        query_builder.push_values(&valid_recipients, |mut b, (lead_id, email)| {
-            b.push_bind(&campaign_id)
-                .push_bind(lead_id)
-                .push_bind(email)
-                .push_bind("queued")
-                .push_bind(chrono::Utc::now());
+    let payload = serde_json::to_value(&body)
+        .map_err(|error| ApiError::Internal(format!("invalid outreach payload: {error}")))?;
+    let result =
+        proxy_to_sales_service(&state, reqwest::Method::POST, "/enrollments", Some(payload)).await;
+    let upstream_status = result.as_ref().ok().map(UpstreamResponse::status_u16);
+    let batch_id = result
+        .as_ref()
+        .ok()
+        .and_then(UpstreamResponse::body_json)
+        .and_then(|value| {
+            value
+                .get("enrollmentBatchId")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
         });
-        query_builder.build().execute(&state.db).await?;
-    }
 
     log_sales_audit(
         &state.db,
         &auth,
         "control_plane.sales.outreach_started",
-        "drip_campaign",
-        Some(&campaign_id),
+        "sales_enrollment_batch",
+        batch_id.as_deref(),
         json!({
-            "leadCount": valid_recipients.len(),
-            "offerId": body.offer_id,
-            "template": template,
-            "skipped": skipped.len(),
+            "sequenceId": body.sequence_id,
+            "contactCount": body.contact_ids.len(),
+            "autonomyPolicyId": body.autonomy_policy_id,
+            "experimentId": body.experiment_id,
+            "upstreamStatus": upstream_status,
         }),
     )
     .await;
 
-    crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "campaignId": campaign_id,
-        "status": "queued",
-        "leadsEnrolled": valid_recipients.len(),
-        "offer": body.offer_id,
-        "template": template,
-        "skipped": skipped,
-    })))
+    if result.is_ok() {
+        crate::routes::admin::dashboard::invalidate_dashboard_cache().await;
+    }
+
+    result.map(UpstreamResponse::into_axum_response)
 }
 
 // ──────────────────────────────────────────
@@ -1145,13 +1145,14 @@ async fn get_settings(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
+    // Real database errors propagate — settings are never silently faked.
     let row: Option<(serde_json::Value, serde_json::Value, serde_json::Value)> = sqlx::query_as(
-        "SELECT scoring_weights, schedule, notifications FROM sales_settings LIMIT 1",
+        "SELECT scoring_weights, schedule, notifications
+         FROM sales_settings
+         WHERE tenant_id = 'system'",
     )
     .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    .await?;
 
     let settings = match row {
         Some((sw, sc, nf)) => SalesSettings {
@@ -1159,6 +1160,8 @@ async fn get_settings(
             schedule: sc,
             notifications: nf,
         },
+        // Explicit defaults only when the system tenant genuinely has no row
+        // yet (first run); the first save creates it via the upsert below.
         None => SalesSettings {
             scoring_weights: serde_json::json!({}),
             schedule: serde_json::json!({}),
@@ -1177,23 +1180,9 @@ async fn save_settings(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-    // API-114/115: Use OnceLock to avoid running DDL on every request.
-    static SALES_SETTINGS_ENSURE: OnceLock<()> = OnceLock::new();
-    if SALES_SETTINGS_ENSURE.get().is_none() {
-        if let Err(e) = sqlx::query(
-            "INSERT INTO sales_settings (tenant_id, scoring_weights, schedule, notifications, updated_at)
-             VALUES ('system', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, NOW())
-             ON CONFLICT (tenant_id) DO NOTHING",
-        )
-        .execute(&state.db)
-        .await
-        {
-            tracing::warn!(error = %e, "Failed to ensure sales_settings table exists");
-        }
-        let _ = SALES_SETTINGS_ENSURE.set(());
-    }
-
-    // Upsert settings (single row)
+    // Upsert the system tenant's settings row. No runtime DDL: the table and
+    // its scoring_weights/schedule/notifications columns are canonical
+    // (migrations 069/093/200) and a missing row is created here.
     sqlx::query(
         "INSERT INTO sales_settings (tenant_id, scoring_weights, schedule, notifications, updated_at)
          VALUES ('system', $1, $2, $3, NOW())
@@ -1229,6 +1218,46 @@ async fn save_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::{test_config, test_state_over_with_config};
+    use axum::body::Body;
+    use axum::http::Request;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    /// A router exposing the outreach handler at its production path over a
+    /// real (lazily connected) AppState. Routes are registered directly rather
+    /// than with `nest` because nesting strips the URI prefix, and the
+    /// control-plane static API key path guard inspects the full path.
+    async fn test_app() -> Router {
+        let mut config = test_config();
+        config.control_plane_api_key = Some("test-cp-key".into());
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy test pool");
+        let state = test_state_over_with_config(db, config).await;
+        Router::new()
+            .route("/v1/admin/sales/outreach/start", post(start_outreach))
+            .with_state(state)
+    }
+
+    fn outreach_post(contact_ids: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/admin/sales/outreach/start")
+            .header("host", "localhost")
+            .header("x-api-key", "test-cp-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "sequenceId": "11111111-1111-1111-1111-111111111111",
+                    "contactIds": contact_ids,
+                    "autonomyPolicyId": "33333333-3333-3333-3333-333333333333",
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
 
     #[test]
     fn build_outreach_rate_limit_key_scopes_by_tenant() {
@@ -1236,5 +1265,64 @@ mod tests {
             build_outreach_rate_limit_key("tenant_123"),
             "apexmail:admin:sales:outreach_rate_limit:tenant_123"
         );
+    }
+
+    #[test]
+    fn outreach_request_deserializes_the_canonical_camel_case_contract() {
+        let request: OutreachRequest = serde_json::from_value(json!({
+            "sequenceId": "11111111-1111-1111-1111-111111111111",
+            "contactIds": ["22222222-2222-2222-2222-222222222222"],
+            "autonomyPolicyId": "33333333-3333-3333-3333-333333333333",
+            "experimentId": "44444444-4444-4444-4444-444444444444"
+        }))
+        .expect("canonical outreach request must deserialize");
+        assert_eq!(request.contact_ids.len(), 1);
+
+        // The retired lead/campaign contract must no longer deserialize.
+        assert!(serde_json::from_value::<OutreachRequest>(json!({
+            "leadIds": ["old_lead_id"],
+            "offerId": "legacy_offer"
+        }))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn outreach_rejects_empty_contact_ids() {
+        let app = test_app().await;
+
+        let response = app.oneshot(outreach_post(json!([]))).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn outreach_rejects_more_than_100_contact_ids() {
+        let app = test_app().await;
+        let too_many: Vec<String> = (0..101).map(|index| format!("contact_{index}")).collect();
+
+        let response = app.oneshot(outreach_post(json!(too_many))).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Fragments are assembled at runtime so the test source itself does not
+    /// contain the forbidden strings it scans for.
+    #[test]
+    fn sales_module_has_no_runtime_ddl_or_retired_tables() {
+        let source = include_str!("sales.rs");
+        let forbidden = [
+            ["CREATE", "TABLE"].join(" "),
+            ["ALTER", "TABLE"].join(" "),
+            ["drip", "campaigns"].join("_"),
+            ["campaign", "recipients"].join("_"),
+            ["ensure", "campaign", "tables"].join("_"),
+            ["SALES", "SETTINGS", "ENSURE"].join("_"),
+        ];
+        for fragment in forbidden {
+            assert!(
+                !source.contains(&fragment),
+                "sales.rs must not contain the retired artifact `{fragment}`"
+            );
+        }
     }
 }

@@ -48,23 +48,36 @@ statement for statement:
 | `resolve_sender_domain_id` — verified + DKIM-ready domain row lock (`FOR SHARE`), SES/SMTP transport gate | same SQL, same predicate |
 | `suppressed_recipients` — platform `suppressions` table | platform `suppressions` **and** crate-local `sales_unsubscribes`, checked per batch before any send |
 | `reserve_email_quota` / `rollback_email_quota` via `billing_service::usage::record_with_quota_check` | the same contract, behind the `QuotaGateway` trait (see the billing note below) |
-| `insert_message_and_queue` — one `messages` row + one `email_queue` row per recipient, `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` | the same two inserts, with idempotency key `sacmp:{campaign_id}:{recipient_email}` |
-| `Idempotency-Key` request header (per API call) | deterministic per (campaign, recipient) — a crash/restart can never double-send |
+| `insert_message_and_queue` — one `messages` row + one `email_queue` row per recipient, `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` | the same two inserts; the canonical sequence path uses the logical step-execution identity (see below) |
+| `Idempotency-Key` request header (per API call) | deterministic per logged send identity — a crash/restart can never double-send |
 
-### Billing quota note (integration point)
+### Send identity is a logical sequence step execution
 
-`billing-service` does not currently compile in this working tree (uncommitted
-WIP: an untracked `usage_ingest.rs` wired through a modified `lib.rs`), and
-this crate must not edit sibling crates. `BillingQuotaGateway`
-(src/dispatcher.rs) is therefore a faithful LOCAL mirror of
-`billing_service::usage::record_with_quota_check` / `rollback_usage_record`:
-identical Redis counter keys (`meter:rt:{tenant}:emails_sent:{Y}-{M}`),
-identical dedup keys (`meter:dedup:{event_id}`), identical check-and-increment
-Lua, identical `metering_events` persistence and identical override-aware
-plan-limit SQL. **When billing-service compiles again, replace the two trait
-method bodies with direct calls to the billing functions** (as documented at
-the gateway in dispatcher.rs) — the swap is seamless because every key and
-persisted row is already identical.
+The canonical multi-touch send path (`ProductionCampaignDispatcher::enqueue_sequenced`)
+keys a message on **one step execution of one enrollment**:
+
+```text
+sa:{enrollment_id}:{sequence_version_id}:{step_index}:{attempt_kind}:{variant}
+```
+
+Built by [`send_idempotency_key(SendIdentity::StepExecution)`](src/dispatcher.rs) via
+[`sales_step_idempotency_key`](src/sequences.rs). This is what makes a second,
+legitimate email to the same person a *different* message rather than a
+suppressed duplicate: `(enrollment, version, step, attempt kind, variant)` is
+unique per logical send, including follow-ups, meeting invites and nurture
+touches of the same sequence.
+
+The legacy single-touch campaign path (`enqueue_recipient`) still keys on
+`sacmp:{campaign_id}:{recipient_email}` — correct only for a campaign that
+sends exactly one email per recipient. New multi-touch work must use
+`SendIdentity::StepExecution`.
+
+### Billing quota integration
+
+`BillingQuotaGateway` (src/dispatcher.rs) calls the platform's real
+`billing_service::usage::record_with_quota_check` / `rollback_usage_record`
+directly — same Redis counters, dedup keys and `metering_events`
+persistence as the REST send path. There is no local quota mirror.
 
 Once the rows are in `email_queue`, the platform worker delivers them with ALL
 platform guarantees: DKIM signing (SMTP) or SES BYODKIM, retries with
@@ -83,7 +96,7 @@ suppression feedback, and no billing quota enforcement. It would also bypass
 `email_queue`, so ops dashboards would not see campaign volume. The enqueue
 design reuses every guarantee for free.
 
-## Dispatch pipeline (per recipient, one DB transaction)
+## Dispatch pipeline — single-touch campaign path (per recipient, one DB transaction)
 
 For each due recipient of an active campaign (batch of at most
 `SALES_DISPATCH_BATCH_SIZE`, default 100 per tick):
@@ -96,9 +109,18 @@ For each due recipient of an active campaign (batch of at most
    NOW(), message_id = $msg WHERE … AND sent_at IS NULL RETURNING email`.
    Zero rows ⇒ a concurrent dispatcher already claimed it ⇒ skip (and release
    the reservation).
-3. **`messages` insert** with `idempotency_key = sacmp:{campaign}:{email}`,
+3. **`messages` insert** with the campaign idempotency key
+   (`sacmp:{campaign}:{email}` on this legacy single-touch path),
    `ON CONFLICT DO NOTHING`. Zero rows ⇒ idempotent duplicate (replay or a
    ledger stamped by an older code path) ⇒ skip the queue insert.
+
+The **canonical sequence path** (`enqueue_sequenced`) differs deliberately: the
+caller (the durable action worker) has already claimed the logical
+`sales_step_executions` row, which *is* the send ledger; suppression is
+re-checked inside the transaction; the message carries the step-execution key
+above and `email_queue.campaign_id` is NULL (sequence mail is attributed to a
+step execution, not a campaign). A duplicate key means "this logical step was
+already enqueued" — a replay is a no-op.
 4. **`email_queue` insert** — single-recipient row, `status='pending'`,
    `priority=5`, plus custom headers:
    - `List-Unsubscribe: <https://…/u/{token}>` (angle-bracket form, RFC 2369)
@@ -207,29 +229,96 @@ sends or visibly fails; the loop then continues the campaign.
 | `SALES_DISPATCH_BATCH_SIZE` | 100 | max recipients per campaign per tick |
 | `SALES_DISPATCH_CONCURRENCY` | 4 | concurrent campaigns per tick |
 
-## Schema (crate-managed, `routes::initialize_schema`)
+## Operator integration (control plane)
 
-- `sales_campaign_recipients.message_id UUID` — links a dispatched recipient
-  to its `messages` row (stats reconciliation).
-- `sales_campaigns.last_error TEXT` — error state for paused campaigns
-  (e.g. `email quota exhausted`).
+The ApexMail control plane owns **no** sales brain: every read is a view over
+the canonical tables and every write is an operator intent. It reaches this
+service at **`SALES_AUTOPILOT_BASE_URL`** — the compose stacks set
+`http://sales-autopilot:3010` (service-name host; a bind address such as
+`0.0.0.0` is not routable from inside the api-server container). The
+api-server default is a loopback address for local runs.
 
-No platform migration is required; `messages`, `email_queue`,
-`suppressions`, `templates`, `domains` are used as-is. (Next free number in
-`services/mail-server/migrations` is 104, reserved if ops prefers a file.)
+CP requests forward the internal service token (`x-api-key`) plus
+`x-tenant-id`. The `/control/*` surface (authenticated) is:
+
+| Route | Purpose |
+|---|---|
+| `GET /control/overview` | autonomy state, pipeline and exceptions |
+| `GET /control/decisions` | what was decided and why |
+| `GET /control/exceptions` | work that needs a human |
+| `GET /control/actions` | action queue state |
+| `POST /control/mode` | set the autonomy mode |
+| `POST /control/pause` / `POST /control/resume` | pause (→ Shadow) / resume (→ ApprovalRequired) |
+| `POST /control/kill-switch` | stop new outbound work immediately |
+| `POST /control/decisions/:id/review` | approve/reject a decision |
+| `POST /control/actions/:id/replay` | replay an action (idempotent) |
+
+### Autonomy modes
+
+The mode lives in `sales_autonomy_state.mode`; a tenant with no row fails
+closed to `disabled`. The mode is read on every decision (never cached), so a
+mode change or the kill switch stops new outbound work immediately. Inbound
+reply processing is deliberately unaffected — the data needed to recover must
+keep flowing.
+
+| Mode | Think | Generate copy | Execute |
+|---|---|---|---|
+| `disabled` | no | no | no |
+| `shadow` | yes | yes | no — records what it *would* have done |
+| `assisted` | yes | yes | only what an operator approves |
+| `approval_required` | yes | yes | approved decisions only |
+| `autonomous_guarded` | yes | yes | automatically when every policy/confidence gate passes |
+
+There is intentionally no unrestricted fully-autonomous mode. Unknown
+persisted mode values fail closed to `disabled`.
+
+### Truthful footer
+
+Every rendered outreach message gets the policy-resolved footer
+(`render_for_recipient_with_footer`, src/dispatcher.rs). The footer's reason
+line must never claim a signup that did not happen: cold/prospected contacts
+are described as business contacts identified by research, not as
+subscribers. Manufacturing consent in a footer is both untrue and illegal.
+
+## Schema (owned by the canonical migration chain)
+
+Schema ownership is deterministic: **every** sales table is created by the
+canonical migration chain (`services/mail-server/migrations`, applied by the
+deploy-gate `migrator` binary). `routes::initialize_schema` is now a
+**verification**, not a bootstrap: it checks the required tables/columns and
+refuses to start (`SalesError::SchemaIncompatible`) when anything is missing
+or stale (including retired tables from the old control-plane sales system
+still being present). There is no `CREATE TABLE IF NOT EXISTS` and no
+`ALTER TABLE` at runtime — the effective schema can never depend on service
+start order.
+
+The required/retired manifest is
+[`schema::REQUIRED_TABLES`](src/schema.rs); the old runtime-managed columns
+now live in migration 200 (`sales_campaign_recipients.message_id`,
+`sales_campaigns.last_error`, the `sales_campaign_recipients` send ledger and
+the canonical sequence/enrollment/step-execution tables). Platform tables
+(`messages`, `email_queue`, `suppressions`, `templates`, `domains`) are used
+as-is.
+
+Operators: run the migrator before starting this service; a drift error at
+startup means the database is not the schema this build expects, not a bug in
+the service.
 
 ## Test strategy
 
 - Unit tests (no DB): token signing/verification/tamper/expiry, HTML escaping
   of personalization values (`<script>` lead names), footer/header rendering,
-  idempotency key derivation, config validation.
+  idempotency key derivation (step-execution identity), config validation.
 - Integration tests (real Postgres via `SALES_TEST_DATABASE_URL`, soft-skip
-  without one, following `tests/can_spam.rs`): the platform schema is applied
-  from `tools/migrations` exactly like `api-server`'s tests do. Covers:
-  suppression exclusion (platform + local), frequency cap, crash-restart
-  idempotency (no double-send), quota-exhausted pause with error state,
-  batch-failure retry semantics, unsubscribe happy/invalid/double paths,
-  List-Unsubscribe header presence, stats increment, and the inbox-reply
-  path (compose+escape+enqueue, double-reply idempotency, suppressed
-  correspondent, campaign-optout-does-not-block-reply, cross-tenant 404,
-  sender-domain gate, 501 when unconfigured).
+  only when the variable is unset): the platform schema is applied through the
+  REAL production migrator (`migrator::test_support::shared_canonical_db`,
+  audit F01) — the same canonical chain a deploy installs, not a hand-written
+  or archived schema. `routes::initialize_schema` then verifies the chain
+  produced the sales schema. Covers: suppression exclusion (platform + local),
+  frequency cap, crash-restart idempotency (no double-send), quota-exhausted
+  pause with error state, batch-failure retry semantics, unsubscribe
+  happy/invalid/double paths, List-Unsubscribe header presence, stats
+  increment, and the inbox-reply path (compose+escape+enqueue, double-reply
+  idempotency, suppressed correspondent,
+  campaign-optout-does-not-block-reply, cross-tenant 404, sender-domain gate,
+  501 when unconfigured).

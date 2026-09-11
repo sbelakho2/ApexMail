@@ -3,6 +3,461 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
+// Autonomy
+// ---------------------------------------------------------------------------
+
+/// How much authority the autonomous sales engine has.
+///
+/// Replaces the old `safe_mode: bool`, which was too crude in two directions:
+/// it could not express "think and generate but do not send" (the most
+/// valuable validation state), and it conflated "stopped" with "supervised".
+///
+/// | Mode                | Think | Generate | Execute                                  |
+/// |---------------------|-------|----------|------------------------------------------|
+/// | `Disabled`          | no    | no       | no                                       |
+/// | `Shadow`            | yes   | yes      | no                                       |
+/// | `Assisted`          | yes   | yes      | operator                                 |
+/// | `ApprovalRequired`  | yes   | yes      | approved decisions only                  |
+/// | `AutonomousGuarded` | yes   | yes      | automatically if every gate passes       |
+///
+/// `Shadow` deliberately runs the entire brain: it produces the decision
+/// packets and generated copy that justify granting more authority later,
+/// while blocking execution at the last gate. There is intentionally no
+/// unrestricted `AutonomousFull`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomyMode {
+    Disabled,
+    Shadow,
+    Assisted,
+    ApprovalRequired,
+    AutonomousGuarded,
+}
+
+impl AutonomyMode {
+    /// Parse the persisted snake_case value. Unknown values fail closed to
+    /// [`AutonomyMode::Disabled`] rather than guessing a permissive mode.
+    pub fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "shadow" => Self::Shadow,
+            "assisted" => Self::Assisted,
+            "approval_required" => Self::ApprovalRequired,
+            "autonomous_guarded" => Self::AutonomousGuarded,
+            // "disabled" and anything unrecognised.
+            _ => Self::Disabled,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Shadow => "shadow",
+            Self::Assisted => "assisted",
+            Self::ApprovalRequired => "approval_required",
+            Self::AutonomousGuarded => "autonomous_guarded",
+        }
+    }
+
+    /// Does the brain run at all (observe, verify, score, plan, generate)?
+    ///
+    /// True for every mode except `Disabled` — including `Shadow`, which is
+    /// the point of the mode.
+    pub fn runs_brain(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// May the engine perform an external action with no human in the loop?
+    pub fn may_execute_autonomously(self) -> bool {
+        matches!(self, Self::AutonomousGuarded)
+    }
+
+    /// Must a human approve before this decision executes?
+    pub fn requires_operator_approval(self) -> bool {
+        matches!(self, Self::Assisted | Self::ApprovalRequired)
+    }
+
+    /// Is external execution blocked entirely for this mode?
+    pub fn blocks_all_execution(self) -> bool {
+        matches!(self, Self::Disabled | Self::Shadow)
+    }
+
+    /// All modes, in increasing order of authority. Used by the CP selector.
+    pub fn all() -> [AutonomyMode; 5] {
+        [
+            Self::Disabled,
+            Self::Shadow,
+            Self::Assisted,
+            Self::ApprovalRequired,
+            Self::AutonomousGuarded,
+        ]
+    }
+}
+
+impl std::fmt::Display for AutonomyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Operator-controlled autonomy state for a tenant, read from
+/// `sales_autonomy_state`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomyState {
+    pub tenant_id: String,
+    pub mode: AutonomyMode,
+    /// Immediate stop for NEW outbound actions. It must never discard data or
+    /// stop inbound reply processing.
+    pub kill_switch: bool,
+    pub rules: serde_json::Value,
+    pub last_action: Option<String>,
+    pub last_action_at: Option<DateTime<Utc>>,
+}
+
+impl Default for AutonomyState {
+    fn default() -> Self {
+        Self {
+            tenant_id: "system".into(),
+            // Fail closed: a tenant with no row sends nothing autonomously.
+            mode: AutonomyMode::Disabled,
+            kill_switch: false,
+            rules: serde_json::json!({}),
+            last_action: None,
+            last_action_at: None,
+        }
+    }
+}
+
+impl AutonomyState {
+    /// Can a new external action proceed right now?
+    pub fn permits_execution(&self) -> bool {
+        !self.kill_switch && !self.mode.blocks_all_execution()
+    }
+}
+
+/// Enforcement verdict for one decision, produced by the decision engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Enforcement {
+    /// Gates passed and the mode permits autonomous execution.
+    Execute,
+    /// Gates passed but a human must approve first.
+    AwaitApproval,
+    /// Brain ran and produced a decision, but execution is blocked by mode
+    /// (shadow). The decision is still recorded.
+    Shadowed,
+    /// A hard constraint denied the action.
+    Denied,
+}
+
+/// Orthogonal state enums. Deliberately separate columns instead of one giant
+/// status enum, so contradictory combinations (qualified + snoozed +
+/// interested + demo scheduled) cannot be forced into a single field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrollmentState {
+    Pending,
+    Active,
+    Waiting,
+    Paused,
+    Replied,
+    MeetingBooked,
+    Completed,
+    Suppressed,
+    Failed,
+}
+
+impl EnrollmentState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Waiting => "waiting",
+            Self::Paused => "paused",
+            Self::Replied => "replied",
+            Self::MeetingBooked => "meeting_booked",
+            Self::Completed => "completed",
+            Self::Suppressed => "suppressed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for EnrollmentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The next-best-action space. Deliberately larger than
+/// "Email 1 → Email 2 → Email 3": for a weak prospect the best action is
+/// often `DoNothing`, and for a strong one with thin evidence it is often
+/// `Enrich` rather than `Contact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionAction {
+    DoNothing,
+    Wait,
+    CollectEvidence,
+    Enrich,
+    VerifyEmail,
+    ResearchCompany,
+    Contact,
+    FollowUp,
+    ChangeAngle,
+    AskForReferral,
+    BookMeeting,
+    OperatorTask,
+    Nurture,
+    StopPermanently,
+}
+
+impl DecisionAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DoNothing => "do_nothing",
+            Self::Wait => "wait",
+            Self::CollectEvidence => "collect_evidence",
+            Self::Enrich => "enrich",
+            Self::VerifyEmail => "verify_email",
+            Self::ResearchCompany => "research_company",
+            Self::Contact => "contact",
+            Self::FollowUp => "follow_up",
+            Self::ChangeAngle => "change_angle",
+            Self::AskForReferral => "ask_for_referral",
+            Self::BookMeeting => "book_meeting",
+            Self::OperatorTask => "operator_task",
+            Self::Nurture => "nurture",
+            Self::StopPermanently => "stop_permanently",
+        }
+    }
+
+    /// Does this action cause an external message to a human?
+    pub fn is_external_send(self) -> bool {
+        matches!(
+            self,
+            Self::Contact
+                | Self::FollowUp
+                | Self::ChangeAngle
+                | Self::AskForReferral
+                | Self::BookMeeting
+        )
+    }
+}
+
+impl std::fmt::Display for DecisionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A stored Decision Packet — the explanation and replay record behind every
+/// automated external action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SalesDecision {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub account_id: Option<Uuid>,
+    pub contact_id: Option<Uuid>,
+    pub action: DecisionAction,
+    pub expected_value_eur: f64,
+    pub confidence: f32,
+    pub score_total: f32,
+    pub selected_offer: Option<String>,
+    pub selected_sequence: Option<String>,
+    pub selected_variant: Option<String>,
+    pub selected_sender: Option<String>,
+    pub evidence_ids: Vec<Uuid>,
+    pub policy_id: Option<String>,
+    pub model_version: Option<String>,
+    pub autonomy_mode: AutonomyMode,
+    pub rationale: String,
+    /// Gate failures. Non-empty implies `enforcement == Denied`.
+    pub block_reasons: Vec<String>,
+    pub enforcement: Enforcement,
+    pub execute_after: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Explainable opportunity score. Replaces the single weighted 0-100 lead
+/// score; the feature vector is stored so a decision can be replayed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpportunityScore {
+    pub account_fit: f32,
+    pub persona_fit: f32,
+    pub need_fit: f32,
+    pub intent: f32,
+    pub timing: f32,
+    pub email_stack_fit: f32,
+    pub eu_residency_fit: f32,
+    pub reachability: f32,
+    pub evidence_quality: f32,
+    pub legal_contactability: f32,
+    pub risk: f32,
+    pub p_qualified_reply: f32,
+    pub p_meeting: f32,
+    pub p_paid: f32,
+    pub expected_value_eur: f64,
+    pub total: f32,
+    /// Human-readable contributions, e.g. `+17 detected transactional email stack`.
+    pub reason_codes: Vec<String>,
+    pub scoring_version: String,
+}
+
+/// Legal/consent verdict for contacting one person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactDecision {
+    Allowed,
+    ApprovalRequired,
+    Prohibited,
+}
+
+impl ContactDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::ApprovalRequired => "approval_required",
+            Self::Prohibited => "prohibited",
+        }
+    }
+}
+
+impl std::fmt::Display for ContactDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Sending-pool classes. Sales reputation must never be able to reach a
+/// transactional/customer pool; that is a policy invariant enforced in code
+/// and by a database constraint, not a convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderPool {
+    TransactionalCustomer,
+    InternalTransactional,
+    SalesOutbound,
+    SalesWarmup,
+}
+
+impl SenderPool {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TransactionalCustomer => "transactional_customer",
+            Self::InternalTransactional => "internal_transactional",
+            Self::SalesOutbound => "sales_outbound",
+            Self::SalesWarmup => "sales_warmup",
+        }
+    }
+
+    /// Is this a pool a sales action is permitted to send from?
+    pub fn is_sales_pool(self) -> bool {
+        matches!(self, Self::SalesOutbound | Self::SalesWarmup)
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "transactional_customer" => Some(Self::TransactionalCustomer),
+            "internal_transactional" => Some(Self::InternalTransactional),
+            "sales_outbound" => Some(Self::SalesOutbound),
+            "sales_warmup" => Some(Self::SalesWarmup),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SenderPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Canonical inbound reply disposition. One vocabulary shared by the
+/// deterministic parser, the AI classifier and the operator corrections that
+/// become training examples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyDisposition {
+    Positive,
+    MeetingRequest,
+    Question,
+    Referral,
+    NotInterested,
+    Unsubscribe,
+    Complaint,
+    OutOfOffice,
+    BounceHard,
+    BounceSoft,
+    Unknown,
+}
+
+impl ReplyDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Positive => "positive",
+            Self::MeetingRequest => "meeting_request",
+            Self::Question => "question",
+            Self::Referral => "referral",
+            Self::NotInterested => "not_interested",
+            Self::Unsubscribe => "unsubscribe",
+            Self::Complaint => "complaint",
+            Self::OutOfOffice => "ooo",
+            Self::BounceHard => "bounce_hard",
+            Self::BounceSoft => "bounce_soft",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Must any human reply of this kind stop the normal sequence?
+    ///
+    /// Every disposition except a pure out-of-office / soft bounce is a human
+    /// (or delivery) signal that the scheduled follow-up must not race.
+    pub fn stops_normal_sequence(self) -> bool {
+        !matches!(self, Self::OutOfOffice | Self::BounceSoft)
+    }
+
+    /// Does this disposition permanently suppress the endpoint?
+    pub fn is_permanent_suppression(self) -> bool {
+        matches!(
+            self,
+            Self::Unsubscribe | Self::Complaint | Self::BounceHard | Self::NotInterested
+        )
+    }
+}
+
+impl std::fmt::Display for ReplyDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A resolved sender identity from `sales_sender_identities`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SenderIdentity {
+    pub id: Uuid,
+    pub tenant_id: String,
+    pub pool: SenderPool,
+    pub from_email: String,
+    pub from_name: Option<String>,
+    pub domain: String,
+    pub status: String,
+    pub daily_limit: Option<i32>,
+}
+
+/// A jurisdiction policy row governing whether a contact may be approached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JurisdictionPolicy {
+    pub id: Uuid,
+    pub jurisdiction: String,
+    pub channel: String,
+    pub contact_type: String,
+    pub decision: ContactDecision,
+    pub basis: String,
+    pub required_disclosure: serde_json::Value,
+    pub version: i32,
+}
+
+// ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
@@ -294,6 +749,22 @@ pub enum SalesError {
     #[error("not implemented: {0}")]
     NotImplemented(String),
 
+    /// A hard decision-engine gate refused the action (suppression, legal
+    /// policy, sender health, invalid contact point, existing human reply,
+    /// exhausted frequency budget). Never retried automatically.
+    #[error("policy denied: {0}")]
+    PolicyDenied(String),
+
+    /// The global kill switch is engaged. No new outbound action may start;
+    /// inbound reply processing continues.
+    #[error("outbound halted: global kill switch is engaged")]
+    KillSwitchEngaged,
+
+    /// The database schema is not the version this build requires. Startup
+    /// must refuse rather than run DDL or operate against a drifted schema.
+    #[error("schema incompatible: {0}")]
+    SchemaIncompatible(String),
+
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -321,6 +792,11 @@ impl axum::response::IntoResponse for SalesError {
                 (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
             }
             SalesError::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, self.to_string()),
+            SalesError::PolicyDenied(_) => (StatusCode::FORBIDDEN, self.to_string()),
+            SalesError::KillSwitchEngaged => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
+            SalesError::SchemaIncompatible(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
             SalesError::Database(_) | SalesError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error".into())
             }

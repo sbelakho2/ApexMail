@@ -79,7 +79,17 @@ fn shared_test_url() -> Option<url::Url> {
     // ambient 5432 made these tests run against an unrelated dev database;
     // the env var must name the intended server explicitly (CI points it at
     // an ephemeral container), otherwise the suite soft-skips.
-    let raw = std::env::var("SALES_TEST_DATABASE_URL").ok()?;
+    //
+    // `TEST_DATABASE_URL` is accepted as well so the live-DB suites can be
+    // run with the same variable api-server's integration tests use.
+    let raw = std::env::var("SALES_TEST_DATABASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("TEST_DATABASE_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
     url::Url::parse(&raw).ok()
 }
 

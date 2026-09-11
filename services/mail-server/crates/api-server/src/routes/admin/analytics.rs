@@ -1,14 +1,36 @@
 //! Analytics endpoints — event stats, time series, provider breakdown.
 //!
+//! Metric conventions (single source of truth:
+//! [`crate::analytics_metrics`]):
+//!
+//! * cohort time = event-OCCURRENCE timestamps (`events.timestamp`);
+//! * `sent` = a successful `sent` event, never message creation;
+//! * cardinality = DISTINCT message ids, so repeat opens/clicks on one
+//!   message can never inflate a numerator (no clamping anywhere);
+//! * rates are FRACTIONS in `0.0..=1.0`, never percentages.
+//!
+//! Provider identity prefers a persisted normalized provider dimension on
+//! `events`; when the schema has none, only well-known consumer domains are
+//! classified and every row is labelled `inferred`.
 
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::analytics_metrics::{
+    distinct_message_counts, distinct_message_time_series, provider_breakdown,
+};
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
+
+// Re-exported for the CSV/JSON export module (and route tests), which share
+// the same column/range whitelists and column detection.
+pub use crate::analytics_metrics::{
+    detect_event_columns, parse_analytics_range, select_event_columns, AnalyticsRange,
+    EventColumns, EventTimeColumn, EventTypeColumn,
+};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -44,8 +66,18 @@ pub struct AnalyticsResponse {
     pub stats: AnalyticsStats,
     pub time_series: Vec<TimeSeriesPoint>,
     pub providers: Vec<ProviderBreakdown>,
+    /// Provenance and interpretation notes (provider inference, rate unit).
+    /// The UI must surface these caveats rather than presenting inferred
+    /// numbers as authoritative.
+    pub notes: Vec<String>,
 }
 
+/// Aggregate engagement numbers.
+///
+/// Every count is a count of DISTINCT message ids and every rate is a
+/// FRACTION in `0.0..=1.0` (delivered/sent etc.) over the event-occurrence
+/// window. Because each numerator message also has a `sent` event, the
+/// ratios are `<= 1.0` by construction — they are never clamped.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsStats {
@@ -62,178 +94,73 @@ pub struct AnalyticsStats {
     pub complaint_rate: f64,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TimeSeriesPoint {
-    pub date: String,
-    pub sent: i64,
-    pub delivered: i64,
-    pub opened: i64,
-    pub clicked: i64,
+/// One day of distinct-message counts (event-occurrence buckets).
+pub use crate::analytics_metrics::DistinctTimeSeriesPoint as TimeSeriesPoint;
+
+/// One provider bucket. `inferred` is `true` when the provider was derived
+/// from the recipient-domain suffix (no persisted provider dimension), so
+/// the UI cannot present the fallback as authoritative.
+pub use crate::analytics_metrics::ProviderCount as ProviderBreakdown;
+
+/// Canonical distinct-message aggregate for the system tenant (fleet-wide).
+async fn system_distinct_counts(
+    state: &AppState,
+    columns: EventColumns,
+    range: AnalyticsRange,
+) -> Result<crate::analytics_metrics::DistinctMessageCounts, ApiError> {
+    distinct_message_counts(&state.db, None, range.interval_sql(), columns).await
 }
 
-#[derive(Debug, Serialize)]
-pub struct ProviderBreakdown {
-    pub provider: String,
-    pub count: i64,
-}
+async fn get_analytics(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(params): Query<AnalyticsQuery>,
+) -> Result<Json<AnalyticsResponse>, ApiError> {
+    crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventTypeColumn {
-    EventType,
-    LegacyType,
-}
+    let range = parse_analytics_range(&params.range);
+    let columns = detect_event_columns(&state).await;
 
-impl EventTypeColumn {
-    pub(crate) fn as_sql(self) -> &'static str {
-        match self {
-            Self::EventType => "event_type",
-            Self::LegacyType => "type",
-        }
+    // Aggregate stats — canonical distinct-message counts over
+    // event-occurrence timestamps.
+    let counts = system_distinct_counts(&state, columns, range).await?;
+
+    let stats = AnalyticsStats {
+        total_sent: counts.sent,
+        total_delivered: counts.delivered,
+        total_opened: counts.opened,
+        total_clicked: counts.clicked,
+        total_bounced: counts.bounced,
+        total_complaints: counts.complained,
+        delivery_rate: counts.delivery_rate(),
+        open_rate: counts.open_rate(),
+        click_rate: counts.click_rate(),
+        bounce_rate: counts.bounce_rate(),
+        complaint_rate: counts.complaint_rate(),
+    };
+
+    // Time series — same convention, bucketed per day.
+    let time_series = distinct_message_time_series(&state.db, None, range, columns).await?;
+
+    // Provider breakdown — persisted dimension when present, otherwise a
+    // labelled consumer-domain-suffix inference.
+    let breakdown = provider_breakdown(&state.db, None, range.interval_sql(), columns).await?;
+
+    let mut notes = vec![
+        "Counts are DISTINCT messages from event-occurrence timestamps; rates are fractions (0.0-1.0)."
+            .to_string(),
+    ];
+    if let Some(note) = breakdown.note {
+        notes.push(note);
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EventTimeColumn {
-    CreatedAt,
-    Timestamp,
-}
-
-impl EventTimeColumn {
-    pub(crate) fn as_sql(self) -> &'static str {
-        match self {
-            Self::CreatedAt => "created_at",
-            Self::Timestamp => "timestamp",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EventColumns {
-    pub type_col: EventTypeColumn,
-    pub time_col: EventTimeColumn,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnalyticsRange {
-    Hours24,
-    Days7,
-    Days30,
-    Days90,
-    Months12,
-}
-
-impl AnalyticsRange {
-    pub(crate) fn interval_sql(self) -> &'static str {
-        match self {
-            Self::Hours24 => "24 hours",
-            Self::Days7 => "7 days",
-            Self::Days30 => "30 days",
-            Self::Days90 => "90 days",
-            Self::Months12 => "365 days",
-        }
-    }
-}
-
-pub fn parse_analytics_range(range: &str) -> AnalyticsRange {
-    match range {
-        "24h" => AnalyticsRange::Hours24,
-        "7d" => AnalyticsRange::Days7,
-        "30d" => AnalyticsRange::Days30,
-        "90d" => AnalyticsRange::Days90,
-        "12m" => AnalyticsRange::Months12,
-        _ => AnalyticsRange::Days7,
-    }
-}
-
-pub fn select_event_columns(type_col: Option<&str>, time_col: Option<&str>) -> EventColumns {
-    EventColumns {
-        type_col: match type_col {
-            Some("type") => EventTypeColumn::LegacyType,
-            _ => EventTypeColumn::EventType,
-        },
-        time_col: match time_col {
-            Some("timestamp") => EventTimeColumn::Timestamp,
-            _ => EventTimeColumn::CreatedAt,
-        },
-    }
-}
-
-fn build_stats_query(columns: EventColumns, range: AnalyticsRange) -> String {
-    let type_col = columns.type_col.as_sql();
-    let time_col = columns.time_col.as_sql();
-    let interval = range.interval_sql();
-
-    format!(
-        "SELECT
-            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0) as sent,
-            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0) as delivered,
-            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0) as opened,
-            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0) as clicked,
-            COALESCE(SUM(CASE WHEN {type_col} = 'bounced' THEN 1 ELSE 0 END), 0) as bounced,
-            COALESCE(SUM(CASE WHEN {type_col} = 'complained' THEN 1 ELSE 0 END), 0) as complaints
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval"
-    )
-}
-
-fn build_time_series_query(columns: EventColumns, range: AnalyticsRange) -> String {
-    let type_col = columns.type_col.as_sql();
-    let time_col = columns.time_col.as_sql();
-    let interval = range.interval_sql();
-
-    format!(
-        "SELECT DATE({time_col})::text as d,
-            COALESCE(SUM(CASE WHEN {type_col} = 'sent' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'delivered' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'opened' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN {type_col} = 'clicked' THEN 1 ELSE 0 END), 0)
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval
-         GROUP BY d ORDER BY d ASC"
-    )
-}
-
-fn build_provider_breakdown_query(columns: EventColumns, range: AnalyticsRange) -> String {
-    let type_col = columns.type_col.as_sql();
-    let time_col = columns.time_col.as_sql();
-    let interval = range.interval_sql();
-
-    format!(
-        "SELECT
-            CASE
-              WHEN recipient LIKE '%@gmail.com' THEN 'Gmail'
-              WHEN recipient LIKE '%@yahoo.%' THEN 'Yahoo'
-              WHEN recipient LIKE '%@outlook.%' OR recipient LIKE '%@hotmail.%' THEN 'Microsoft'
-              WHEN recipient LIKE '%@icloud.com' OR recipient LIKE '%@me.com' THEN 'iCloud'
-              ELSE 'Other'
-            END as provider,
-            COUNT(*) as cnt
-         FROM events WHERE {time_col} >= NOW() - '{interval}'::interval AND {type_col} = 'sent'
-         GROUP BY provider ORDER BY cnt DESC"
-    )
-}
-
-async fn detect_column(state: &AppState, table: &str, candidates: &[&str]) -> Option<String> {
-    for col in candidates {
-        let exists: Option<(bool,)> = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2)",
-        )
-        .bind(table)
-        .bind(*col)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-        if exists.map(|r| r.0).unwrap_or(false) {
-            return Some((*col).to_string());
-        }
-    }
-    None
-}
-
-pub async fn detect_event_columns(state: &AppState) -> EventColumns {
-    let type_col = detect_column(state, "events", &["event_type", "type"]).await;
-    let time_col = detect_column(state, "events", &["created_at", "timestamp"]).await;
-
-    select_event_columns(type_col.as_deref(), time_col.as_deref())
+    Ok(Json(AnalyticsResponse {
+        stats,
+        time_series,
+        providers: breakdown.providers,
+        notes,
+    }))
 }
 
 // ── ClickHouse engagement (analytics crate QueryEngine consumer) ──────────
@@ -373,79 +300,6 @@ async fn get_clickhouse_engagement(
     }))
 }
 
-async fn get_analytics(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Query(params): Query<AnalyticsQuery>,
-) -> Result<Json<AnalyticsResponse>, ApiError> {
-    crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
-
-    let range = parse_analytics_range(&params.range);
-    let columns = detect_event_columns(&state).await;
-
-    // Aggregate stats
-    let stats_sql = build_stats_query(columns, range);
-
-    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(&stats_sql)
-        .fetch_optional(&state.db)
-        .await?
-        .unwrap_or((0, 0, 0, 0, 0, 0));
-
-    let (sent, delivered, opened, clicked, bounced, complaints) = row;
-    let safe_sent = if sent > 0 { sent as f64 } else { 1.0 };
-
-    let stats = AnalyticsStats {
-        total_sent: sent,
-        total_delivered: delivered,
-        total_opened: opened,
-        total_clicked: clicked,
-        total_bounced: bounced,
-        total_complaints: complaints,
-        delivery_rate: (delivered as f64 / safe_sent * 100.0).min(100.0),
-        open_rate: (opened as f64 / safe_sent * 100.0).min(100.0),
-        click_rate: (clicked as f64 / safe_sent * 100.0).min(100.0),
-        bounce_rate: (bounced as f64 / safe_sent * 100.0).min(100.0),
-        complaint_rate: (complaints as f64 / safe_sent * 100.0).min(100.0),
-    };
-
-    // Time series
-    let ts_sql = build_time_series_query(columns, range);
-
-    let ts_rows = sqlx::query_as::<_, (String, i64, i64, i64, i64)>(&ts_sql)
-        .fetch_all(&state.db)
-        .await?;
-
-    let time_series: Vec<TimeSeriesPoint> = ts_rows
-        .into_iter()
-        .map(|(date, s, d, o, c)| TimeSeriesPoint {
-            date,
-            sent: s,
-            delivered: d,
-            opened: o,
-            clicked: c,
-        })
-        .collect();
-
-    // Provider breakdown by recipient domain
-    let prov_sql = build_provider_breakdown_query(columns, range);
-
-    let prov_rows = sqlx::query_as::<_, (String, i64)>(&prov_sql)
-        .fetch_all(&state.db)
-        .await?;
-
-    let providers: Vec<ProviderBreakdown> = prov_rows
-        .into_iter()
-        .map(|(provider, count)| ProviderBreakdown { provider, count })
-        .collect();
-
-    Ok(Json(AnalyticsResponse {
-        stats,
-        time_series,
-        providers,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +338,46 @@ mod tests {
         assert_eq!(clickhouse_window("90d"), chrono::Duration::days(90));
         // Unknown ranges fall back to the 7-day window.
         assert_eq!(clickhouse_window("bogus"), chrono::Duration::days(7));
+    }
+
+    /// Fix 1 + Fix 3: the response rates are FRACTIONS over DISTINCT
+    /// messages, and multi-open on one message cannot push engagement above
+    /// 100% — no clamping anywhere.
+    #[test]
+    fn stats_rates_are_fractions_over_distinct_messages() {
+        let counts = crate::analytics_metrics::DistinctMessageCounts {
+            sent: 10,
+            delivered: 9,
+            opened: 7,
+            clicked: 2,
+            bounced: 1,
+            complained: 0,
+        };
+        let stats = AnalyticsStats {
+            total_sent: counts.sent,
+            total_delivered: counts.delivered,
+            total_opened: counts.opened,
+            total_clicked: counts.clicked,
+            total_bounced: counts.bounced,
+            total_complaints: counts.complained,
+            delivery_rate: counts.delivery_rate(),
+            open_rate: counts.open_rate(),
+            click_rate: counts.click_rate(),
+            bounce_rate: counts.bounce_rate(),
+            complaint_rate: counts.complaint_rate(),
+        };
+
+        assert!((stats.delivery_rate - 0.9).abs() < 1e-9);
+        assert!((stats.open_rate - 0.7).abs() < 1e-9);
+        assert!((stats.bounce_rate - 0.1).abs() < 1e-9);
+        for rate in [
+            stats.delivery_rate,
+            stats.open_rate,
+            stats.click_rate,
+            stats.bounce_rate,
+            stats.complaint_rate,
+        ] {
+            assert!((0.0..=1.0).contains(&rate), "rate out of range: {rate}");
+        }
     }
 }

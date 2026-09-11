@@ -616,6 +616,7 @@ async fn web_route_data(
         list,
         campaign_edit,
         mfa_setup: None,
+        sales: None,
     }
 }
 
@@ -2204,13 +2205,15 @@ async fn control_plane_route_data(
         "/cp" | "/dashboard" => Some(cp_dashboard(state, cid).await),
         "/cp/tenants" | "/tenants" => Some(cp_tenants(state, q, cid).await),
         "/operators" => Some(cp_operators(state, q, cid).await),
-        "/cp/sales" | "/sales" => Some(cp_sales(state, q, cid).await),
+        // `/sales` is no longer a lead list: the control surface answers
+        // whether the autonomous engine is producing pipeline profitably and
+        // safely. Its data comes from `RouteData::sales`, not `list`.
+        "/cp/sales" | "/sales" => None,
         "/cp/audit" | "/audit" => Some(cp_audit(state, q, cid).await),
         "/jobs" => Some(cp_jobs(state, cid).await),
         "/infrastructure/nodes" => Some(cp_nodes(state, cid).await),
         "/infrastructure/queues" => Some(cp_queues(state, cid).await),
         "/alerts" => Some(cp_alerts(state, q, cid).await),
-        "/alerts/rules" => Some(cp_alert_rules()),
         "/domains" => Some(cp_domains(state, q, cid).await),
         "/billing/plans" => Some(cp_plans(state, cid).await),
         "/compliance" => Some(cp_compliance(state, cid).await),
@@ -2219,10 +2222,383 @@ async fn control_plane_route_data(
         "/analytics" => Some(cp_analytics(state, cid).await),
         _ => None,
     };
+
+    let sales = match path {
+        "/cp/sales" | "/sales" => Some(cp_sales_autopilot(state).await),
+        _ => None,
+    };
+
     RouteData {
         list,
         campaign_edit: None,
         mfa_setup: None,
+        sales,
+    }
+}
+
+/// Load the sales-autopilot control surface from the canonical sales tables.
+///
+/// The control plane deliberately reads the canonical tables rather than
+/// re-deriving anything: this is a view over the one sales domain, not a
+/// second brain. Every section is independently `None`-able so a single
+/// missing table degrades to the page's explicit "unavailable" state instead
+/// of a zero-filled dashboard that would read as real activity.
+async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::SalesPageData {
+    use ui_foundation::view_data::{
+        SalesActionStatsData, SalesAutonomyData, SalesDeadLetterData, SalesEnrollmentCountData,
+        SalesOverviewData, SalesPageData, SalesRevenueData,
+    };
+
+    const TENANT: &str = "system";
+
+    // ── Autonomy ──────────────────────────────────────────────────────
+    let autonomy = sqlx::query_as::<
+        _,
+        (
+            String,
+            bool,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ),
+    >(
+        "SELECT mode, kill_switch, last_action, last_action_at \
+         FROM sales_autonomy_state WHERE tenant_id = $1",
+    )
+    .bind(TENANT)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|(mode, kill_switch, last_action, last_action_at)| {
+        let parsed = AutonomyModeView::parse(&mode);
+        SalesAutonomyData {
+            mode: parsed.mode.to_string(),
+            mode_description: String::new(),
+            kill_switch,
+            runs_brain: parsed.runs_brain,
+            may_execute: parsed.may_execute,
+            last_action,
+            last_action_at: last_action_at.map(|t| t.to_rfc3339()),
+        }
+    });
+
+    // ── Action queue ──────────────────────────────────────────────────
+    let action_stats = match sqlx::query_as::<_, (String, i64)>(
+        "SELECT state, COUNT(*)::bigint FROM sales_actions \
+         WHERE tenant_id = $1 GROUP BY state ORDER BY state",
+    )
+    .bind(TENANT)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => {
+            let by_state: Vec<(String, i64)> = rows;
+            let total = by_state.iter().map(|(_, count)| *count).sum();
+            let dead_lettered = by_state
+                .iter()
+                .find(|(state, _)| state == "dead_letter")
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            let due_now = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::bigint FROM sales_actions \
+                 WHERE tenant_id = $1 AND state = 'queued' AND due_at <= NOW()",
+            )
+            .bind(TENANT)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+            Some(SalesActionStatsData {
+                total,
+                due_now,
+                dead_lettered,
+                by_state,
+            })
+        }
+        Err(_) => None,
+    };
+
+    // ── Enrollments by state ──────────────────────────────────────────
+    let enrollments = sqlx::query_as::<_, (String, i64)>(
+        "SELECT state, COUNT(*)::bigint FROM sales_enrollments \
+         WHERE tenant_id = $1 GROUP BY state ORDER BY state",
+    )
+    .bind(TENANT)
+    .fetch_all(&state.db)
+    .await
+    .ok()
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(state, count)| SalesEnrollmentCountData { state, count })
+            .collect::<Vec<_>>()
+    });
+
+    // ── Decision counters ────────────────────────────────────────────
+    let decisions_last_24h = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM sales_decisions \
+         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '24 hours'",
+    )
+    .bind(TENANT)
+    .fetch_one(&state.db)
+    .await
+    .ok();
+
+    let blocked_last_24h = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM sales_decisions \
+         WHERE tenant_id = $1 AND blocked AND created_at >= NOW() - INTERVAL '24 hours'",
+    )
+    .bind(TENANT)
+    .fetch_one(&state.db)
+    .await
+    .ok();
+
+    let meetings_booked = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM sales_meetings \
+         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '30 days'",
+    )
+    .bind(TENANT)
+    .fetch_one(&state.db)
+    .await
+    .ok();
+
+    let revenue = sqlx::query_as::<_, (String, f64)>(
+        "SELECT outcome, COALESCE(SUM(value_eur), 0)::float8 FROM sales_outcomes \
+         WHERE tenant_id = $1 AND occurred_at >= NOW() - INTERVAL '30 days' \
+           AND outcome IN ('trial', 'paid_subscription', 'retained_mrr') \
+         GROUP BY outcome ORDER BY outcome",
+    )
+    .bind(TENANT)
+    .fetch_all(&state.db)
+    .await
+    .ok()
+    .map(|rows| {
+        rows.into_iter()
+            .map(|(outcome, eur)| SalesRevenueData { outcome, eur })
+            .collect::<Vec<_>>()
+    });
+
+    let overview = match (autonomy, action_stats) {
+        (Some(autonomy), Some(action_stats)) => Some(SalesOverviewData {
+            autonomy,
+            action_stats,
+            enrollments: enrollments.unwrap_or_default(),
+            decisions_last_24h: decisions_last_24h.unwrap_or(0),
+            blocked_last_24h: blocked_last_24h.unwrap_or(0),
+            meetings_booked: meetings_booked.unwrap_or(0),
+            revenue: revenue.unwrap_or_default(),
+        }),
+        _ => None,
+    };
+
+    // ── Decision rows ────────────────────────────────────────────────
+    let decisions = load_decision_rows(
+        state,
+        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
+                confidence::float8, selected_offer, selected_sequence, selected_variant, \
+                selected_sender, rationale, blocked, block_reasons, execute_after, created_at \
+         FROM sales_decisions WHERE tenant_id = $1 \
+         ORDER BY created_at DESC LIMIT 25",
+    )
+    .await;
+
+    let exceptions = load_decision_rows(
+        state,
+        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
+                confidence::float8, selected_offer, selected_sequence, selected_variant, \
+                selected_sender, rationale, blocked, block_reasons, execute_after, created_at \
+         FROM sales_decisions WHERE tenant_id = $1 \
+           AND (blocked OR autonomy_mode IN ('assisted', 'approval_required')) \
+         ORDER BY created_at DESC LIMIT 25",
+    )
+    .await;
+
+    // ── Dead letters ─────────────────────────────────────────────────
+    let dead_letters = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            i32,
+            i32,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        "SELECT id::text, action_type, entity_type, entity_id::text, state, attempt, \
+                max_attempts, last_error, due_at, created_at \
+         FROM sales_actions WHERE tenant_id = $1 AND state = 'dead_letter' \
+         ORDER BY created_at DESC LIMIT 25",
+    )
+    .bind(TENANT)
+    .fetch_all(&state.db)
+    .await
+    .ok()
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    action_type,
+                    entity_type,
+                    entity_id,
+                    state,
+                    attempt,
+                    max_attempts,
+                    last_error,
+                    due_at,
+                    created_at,
+                )| SalesDeadLetterData {
+                    id,
+                    action_type,
+                    entity_type,
+                    entity_id,
+                    state,
+                    attempt,
+                    max_attempts,
+                    last_error,
+                    due_at: Some(due_at.to_rfc3339()),
+                    created_at: Some(created_at.to_rfc3339()),
+                },
+            )
+            .collect::<Vec<_>>()
+    });
+
+    SalesPageData {
+        // The render pipeline injects hidden `_csrf` inputs into every
+        // POST /web/* form, so the page does not need to carry a token.
+        csrf_token: String::new(),
+        overview,
+        decisions,
+        exceptions,
+        dead_letters,
+    }
+}
+
+/// Load and map decision rows for both the stream and the exceptions list.
+async fn load_decision_rows(
+    state: &AppState,
+    sql: &str,
+) -> Option<Vec<ui_foundation::view_data::SalesDecisionData>> {
+    use ui_foundation::view_data::SalesDecisionData;
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            f64,
+            f64,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            bool,
+            serde_json::Value,
+            Option<chrono::DateTime<chrono::Utc>>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(sql)
+    .bind("system")
+    .fetch_all(&state.db)
+    .await
+    .ok()?;
+
+    Some(
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    account_id,
+                    contact_id,
+                    action,
+                    expected_value_eur,
+                    confidence,
+                    selected_offer,
+                    selected_sequence,
+                    selected_variant,
+                    selected_sender,
+                    rationale,
+                    blocked,
+                    block_reasons,
+                    execute_after,
+                    created_at,
+                )| SalesDecisionData {
+                    id,
+                    account_id,
+                    contact_id,
+                    // Rendered as-is by the view; the engine's vocabulary is
+                    // already operator-facing.
+                    action,
+                    expected_value_eur: Some(expected_value_eur),
+                    confidence: Some(confidence),
+                    selected_offer,
+                    selected_sequence,
+                    selected_variant,
+                    selected_sender,
+                    rationale,
+                    blocked,
+                    block_reasons: block_reasons
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    execute_after: execute_after.map(|t| t.to_rfc3339()),
+                    created_at: Some(created_at.to_rfc3339()),
+                },
+            )
+            .collect(),
+    )
+}
+
+/// The autonomy semantics the CP renders, derived from the persisted mode
+/// string. Kept in the CP so a mode written by a newer engine still renders a
+/// truthful "runs brain / may execute" answer instead of a blank panel.
+struct AutonomyModeView {
+    mode: &'static str,
+    runs_brain: bool,
+    may_execute: bool,
+}
+
+impl AutonomyModeView {
+    fn parse(mode: &str) -> Self {
+        match mode {
+            "shadow" => Self {
+                mode: "shadow",
+                runs_brain: true,
+                may_execute: false,
+            },
+            "assisted" => Self {
+                mode: "assisted",
+                runs_brain: true,
+                may_execute: false,
+            },
+            "approval_required" => Self {
+                mode: "approval_required",
+                runs_brain: true,
+                may_execute: false,
+            },
+            "autonomous_guarded" => Self {
+                mode: "autonomous_guarded",
+                runs_brain: true,
+                may_execute: true,
+            },
+            // "disabled" and anything unrecognised fail closed.
+            _ => Self {
+                mode: "disabled",
+                runs_brain: false,
+                may_execute: false,
+            },
+        }
     }
 }
 
@@ -2573,6 +2949,11 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
         &binds,
     )
     .await;
+    // Same PER_PAGE/OFFSET pagination contract as the tenants/audit loaders:
+    // the table previously hard-limited to 100 rows while the KPI counted the
+    // whole set, so a large installation showed a total that could not be
+    // navigated.
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
     let rows =
         load_query(
@@ -2580,7 +2961,7 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
             cid,
             async {
             let q4 = format!(
-                "SELECT email, name, role, COALESCE(mfa_enabled, false), COALESCE(status, ''), created_at FROM users WHERE {where_clause} ORDER BY created_at DESC LIMIT 100"
+                "SELECT email, name, role, COALESCE(mfa_enabled, false), COALESCE(status, ''), created_at FROM users WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
@@ -2612,11 +2993,14 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
     data.search_label = "Search operators".into();
     data.search_placeholder = "Search by email or name".into();
     data.current_query = q.search.clone();
+    data.page = page;
+    data.total_pages = total_pages;
     data.total_count = if rows_unavailable {
         0
     } else {
         total.total_or_zero()
     };
+    data.filter_query = filter_query(q);
     data.primary_action = Some(("Add Operator".into(), "/operators/new".into()));
     data.empty_title = "No operators yet".into();
     data.empty_description = "Invite an administrator with controlled access.".into();
@@ -2636,7 +3020,7 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
             .enumerate()
             .map(
                 |(index, (email, name, role, mfa, status, _created))| DataRowData {
-                    id: format!("operator-{index}"),
+                    id: format!("operator-{}", offset as usize + index),
                     cells: vec![
                         DataCell::text(email),
                         DataCell::text(name.unwrap_or_default()),
@@ -2970,10 +3354,13 @@ async fn cp_jobs(state: &AppState, cid: &str) -> ListPageData {
     data
 }
 
-/// /infrastructure/nodes query (audit F58). ip_pool_addresses.id is a UUID
-/// and ip_address is INET (migration 093); both must be decoded as text —
-/// `id::text` for the row id and `host(ip_address)` for the bare address
-/// (INET never decodes as a String).
+/// /infrastructure/nodes query (audit F58). The table behind this route is
+/// the OUTBOUND IP POOL (`ip_pool_addresses`), not an MTA-node heartbeat
+/// registry — no node registry exists in the schema, so the page is titled
+/// "IP Pool". ip_pool_addresses.id is a UUID and ip_address is INET
+/// (migration 093); both must be decoded as text — `id::text` for the row id
+/// and `host(ip_address)` for the bare address (INET never decodes as a
+/// String).
 const NODES_SQL: &str = "SELECT id::text AS id, host(ip_address) AS ip_address, pool_id, status, warmup_day FROM ip_pool_addresses ORDER BY ip_address LIMIT 100";
 
 async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
@@ -2991,20 +3378,20 @@ async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
 
     let active = rows.iter().filter(|r| r.3 == "active").count();
     let mut data = base_list(
-        "Nodes",
-        "Cluster capacity and node health.",
+        "IP Pool",
+        "Outbound sending IP addresses, warmup progress, and pool health.",
         "/infrastructure/nodes",
     );
     data.kpis = vec![
         KpiCardData::new(
-            "Nodes",
+            "Addresses",
             if rows_unavailable {
                 "unavailable".to_string()
             } else {
                 rows.len().to_string()
             },
         )
-        .with_hint("MTA pool"),
+        .with_hint("IP pool"),
         KpiCardData::new(
             "Active",
             if rows_unavailable {
@@ -3013,17 +3400,17 @@ async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
                 active.to_string()
             },
         )
-        .with_hint("Sending"),
+        .with_hint("Sending-ready"),
     ];
-    data.empty_title = "No nodes registered".into();
+    data.empty_title = "No IP pool addresses registered".into();
     data.empty_description =
-        "MTA pool addresses appear here as infrastructure registers them.".into();
+        "Outbound sending addresses appear here as the pool provisions them.".into();
     if rows_unavailable {
-        mark_rows_unavailable(&mut data, "Nodes", cid);
+        mark_rows_unavailable(&mut data, "IP Pool", cid);
     }
     data.table = Some(TableData {
         columns: vec![
-            "Node".into(),
+            "ID".into(),
             "IP".into(),
             "Pool".into(),
             "Status".into(),
@@ -3050,12 +3437,45 @@ async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
     data
 }
 
+/// Queue health thresholds. None of these are operator-configurable today,
+/// so they are named constants here; each queue is classified by its pending
+/// backlog depth and the age of its oldest pending job:
+///
+/// - `healthy` — depth < [`WARNING_QUEUE_DEPTH`] and no pending job older
+///   than [`WARNING_QUEUE_AGE_SECS`];
+/// - `warning` — depth >= [`WARNING_QUEUE_DEPTH`] OR oldest pending job at
+///   least [`WARNING_QUEUE_AGE_SECS`] old;
+/// - `critical` — depth >= [`CRITICAL_QUEUE_DEPTH`] OR oldest pending job at
+///   least [`CRITICAL_QUEUE_AGE_SECS`] old.
+const WARNING_QUEUE_DEPTH: i64 = 250;
+const CRITICAL_QUEUE_DEPTH: i64 = 1_000;
+/// 5 minutes.
+const WARNING_QUEUE_AGE_SECS: i64 = 5 * 60;
+/// 30 minutes.
+const CRITICAL_QUEUE_AGE_SECS: i64 = 30 * 60;
+
+/// Classify one queue's health. Replaces the previous `depth > 1000 ?
+/// "sending" : "active"` fabrication — a deep backlog is a HEALTH signal,
+/// not evidence that the queue is sending. `None` age means the queue has no
+/// pending jobs (nothing is waiting), which cannot itself be unhealthy.
+fn queue_health(depth: i64, oldest_pending_age_secs: Option<i64>) -> &'static str {
+    let age = oldest_pending_age_secs.unwrap_or(0);
+    if depth >= CRITICAL_QUEUE_DEPTH || age >= CRITICAL_QUEUE_AGE_SECS {
+        "critical"
+    } else if depth >= WARNING_QUEUE_DEPTH || age >= WARNING_QUEUE_AGE_SECS {
+        "warning"
+    } else {
+        "healthy"
+    }
+}
+
 async fn cp_queues(state: &AppState, cid: &str) -> ListPageData {
     let rows = load_query("cp.queues.list", cid, async {
-        sqlx::query_as::<_, (String, i64, i64)>(
+        sqlx::query_as::<_, (String, i64, i64, Option<i64>)>(
             "SELECT COALESCE(queue, 'default') AS q,
                         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)::bigint AS depth,
-                        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END)::bigint AS proc
+                        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END)::bigint AS proc,
+                        (EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status = 'pending'))))::bigint AS oldest_pending_secs
                  FROM queue_jobs GROUP BY 1",
         )
         .fetch_all(&state.db)
@@ -3106,15 +3526,17 @@ async fn cp_queues(state: &AppState, cid: &str) -> ListPageData {
         ],
         rows: rows
             .into_iter()
-            .map(|(queue, depth, processing)| DataRowData {
-                id: queue.clone(),
-                cells: vec![
-                    DataCell::mono(queue),
-                    DataCell::text(depth.to_string()),
-                    DataCell::text(processing.to_string()),
-                    DataCell::status(if depth > 1000 { "sending" } else { "active" }),
-                ],
-            })
+            .map(
+                |(queue, depth, processing, oldest_pending_secs)| DataRowData {
+                    id: queue.clone(),
+                    cells: vec![
+                        DataCell::mono(queue),
+                        DataCell::text(depth.to_string()),
+                        DataCell::text(processing.to_string()),
+                        DataCell::status(queue_health(depth, oldest_pending_secs)),
+                    ],
+                },
+            )
             .collect(),
     });
     data
@@ -3245,24 +3667,12 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data
 }
 
-/// /alerts/rules has no backing table yet — an honest empty state, never
-/// fabricated rule rows.
-fn cp_alert_rules() -> ListPageData {
-    let mut data = base_list(
-        "Alert Rules",
-        "Alerting policy and escalation thresholds.",
-        "/alerts/rules",
-    );
-    data.empty_title = "No rule store wired yet".into();
-    data.empty_description =
-        "Alert rules are enforced by the fleet alerting engine; a rules table is not provisioned yet, so there is nothing to list."
-            .into();
-    data.table = Some(TableData {
-        columns: vec!["Rule".into()],
-        rows: Vec::new(),
-    });
-    data
-}
+/// /alerts/rules is NOT implemented: there is no alert-rule table or CRUD
+/// service, and presenting an empty "rules" surface implied one existed. The
+/// route now returns an explicit 501 (see `cp_alert_rules_not_implemented`
+/// in app.rs) instead of fabricated page data. This loader was removed with
+/// the route's data arm so a future real store must wire itself in
+/// deliberately.
 
 async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
@@ -3282,21 +3692,22 @@ async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
     .await;
     let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    // domains.status may be absent on legacy deployments (verified flags
-    // instead) — the status cell degrades to "pending" rather than failing.
-    // domains.id and domains.tenant_id are UUIDs (migration 052): decode
-    // both as text.
+    // domains.status may be NULL on legacy deployments (verified flags
+    // instead) — the status cell degrades to "pending" rather than failing,
+    // but the column is always SELECTed and rendered because the page
+    // filters on it. domains.id and domains.tenant_id are UUIDs (migration
+    // 052): decode both as text.
     let rows =
         load_query(
             "cp.domains.list",
             cid,
             async {
             let q8 = format!(
-                "SELECT id::text AS id, name, tenant_id::text AS tenant_id, created_at FROM domains WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                "SELECT id::text AS id, name, tenant_id::text AS tenant_id, COALESCE(status, 'pending') AS status, created_at FROM domains WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
-                    (String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>),
+                    (String, String, Option<String>, String, Option<chrono::DateTime<chrono::Utc>>),
                 >(&q8);
                 for value in &where_sql.binds {
                     query = query.bind(value);
@@ -3344,14 +3755,20 @@ async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
         mark_rows_unavailable(&mut data, "Domains", cid);
     }
     data.table = Some(TableData {
-        columns: vec!["Domain".into(), "Tenant".into(), "Added".into()],
+        columns: vec![
+            "Domain".into(),
+            "Tenant".into(),
+            "Status".into(),
+            "Added".into(),
+        ],
         rows: rows
             .into_iter()
-            .map(|(id, name, tenant_id, created)| DataRowData {
+            .map(|(id, name, tenant_id, status, created)| DataRowData {
                 id,
                 cells: vec![
                     DataCell::text(name),
                     DataCell::mono(tenant_id.unwrap_or_else(|| "—".into())),
+                    DataCell::status(&status),
                     DataCell::text(relative_time(created)),
                 ],
             })
@@ -4264,17 +4681,302 @@ mod tests {
     }
 
     #[test]
-    fn alert_rules_empty_state_is_honest() {
-        let data = cp_alert_rules();
-        assert!(data.table.unwrap().rows.is_empty());
-        assert!(data.empty_description.contains("not provisioned"));
-    }
-
-    #[test]
     fn filter_query_preserves_active_filters() {
         let q = parse_list_query(Some("query=a b&status=draft&stage=proposal"));
         assert_eq!(filter_query(&q), "query=a%20b&status=draft&stage=proposal");
         assert_eq!(filter_query(&ListQuery::default()), "");
+    }
+
+    // ─── Fix 6: queue health classification ──────────────────────────
+
+    #[test]
+    fn queue_health_uses_depth_and_age_thresholds() {
+        // Healthy: shallow depth, young (or no) pending backlog.
+        assert_eq!(queue_health(0, None), "healthy");
+        assert_eq!(
+            queue_health(249, Some(WARNING_QUEUE_AGE_SECS - 1)),
+            "healthy"
+        );
+        // Warning: either threshold crossed.
+        assert_eq!(queue_health(WARNING_QUEUE_DEPTH, None), "warning");
+        assert_eq!(queue_health(0, Some(WARNING_QUEUE_AGE_SECS)), "warning");
+        assert_eq!(
+            queue_health(999, Some(CRITICAL_QUEUE_AGE_SECS - 1)),
+            "warning"
+        );
+        // Critical: either critical threshold crossed.
+        assert_eq!(queue_health(CRITICAL_QUEUE_DEPTH, None), "critical");
+        assert_eq!(queue_health(0, Some(CRITICAL_QUEUE_AGE_SECS)), "critical");
+        // A deep backlog is a health signal, never the fabricated "sending".
+        assert_ne!(queue_health(5_000, None), "sending");
+    }
+
+    /// The loaders are pinned in source for the pieces that are only
+    /// expressible inside SQL closures: operators must paginate (no more
+    /// hard `LIMIT 100`) and domains must SELECT + render the status they
+    /// filter on.
+    #[test]
+    fn loaders_paginate_operators_and_render_domain_status() {
+        let source = include_str!("data.rs");
+        let operators = source
+            .split("async fn cp_operators")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn cp_sales").next())
+            .expect("cp_operators body");
+        assert!(
+            operators.contains("LIMIT {PER_PAGE} OFFSET {offset}"),
+            "cp_operators must paginate with the shared PER_PAGE/OFFSET pattern"
+        );
+        assert!(
+            !operators.contains("LIMIT 100"),
+            "cp_operators must not hard-limit the table to 100 rows"
+        );
+
+        let domains = source
+            .split("async fn cp_domains")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn cp_plans").next())
+            .expect("cp_domains body");
+        assert!(
+            domains.contains("COALESCE(status, 'pending') AS status"),
+            "cp_domains must SELECT the status it filters on"
+        );
+        assert!(
+            domains.contains("\"Status\".into()"),
+            "cp_domains must render a Status column"
+        );
+
+        let queues = source
+            .split("async fn cp_queues")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn cp_alerts").next())
+            .expect("cp_queues body");
+        assert!(
+            queues.contains("queue_health(depth, oldest_pending_secs)"),
+            "cp_queues must render the health classification, not a fabricated state"
+        );
+        assert!(
+            !queues.contains("\"sending\""),
+            "high backlog must never be labelled 'sending'"
+        );
+    }
+
+    // ─── Fix 4: required-schema manifest matches the migrations ──────
+
+    /// The three historical aliases the readiness probe used to demand
+    /// (`dedicated_ips.address`, `ip_pool_addresses.ip_pool_id`,
+    /// `ip_pool_addresses.address`) do not exist in the canonical chain. The
+    /// manifest must name exactly what the migrations create:
+    ///
+    /// - `dedicated_ips.ip_address` — migrations/003_dedicated_ips.sql:43
+    ///   (also migrations/021_hybrid_infrastructure.sql:18);
+    /// - `ip_pool_addresses.pool_id` — migrations/093_deep_schema_convergence.sql:394;
+    /// - `ip_pool_addresses.ip_address` — migrations/093_deep_schema_convergence.sql:395.
+    #[test]
+    fn required_schema_names_match_the_canonical_migrations() {
+        const DEDICATED_IPS_MIGRATION: &str =
+            include_str!("../../../../../migrations/003_dedicated_ips.sql");
+        const DEEP_SCHEMA_MIGRATION: &str =
+            include_str!("../../../../../migrations/093_deep_schema_convergence.sql");
+
+        // The canonical CREATE TABLE blocks really carry these names.
+        assert!(
+            DEDICATED_IPS_MIGRATION.contains("ip_address        TEXT NOT NULL"),
+            "dedicated_ips.ip_address must be created by migration 003"
+        );
+        assert!(
+            DEEP_SCHEMA_MIGRATION.contains("pool_id        VARCHAR(26) NOT NULL"),
+            "ip_pool_addresses.pool_id must be created by migration 093"
+        );
+        assert!(
+            DEEP_SCHEMA_MIGRATION.contains("ip_address     INET NOT NULL"),
+            "ip_pool_addresses.ip_address must be created by migration 093"
+        );
+
+        // The manifest names those same canonical columns, never the
+        // historical aliases an older probe demanded.
+        let dedicated = REQUIRED_CONSOLE_SCHEMA
+            .iter()
+            .find(|(table, _)| *table == "dedicated_ips")
+            .expect("dedicated_ips in manifest")
+            .1;
+        assert_eq!(dedicated, &["id", "tenant_id", "ip_address"]);
+        let pool = REQUIRED_CONSOLE_SCHEMA
+            .iter()
+            .find(|(table, _)| *table == "ip_pool_addresses")
+            .expect("ip_pool_addresses in manifest")
+            .1;
+        assert_eq!(pool, &["pool_id", "ip_address"]);
+    }
+
+    // ─── Fix 6: DB-backed loader behaviour (soft-skip without infra) ─
+
+    fn cp_user() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// Fix 6: the operators table paginates past 100 rows instead of
+    /// showing every operator a KPI total they cannot navigate.
+    #[tokio::test]
+    async fn operators_loader_paginates_all_rows() {
+        let Some(pool) = crate::test_db::canonical_pool("data_operators_paging").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        let baseline: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM users WHERE role IN ('admin', 'owner')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("baseline operator count");
+
+        let tenant_id = "data_ops_tenant_0000000001";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Data Ops', 'data-ops-paging', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        for index in 0..105 {
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                    email_verified, mfa_enabled, metadata, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'Op', 'x', 'admin', 'active', true, true, '{}'::jsonb, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(tenant_id)
+            .bind(format!("paging-{index}@apexmail.ee"))
+            .execute(&pool)
+            .await
+            .expect("seed operator");
+        }
+
+        let data = load_page_data(
+            &state,
+            "control-plane",
+            "/operators",
+            None,
+            Some(&cp_user()),
+        )
+        .await;
+        let list = data.list.expect("operators list");
+        assert_eq!(list.total_count, baseline + 105);
+        assert_eq!(list.page, 1);
+        assert_eq!(
+            list.total_pages,
+            ((baseline + 105) as usize).div_ceil(PER_PAGE)
+        );
+        let first_page = list.table.expect("table");
+        assert_eq!(first_page.rows.len(), PER_PAGE);
+        assert_eq!(first_page.rows[0].id, "operator-0");
+
+        // Page 2 offsets by PER_PAGE — the table is navigable past 100.
+        let data = load_page_data(
+            &state,
+            "control-plane",
+            "/operators",
+            Some("page=2"),
+            Some(&cp_user()),
+        )
+        .await;
+        let second_page = data.list.expect("page 2").table.expect("table");
+        assert_eq!(second_page.rows.len(), PER_PAGE);
+        assert_eq!(second_page.rows[0].id, "operator-20");
+
+        sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup users");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    /// Fix 6: the domains table shows the status it filters on.
+    #[tokio::test]
+    async fn domains_loader_renders_the_filtered_status() {
+        let Some(pool) = crate::test_db::canonical_pool("data_domains_status").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        let tenant_id = "data_dom_tenant_0000000001";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Data Dom', 'data-dom-status', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        for (name, status) in [
+            ("verified-one.example.test", "verified"),
+            ("verified-two.example.test", "verified"),
+            ("pending.example.test", "pending"),
+        ] {
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(tenant_id)
+            .bind(name)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed domain");
+        }
+
+        let data = load_page_data(
+            &state,
+            "control-plane",
+            "/domains",
+            Some("status=verified"),
+            Some(&cp_user()),
+        )
+        .await;
+        let list = data.list.expect("domains list");
+        assert_eq!(list.total_count, 2);
+        let table = list.table.expect("table");
+        assert!(
+            table.columns.contains(&"Status".to_string()),
+            "the filtered status must be visible: {:?}",
+            table.columns
+        );
+        for row in &table.rows {
+            assert!(
+                row.cells.iter().any(|cell| matches!(
+                    cell,
+                    ui_foundation::view_data::DataCell::Status(status) if status == "verified"
+                )),
+                "every filtered row must render its status"
+            );
+        }
+
+        sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup domains");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
     }
 
     // ─── Audit F03: API-keys console query + view-model states ───────

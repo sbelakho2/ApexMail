@@ -57,7 +57,7 @@
 | Argon2id | Password hashing | [`apexmail-lib` Argon2id password hashing](../../../services/mail-server/crates/apexmail-lib/src/) | Low (current best practice) |
 | SHA-256 | HMAC, hashing | Multiple locations | Low (no practical collision attacks relevant) |
 | HKDF-SHA256 | Key derivation | [`isolation/src/encryption.rs`](../../../services/mail-server/crates/isolation/src/encryption.rs) | Low (NIST approved) |
-| RSA 2048/4096 | DKIM, JWT | [`outbound-queue/src/dkim.rs`](../../../services/mail-server/crates/outbound-queue/src/dkim.rs) | Medium (migrating to Ed25519 planned) |
+| RSA 2048/4096 | DKIM, JWT | [`apexmail-lib/src/dkim.rs`](../../../services/mail-server/crates/apexmail-lib/src/dkim.rs) | Medium (migrating to Ed25519 planned) |
 
 ### Class 3: Entropy Exhaustion (SEV3)
 
@@ -546,7 +546,7 @@ exit ${FAIL}
 | AES-256-GCM | 256-bit | Data encryption | `isolation/src/encryption.rs` | ✅ Active | 365 days (master key) |
 | Argon2id | Variable | Password hashing | `submission/src/auth.rs` | ✅ Active | On password change |
 | HKDF-SHA256 | 256-bit | Key derivation | `isolation/src/encryption.rs` | ✅ Active | Per-encryption |
-| RSA 4096 | 4096-bit | DKIM signing | `outbound-queue/src/dkim.rs` | ✅ Active | 180 days |
+| RSA 4096 | 4096-bit | DKIM signing | `worker-processors/src/email/transport.rs` | ✅ Active | 180 days |
 | RSA 2048 | 2048-bit | JWT signing (legacy) | `api-server/src/routes/auth.rs` | ⚠️ Migration to Ed25519 planned | 90 days |
 | Ed25519 | 256-bit | JWT signing (planned) | — | 📋 Planned | 90 days |
 | SHA-256 | 256-bit | HMAC, hashing | Multiple | ✅ Active | 90 days (secrets) |

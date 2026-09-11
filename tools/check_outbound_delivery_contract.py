@@ -25,16 +25,16 @@ SENDER_PATTERNS = [
 
 def main() -> int:
     violations: list[str] = []
+    # The outbound-queue package was retired and its sources deleted. The
+    # guardrail keeps watching the manifest path so a re-created manifest —
+    # i.e. someone resurrecting a second, unapproved delivery path — still
+    # fails this check.
     retired_manifest = CRATES / "outbound-queue" / "Cargo.toml"
     if retired_manifest.exists():
         violations.append("outbound-queue/Cargo.toml (retired delivery package restored)")
 
     for path in sorted(CRATES.rglob("*.rs")):
         relative = path.relative_to(CRATES).as_posix()
-        if relative.startswith("outbound-queue/"):
-            # Historical source is deliberately retained without a Cargo
-            # manifest. It is not a runnable or supported delivery path.
-            continue
         if relative in APPROVED_FILES:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")

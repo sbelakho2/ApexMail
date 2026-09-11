@@ -35,6 +35,9 @@ const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 3;
 /// reconnects automatically, which re-runs the auth/scope gates.
 const MAX_STREAM_DURATION: Duration = Duration::from_secs(30 * 60);
 
+/// Live alerts poll interval.
+const ALERTS_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dashboard", get(sse_dashboard))
@@ -262,86 +265,13 @@ async fn sse_alerts(
     let initial_alerts = query_new_alerts(&db, now - chrono::Duration::hours(24)).await?;
 
     let last_seen = Arc::new(Mutex::new(now));
+    let poll_db = db.clone();
+    let poll: AlertPollFn = Arc::new(move |since| {
+        let db = poll_db.clone();
+        Box::pin(async move { query_new_alerts(&db, since).await })
+    });
 
-    let stream = futures::stream::iter(
-        initial_alerts
-            .into_iter()
-            .map(|alert| {
-                let json = serde_json::to_string(&alert).unwrap_or_default();
-                Ok(Event::default().data(json).event("alert"))
-            })
-            .collect::<Vec<_>>(),
-    )
-    .chain(
-        // Same bounded-poll contract as the dashboard stream; unfold owns
-        // the state (see sse_dashboard).
-        futures::stream::unfold(
-            (
-                db,
-                Arc::clone(&last_seen),
-                tokio::time::Instant::now(),
-                0u32,
-            ),
-            |mut poll_state| async move {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                if tokio::time::Instant::now() >= poll_state.2 {
-                    tracing::info!("admin alerts SSE stream reached its time cap; closing");
-                    return None;
-                }
-                let (db, last_seen, consecutive_errors) =
-                    (&poll_state.0, &poll_state.1, &mut poll_state.3);
-                let since = *last_seen.lock().await;
-                let outcome = match query_new_alerts(db, since).await {
-                    Ok(alerts) => {
-                        *consecutive_errors = 0;
-                        if let Some(latest) = alerts
-                            .iter()
-                            .filter_map(|a| {
-                                chrono::DateTime::parse_from_rfc3339(&a.timestamp)
-                                    .ok()
-                                    .map(|t| t.with_timezone(&Utc))
-                            })
-                            .max()
-                        {
-                            *last_seen.lock().await = latest;
-                        }
-
-                        let events: Vec<Result<Event, Infallible>> = alerts
-                            .into_iter()
-                            .map(|alert| {
-                                let json = serde_json::to_string(&alert).unwrap_or_default();
-                                Ok(Event::default().data(json).event("alert"))
-                            })
-                            .collect();
-
-                        if events.is_empty() {
-                            vec![Ok(Event::default().comment("no-new-alerts"))]
-                        } else {
-                            events
-                        }
-                    }
-                    Err(error) => {
-                        *consecutive_errors += 1;
-                        tracing::warn!(
-                            error = %error,
-                            consecutive_errors,
-                            "alerts SSE poll failed"
-                        );
-                        if *consecutive_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
-                            tracing::error!("alerts SSE closing after repeated poll failures");
-                            vec![Ok(
-                                Event::default().comment("alerts-unavailable-stream-closing")
-                            )]
-                        } else {
-                            vec![Ok(Event::default().comment("alerts-unavailable"))]
-                        }
-                    }
-                };
-                Some((futures::stream::iter(outcome), poll_state))
-            },
-        )
-        .flatten(),
-    );
+    let stream = build_alerts_stream(initial_alerts, last_seen, poll);
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -350,9 +280,114 @@ async fn sse_alerts(
     ))
 }
 
+/// Boxed future produced by one live-alerts poll.
+type AlertPollFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<AlertSsePayload>, sqlx::Error>> + Send>,
+>;
+
+/// The injectable poll used by [`build_alerts_stream`] (the handler wires it
+/// to [`query_new_alerts`]; tests supply a counting fake).
+type AlertPollFn = Arc<dyn Fn(DateTime<Utc>) -> AlertPollFuture + Send + Sync>;
+
+/// Build the alerts SSE stream: the initial backlog, then a bounded
+/// live-poll loop that stops at [`MAX_STREAM_DURATION`] or after
+/// [`MAX_CONSECUTIVE_POLL_ERRORS`] failing polls. Extracted from the
+/// handler so the deadline/cap behavior is testable under paused time
+/// without a database.
+fn build_alerts_stream(
+    initial_alerts: Vec<AlertSsePayload>,
+    last_seen: Arc<Mutex<DateTime<Utc>>>,
+    poll: AlertPollFn,
+) -> impl futures::Stream<Item = Result<Event, Infallible>> {
+    let initial = futures::stream::iter(
+        initial_alerts
+            .into_iter()
+            .map(|alert| {
+                let json = serde_json::to_string(&alert).unwrap_or_default();
+                Ok(Event::default().data(json).event("alert"))
+            })
+            .collect::<Vec<_>>(),
+    );
+    initial.chain(
+        // Same bounded-poll contract as the dashboard stream; unfold owns
+        // the state (see sse_dashboard).
+        futures::stream::unfold(
+            (
+                last_seen,
+                // CRITICAL: the deadline is the END of the polling window —
+                // `Instant::now()` here closed the stream right after the
+                // initial backlog instead of polling for MAX_STREAM_DURATION.
+                tokio::time::Instant::now() + MAX_STREAM_DURATION,
+                0u32,
+            ),
+            move |mut poll_state| {
+                let poll = Arc::clone(&poll);
+                async move {
+                    tokio::time::sleep(ALERTS_POLL_INTERVAL).await;
+                    if tokio::time::Instant::now() >= poll_state.1 {
+                        tracing::info!("admin alerts SSE stream reached its time cap; closing");
+                        return None;
+                    }
+                    let (last_seen, consecutive_errors) = (&poll_state.0, &mut poll_state.2);
+                    let since = *last_seen.lock().await;
+                    let outcome = match poll(since).await {
+                        Ok(alerts) => {
+                            *consecutive_errors = 0;
+                            if let Some(latest) = alerts
+                                .iter()
+                                .filter_map(|a| {
+                                    chrono::DateTime::parse_from_rfc3339(&a.timestamp)
+                                        .ok()
+                                        .map(|t| t.with_timezone(&Utc))
+                                })
+                                .max()
+                            {
+                                *last_seen.lock().await = latest;
+                            }
+
+                            let events: Vec<Result<Event, Infallible>> = alerts
+                                .into_iter()
+                                .map(|alert| {
+                                    let json = serde_json::to_string(&alert).unwrap_or_default();
+                                    Ok(Event::default().data(json).event("alert"))
+                                })
+                                .collect();
+
+                            if events.is_empty() {
+                                vec![Ok(Event::default().comment("no-new-alerts"))]
+                            } else {
+                                events
+                            }
+                        }
+                        Err(error) => {
+                            *consecutive_errors += 1;
+                            tracing::warn!(
+                                error = %error,
+                                consecutive_errors,
+                                "alerts SSE poll failed"
+                            );
+                            if *consecutive_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                                tracing::error!("alerts SSE closing after repeated poll failures");
+                                vec![Ok(
+                                    Event::default().comment("alerts-unavailable-stream-closing")
+                                )]
+                            } else {
+                                vec![Ok(Event::default().comment("alerts-unavailable"))]
+                            }
+                        }
+                    };
+                    Some((futures::stream::iter(outcome), poll_state))
+                }
+            },
+        )
+        .flatten(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn alerts_sql_aliases_real_system_alerts_columns() {
@@ -361,5 +396,72 @@ mod tests {
         assert!(NEW_ALERTS_SQL.contains("created_at AS timestamp"));
         assert!(NEW_ALERTS_SQL.contains("COALESCE(component, alert_type)"));
         assert!(!NEW_ALERTS_SQL.contains("WHERE timestamp"));
+    }
+
+    fn backlog_alert() -> AlertSsePayload {
+        AlertSsePayload {
+            id: "alert-backlog-1".into(),
+            severity: "high".into(),
+            message: "backlog".into(),
+            component: None,
+            timestamp: Utc::now().to_rfc3339(),
+            acknowledged: false,
+        }
+    }
+
+    /// Fix 5 regression: the live-poll deadline must be the END of the
+    /// 30-minute window. Initializing it to `Instant::now()` closed the
+    /// stream right after the first sleep (before any live poll); this test
+    /// runs under paused time and proves polling continues past the initial
+    /// backlog and stops only at the MAX_STREAM_DURATION cap.
+    #[tokio::test(start_paused = true)]
+    async fn alerts_stream_polls_after_backlog_and_stops_at_cap() {
+        let poll_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&poll_calls);
+        let poll: AlertPollFn = Arc::new(move |_since| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Vec::new())
+            })
+        });
+
+        let mut stream = Box::pin(build_alerts_stream(
+            vec![backlog_alert()],
+            Arc::new(Mutex::new(Utc::now())),
+            poll,
+        ));
+
+        // The backlog is emitted first, before any live poll.
+        let first = stream
+            .next()
+            .await
+            .expect("initial backlog event")
+            .expect("infallible event");
+        assert!(format!("{first:?}").contains("alert-backlog-1"));
+        assert_eq!(poll_calls.load(Ordering::SeqCst), 0);
+
+        // Drain the rest under paused time: tokio auto-advances to each 10s
+        // sleep, so the whole 30-minute window runs without real waiting.
+        let mut live_events = 0usize;
+        while stream.next().await.is_some() {
+            live_events += 1;
+        }
+
+        let polls = poll_calls.load(Ordering::SeqCst);
+        assert!(
+            polls >= 1,
+            "live polling must continue after the initial backlog \
+             (the deadline was previously initialized to now)"
+        );
+        assert_eq!(
+            live_events, polls,
+            "each empty poll emits exactly one comment event"
+        );
+        assert_eq!(
+            polls,
+            (MAX_STREAM_DURATION.as_secs() / ALERTS_POLL_INTERVAL.as_secs()) as usize - 1,
+            "the stream must stop only at the MAX_STREAM_DURATION cap"
+        );
     }
 }

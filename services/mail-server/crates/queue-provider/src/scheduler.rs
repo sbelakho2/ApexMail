@@ -12,9 +12,9 @@ use crate::types::Job;
 /// NO production code constructs this scheduler. `queue-provider` itself is
 /// only smoke-test-wired (smoke-tests exercises `queue_provider::types`
 /// only) — no production poller dequeues from `queue_jobs`, so there is no
-/// natural place to slot a fair-scheduling pass yet. The worker-processors
-/// email path implements its own per-tenant weighted round-robin in
-/// `EmailQueue::process_batch` (outbound-queue) against `email_queue`.
+/// natural place to slot a fair-scheduling pass yet. The production email
+/// path (`worker-processors/src/email/processor.rs`) polls `email_queue`
+/// directly and runs no fair-scheduling pass of its own.
 /// When a production owner adopts `PostgresQueueProvider::dequeue`, apply
 /// `schedule(dequeued, batch_size)` to the dequeued batch before dispatch
 /// (excess jobs must then be released back to pending, mirroring the

@@ -13,7 +13,7 @@
 | Path | Provider | Transport | When |
 |------|----------|-----------|------|
 | **Shared sending** | AWS SES | SES API (`SendRawEmail`) | Default for all tenants |
-| **Dedicated IPs** | Hetzner Cloud | Self-hosted SMTP (outbound-queue) | When tenant has active/warming dedicated IPs |
+| **Dedicated IPs** | Hetzner Cloud | Self-hosted SMTP (`SmtpTransport`, worker-processors) | When tenant has active/warming dedicated IPs |
 
 There is **no** provider choice. Dedicated IPs are **always** Hetzner floating
 IPs. Shared sending is **always** AWS SES. A tenant can use **both paths
@@ -151,7 +151,7 @@ When a tenant downgrades or releases an IP:
 - **FBL**: ARF feedback loops → `self_hosted_complaints` table
 - **Reputation**: Monitored via `ip_daily_usage` + internal alerting
 - **IP management**: Hetzner Cloud API (floating IPs, rDNS, server assignment)
-- **Send limits**: Enforced by `outbound-queue` IP rotation, respecting warmup schedule
+- **Send limits**: Enforced by the worker's warmup admission (`select_binding_warmup_ip` / `check_warmup_limit` in `worker-processors/src/email/processor.rs`) against the canonical `mail_common::warmup` schedule
 
 ### Transport Router
 

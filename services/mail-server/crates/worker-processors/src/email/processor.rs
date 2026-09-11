@@ -10,8 +10,10 @@ use apexmail_lib::dkim::{
     public_key_base64_from_private_key_pem,
 };
 use chrono::{DateTime, Utc};
+use mail_common::warmup::WarmupSchedule;
 use moka::sync::Cache;
 use rand::Rng;
+use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use std::sync::Mutex;
 use tokio::sync::Notify;
@@ -22,7 +24,7 @@ use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
 use super::transport::{create_transport_from_config, EmailTransport};
 use super::types::{
     Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, Mailbox, PreparedEmail,
-    SendOutcome, SendResult, WarmupLimits,
+    SendOutcome, SendResult, WarmupIpIdentity,
 };
 use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
@@ -99,6 +101,32 @@ enum ConsentDecision {
     Suppressed(String),
     /// The verification itself failed — defer, do not send.
     Deferred(&'static str),
+}
+
+/// Fix 3: the warmup admission decision for one send unit. Every variant
+/// other than [`WarmupAdmission::Admit`] defers the row (attempt preserved) —
+/// the gate never fails open, because a warming IP's reputation cannot be
+/// recovered from over-sending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmupAdmission {
+    /// Reserve a slot (or the IP has graduated) — proceed.
+    Admit,
+    /// The source IP's canonical daily cap is reached.
+    QuotaExhausted,
+    /// Admission could not be established: missing source-IP identity or an
+    /// unavailable quota store. Refuse rather than admit on a wrong key.
+    Unavailable,
+}
+
+impl WarmupAdmission {
+    /// The `requeue_reason` recorded on the deferred row.
+    fn requeue_reason(self) -> &'static str {
+        match self {
+            Self::Admit => "allowed",
+            Self::QuotaExhausted => "warmup_limit",
+            Self::Unavailable => "warmup_admission_unavailable",
+        }
+    }
 }
 
 /// F55: the single authoritative dispatch-time consent query — global
@@ -263,17 +291,19 @@ const MESSAGES_CLAIMED_UPDATE_SQL: &str = r#"
       AND status IN ('queued', 'scheduled')
 "#;
 
-/// Audit-1: the ready-domain lookup for a queued job.
+/// Audit-1 / Fix 3: the ready-domain lookup for a queued job.
 ///
 /// Warmup state comes from the REAL warmup tables: per-IP warmup lives on
 /// `dedicated_ips` (created by migration 003 with `warmup_started_at`, given
 /// the per-IP warmup model by migrations 071/093 — the same table
-/// `transport_router.rs` routes on), so the query returns the
-/// `warmup_started_at` timestamps of the tenant's dedicated IPs still in
-/// status 'warming' and the day/enabled derivation happens in Rust
-/// ([`derive_domain_warmup`]). A domain whose tenant has no warming
-/// dedicated IP (shared SES pool) derives warmup DISABLED — correct: the
-/// shared pool rides platform reputation, not the tenant's.
+/// `transport_router.rs` routes on), so the query returns the identity
+/// (`id`, `ip_address`) and `warmup_started_at` of every dedicated IP still
+/// in status 'warming'. The day/enabled derivation and the selection of the
+/// BINDING IP happen in Rust ([`select_binding_warmup_ip`]), and the
+/// resulting identity is what `check_warmup_limit` keys its Redis counter
+/// on. A domain whose tenant has no warming dedicated IP (shared SES pool)
+/// derives warmup DISABLED — correct: the shared pool rides platform
+/// reputation, not the tenant's.
 ///
 /// `ip_pool_addresses` (migration 093) also carries per-address warmup
 /// columns, but the table has no tenant binding (`ip_pools` are platform
@@ -287,16 +317,24 @@ const GET_DOMAIN_SQL: &str = r#"
         d.dkim_public_key AS dkim_public_key,
         d.dkim_private_key AS dkim_private_key,
         NULL::text AS return_path,
-        w.warmup_starts AS warmup_starts
+        w.warmup_ips AS warmup_ips
     FROM domains d
     LEFT JOIN LATERAL (
-        SELECT ARRAY(
-            SELECT di.warmup_started_at
-            FROM dedicated_ips di
-            WHERE di.tenant_id = d.tenant_id
-              AND di.status = 'warming'
-              AND di.warmup_started_at IS NOT NULL
-        ) AS warmup_starts
+        SELECT COALESCE(
+            jsonb_agg(
+                jsonb_build_object(
+                    'id', di.id::text,
+                    'ip_address', di.ip_address,
+                    'warmup_started_at', di.warmup_started_at
+                )
+                ORDER BY di.warmup_started_at DESC
+            ),
+            '[]'::jsonb
+        ) AS warmup_ips
+        FROM dedicated_ips di
+        WHERE di.tenant_id = d.tenant_id::text
+          AND di.status = 'warming'
+          AND di.warmup_started_at IS NOT NULL
     ) w ON true
     WHERE d.id = $1::uuid AND d.tenant_id = $2
       AND d.status = 'verified'
@@ -309,7 +347,7 @@ const GET_DOMAIN_SQL: &str = r#"
 "#;
 
 /// Audit-1: [`GET_DOMAIN_SQL`] row — the [`Domain`] columns plus the warmup
-/// source data (`warmup_started_at` of every warming dedicated IP).
+/// source data (one JSON object per warming dedicated IP).
 #[derive(Debug, sqlx::FromRow)]
 struct DomainWithWarmupRow {
     id: String,
@@ -319,33 +357,70 @@ struct DomainWithWarmupRow {
     dkim_public_key: Option<String>,
     dkim_private_key: Option<String>,
     return_path: Option<String>,
-    warmup_starts: Option<Vec<DateTime<Utc>>>,
+    warmup_ips: Option<JsonValue>,
 }
 
-/// Audit-1: derive the domain's effective warmup state from the
-/// `warmup_started_at` timestamps of the tenant's dedicated IPs that are
-/// still warming.
+/// One warming dedicated IP as serialized by [`GET_DOMAIN_SQL`]'s
+/// `jsonb_build_object` array.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WarmupIpRow {
+    id: String,
+    ip_address: String,
+    warmup_started_at: DateTime<Utc>,
+}
+
+impl From<WarmupIpRow> for WarmupIpIdentity {
+    fn from(row: WarmupIpRow) -> Self {
+        Self {
+            dedicated_ip_id: row.id,
+            ip_address: row.ip_address,
+            warmup_started_at: row.warmup_started_at,
+        }
+    }
+}
+
+/// Decode the `warmup_ips` JSONB array. Malformed entries are dropped (the
+/// query builds this array itself; a decode failure means row corruption,
+/// and dropping it fails the admission closed rather than inventing an IP).
+fn parse_warmup_ips(raw: Option<&JsonValue>) -> Vec<WarmupIpRow> {
+    let Some(JsonValue::Array(values)) = raw else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .collect()
+}
+
+/// Whole elapsed days since a warmup start, clamped to `[0, u32::MAX]`
+/// (clock-skewed future timestamps are day 0).
+fn warmup_day_since(now: DateTime<Utc>, started_at: DateTime<Utc>) -> u32 {
+    (now - started_at).num_days().clamp(0, u32::MAX as i64) as u32
+}
+
+/// Fix 3: select the BINDING warming IP for a domain's sends — the
+/// least-warmed dedicated IP (smallest elapsed day count) is the constraint
+/// on the tenant's reputation. Returns the IP identity (used as the
+/// per-IP admission key) and its warmup day.
 ///
-/// * no warming IP → `(false, 0)`: the domain sends on the shared pool and
-///   `check_warmup_limit` must not engage;
-/// * otherwise enabled, with the binding day = the SMALLEST whole-days
-///   elapsed across the warming IPs — the least-warmed IP is the constraint
-///   on the tenant's reputation;
-/// * day never goes negative (a just-started or clock-skewed future
-///   timestamp clamps to day 0).
-fn derive_domain_warmup(now: DateTime<Utc>, warmup_starts: &[DateTime<Utc>]) -> (bool, i32) {
-    let mut binding_day: Option<i32> = None;
-    for started_at in warmup_starts {
-        let elapsed_days = (now - started_at).num_days().clamp(0, i32::MAX as i64) as i32;
-        binding_day = Some(match binding_day {
-            Some(day) => day.min(elapsed_days),
-            None => elapsed_days,
-        });
+/// `None` when the tenant has no warming IP: the domain sends on the shared
+/// pool and warmup admission must not engage.
+fn select_binding_warmup_ip(
+    now: DateTime<Utc>,
+    warmup_ips: &[WarmupIpRow],
+) -> Option<(WarmupIpIdentity, u32)> {
+    let mut binding: Option<(WarmupIpRow, u32)> = None;
+    for row in warmup_ips {
+        let day = warmup_day_since(now, row.warmup_started_at);
+        let replace = match &binding {
+            Some((_, binding_day)) => day < *binding_day,
+            None => true,
+        };
+        if replace {
+            binding = Some((row.clone(), day));
+        }
     }
-    match binding_day {
-        Some(day) => (true, day),
-        None => (false, 0),
-    }
+    binding.map(|(row, day)| (WarmupIpIdentity::from(row), day))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -706,6 +781,77 @@ async fn reserve_send_admission(
     Ok(admitted == 1)
 }
 
+/// Fix 3: TTL for per-IP warmup counters/markers. The key embeds the UTC day,
+/// so 48 hours keeps the current day's counter alive while old keys expire.
+const WARMUP_COUNTER_TTL_SECS: u64 = 48 * 60 * 60;
+
+/// Fix 3: daily warmup counter key for one dedicated source IP. The IP — not
+/// the sending domain — is the reputation boundary that warmup protects.
+fn warmup_ip_counter_key(ip_address: &str, utc_day: &str) -> String {
+    format!("apexmail:warmup:ip:{}:{}", ip_address, utc_day)
+}
+
+/// Fix 3: idempotency marker for one send unit (queue row + recipient) on one
+/// source IP and UTC day. `attempt` is intentionally NOT part of the key: a
+/// retry of the same row must not double-count against the IP quota. Distinct
+/// recipients of a multi-recipient row carry distinct keys — each is a
+/// separate send through the IP.
+fn warmup_ip_send_marker_key(ip_address: &str, utc_day: &str, job: &EmailJob) -> String {
+    format!(
+        "apexmail:warmup:sent:{}:{}:{}:{}",
+        ip_address,
+        utc_day,
+        job.id,
+        canonical_recipient(&job.to)
+    )
+}
+
+/// Fix 3: the atomic warmup reservation. KEYS[1] is the per-IP/day counter,
+/// KEYS[2] the per-send marker; ARGV[1] the canonical daily limit, ARGV[2]
+/// the TTL. Returns 1 when this send unit holds a slot (freshly reserved or
+/// already reserved earlier), 0 when the day's cap is full. A denied send
+/// removes its marker so a later retry (after a quota reset or on a new day)
+/// can be considered afresh.
+const WARMUP_RESERVE_LUA: &str = r#"
+local limit = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+if redis.call('SETNX', KEYS[2], '1') == 0 then
+    return 1
+end
+redis.call('EXPIRE', KEYS[2], ttl)
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+if current >= limit then
+    redis.call('DEL', KEYS[2])
+    return 0
+end
+local new = redis.call('INCR', KEYS[1])
+if new == 1 then
+    redis.call('EXPIRE', KEYS[1], ttl)
+end
+return 1
+"#;
+
+/// Run [`WARMUP_RESERVE_LUA`]. `Ok(true)` — admitted (slot reserved or
+/// already reserved for this send unit); `Ok(false)` — cap reached;
+/// `Err` — the quota store is unavailable (caller fails closed).
+async fn reserve_warmup_send(
+    redis: &RedisPool,
+    counter_key: &str,
+    marker_key: &str,
+    limit: u64,
+) -> Result<bool, String> {
+    let mut conn = redis.get().await.map_err(|error| error.to_string())?;
+    let reserved: i32 = redis::Script::new(WARMUP_RESERVE_LUA)
+        .key(counter_key)
+        .key(marker_key)
+        .arg(limit)
+        .arg(WARMUP_COUNTER_TTL_SECS)
+        .invoke_async(&mut *conn)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(reserved == 1)
+}
+
 /// G.3c: try to claim the send slot (Redis SET NX EX). `Ok(true)` — we own
 /// this send; `Ok(false)` — a previous claim may already have sent (crashed
 /// worker, expired lease); `Err` — Redis unavailable (best-effort mode: the
@@ -968,11 +1114,6 @@ pub struct EmailProcessor {
     /// Allowed/TemporarilyUnavailable decisions are never cached — see
     /// [`EmailProcessor::tenant_policy`].
     tenant_restriction_cache: Cache<String, String>,
-    #[expect(
-        dead_code,
-        reason = "warmup day cache is retained for scheduled warmup routing integration"
-    )]
-    warmup_day_cache: Cache<String, i32>,
 
     // Circuit breakers for SMTP endpoints
     smtp_circuit_breaker: CircuitBreaker,
@@ -1020,10 +1161,6 @@ impl EmailProcessor {
             tenant_restriction_cache: Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(30))
-                .build(),
-            warmup_day_cache: Cache::builder()
-                .max_capacity(1000)
-                .time_to_live(Duration::from_secs(3600))
                 .build(),
             smtp_circuit_breaker,
             recent_outcomes: Mutex::new(Vec::new()),
@@ -1352,8 +1489,8 @@ impl EmailProcessor {
 
     /// Export `apexmail_email_queue_depth{status=...}` — the metric the
     /// EmailQueueBacklog / CriticalEmailQueueBacklog alerts key on. The
-    /// original exporter lived in the outbound-queue crate, which is not
-    /// deployed, so the alerts were dead rules; the deployed worker is the
+    /// original exporter lived in a since-removed outbound delivery
+    /// package, so the alerts were dead rules; the deployed worker is the
     /// right emitter. Time-gated to avoid a grouped COUNT on every poll.
     async fn record_queue_depth_metrics(&self) {
         let now_ms = Utc::now().timestamp_millis();
@@ -1713,10 +1850,15 @@ impl EmailProcessor {
         // enough.
         let domain = self.get_domain(job).await?;
 
-        // Check warmup limits
-        if self.config.warmup.enabled && !self.check_warmup_limit(job, &domain).await? {
-            self.requeue_job(job, "warmup_limit").await?;
-            return Ok(());
+        // Check warmup limits (per source IP — see check_warmup_limit).
+        if self.config.warmup.enabled {
+            match self.check_warmup_limit(job, &domain).await? {
+                WarmupAdmission::Admit => {}
+                deferred => {
+                    self.requeue_job(job, deferred.requeue_reason()).await?;
+                    return Ok(());
+                }
+            }
         }
 
         // Prepare email
@@ -1987,69 +2129,97 @@ impl EmailProcessor {
         }
     }
 
-    /// Check warmup limits for a domain.
+    /// Fix 3: send-time warmup admission for the SOURCE IP that carries the
+    /// send.
     ///
-    /// # Security (O-16.8)
+    /// # Reputation boundary
     ///
-    /// **Root cause**: Previously used an in-memory `RwLock<HashMap<String, i64>>`
-    /// which is local to each process. Multiple workers would each have their own
-    /// counter, allowing up to N × daily_limit sends per domain (where N is the
-    /// number of workers). This is a bypass of warmup rate limiting.
+    /// Warmup is a per-IP reputation property, so the daily counter MUST be
+    /// keyed by the dedicated source IP
+    /// (`apexmail:warmup:ip:{source_ip}:{utc_day}`), never by the sending
+    /// domain. The previous domain-keyed counter
+    /// (`warmup:count:<date>:<domain_id>`) gave every domain of a tenant its
+    /// own full quota, so N domains on one warming IP multiplied traffic
+    /// through that IP by N.
     ///
-    /// **Fix**: Replaced the per-process `HashMap` with a Redis `INCR` + `EXPIRE`
-    /// key (`warmup:count:<date>:<domain_id>`). The key has a 24-hour TTL and uses
-    /// atomic `INCR` for cross-worker correctness. The first worker to increment
-    /// (return value == 1) also sets the TTL via `EXPIRE` (race-safe; extra EXPIRE
-    /// calls are harmless). All workers share a single counter per domain per day.
-    async fn check_warmup_limit(&self, job: &EmailJob, domain: &Domain) -> ProcessorResult<bool> {
+    /// The binding IP is resolved from the SAME canonical state
+    /// [`GET_DOMAIN_SQL`] used to enable warmup (the tenant's least-warmed
+    /// `dedicated_ips` row, `status='warming'`). If warmup is enabled but no
+    /// IP identity is available, the send is REFUSED (deferred) rather than
+    /// admitted against a non-IP key: a wrong reputation boundary is worse
+    /// than a refusal.
+    ///
+    /// The canonical `mail_common::warmup::WarmupSchedule` is the single
+    /// definition of the day limit (60 days, 50/day ramping to unlimited).
+    ///
+    /// # Atomicity and idempotency
+    ///
+    /// The counter is a Redis key with a 48-hour TTL shared by every worker,
+    /// so a restart cannot reset it. Admission runs one Lua script that
+    /// (1) SET NX's a per-send-unit marker keyed on
+    /// `(source_ip, utc_day, queue row, recipient)` — a retry of the same
+    /// send unit is admitted WITHOUT incrementing again — then (2) atomically
+    /// compares the counter to the limit and increments only when under it.
+    ///
+    /// # Failure posture
+    ///
+    /// Both an unknown source IP and an unavailable Redis fail CLOSED with
+    /// [`WarmupAdmission::Unavailable`]: the caller defers the row through
+    /// the normal requeue path (attempt preserved) instead of burning a
+    /// warming IP. This differs deliberately from the send-rate gate, which
+    /// fails open.
+    async fn check_warmup_limit(
+        &self,
+        job: &EmailJob,
+        domain: &Domain,
+    ) -> ProcessorResult<WarmupAdmission> {
         if !domain.warmup_enabled {
-            return Ok(true);
+            return Ok(WarmupAdmission::Admit);
         }
 
-        let limits = WarmupLimits::for_day(domain.warmup_day);
+        let Some(warmup_ip) = domain.warmup_ip.as_ref() else {
+            warn!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                domain_id = %job.domain_id,
+                "warmup is enabled but no warming dedicated IP identity is available \
+                 — refusing the send (fail closed) instead of admitting on a non-IP key"
+            );
+            return Ok(WarmupAdmission::Unavailable);
+        };
 
-        // Use Redis INCR for atomic cross-worker counters with 24h TTL.
-        // Key format: warmup:count:<YYYY-MM-DD>:<domain_id>
+        let day = warmup_day_since(Utc::now(), warmup_ip.warmup_started_at);
+        let limit = WarmupSchedule::limit_for_day(day);
+        // Graduated (day >= FULL_WARMUP_DAYS): unlimited, no counter needed.
+        if limit == u64::MAX {
+            return Ok(WarmupAdmission::Admit);
+        }
+
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let redis_key = format!("warmup:count:{}:{}", today, job.domain_id);
-
-        let mut conn = self.redis.get().await.map_err(|e| {
-            warn!(domain_id = %job.domain_id, error = %e, "Failed to get Redis connection for warmup check");
-            ProcessorError::Job(format!("Redis unavailable for warmup check: {}", e))
-        })?;
-
-        // Atomically increment the counter — shared across all workers
-        let current: i64 = redis::cmd("INCR")
-            .arg(&redis_key)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| {
-                warn!(domain_id = %job.domain_id, error = %e, "Redis INCR failed for warmup check");
-                ProcessorError::Job(format!("Redis INCR failed: {}", e))
-            })?;
-
-        // Set expiry on first increment (return value == 1 means this is a new key).
-        // Race-safe: multiple workers may call EXPIRE concurrently, which is idempotent.
-        if current == 1 {
-            let _: () = redis::cmd("EXPIRE")
-                .arg(&redis_key)
-                .arg(86400) // 24 hours
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or_default();
+        let counter_key = warmup_ip_counter_key(&warmup_ip.ip_address, &today);
+        let marker_key = warmup_ip_send_marker_key(&warmup_ip.ip_address, &today, job);
+        match reserve_warmup_send(&self.redis, &counter_key, &marker_key, limit).await {
+            Ok(true) => Ok(WarmupAdmission::Admit),
+            Ok(false) => {
+                debug!(
+                    job_id = %job.id,
+                    ip = %warmup_ip.ip_address,
+                    day,
+                    limit,
+                    "warmup quota for the source IP is exhausted — deferring row"
+                );
+                Ok(WarmupAdmission::QuotaExhausted)
+            }
+            Err(error) => {
+                warn!(
+                    job_id = %job.id,
+                    ip = %warmup_ip.ip_address,
+                    error = %error,
+                    "warmup quota store unavailable — deferring row (fail closed)"
+                );
+                Ok(WarmupAdmission::Unavailable)
+            }
         }
-
-        if current > limits.daily_limit {
-            // We've exceeded the limit. Decrement to keep the counter accurate.
-            let _: () = redis::cmd("DECR")
-                .arg(&redis_key)
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or_default();
-            return Ok(false);
-        }
-
-        Ok(true)
     }
 
     /// Get the ready sending-domain configuration for a queued job.
@@ -2081,8 +2251,12 @@ impl EmailProcessor {
                 ))
             })?;
 
-        let (warmup_enabled, warmup_day) =
-            derive_domain_warmup(Utc::now(), row.warmup_starts.as_deref().unwrap_or(&[]));
+        let warmup_rows = parse_warmup_ips(row.warmup_ips.as_ref());
+        let binding = select_binding_warmup_ip(Utc::now(), &warmup_rows);
+        let (warmup_enabled, warmup_day, warmup_ip) = match binding {
+            Some((identity, day)) => (true, day as i32, Some(identity)),
+            None => (false, 0, None),
+        };
         let domain = Domain {
             id: row.id,
             tenant_id: row.tenant_id,
@@ -2092,6 +2266,7 @@ impl EmailProcessor {
             dkim_private_key: row.dkim_private_key,
             warmup_enabled,
             warmup_day,
+            warmup_ip,
             return_path: row.return_path,
         };
 
@@ -3745,6 +3920,7 @@ mod tests {
             dkim_private_key: Some(key_pair.private_key_pem.to_string()),
             warmup_enabled: false,
             warmup_day: 0,
+            warmup_ip: None,
             return_path: None,
         };
 
@@ -3868,6 +4044,7 @@ mod tests {
             dkim_private_key: None,
             warmup_enabled: false,
             warmup_day: 0,
+            warmup_ip: None,
             return_path: None,
         }
     }
@@ -4813,62 +4990,87 @@ mod tests {
     /// reclaim of a lease that expired mid-send is refused, and the marker
     /// is releasable once the attempt is handled.
     // ---------------------------------------------------------------------------
-    // Audit-1: real per-domain warmup state (dedicated_ips, migrations 071/093)
+    // Audit-1 / Fix 3: real per-IP warmup state (dedicated_ips, migrations 071/093)
     // ---------------------------------------------------------------------------
 
+    fn warmup_ip_row(id: &str, ip: &str, started_at: DateTime<Utc>) -> WarmupIpRow {
+        WarmupIpRow {
+            id: id.into(),
+            ip_address: ip.into(),
+            warmup_started_at: started_at,
+        }
+    }
+
     #[test]
-    fn warmup_derivation_disabled_without_warming_ips() {
+    fn warmup_selection_returns_none_without_warming_ips() {
         // No dedicated IP in warmup (shared pool = platform reputation):
         // warmup limiting must stay off.
-        let (enabled, day) = derive_domain_warmup(Utc::now(), &[]);
-        assert!(!enabled, "no warming IPs => warmup disabled");
-        assert_eq!(day, 0);
+        assert!(select_binding_warmup_ip(Utc::now(), &[]).is_none());
     }
 
     #[test]
-    fn warmup_derivation_uses_elapsed_days_of_warming_ip() {
+    fn warmup_selection_uses_elapsed_days_and_returns_ip_identity() {
         let now = Utc::now();
-        let (enabled, day) = derive_domain_warmup(now, &[now - chrono::Duration::days(3)]);
-        assert!(enabled, "an active warmup row must enable the gate");
+        let (identity, day) = select_binding_warmup_ip(
+            now,
+            &[warmup_ip_row(
+                "dip-1",
+                "203.0.113.9",
+                now - chrono::Duration::days(3),
+            )],
+        )
+        .expect("an active warmup row must enable the gate");
         assert_eq!(day, 3, "day must be the whole days since warmup_started_at");
+        assert_eq!(identity.dedicated_ip_id, "dip-1");
+        assert_eq!(
+            identity.ip_address, "203.0.113.9",
+            "the admission key must be the source IP"
+        );
     }
 
     #[test]
-    fn warmup_derivation_binds_to_the_least_warmed_ip() {
+    fn warmup_selection_binds_to_the_least_warmed_ip() {
         // Several warming IPs: the furthest-behind one is the binding
         // constraint on the tenant's sending reputation.
         let now = Utc::now();
-        let (enabled, day) = derive_domain_warmup(
+        let (identity, day) = select_binding_warmup_ip(
             now,
             &[
-                now - chrono::Duration::days(10),
-                now - chrono::Duration::days(3),
-                now - chrono::Duration::days(40),
+                warmup_ip_row("dip-old", "203.0.113.1", now - chrono::Duration::days(40)),
+                warmup_ip_row("dip-mid", "203.0.113.2", now - chrono::Duration::days(10)),
+                warmup_ip_row("dip-new", "203.0.113.3", now - chrono::Duration::days(3)),
             ],
-        );
-        assert!(enabled);
+        )
+        .expect("at least one warming IP");
         assert_eq!(day, 3, "MIN elapsed days across warming IPs wins");
+        assert_eq!(identity.dedicated_ip_id, "dip-new");
+        assert_eq!(identity.ip_address, "203.0.113.3");
     }
 
     #[test]
-    fn warmup_derivation_clamps_to_day_zero() {
+    fn warmup_selection_clamps_to_day_zero() {
         // A warmup started moments ago (or a clock-skewed future timestamp)
         // is day 0, never negative.
         let now = Utc::now();
-        let (enabled, day) = derive_domain_warmup(
+        let (_, day) = select_binding_warmup_ip(
             now,
             &[
-                now + chrono::Duration::hours(1),
-                now - chrono::Duration::hours(2),
+                warmup_ip_row(
+                    "dip-future",
+                    "203.0.113.4",
+                    now + chrono::Duration::hours(1),
+                ),
+                warmup_ip_row("dip-past", "203.0.113.5", now - chrono::Duration::hours(2)),
             ],
-        );
-        assert!(enabled);
+        )
+        .expect("at least one warming IP");
         assert_eq!(day, 0);
     }
 
     /// get_domain must consult the real warmup tables (dedicated_ips was
     /// given per-IP warmup state by migrations 071/093) instead of
-    /// hardcoding `false AS warmup_enabled, 0 AS warmup_day`.
+    /// hardcoding `false AS warmup_enabled, 0 AS warmup_day`, and its rows
+    /// must carry the IP IDENTITY the admission counter keys on.
     #[test]
     fn get_domain_sql_consults_dedicated_ips_warmup_state() {
         assert!(
@@ -4878,6 +5080,51 @@ mod tests {
         assert!(
             !GET_DOMAIN_SQL.contains("false AS warmup_enabled"),
             "the hardcoded warmup constants must be gone: {GET_DOMAIN_SQL}"
+        );
+        assert!(
+            GET_DOMAIN_SQL.contains("'id', di.id::text")
+                && GET_DOMAIN_SQL.contains("'ip_address', di.ip_address"),
+            "the warmup source must carry the per-IP identity: {GET_DOMAIN_SQL}"
+        );
+        assert!(
+            !GET_DOMAIN_SQL.contains("warmup_starts"),
+            "timestamps alone are not a reputation boundary: {GET_DOMAIN_SQL}"
+        );
+    }
+
+    /// Fix 3: the admission keys are IP-scoped (the reputation boundary) and
+    /// the send marker is idempotent across retries of one send unit while
+    /// staying distinct across recipients of the same row.
+    #[test]
+    fn warmup_admission_keys_are_ip_scoped_and_per_send_unit() {
+        let today = "2026-09-11";
+        let key = warmup_ip_counter_key("203.0.113.9", today);
+        assert_eq!(key, "apexmail:warmup:ip:203.0.113.9:2026-09-11");
+        assert!(
+            !key.contains("domain-1"),
+            "the domain must not participate in the warmup boundary: {key}"
+        );
+
+        let job = tracking_gate_job();
+        let marker = warmup_ip_send_marker_key("203.0.113.9", today, &job);
+        assert_eq!(
+            marker,
+            "apexmail:warmup:sent:203.0.113.9:2026-09-11:job-1:recipient@example.com"
+        );
+        // A retry (attempt bumps, recipient unchanged) reuses the same
+        // marker — no double-count.
+        let mut retried = job.clone();
+        retried.attempt = 5;
+        assert_eq!(
+            warmup_ip_send_marker_key("203.0.113.9", today, &retried),
+            marker
+        );
+        // A different recipient of the same row is a different send unit.
+        let mut other = job.clone();
+        other.to = "other@example.com".into();
+        assert_ne!(
+            warmup_ip_send_marker_key("203.0.113.9", today, &other),
+            marker
         );
     }
 
@@ -4891,11 +5138,13 @@ mod tests {
         );
     }
 
-    /// Audit-1 behavioral gate: with warmup_enabled and warmup_day = N, the
-    /// Redis counter gate blocks sends above WarmupLimits::for_day(N)'s cap
-    /// and admits below it.
+    /// Audit-1 / Fix 3 behavioral gate: with warmup enabled for a binding
+    /// source IP, the Redis counter gate (canonical `mail_common::warmup`
+    /// day cap) blocks sends above the cap, admits below it, is idempotent
+    /// per send unit, ignores the retired domain-keyed counter, and fails
+    /// closed when the source IP identity is missing.
     #[tokio::test]
-    async fn warmup_gate_blocks_above_the_days_cap() {
+    async fn warmup_gate_blocks_above_the_ip_cap_and_ignores_domain_keys() {
         let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
             Ok(l) => l,
             Err(_) => {
@@ -4961,28 +5210,40 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Canonical schedule: day 3 -> 100/day (mail_common::warmup).
+            let day_limit = WarmupSchedule::limit_for_day(3);
+            assert_eq!(day_limit, 100, "canonical warmup day-3 cap");
+
+            let started_at = Utc::now() - chrono::Duration::days(3);
             let mut domain = tracking_gate_domain();
             domain.warmup_enabled = true;
-            domain.warmup_day = 3; // WarmupLimits::for_day(3).daily_limit == 400
+            domain.warmup_day = 3;
+            domain.warmup_ip = Some(WarmupIpIdentity {
+                dedicated_ip_id: "dip-1".into(),
+                ip_address: "203.0.113.9".into(),
+                warmup_started_at: started_at,
+            });
             let job = tracking_gate_job();
 
-            // Pre-fill the shared day counter to exactly the cap: the next
-            // increment exceeds it, so the gate must refuse AND roll the
-            // over-limit increment back.
             let today = Utc::now().format("%Y-%m-%d").to_string();
-            let key = format!("warmup:count:{}:{}", today, job.domain_id);
+            let key = warmup_ip_counter_key("203.0.113.9", &today);
+            let legacy_domain_key = format!("warmup:count:{}:{}", today, job.domain_id);
+
+            // Pre-fill the per-IP counter to exactly the cap: the next send
+            // unit must be REFUSED and the counter must stay at the cap.
             {
                 let mut conn = processor.redis.get().await.unwrap();
                 let _: () = redis::cmd("SET")
                     .arg(&key)
-                    .arg(WarmupLimits::for_day(3).daily_limit)
+                    .arg(day_limit)
                     .query_async(&mut *conn)
                     .await
                     .unwrap();
             }
-            assert!(
-                !processor.check_warmup_limit(&job, &domain).await.unwrap(),
-                "a send above the day's cap must be blocked"
+            assert_eq!(
+                processor.check_warmup_limit(&job, &domain).await.unwrap(),
+                WarmupAdmission::QuotaExhausted,
+                "a send above the IP's day cap must be blocked"
             );
             let after: i64 = {
                 let mut conn = processor.redis.get().await.unwrap();
@@ -4993,29 +5254,130 @@ mod tests {
                     .unwrap()
             };
             assert_eq!(
-                after,
-                WarmupLimits::for_day(3).daily_limit,
-                "the refused send must roll its increment back"
+                after, day_limit as i64,
+                "the refused send must not consume IP quota"
             );
 
-            // Below the cap the gate admits.
+            // Below the cap the gate admits …
             {
                 let mut conn = processor.redis.get().await.unwrap();
                 let _: () = redis::cmd("SET")
                     .arg(&key)
-                    .arg(WarmupLimits::for_day(3).daily_limit - 1)
+                    .arg(day_limit - 1)
                     .query_async(&mut *conn)
                     .await
                     .unwrap();
             }
-            assert!(
+            assert_eq!(
                 processor.check_warmup_limit(&job, &domain).await.unwrap(),
+                WarmupAdmission::Admit,
                 "a send below the cap must be admitted"
+            );
+            // … and a retry of the SAME send unit is idempotent: admitted
+            // without a second increment.
+            assert_eq!(
+                processor.check_warmup_limit(&job, &domain).await.unwrap(),
+                WarmupAdmission::Admit,
+                "a retry of the same send unit must stay admitted"
+            );
+            let after_retry: i64 = {
+                let mut conn = processor.redis.get().await.unwrap();
+                redis::cmd("GET")
+                    .arg(&key)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(
+                after_retry, day_limit as i64,
+                "a retry must not double-count against the IP quota"
+            );
+
+            // A DIFFERENT recipient of the same row is a different send unit
+            // and is now blocked (cap reached).
+            let mut other_recipient = job.clone();
+            other_recipient.to = "other@example.com".into();
+            assert_eq!(
+                processor
+                    .check_warmup_limit(&other_recipient, &domain)
+                    .await
+                    .unwrap(),
+                WarmupAdmission::QuotaExhausted,
+                "distinct recipients must each consume their own slot"
+            );
+
+            // The RETIRED domain-keyed counter is no longer authoritative:
+            // with the legacy key exhausted and the IP counter below cap, the
+            // send is still admitted.
+            {
+                let mut conn = processor.redis.get().await.unwrap();
+                let _: () = redis::cmd("SET")
+                    .arg(&legacy_domain_key)
+                    .arg(day_limit + 10_000)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap();
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(day_limit - 1)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                processor
+                    .check_warmup_limit(&other_recipient, &domain)
+                    .await
+                    .unwrap(),
+                WarmupAdmission::Admit,
+                "the domain-keyed counter must not gate the send"
+            );
+
+            // Fail closed: warmup enabled but no source IP identity must
+            // DEFER (refuse), never admit.
+            let mut unidentified = tracking_gate_domain();
+            unidentified.warmup_enabled = true;
+            unidentified.warmup_ip = None;
+            assert_eq!(
+                processor
+                    .check_warmup_limit(&job, &unidentified)
+                    .await
+                    .unwrap(),
+                WarmupAdmission::Unavailable,
+                "warmup enabled without a source IP must fail closed"
+            );
+
+            // Graduated (>= 60 days) source IP is unlimited.
+            let mut graduated = domain.clone();
+            graduated.warmup_ip = Some(WarmupIpIdentity {
+                dedicated_ip_id: "dip-1".into(),
+                ip_address: "203.0.113.9".into(),
+                warmup_started_at: Utc::now() - chrono::Duration::days(61),
+            });
+            {
+                let mut conn = processor.redis.get().await.unwrap();
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(day_limit + 10_000)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                processor
+                    .check_warmup_limit(&job, &graduated)
+                    .await
+                    .unwrap(),
+                WarmupAdmission::Admit,
+                "a graduated IP must not be gated"
             );
 
             // A domain without warmup state is never gated, regardless of counters.
             let cold = tracking_gate_domain();
-            assert!(processor.check_warmup_limit(&job, &cold).await.unwrap());
+            assert_eq!(
+                processor.check_warmup_limit(&job, &cold).await.unwrap(),
+                WarmupAdmission::Admit
+            );
             Ok(())
         }
         .await;

@@ -1,5 +1,14 @@
-//! System health endpoint — queues, workers, MTA nodes, alerts.
+//! System health endpoint — queues, queue writers, IP pool addresses, alerts.
 //!
+//! **What these numbers are NOT**: there is no process-heartbeat registry in
+//! the schema (no worker/service heartbeat table exists), so `queueWriters`
+//! are inferred from `queue_jobs` activity — one entry per queue with recent
+//! job activity — not live worker processes. `ipPoolAddresses` are rows of
+//! `ip_pool_addresses` (sending IPs), not MTA processes/nodes. Both are
+//! labelled accordingly and explained in [`SystemHealthResponse::notes`].
+//!
+//! If a real heartbeat registry is ever added, these fields should be
+//! replaced with its data (grep found none at the time of this fix).
 
 use axum::extract::State;
 use axum::routing::get;
@@ -39,10 +48,15 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 pub struct SystemHealthResponse {
     pub queues: Vec<QueueStatus>,
-    pub workers: Vec<WorkerStatus>,
-    pub mta_nodes: Vec<MtaNode>,
+    /// Queue writers OBSERVED via `queue_jobs` activity — not process
+    /// heartbeats (no heartbeat registry exists).
+    pub queue_writers: Vec<QueueWriterStatus>,
+    /// Rows of `ip_pool_addresses` (sending IP addresses), not MTA processes.
+    pub ip_pool_addresses: Vec<IpPoolAddress>,
     pub alerts: Vec<SystemAlert>,
     pub system_sender: SystemSenderHealth,
+    /// Response-level caveats so a UI can label the data honestly.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,19 +75,26 @@ pub struct QueueStatus {
     pub status: String,
 }
 
+/// One queue writer observed from queue activity. `last_observed_activity`
+/// is the most recent `queue_jobs.updated_at` a worker touched for that
+/// queue — it is NOT a process heartbeat.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkerStatus {
+pub struct QueueWriterStatus {
     pub id: String,
     pub name: String,
     pub r#type: String,
+    /// "active" when the queue was touched recently, else "idle" — derived
+    /// from job activity, not a process liveness signal.
     pub status: String,
-    pub last_heartbeat: Option<String>,
+    pub last_observed_activity: Option<String>,
 }
 
+/// A row of `ip_pool_addresses` — a sending IP address in an IP pool, not an
+/// MTA process.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MtaNode {
+pub struct IpPoolAddress {
     pub id: String,
     pub ip_address: String,
     pub pool_id: Option<String>,
@@ -141,10 +162,11 @@ async fn system_health(
         })
         .collect();
 
-    // ── Workers (derived from queue_jobs activity) ─────────────
-    // queue_jobs has no worker_id column — derive one logical worker per
-    // queue from the most recent job activity (updated_at on jobs that a
-    // worker actually touched).
+    // ── Queue writers (OBSERVED from queue_jobs activity) ──────
+    // queue_jobs has no worker_id column and no heartbeat registry exists —
+    // derive one logical queue writer per queue from the most recent job
+    // activity (updated_at on jobs that a worker actually touched). These
+    // are observations of queue activity, NOT process heartbeats.
     let worker_rows = optional_relation_rows(
         sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>)>(
             "SELECT COALESCE(queue_name, queue) AS worker_queue, MAX(updated_at)
@@ -157,26 +179,27 @@ async fn system_health(
         "queue_jobs",
     )?;
 
-    let workers: Vec<WorkerStatus> = worker_rows
+    let queue_writers: Vec<QueueWriterStatus> = worker_rows
         .into_iter()
-        .map(|(queue, hb)| WorkerStatus {
-            id: format!("worker:{queue}"),
-            name: format!("{queue}-worker"),
+        .map(|(queue, last_activity)| QueueWriterStatus {
+            id: format!("queue-writer:{queue}"),
+            name: format!("{queue}-queue-writer"),
             r#type: queue,
-            status: if hb
+            status: if last_activity
                 .map(|t| t > chrono::Utc::now() - chrono::Duration::minutes(5))
                 .unwrap_or(false)
             {
-                "running".into()
+                "active".into()
             } else {
                 "idle".into()
             },
-            last_heartbeat: hb.map(|t| t.to_rfc3339()),
+            last_observed_activity: last_activity.map(|t| t.to_rfc3339()),
         })
         .collect();
 
-    // ── MTA nodes from ip_pool_addresses ───────────────────────
-    let mta_rows = optional_relation_rows(
+    // ── IP pool addresses (rows of ip_pool_addresses) ──────────
+    // These are sending IP ADDRESSES, not MTA processes/nodes.
+    let ip_rows = optional_relation_rows(
         sqlx::query_as::<
             _,
             (
@@ -197,9 +220,9 @@ async fn system_health(
         "ip_pool_addresses",
     )?;
 
-    let mta_nodes: Vec<MtaNode> = mta_rows
+    let ip_pool_addresses: Vec<IpPoolAddress> = ip_rows
         .into_iter()
-        .map(|(id, ip, pool, status, wd, dl)| MtaNode {
+        .map(|(id, ip, pool, status, wd, dl)| IpPoolAddress {
             id,
             ip_address: ip,
             pool_id: pool,
@@ -244,9 +267,61 @@ async fn system_health(
 
     Ok(Json(SystemHealthResponse {
         queues,
-        workers,
-        mta_nodes,
+        queue_writers,
+        ip_pool_addresses,
         alerts,
         system_sender,
+        notes: vec![
+            "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats — no heartbeat registry exists."
+                .to_string(),
+            "ipPoolAddresses are ip_pool_addresses rows (sending IP addresses), not MTA processes/nodes."
+                .to_string(),
+        ],
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fix 6: the response must say plainly that queue writers are not
+    /// process heartbeats and IP pool addresses are not MTA nodes.
+    #[test]
+    fn response_notes_disclaim_heartbeats_and_mta_nodes() {
+        let notes = vec![
+            "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats — no heartbeat registry exists.",
+            "ipPoolAddresses are ip_pool_addresses rows (sending IP addresses), not MTA processes/nodes.",
+        ];
+        assert!(notes[0].contains("not process heartbeats"));
+        assert!(notes[1].contains("not MTA processes"));
+    }
+
+    /// The renamed structs must not carry the misleading "heartbeat" or
+    /// "MTA node" vocabulary in their serialized shape.
+    #[test]
+    fn queue_writer_field_is_last_observed_activity_not_heartbeat() {
+        let writer = QueueWriterStatus {
+            id: "queue-writer:default".into(),
+            name: "default-queue-writer".into(),
+            r#type: "default".into(),
+            status: "active".into(),
+            last_observed_activity: None,
+        };
+        let json = serde_json::to_string(&writer).expect("serialize queue writer");
+        assert!(json.contains("lastObservedActivity"));
+        assert!(!json.contains("heartbeat"));
+        assert!(!json.contains("worker"));
+
+        let address = IpPoolAddress {
+            id: "ip-1".into(),
+            ip_address: "192.0.2.1".into(),
+            pool_id: None,
+            status: "active".into(),
+            warmup_day: None,
+            daily_limit: None,
+        };
+        let json = serde_json::to_string(&address).expect("serialize ip pool address");
+        assert!(json.contains("ipAddress"));
+        assert!(!json.contains("mtaNode"));
+    }
 }

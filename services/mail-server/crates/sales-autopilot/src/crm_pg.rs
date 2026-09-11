@@ -5,7 +5,7 @@
 //! process restarts.
 
 use chrono::Utc;
-use sqlx::{Connection, PgPool, QueryBuilder, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -40,142 +40,14 @@ impl SqlxCrmService {
         Self { pool }
     }
 
-    /// Ensure the leads table exists.
+    /// Verify the schema this service requires.
     ///
-    /// Wrapped in a session-scoped Postgres advisory lock so concurrent
-    /// callers (e.g. parallel integration tests) do not race on
-    /// `pg_class_relname_nsp_index` during `CREATE TABLE IF NOT EXISTS` /
-    /// `CREATE INDEX IF NOT EXISTS` catalog inserts.
+    /// Historically this created `sales_leads` and its indexes at runtime with
+    /// `CREATE TABLE IF NOT EXISTS`, which is exactly the non-deterministic
+    /// schema ownership the v2 unification removed. It now verifies against
+    /// the canonical migration set and refuses to run otherwise.
     pub async fn initialize(&self) -> Result<(), SalesError> {
-        // Hold the advisory lock on a SINGLE dedicated connection for the full
-        // duration of the schema bootstrap (see equivalent reasoning in
-        // `routes::initialize_schema`).
-        //
-        // `SET LOCAL lock_timeout` only takes effect inside a transaction, so
-        // the lock acquisition is wrapped in one. If another process already
-        // holds the lock, `pg_advisory_lock` fails after 30s instead of
-        // queuing forever and exhausting the pool.
-        let mut lock_conn = self
-            .pool
-            .acquire()
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-        let mut tx = lock_conn
-            .begin()
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-        sqlx::query("SET LOCAL lock_timeout = '30s'")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-        sqlx::query("SELECT pg_advisory_lock(7723691501421983235)")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-        let result = self.initialize_inner().await;
-        // Session-level advisory locks survive the transaction, so it is safe
-        // to release the lock before rolling back the (empty) transaction.
-        if let Err(e) = sqlx::query("SELECT pg_advisory_unlock(7723691501421983235)")
-            .execute(&mut *tx)
-            .await
-        {
-            warn!(error = %e, "failed to release sales-autopilot schema advisory lock");
-        }
-        // The transaction only carries the SET LOCAL; DDL in
-        // initialize_inner ran on separate pooled connections.
-        if let Err(e) = tx.rollback().await {
-            warn!(error = %e, "failed to roll back advisory-lock transaction");
-        }
-        drop(lock_conn);
-        result
-    }
-
-    async fn initialize_inner(&self) -> Result<(), SalesError> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS sales_leads (
-                id          TEXT PRIMARY KEY,
-                tenant_id   TEXT NOT NULL,
-                company_name TEXT NOT NULL DEFAULT '',
-                domain      TEXT NOT NULL DEFAULT '',
-                contact_email TEXT,
-                contact_name TEXT,
-                email       TEXT,
-                title       TEXT NOT NULL DEFAULT '',
-                score       INTEGER NOT NULL DEFAULT 0,
-                source      TEXT NOT NULL DEFAULT '',
-                status      TEXT NOT NULL DEFAULT 'new',
-                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-        "#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_status ON sales_leads(status)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_tenant ON sales_leads(tenant_id)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        // A tenant cannot hold the same contact email twice. Matching is
-        // case-insensitive because email addresses are case-insensitive in
-        // their domain part (and treated so in practice overall).
-        // NULL contact_email values remain distinct (standard unique-index
-        // semantics), so legacy/api-server rows without an email are unaffected.
-        sqlx::query(
-            r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_leads_tenant_email
-               ON sales_leads(tenant_id, lower(contact_email))"#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        for statement in [
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS company_name TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS contact_email TEXT",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS contact_name TEXT",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS email TEXT",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS score INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE sales_leads ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-        ] {
-            sqlx::query(statement)
-                .execute(&self.pool)
-                .await
-                .map_err(|e| SalesError::Database(e.to_string()))?;
-        }
-
-        // The email index lives AFTER the ALTER loop: databases whose
-        // sales_leads predates this crate (the api-server writer's shape)
-        // gain the column here, not at table-creation time.
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sales_leads_email ON sales_leads(email)")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        // GIN index for full-text search across contact name, email, and company columns.
-        // Supports the to_tsvector @@ plainto_tsquery query used in search_leads().
-        sqlx::query(
-            r#"CREATE INDEX IF NOT EXISTS idx_sales_leads_fts_gin
-               ON sales_leads
-               USING GIN (
-                   to_tsvector('english', COALESCE(contact_name, '') || ' ' || COALESCE(email, contact_email, '') || ' ' || COALESCE(company_name, ''))
-               )"#,
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        Ok(())
+        crate::schema::verify(&self.pool).await
     }
 
     /// Insert a new lead.

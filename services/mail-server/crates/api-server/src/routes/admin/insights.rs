@@ -3,6 +3,11 @@
 //! Compares recent metrics against historical baselines and surfaces meaningful
 //! observations. Every insight is backed by real database queries. If a metric
 //! comparison returns no data, the insight is not generated (no fabricated content).
+//!
+//! Metric conventions come from [`crate::analytics_metrics`]: comparisons use
+//! event-occurrence windows over DISTINCT messages, so repeat opens/clicks on
+//! one message cannot fake an engagement change and current message status is
+//! never mixed into a historical cohort.
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -10,6 +15,9 @@ use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::analytics_metrics::{
+    detect_event_columns, distinct_message_counts, distinct_message_counts_previous, EventColumns,
+};
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -62,6 +70,8 @@ pub struct TrendInsight {
     pub description: String,
     pub data_points: i64,
     pub trend_direction: String,
+    /// Sample-size label ("high" / "medium"), NOT a statistical confidence
+    /// level — the trend is a heuristic comparison of daily averages.
     pub confidence: String,
 }
 
@@ -73,14 +83,6 @@ pub struct Recommendation {
     pub title: String,
     pub description: String,
     pub actionable: bool,
-}
-
-#[derive(sqlx::FromRow)]
-struct MetricComparison {
-    current_value: f64,
-    previous_value: f64,
-    current_count: i64,
-    previous_count: i64,
 }
 
 fn parse_lookback_days(lookback: &str) -> i64 {
@@ -112,37 +114,26 @@ fn calc_change_pct(current: f64, previous: f64) -> (f64, String) {
     (pct, direction.into())
 }
 
-async fn compare_metric(
+/// Successful sends per day, by event occurrence (DISTINCT messages).
+/// `days` is bound, never rendered into SQL.
+async fn sent_volume_by_day(
     db: &sqlx::PgPool,
-    current_query: &str,
-    previous_query: &str,
-    interval: &str,
-) -> Option<MetricComparison> {
-    let current: Option<(f64, i64)> = sqlx::query_as(current_query)
-        .bind(interval)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-        .map(|(v, c): (Option<f64>, Option<i64>)| (v.unwrap_or(0.0), c.unwrap_or(0)));
+    columns: EventColumns,
+    days: i32,
+) -> Vec<(String, i64)> {
+    let type_col = columns.type_col.as_sql();
+    let time_col = columns.time_col.as_sql();
 
-    let previous: Option<(f64, i64)> = sqlx::query_as(previous_query)
-        .bind(interval)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-        .map(|(v, c): (Option<f64>, Option<i64>)| (v.unwrap_or(0.0), c.unwrap_or(0)));
-
-    match (current, previous) {
-        (Some((cv, cc)), Some((pv, pc))) => Some(MetricComparison {
-            current_value: cv,
-            previous_value: pv,
-            current_count: cc,
-            previous_count: pc,
-        }),
-        _ => None,
-    }
+    sqlx::query_as::<_, (String, i64)>(&format!(
+        "SELECT DATE({time_col})::text, COUNT(DISTINCT message_id)::bigint
+         FROM events
+         WHERE {type_col} = 'sent' AND {time_col} >= NOW() - make_interval(days => $1::int)
+         GROUP BY DATE({time_col}) ORDER BY 1"
+    ))
+    .bind(days)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
 }
 
 async fn get_insights(
@@ -160,34 +151,16 @@ async fn get_insights(
     let mut trends: Vec<TrendInsight> = Vec::new();
     let mut recommendations: Vec<Recommendation> = Vec::new();
 
-    // ─── Delivery Rate Insight ──────────────────────────────────────────
-    let delivery_sql_current = format!(
-        "SELECT
-            CASE WHEN COUNT(*) > 0
-                THEN COUNT(*) FILTER (WHERE status = 'delivered')::float8 / COUNT(*)::float8
-                ELSE 0
-            END::float8,
-            COUNT(*)::bigint
-         FROM messages
-         WHERE created_at >= NOW() - '{interval}'::interval"
-    );
-    let delivery_sql_previous = format!(
-        "SELECT
-            CASE WHEN COUNT(*) > 0
-                THEN COUNT(*) FILTER (WHERE status = 'delivered')::float8 / COUNT(*)::float8
-                ELSE 0
-            END::float8,
-            COUNT(*)::bigint
-         FROM messages
-         WHERE created_at >= NOW() - '{interval}'::interval - '{interval}'::interval
-           AND created_at < NOW() - '{interval}'::interval"
-    );
+    // Canonical, like-for-like period comparison: DISTINCT messages bucketed
+    // by event occurrence, current window vs the immediately preceding one.
+    let columns: EventColumns = detect_event_columns(&state).await;
+    let current = distinct_message_counts(db, None, &interval, columns).await?;
+    let previous = distinct_message_counts_previous(db, None, &interval, columns).await?;
 
-    if let Some(cmp) =
-        compare_metric(db, &delivery_sql_current, &delivery_sql_previous, &interval).await
-    {
-        let (pct, dir) = calc_change_pct(cmp.current_value, cmp.previous_value);
-        if pct.abs() > 2.0 && cmp.current_count > 10 {
+    // ─── Delivery Rate Insight ──────────────────────────────────────────
+    if current.sent > 10 {
+        let (pct, dir) = calc_change_pct(current.delivery_rate(), previous.delivery_rate());
+        if pct.abs() > 2.0 {
             insights.push(Insight {
                 category: "deliverability".into(),
                 title: if dir == "down" {
@@ -197,8 +170,8 @@ async fn get_insights(
                 },
                 description: format!(
                     "Delivery rate is {:.1}% vs {:.1}% in the previous period ({:+.1}% change)",
-                    cmp.current_value * 100.0,
-                    cmp.previous_value * 100.0,
+                    current.delivery_rate() * 100.0,
+                    previous.delivery_rate() * 100.0,
                     pct
                 ),
                 severity: if dir == "down" && pct < -5.0 {
@@ -210,8 +183,8 @@ async fn get_insights(
                 }
                 .into(),
                 metric_name: "delivery_rate".into(),
-                current_value: format!("{:.1}%", cmp.current_value * 100.0),
-                previous_value: format!("{:.1}%", cmp.previous_value * 100.0),
+                current_value: format!("{:.1}%", current.delivery_rate() * 100.0),
+                previous_value: format!("{:.1}%", previous.delivery_rate() * 100.0),
                 change_pct: pct,
                 direction: dir,
             });
@@ -219,33 +192,9 @@ async fn get_insights(
     }
 
     // ─── Bounce Rate Insight ────────────────────────────────────────────
-    let bounce_sql_current = format!(
-        "SELECT
-            CASE WHEN COUNT(*) > 0
-                THEN COUNT(*) FILTER (WHERE status = 'bounced')::float8 / COUNT(*)::float8
-                ELSE 0
-            END::float8,
-            COUNT(*) FILTER (WHERE status = 'bounced')::bigint
-         FROM messages
-         WHERE created_at >= NOW() - '{interval}'::interval"
-    );
-    let bounce_sql_previous = format!(
-        "SELECT
-            CASE WHEN COUNT(*) > 0
-                THEN COUNT(*) FILTER (WHERE status = 'bounced')::float8 / COUNT(*)::float8
-                ELSE 0
-            END::float8,
-            COUNT(*) FILTER (WHERE status = 'bounced')::bigint
-         FROM messages
-         WHERE created_at >= NOW() - '{interval}'::interval - '{interval}'::interval
-           AND created_at < NOW() - '{interval}'::interval"
-    );
-
-    if let Some(cmp) =
-        compare_metric(db, &bounce_sql_current, &bounce_sql_previous, &interval).await
-    {
-        let (pct, dir) = calc_change_pct(cmp.current_value, cmp.previous_value);
-        if pct.abs() > 10.0 || (dir == "up" && cmp.current_count > 5) {
+    if current.sent > 0 {
+        let (pct, dir) = calc_change_pct(current.bounce_rate(), previous.bounce_rate());
+        if pct.abs() > 10.0 || (dir == "up" && current.bounced > 5) {
             insights.push(Insight {
                 category: "deliverability".into(),
                 title: if dir == "up" {
@@ -266,51 +215,29 @@ async fn get_insights(
                 }
                 .into(),
                 metric_name: "bounce_rate".into(),
-                current_value: format!("{:.1}%", cmp.current_value * 100.0),
-                previous_value: format!("{:.1}%", cmp.previous_value * 100.0),
+                current_value: format!("{:.1}%", current.bounce_rate() * 100.0),
+                previous_value: format!("{:.1}%", previous.bounce_rate() * 100.0),
                 change_pct: pct,
                 direction: dir,
             });
         }
     }
 
-    // ─── Open Rate Insight ──────────────────────────────────────────────
-    let open_sql_current = format!(
-        "SELECT
-            COALESCE(
-                COUNT(*)::float8,
-                0
-            )::float8,
-            COUNT(*)::bigint
-         FROM events
-         WHERE event_type = 'opened'
-           AND timestamp >= NOW() - '{interval}'::interval"
-    );
-    let open_sql_previous = format!(
-        "SELECT
-            COALESCE(
-                COUNT(*)::float8,
-                0
-            )::float8,
-            COUNT(*)::bigint
-         FROM events
-         WHERE event_type = 'opened'
-           AND timestamp >= NOW() - '{interval}'::interval - '{interval}'::interval
-           AND timestamp < NOW() - '{interval}'::interval"
-    );
-
-    if let Some(cmp) = compare_metric(db, &open_sql_current, &open_sql_previous, &interval).await {
-        let (pct, dir) = calc_change_pct(cmp.current_value, cmp.previous_value);
-        if pct.abs() > 5.0 && cmp.current_count > 10 {
+    // ─── Open Engagement Insight ────────────────────────────────────────
+    // DISTINCT opened messages: repeat opens of one message never inflate
+    // the numerator.
+    {
+        let (pct, dir) = calc_change_pct(current.opened as f64, previous.opened as f64);
+        if pct.abs() > 5.0 && current.opened > 10 {
             insights.push(Insight {
                 category: "engagement".into(),
                 title: if dir == "up" {
-                    "Open rate increased".into()
+                    "Open engagement increased".into()
                 } else {
-                    "Open rate decreased".into()
+                    "Open engagement decreased".into()
                 },
                 description: format!(
-                    "Email opens changed {:+.1}% vs previous period. Consider subject line optimization or send-time tuning.",
+                    "Distinct messages opened changed {:+.1}% vs previous period. Consider subject line optimization or send-time tuning.",
                     pct
                 ),
                 severity: if dir == "down" && pct < -20.0 {
@@ -319,9 +246,9 @@ async fn get_insights(
                     "info"
                 }
                 .into(),
-                metric_name: "open_count".into(),
-                current_value: format!("{} opens", cmp.current_count),
-                previous_value: format!("{} opens", cmp.previous_count),
+                metric_name: "opened_messages".into(),
+                current_value: format!("{} messages opened", current.opened),
+                previous_value: format!("{} messages opened", previous.opened),
                 change_pct: pct,
                 direction: dir,
             });
@@ -427,16 +354,10 @@ async fn get_insights(
         }
     }
 
-    // ─── Volume Growth Trend ────────────────────────────────────────────
-    let volume_rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT DATE(created_at)::text, COUNT(*)::bigint
-         FROM messages
-         WHERE created_at >= NOW() - INTERVAL '30 days'
-         GROUP BY DATE(created_at) ORDER BY 1",
-    )
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    // ─── Send Volume Growth Trend ───────────────────────────────────────
+    // Successful sends bucketed by event occurrence — never message
+    // creation, which counts mail that may never have left the queue.
+    let volume_rows = sent_volume_by_day(db, columns, 30).await;
 
     if volume_rows.len() >= 7 {
         let recent_vol: Vec<i64> = volume_rows.iter().rev().take(7).map(|(_, c)| *c).collect();
@@ -456,12 +377,12 @@ async fn get_insights(
             if pct.abs() > 10.0 {
                 trends.push(TrendInsight {
                     title: format!(
-                        "Email volume {} by {:+.1}%",
+                        "Send volume {} by {:+.1}%",
                         if dir == "up" { "growing" } else { "shrinking" },
                         pct
                     ),
                     description: format!(
-                        "Daily average: {:.0} emails (recent week) vs {:.0} (prior week)",
+                        "Daily average: {:.0} sent messages (recent week) vs {:.0} (prior week)",
                         recent_avg, older_avg
                     ),
                     data_points: volume_rows.len() as i64,
@@ -478,34 +399,17 @@ async fn get_insights(
     }
 
     // ─── Complaint Rate Insight ─────────────────────────────────────────
-    let complaint_current: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*)::bigint FROM events
-         WHERE event_type = 'complained'
-           AND timestamp >= NOW() - '{interval}'::interval"
-    ))
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    // DISTINCT complained messages (canonical counts), not raw complaint
+    // events — a repeated callback for one message cannot fake a spike.
+    let (com_pct, com_dir) = calc_change_pct(current.complained as f64, previous.complained as f64);
 
-    let complaint_previous: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*)::bigint FROM events
-         WHERE event_type = 'complained'
-           AND timestamp >= NOW() - '{interval}'::interval - '{interval}'::interval
-           AND timestamp < NOW() - '{interval}'::interval"
-    ))
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
-
-    let (com_pct, com_dir) = calc_change_pct(complaint_current as f64, complaint_previous as f64);
-
-    if complaint_current > 0 && (com_dir == "up" || com_pct.abs() > 50.0) {
+    if current.complained > 0 && (com_dir == "up" || com_pct.abs() > 50.0) {
         insights.push(Insight {
             category: "deliverability".into(),
             title: "Complaint rate change detected".into(),
             description: format!(
-                "{} complaints this period vs {} in the previous ({:+.1}%). Review recent campaign content and list quality.",
-                complaint_current, complaint_previous, com_pct
+                "{} messages complained this period vs {} in the previous ({:+.1}%). Review recent campaign content and list quality.",
+                current.complained, previous.complained, com_pct
             ),
             severity: if com_dir == "up" && com_pct > 50.0 {
                 "critical"
@@ -513,9 +417,9 @@ async fn get_insights(
                 "warning"
             }
             .into(),
-            metric_name: "complaints".into(),
-            current_value: complaint_current.to_string(),
-            previous_value: complaint_previous.to_string(),
+            metric_name: "complained_messages".into(),
+            current_value: current.complained.to_string(),
+            previous_value: previous.complained.to_string(),
             change_pct: com_pct,
             direction: com_dir,
         });
@@ -586,16 +490,9 @@ async fn get_trends(
     let db = &state.db;
     let mut trends: Vec<TrendInsight> = Vec::new();
 
-    // Volume trend
-    let volume_rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT DATE(created_at)::text, COUNT(*)::bigint
-         FROM messages
-         WHERE created_at >= NOW() - INTERVAL '30 days'
-         GROUP BY DATE(created_at) ORDER BY 1",
-    )
-    .fetch_all(db)
-    .await
-    .unwrap_or_default();
+    // Send volume trend — successful sends by event occurrence.
+    let columns: EventColumns = detect_event_columns(&state).await;
+    let volume_rows = sent_volume_by_day(db, columns, 30).await;
 
     if volume_rows.len() >= 7 {
         let recent: Vec<i64> = volume_rows.iter().rev().take(7).map(|(_, c)| *c).collect();
@@ -614,12 +511,12 @@ async fn get_trends(
 
             trends.push(TrendInsight {
                 title: format!(
-                    "Volume {} by {:+.1}%",
+                    "Send volume {} by {:+.1}%",
                     if dir == "up" { "growing" } else { "shrinking" },
                     pct
                 ),
                 description: format!(
-                    "Daily avg: {:.0} (recent) vs {:.0} (prior), {} data points",
+                    "Daily avg sent messages: {:.0} (recent) vs {:.0} (prior), {} data points",
                     recent_avg,
                     older_avg,
                     volume_rows.len()
@@ -721,34 +618,23 @@ async fn get_recommendations(
     let db = &state.db;
     let mut recommendations: Vec<Recommendation> = Vec::new();
 
-    // Check bounce rate for DNS recommendation
-    let bounce_rate: Option<(f64,)> = sqlx::query_as(
-        "SELECT
-            CASE WHEN COUNT(*) > 0
-                THEN COUNT(*) FILTER (WHERE status = 'bounced')::float8 / COUNT(*)::float8
-                ELSE 0
-            END
-         FROM messages
-         WHERE created_at >= NOW() - INTERVAL '7 days'",
-    )
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten();
+    // Check bounce rate for DNS recommendation — canonical distinct-message
+    // rate over event occurrence (fraction 0..1).
+    let columns = detect_event_columns(&state).await;
+    let counts = distinct_message_counts(db, None, "7 days", columns).await?;
+    let bounce_rate = counts.bounce_rate();
 
-    if let Some((rate,)) = bounce_rate {
-        if rate > 0.05 {
-            recommendations.push(Recommendation {
-                category: "deliverability".into(),
-                priority: "high".into(),
-                title: "Review DNS configuration for sending domains".into(),
-                description: format!(
-                    "Bounce rate is {:.1}% over the last 7 days. Verify SPF, DKIM, and DMARC records are correctly configured for all sending domains.",
-                    rate * 100.0
-                ),
-                actionable: true,
-            });
-        }
+    if bounce_rate > 0.05 {
+        recommendations.push(Recommendation {
+            category: "deliverability".into(),
+            priority: "high".into(),
+            title: "Review DNS configuration for sending domains".into(),
+            description: format!(
+                "Bounce rate is {:.1}% over the last 7 days. Verify SPF, DKIM, and DMARC records are correctly configured for all sending domains.",
+                bounce_rate * 100.0
+            ),
+            actionable: true,
+        });
     }
 
     // Check for tenants without verified domains
@@ -876,5 +762,53 @@ mod tests {
     fn parse_lookback_defaults() {
         assert_eq!(parse_lookback_days("unknown"), 7);
         assert_eq!(parse_lookback_days("30d"), 30);
+    }
+
+    /// The volume trend counts DISTINCT successfully-sent messages by event
+    /// occurrence: two send copies of one message on one day count once.
+    /// Gated on TEST_DATABASE_URL.
+    #[tokio::test]
+    async fn sent_volume_by_day_counts_distinct_messages() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_sent_volume").await else {
+            eprintln!("skipping sent_volume_by_day_counts_distinct_messages: no TEST_DATABASE_URL");
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = format!("t{}", &suffix[..25]);
+        let message_a = format!("msg-{suffix}-a");
+        let message_b = format!("msg-{suffix}-b");
+
+        let seed = |message: String, minutes_ago: i32| {
+            let pool = pool.clone();
+            let tenant = tenant.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp)
+                     VALUES ($1, $2, $3, 'sent', NOW() - make_interval(mins => $4::int))",
+                )
+                .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
+                .bind(&tenant)
+                .bind(&message)
+                .bind(minutes_ago)
+                .execute(&pool)
+                .await
+                .expect("seed sent event");
+            }
+        };
+
+        // Two copies of message A today (count once), one copy of B today,
+        // one copy of B three days ago (separate day bucket).
+        seed(message_a.clone(), 2).await;
+        seed(message_a, 3).await;
+        seed(message_b.clone(), 4).await;
+        seed(message_b, 3 * 24 * 60 + 5).await;
+
+        let columns = crate::analytics_metrics::EventColumns::default();
+        let rows = sent_volume_by_day(&pool, columns, 30).await;
+        let total: i64 = rows.iter().map(|(_, c)| *c).sum();
+        assert_eq!(total, 3, "duplicate send copies must count once: {rows:?}");
+
+        pool.close().await;
     }
 }

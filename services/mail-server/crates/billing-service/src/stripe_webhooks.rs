@@ -1111,7 +1111,12 @@ async fn handle_subscription_change(
 
     if matches!(subscription.status, SubscriptionStatus::Active) {
         // Spawn dedicated IP provisioning in background so the webhook handler
-        // returns immediately. The maintenance job will retry failed requests.
+        // returns immediately. There is NO maintenance retry consumer for
+        // `dedicated_ip_provisioning_requests` rows: a failure here is logged
+        // and recorded as 'failed'/'partial' on the request row (see below),
+        // and a subsequent subscription event re-runs the whole provisioning
+        // path (the pending-request upsert is idempotent, and the active-count
+        // query skips already-allocated IPs).
         let state = state.clone();
         let tenant_id = tenant_id.to_string();
         tokio::spawn(async move {
@@ -1124,9 +1129,27 @@ async fn handle_subscription_change(
     Ok(())
 }
 
+/// The exact JSON body sent to `POST {api_base_url}/v1/dedicated-ips`.
+///
+/// The API's `AllocateIpRequest` is `#[serde(deny_unknown_fields)]` and only
+/// declares `region` (optional). The previous body
+/// (`{"auto_provisioned": true}`) carried an unknown field, so axum's JSON
+/// extractor rejected the request with 422 during deserialization — before
+/// the allocation handler ever ran. The empty object parses into the
+/// contract (every field is defaulted). If a region ever needs to be
+/// pinned, extend this object with `region` only.
+fn auto_provision_request_body() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 /// Background task that performs the actual dedicated IP provisioning.
 /// Called from a `tokio::spawn` to avoid blocking the webhook handler.
-/// The maintenance job (`maintenance.rs`) retries any requests left in 'pending' status.
+///
+/// There is no maintenance retry consumer: failures are logged and the
+/// `dedicated_ip_provisioning_requests` row is finalized as
+/// 'failed'/'partial'. A later active-subscription event retries the
+/// provisioning path from scratch (idempotent request upsert + active-count
+/// check), so the absence of a sweeper does not strand provisioning.
 async fn auto_provision_dedicated_ips_background(
     app_state: &AppState,
     tenant_id: &str,
@@ -1206,7 +1229,7 @@ async fn auto_provision_dedicated_ips_background(
                 .header(reqwest::header::AUTHORIZATION, &bearer)
                 .header("X-Internal-Service", "billing")
                 .header("X-Tenant-Id", tenant_id)
-                .json(&serde_json::json!({ "auto_provisioned": true }))
+                .json(&auto_provision_request_body())
                 .send()
         })
         .collect();
@@ -4178,6 +4201,39 @@ mod tests {
     // -----------------------------------------------------------------------
     // Fix 7.5 — Dedicated IP auto-provisioning tests
     // -----------------------------------------------------------------------
+
+    /// Locally-declared mirror of the API's
+    /// `api_server::routes::dedicated_ips::AllocateIpRequest` (api-server is
+    /// deliberately NOT a dependency of billing-service). Field names and the
+    /// `deny_unknown_fields` validation MUST match the API extractor exactly:
+    /// if the API contract gains a field, this mirror must gain it too, or
+    /// the request body built here is rejected at deserialization time.
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct AllocateIpRequestMirror {
+        #[serde(default)]
+        region: Option<String>,
+    }
+
+    #[test]
+    fn auto_provision_body_deserializes_into_the_api_allocate_contract() {
+        // Serialize the EXACT production request body and prove the API's
+        // extractor contract accepts it.
+        let body = serde_json::to_string(&auto_provision_request_body())
+            .expect("auto-provision body must serialize");
+        let parsed: AllocateIpRequestMirror = serde_json::from_str(&body)
+            .expect("billing auto-provision body must deserialize into AllocateIpRequest");
+        assert!(parsed.region.is_none());
+
+        // Regression guard: the pre-fix body carried an unknown field and the
+        // same contract rejects it — so this mirror genuinely exercises
+        // `deny_unknown_fields` rather than accepting everything.
+        let pre_fix = r#"{"auto_provisioned":true}"#;
+        assert!(
+            serde_json::from_str::<AllocateIpRequestMirror>(pre_fix).is_err(),
+            "the old auto_provisioned body must remain rejected by the API contract"
+        );
+    }
 
     #[test]
     fn dedicated_ip_provisioning_flow_pending_then_provisioned() {

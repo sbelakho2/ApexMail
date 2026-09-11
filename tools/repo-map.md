@@ -24,7 +24,7 @@ ApexMail/
 ├── docs/                 # Documentation: API, architecture, ADRs, operations, security
 ├── packages/             # SDK packages (Go, Java, PHP, Python, Ruby)
 ├── reports/              # Visual parity screenshots, browser smoke test results
-├── services/             # Core mail-server Rust workspace (57 crates)
+├── services/             # Core mail-server Rust workspace (49 crates)
 ├── tools/                # Audit scripts, fix tools, migration SQL, dev scripts
 ├── .env.example          # Environment variable template (119 lines)
 ├── .env.production.example
@@ -142,7 +142,7 @@ ai/training/
 
 ## 4. Core Mail Server — Rust Workspace (`services/mail-server/`)
 
-The heart of the platform — a Cargo workspace with **57 crates**.
+The heart of the platform — a Cargo workspace with **49 crates**.
 
 ### 4.1 Workspace Configuration
 
@@ -167,66 +167,65 @@ The heart of the platform — a Cargo workspace with **57 crates**.
 | 4 | [`mta`](services/mail-server/crates/mta/) | SMTP mail transfer agent (ports 25, 587, 465) | `mta` |
 | 5 | [`smtp-edge`](services/mail-server/crates/smtp-edge/) | SMTP edge proxy/server | `smtp-edge` |
 | 6 | [`submission`](services/mail-server/crates/submission/) | SMTP submission service (port 587) | `submission` |
-| 7 | [`outbound-queue`](services/mail-server/crates/outbound-queue/) | Outbound email queue processor | `outbound-queue` |
-| 8 | [`worker-processors`](services/mail-server/crates/worker-processors/) | Background job processing (analytics) | `worker` |
-| 9 | [`compliance`](services/mail-server/crates/compliance/) | Compliance service (GDPR, HIPAA, SOC2, DPA) | `compliance-server` |
-| 10 | [`isolation`](services/mail-server/crates/isolation/) | Multi-tenant data isolation service | `isolation-server` |
-| 11 | [`ha`](services/mail-server/crates/ha/) | High-availability: multi-region, circuit breaker, replication | `ha-server` |
-| 12 | [`devex-service`](services/mail-server/crates/devex-service/) | Developer experience service (SDK mgmt, webhook tester, onboarding) | `devex-server` |
-| 13 | [`observability-service`](services/mail-server/crates/observability-service/) | Metrics, tracing, alerting, SLO management | `observability-server` |
-| 14 | [`ops-service`](services/mail-server/crates/ops-service/) | Operations: health, incidents, status, warmup, trust | `ops-server` |
-| 15 | [`billing-service`](services/mail-server/crates/billing-service/) | Billing: invoicing, subscriptions, metering, VAT, Stripe webhooks | `billing-server` |
-| 16 | [`ai-service`](services/mail-server/crates/ai-service/) | AI inference: send-time optimization, bandits, content analysis | `ai-service` |
-| 17 | [`ai-embeddings`](services/mail-server/crates/ai-embeddings/) | Vector embeddings service (chunking, vector store, search) | `ai-embeddings-server` |
-| 18 | [`pdf-renderer`](services/mail-server/crates/pdf-renderer/) | PDF generation via Typst (invoices, reports, DPAs) | `pdf-renderer` |
-| 19 | [`template-renderer`](services/mail-server/crates/template-renderer/) | Email template rendering (sandboxed, transpiler) | `template-renderer` |
-| 20 | [`inbox-placement`](services/mail-server/crates/inbox-placement/) | Inbox placement testing (seed accounts, IMAP polling) | `inbox-placement` |
-| 21 | [`sales-autopilot`](services/mail-server/crates/sales-autopilot/) | Sales CRM: leads, calendar, enrichment, scrapers | `sales-autopilot` |
-| 22 | [`mailstore-core`](services/mail-server/crates/mailstore-core/) | Mail storage service (encryption, models, storage) | `mailstore-core` |
+| 7 | [`worker-processors`](services/mail-server/crates/worker-processors/) | Background job processing (analytics) | `worker` |
+| 8 | [`compliance`](services/mail-server/crates/compliance/) | Compliance service (GDPR, HIPAA, SOC2, DPA) | `compliance-server` |
+| 9 | [`isolation`](services/mail-server/crates/isolation/) | Multi-tenant data isolation service | `isolation-server` |
+| 10 | [`ha`](services/mail-server/crates/ha/) | High-availability: multi-region, circuit breaker, replication | `ha-server` |
+| 11 | [`devex-service`](services/mail-server/crates/devex-service/) | Developer experience service (SDK mgmt, webhook tester, onboarding) | `devex-server` |
+| 12 | [`observability-service`](services/mail-server/crates/observability-service/) | Metrics, tracing, alerting, SLO management | `observability-server` |
+| 13 | [`ops-service`](services/mail-server/crates/ops-service/) | Operations: health, incidents, status, warmup, trust | `ops-server` |
+| 14 | [`billing-service`](services/mail-server/crates/billing-service/) | Billing: invoicing, subscriptions, metering, VAT, Stripe webhooks | `billing-server` |
+| 15 | [`ai-service`](services/mail-server/crates/ai-service/) | AI inference: send-time optimization, bandits, content analysis | `ai-service` |
+| 16 | [`ai-embeddings`](services/mail-server/crates/ai-embeddings/) | Vector embeddings service (chunking, vector store, search) | `ai-embeddings-server` |
+| 17 | [`pdf-renderer`](services/mail-server/crates/pdf-renderer/) | PDF generation via Typst (invoices, reports, DPAs) | `pdf-renderer` |
+| 18 | [`template-renderer`](services/mail-server/crates/template-renderer/) | Email template rendering (sandboxed, transpiler) | `template-renderer` |
+| 19 | [`inbox-placement`](services/mail-server/crates/inbox-placement/) | Inbox placement testing (seed accounts, IMAP polling) | `inbox-placement` |
+| 20 | [`sales-autopilot`](services/mail-server/crates/sales-autopilot/) | Sales CRM: leads, calendar, enrichment, scrapers | `sales-autopilot` |
+| 21 | [`mailstore-core`](services/mail-server/crates/mailstore-core/) | Mail storage service (encryption, models, storage) | `mailstore-core` |
 
 ### 4.3 Library Crates (Non-executable)
 
 | # | Crate | Description |
 |---|-------|-------------|
-| 23 | [`apexmail-db`](services/mail-server/crates/apexmail-db/) | Database layer: pool, migrations, transactions, types |
-| 24 | [`apexmail-lib`](services/mail-server/crates/apexmail-lib/) | Shared library: crypto, cache, MFA, PII, validation, error codes |
-| 25 | [`mail-common`](services/mail-server/crates/mail-common/) | Common mail types: config, errors, hot-config, internal auth, PII, SSRF, warmup |
-| 26 | [`mail-proto`](services/mail-server/crates/mail-proto/) | Protobuf definitions (gRPC mail protocol) |
-| 27 | [`billing-common`](services/mail-server/crates/billing-common/) | Shared billing: audit, CSV, proration, VAT rates |
-| 28 | [`queue-provider`](services/mail-server/crates/queue-provider/) | Queue abstraction: provider, scheduler, schema |
-| 29 | [`ui-foundation`](services/mail-server/crates/ui-foundation/) | Leptos UI foundation: components, icons, tokens, SSR, routing, pixel parity |
-| 30 | [`rate-limiter`](services/mail-server/crates/rate-limiter/) | Rate limiting: governor, sliding window, Redis-backed, keyed |
-| 31 | [`dns-resolver`](services/mail-server/crates/dns-resolver/) | DNS resolution: caching, records, lookup |
-| 32 | [`analytics`](services/mail-server/crates/analytics/) | Email analytics: ClickHouse engine, churn, engagement, send-time optimization |
-| 33 | [`bounce-analytics`](services/mail-server/crates/bounce-analytics/) | Bounce processing: aggregation, classification |
-| 34 | [`email-grader`](services/mail-server/crates/email-grader/) | Email grade/scoring: network checks, crypto, scoring |
-| 35 | [`pattern-matcher`](services/mail-server/crates/pattern-matcher/) | Pattern matching: bot patterns, rules, spam patterns |
-| 36 | [`edge-cases`](services/mail-server/crates/edge-cases/) | Edge case handling |
+| 22 | [`apexmail-db`](services/mail-server/crates/apexmail-db/) | Database layer: pool, migrations, transactions, types |
+| 23 | [`apexmail-lib`](services/mail-server/crates/apexmail-lib/) | Shared library: crypto, cache, MFA, PII, validation, error codes |
+| 24 | [`mail-common`](services/mail-server/crates/mail-common/) | Common mail types: config, errors, hot-config, internal auth, PII, SSRF, warmup |
+| 25 | [`mail-proto`](services/mail-server/crates/mail-proto/) | Protobuf definitions (gRPC mail protocol) |
+| 26 | [`billing-common`](services/mail-server/crates/billing-common/) | Shared billing: audit, CSV, proration, VAT rates |
+| 27 | [`queue-provider`](services/mail-server/crates/queue-provider/) | Queue abstraction: provider, scheduler, schema |
+| 28 | [`ui-foundation`](services/mail-server/crates/ui-foundation/) | Leptos UI foundation: components, icons, tokens, SSR, routing, pixel parity |
+| 29 | [`rate-limiter`](services/mail-server/crates/rate-limiter/) | Rate limiting: governor, sliding window, Redis-backed, keyed |
+| 30 | [`dns-resolver`](services/mail-server/crates/dns-resolver/) | DNS resolution: caching, records, lookup |
+| 31 | [`analytics`](services/mail-server/crates/analytics/) | Email analytics: ClickHouse engine, churn, engagement, send-time optimization |
+| 32 | [`bounce-analytics`](services/mail-server/crates/bounce-analytics/) | Bounce processing: aggregation, classification |
+| 33 | [`email-grader`](services/mail-server/crates/email-grader/) | Email grade/scoring: network checks, crypto, scoring |
+| 34 | [`pattern-matcher`](services/mail-server/crates/pattern-matcher/) | Pattern matching: bot patterns, rules, spam patterns |
+| 35 | [`edge-cases`](services/mail-server/crates/edge-cases/) | Edge case handling |
 
 ### 4.4 Security & Protection Crates
 
 | # | Crate | Description |
 |---|-------|-------------|
-| 37 | [`ddos-protection`](services/mail-server/crates/ddos-protection/) | DDoS mitigation: adaptive, cost-based, ML cache, reputation, SMTP protection |
-| 38 | [`waf-engine`](services/mail-server/crates/waf-engine/) | Web Application Firewall: SQL analyzer, XSS, JSON/GraphQL, fast-path detection |
-| 39 | [`ids-engine`](services/mail-server/crates/ids-engine/) | Intrusion Detection: signature-based, connection tracking, protocol analysis |
-| 40 | [`spam-filter`](services/mail-server/crates/spam-filter/) | Spam filtering: Bayesian, content scoring, header/URL analysis |
-| 41 | [`sandbox`](services/mail-server/crates/sandbox/) | Email attachment sandbox: dynamic analysis, file inspection, policy |
-| 42 | [`ato-protection`](services/mail-server/crates/ato-protection/) | Account Takeover protection: behavior, geo, TLS fingerprint, lockout, session |
-| 43 | [`dlp-engine`](services/mail-server/crates/dlp-engine/) | Data Loss Prevention: PII detection, content policy, entropy, attachment scanning |
-| 44 | [`threat-intel`](services/mail-server/crates/threat-intel/) | Threat intelligence: STIX/TAXII, reputation, domain/IP blocklists |
-| 45 | [`fingerprint`](services/mail-server/crates/fingerprint/) | HTTP/TLS fingerprinting: JA4, HTTP2, database |
+| 36 | [`ddos-protection`](services/mail-server/crates/ddos-protection/) | DDoS mitigation: adaptive, cost-based, ML cache, reputation, SMTP protection |
+| 37 | [`waf-engine`](services/mail-server/crates/waf-engine/) | Web Application Firewall: SQL analyzer, XSS, JSON/GraphQL, fast-path detection |
+| 38 | [`ids-engine`](services/mail-server/crates/ids-engine/) | Intrusion Detection: signature-based, connection tracking, protocol analysis |
+| 39 | [`spam-filter`](services/mail-server/crates/spam-filter/) | Spam filtering: Bayesian, content scoring, header/URL analysis |
+| 40 | [`sandbox`](services/mail-server/crates/sandbox/) | Email attachment sandbox: dynamic analysis, file inspection, policy |
+| 41 | [`ato-protection`](services/mail-server/crates/ato-protection/) | Account Takeover protection: behavior, geo, TLS fingerprint, lockout, session |
+| 42 | [`dlp-engine`](services/mail-server/crates/dlp-engine/) | Data Loss Prevention: PII detection, content policy, entropy, attachment scanning |
+| 43 | [`threat-intel`](services/mail-server/crates/threat-intel/) | Threat intelligence: STIX/TAXII, reputation, domain/IP blocklists |
+| 44 | [`fingerprint`](services/mail-server/crates/fingerprint/) | HTTP/TLS fingerprinting: JA4, HTTP2, database |
 
 ### 4.5 Test & Benchmark Crates
 
 | # | Crate | Description |
 |---|-------|-------------|
-| 46 | [`smoke-tests`](services/mail-server/crates/smoke-tests/) | Smoke test suite |
-| 47 | [`functional-tests`](services/mail-server/crates/functional-tests/) | Functional test suite |
-| 48 | [`integration-tests`](services/mail-server/crates/integration-tests/) | Integration test suite |
-| 49 | [`perf-tests`](services/mail-server/crates/perf-tests/) | Performance benchmarks (AI, billing, crypto, pattern, sales, services) |
-| 50 | [`fuzz-tests`](services/mail-server/crates/fuzz-tests/) | Fuzz testing |
-| 51 | [`load-tests`](services/mail-server/crates/load-tests/) | Load tests (concurrent, parallel, stress, throughput, async_network, isolation) + k6 scripts |
+| 45 | [`smoke-tests`](services/mail-server/crates/smoke-tests/) | Smoke test suite |
+| 46 | [`functional-tests`](services/mail-server/crates/functional-tests/) | Functional test suite |
+| 47 | [`integration-tests`](services/mail-server/crates/integration-tests/) | Integration test suite |
+| 48 | [`perf-tests`](services/mail-server/crates/perf-tests/) | Performance benchmarks (AI, billing, crypto, pattern, sales, services) |
+| 49 | [`fuzz-tests`](services/mail-server/crates/fuzz-tests/) | Fuzz testing |
+| 50 | [`load-tests`](services/mail-server/crates/load-tests/) | Load tests (concurrent, parallel, stress, throughput, async_network, isolation) + k6 scripts |
 
 ### 4.6 API Server Route Map (`api-server`)
 
@@ -666,7 +665,7 @@ graph TB
 
 ## 13. Key Architectural Patterns
 
-1. **Rust Monorepo**: Single Cargo workspace with 57 crates, shared dependency resolution
+1. **Rust Monorepo**: Single Cargo workspace with 49 crates, shared dependency resolution
 2. **Multi-stage Docker builds**: Dockerfile targets produce optimized binaries per service
 3. **Dual deployment**: Docker Compose for dev/smoke, Kubernetes (Helm + Kustomize) for production
 4. **Defense in depth**: WAF → IDS → DDoS protection → Spam filter → ATO protection → DLP → Threat intel → Sandbox
@@ -759,7 +758,7 @@ The [`api-server`](services/mail-server/crates/api-server/src/routes/) exposes R
 
 | Category | Approx. Count |
 |----------|--------------|
-| Rust source files (.rs) | ~200+ (57 crates) |
+| Rust source files (.rs) | ~200+ (49 crates) |
 | Python scripts | ~60+ (tools, AI training) |
 | Shell scripts | ~15 |
 | SQL migrations | ~70 files (51+16+2) |

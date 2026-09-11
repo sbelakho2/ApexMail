@@ -56,12 +56,31 @@ pub fn limit_for_day(day: u32) -> u64 {
 
 ## Behaviour during warmup
 
-- The `tick_warmup()` cron (API server) updates `warmup_progress` and
-  graduates IPs to `active` status after 60 days.
-- While warming, messages that would exceed the daily limit overflow to SES
-  shared sending — deliverability is never blocked.
-- The per-domain worker-side check uses `WarmupLimits::for_day()` which
-  follows a compatible schedule.
+- **Enforcement is per source IP in the outbound queue.** Before opening an
+  SMTP connection, `SmtpSender` calls `IpPool::reserve_send`, which atomically
+  reserves one slot of the selected IP's daily quota through the Redis-backed
+  `RedisWarmupQuotaStore` (check-and-increment Lua, key
+  `apexmail:outbound:warmup:{identity}:{day}`, shared by every MTA process).
+  The cap comes from `mail_common::warmup::limit_for_day()` for that IP's
+  warmup day (`dedicated_ips.warmup_started_at`); day 60+ is unlimited.
+- **A full cap refuses the send; it does not overflow.** When no candidate
+  source IP can accept the send, `IpPool::reserve_send` returns
+  `IpPoolError::WarmupQuotaExhausted` (and a candidate whose quota store is
+  unavailable is likewise not sendable). There is **no automatic overflow to
+  SES shared sending** in the runtime: shared traffic is SES-only and selected
+  by `EMAIL_TRANSPORT_TYPE=ses`, with no per-message failover. A warming
+  dedicated IP never silently exceeds its schedule.
+- **Progress bookkeeping is not currently scheduled.** `DedicatedIpProvider`
+  exposes `tick_warmup()` (updates `dedicated_ips.warmup_progress` and
+  graduates IPs to `active` after `FULL_WARMUP_DAYS`) and
+  `SesProvider::sync_warmup_progress()` exists, but **no runtime component in
+  this tree calls either** — there is no warmup cron. Graduation/progress only
+  advances if an operator invokes it; do not assume a running cron will do it.
+
+The single schedule lives in
+[`mail_common::warmup`](../../services/mail-server/crates/mail-common/src/warmup.rs)
+and is used directly by the outbound queue and `DedicatedIpProvider`; the
+historical `WarmupLimits::for_day()` type no longer exists.
 
 ## Related
 

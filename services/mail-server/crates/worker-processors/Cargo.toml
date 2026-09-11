@@ -47,6 +47,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
 apexmail-lib = { path = "../apexmail-lib" }
+# The canonical dedicated-IP warmup schedule (`warmup::WarmupSchedule`) is the
+# single source of truth for send-time warmup limits.
+mail-common = { path = "../mail-common" }
 # F13: the shared unsubscribe-token codec — the outgoing pipeline generates
 # v2 tokens with the SAME codec the tracking-service verifies them with.
 tracking-service = { path = "../tracking-service" }

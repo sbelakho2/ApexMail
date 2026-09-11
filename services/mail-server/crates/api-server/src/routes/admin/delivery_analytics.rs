@@ -1,14 +1,26 @@
-//! Delivery analytics endpoint — provider breakdown, latency percentiles,
+//! Delivery analytics endpoint — transport breakdown, latency percentiles,
 //! bounce/complaint rates by transport, and queue health monitoring.
 //!
-//! All values come from real database queries against messages, email_delivery_log,
-//! email_queue, events, bounce_analytics_daily, and bounce_domain_reputation tables.
+//! Metric conventions (single source of truth:
+//! [`crate::analytics_metrics`]):
+//!
+//! * **One cohort/time convention**: event-OCCURRENCE timestamps. `sent`
+//!   counts `events.event_type = 'sent'` (written after provider
+//!   acceptance), never `messages.created_at`.
+//! * **One rate unit**: every rate is a FRACTION in `0.0..=1.0`.
+//! * Counts are DISTINCT message ids, so per-recipient copies of one message
+//!   cannot inflate a bucket.
+//!
+//! Latency percentiles come from `email_delivery_log` (attempt-occurrence
+//! timestamps); the queue block is an explicit CURRENT snapshot, not a
+//! windowed metric — see [`DeliveryAnalyticsResponse::notes`].
 
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::analytics_metrics::{detect_event_columns, distinct_message_counts, EventColumns};
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -35,28 +47,49 @@ fn default_range() -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryAnalyticsResponse {
+    /// Fraction in `0.0..=1.0` (distinct delivered messages / distinct sent
+    /// messages), over event-occurrence timestamps.
     pub delivery_rate: f64,
+    /// Fraction in `0.0..=1.0`.
     pub bounce_rate: f64,
+    /// Fraction in `0.0..=1.0`.
     pub complaint_rate: f64,
+    /// DISTINCT messages with a successful `sent` event in the window.
     pub total_sent: i64,
+    /// DISTINCT messages with a `delivered` event in the window.
     pub total_delivered: i64,
+    /// DISTINCT messages with a `bounced` event in the window.
     pub total_bounced: i64,
+    /// DISTINCT messages with a `complained` event in the window.
     pub total_complaints: i64,
     pub delivery_by_provider: Vec<ProviderDeliveryStats>,
     pub latency: LatencyStats,
+    /// CURRENT queue backlog (snapshot), not restricted to the window.
     pub queue_depth: i64,
+    /// Interpretation notes (cohort/rate conventions and the snapshot-only
+    /// queue fields) so the UI can label the numbers honestly.
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDeliveryStats {
+    /// Sending transport dimension (`ses` / `smtp` / `unknown`), read from
+    /// `messages.transport` (migration 021/056). This is the outbound
+    /// transport, not the recipient mailbox provider.
     pub provider: String,
     pub sent: i64,
     pub delivered: i64,
     pub bounced: i64,
+    /// Fraction in `0.0..=1.0`.
     pub delivery_rate: f64,
+    /// Fraction in `0.0..=1.0`.
     pub bounce_rate: f64,
-    pub avg_latency_ms: f64,
+    /// `None` — per-provider/transport latency is not derivable from the
+    /// event-based breakdown. Real percentiles are served by `/latency`
+    /// (from `email_delivery_log`), so this is explicitly absent instead of
+    /// a placeholder zero.
+    pub avg_latency_ms: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,13 +108,17 @@ pub struct LatencyStats {
 #[serde(rename_all = "camelCase")]
 pub struct LatencyPercentileResponse {
     pub percentiles: LatencyStats,
-    pub by_provider: Vec<ProviderLatencyStats>,
+    pub by_provider: Vec<TransportLatencyStats>,
 }
 
+/// Latency percentiles by SENDING TRANSPORT (`messages.transport`), the real
+/// dimension recorded for each delivery attempt. (The previous code grouped
+/// by `email_delivery_log.smtp_response` — the SMTP reply text, e.g.
+/// "250 OK" — which is not a provider at all.)
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderLatencyStats {
-    pub provider: String,
+pub struct TransportLatencyStats {
+    pub transport: String,
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub p99_ms: f64,
@@ -93,6 +130,7 @@ pub struct ProviderLatencyStats {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderBreakdownResponse {
     pub providers: Vec<ProviderDeliveryStats>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,14 +142,8 @@ pub struct QueueHealthResponse {
     pub deferred_count: i64,
     pub avg_attempts: f64,
     pub oldest_pending_minutes: f64,
-    pub throughput_last_hour: f64,
-}
-
-#[derive(sqlx::FromRow)]
-struct DeliveryCountRow {
-    sent: i64,
-    delivered: i64,
-    bounced: i64,
+    /// Sends accepted in the last hour, expressed per second.
+    pub throughput_per_second: f64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -120,7 +152,6 @@ struct ProviderRow {
     sent: i64,
     delivered: i64,
     bounced: i64,
-    avg_latency: Option<f64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -136,7 +167,7 @@ struct LatencyRow {
 
 #[derive(sqlx::FromRow)]
 struct ProviderLatencyRow {
-    provider: String,
+    transport: String,
     p50: f64,
     p95: f64,
     p99: f64,
@@ -164,6 +195,66 @@ fn parse_range_interval(range: &str) -> String {
     }
 }
 
+/// Interpretation notes shared by the delivery endpoints.
+fn delivery_notes() -> Vec<String> {
+    vec![
+        "All rates are fractions in 0.0-1.0. Counts are DISTINCT messages bucketed by event-occurrence timestamps; 'sent' means a successful send event, not message creation."
+            .to_string(),
+        "Queue fields (queueDepth / /queue) are CURRENT snapshots, not windowed metrics.".to_string(),
+    ]
+}
+
+/// Distinct-message sent/delivered/bounced per SENDING TRANSPORT, over
+/// event-occurrence timestamps. `messages.transport` is the real transport
+/// recorded at send time (migration 021:250-259); events are joined to the
+/// message row by id.
+async fn transport_breakdown(
+    db: &sqlx::PgPool,
+    interval: &str,
+    columns: EventColumns,
+) -> Result<Vec<ProviderDeliveryStats>, ApiError> {
+    let type_col = columns.type_col.as_sql();
+    let time_col = columns.time_col.as_sql();
+
+    let rows = sqlx::query_as::<_, ProviderRow>(&format!(
+        "SELECT
+            COALESCE(NULLIF(m.transport, ''), 'unknown') as provider,
+            COUNT(DISTINCT e.message_id) FILTER (WHERE e.{type_col} = 'sent')::bigint as sent,
+            COUNT(DISTINCT e.message_id) FILTER (WHERE e.{type_col} = 'delivered')::bigint as delivered,
+            COUNT(DISTINCT e.message_id) FILTER (WHERE e.{type_col} = 'bounced')::bigint as bounced
+         FROM events e
+         LEFT JOIN messages m ON m.id::text = e.message_id
+         WHERE e.{time_col} >= NOW() - $1::interval
+         GROUP BY 1
+         ORDER BY sent DESC
+         LIMIT 20"
+    ))
+    .bind(interval)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| ProviderDeliveryStats {
+            provider: r.provider,
+            sent: r.sent,
+            delivered: r.delivered,
+            bounced: r.bounced,
+            delivery_rate: if r.sent > 0 {
+                r.delivered as f64 / r.sent as f64
+            } else {
+                0.0
+            },
+            bounce_rate: if r.sent > 0 {
+                r.bounced as f64 / r.sent as f64
+            } else {
+                0.0
+            },
+            avg_latency_ms: None,
+        })
+        .collect())
+}
+
 async fn get_delivery_analytics(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -174,83 +265,17 @@ async fn get_delivery_analytics(
     let interval = parse_range_interval(&params.range);
     let db = &state.db;
 
-    // Aggregate counts
-    let counts = sqlx::query_as::<_, DeliveryCountRow>(
-        "SELECT
-            COUNT(*) as sent,
-            COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
-            COUNT(*) FILTER (WHERE status = 'bounced') as bounced
-         FROM messages
-         WHERE created_at >= NOW() - $1::interval",
-    )
-    .bind(&interval)
-    .fetch_optional(db)
-    .await?
-    .unwrap_or(DeliveryCountRow {
-        sent: 0,
-        delivered: 0,
-        bounced: 0,
-    });
+    // One cohort convention: event occurrence. `sent` is a successful send
+    // event and every count is DISTINCT messages.
+    let columns = detect_event_columns(&state).await;
+    let counts = distinct_message_counts(db, None, &interval, columns).await?;
 
-    // Complaint counts from events
-    let complaint_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM events
-         WHERE event_type = 'complained'
-           AND timestamp >= NOW() - $1::interval",
-    )
-    .bind(&interval)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    let delivery_by_provider = transport_breakdown(db, &interval, columns).await?;
 
-    let safe_sent = if counts.sent > 0 {
-        counts.sent as f64
-    } else {
-        1.0
-    };
-
-    // Provider breakdown
-    let providers = sqlx::query_as::<_, ProviderRow>(
-        "SELECT
-            COALESCE(headers->>'X-Mail-Provider', 'unknown') as provider,
-            COUNT(*) as sent,
-            COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
-            COUNT(*) FILTER (WHERE status = 'bounced') as bounced,
-            NULL::float8 as avg_latency
-         FROM messages
-         WHERE created_at >= NOW() - $1::interval
-         GROUP BY 1
-         ORDER BY sent DESC
-         LIMIT 20",
-    )
-    .bind(&interval)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|r| ProviderDeliveryStats {
-        provider: r.provider,
-        sent: r.sent,
-        delivered: r.delivered,
-        bounced: r.bounced,
-        delivery_rate: if r.sent > 0 {
-            r.delivered as f64 / r.sent as f64
-        } else {
-            0.0
-        },
-        bounce_rate: if r.sent > 0 {
-            r.bounced as f64 / r.sent as f64
-        } else {
-            0.0
-        },
-        avg_latency_ms: r.avg_latency.unwrap_or(0.0),
-    })
-    .collect();
-
-    // Latency percentiles from email_delivery_log
+    // Latency percentiles from email_delivery_log (attempt occurrence).
     let latency = compute_latency_percentiles(db, &interval).await;
 
-    // Queue depth
+    // Queue depth — CURRENT snapshot (documented in the response notes).
     let queue: Option<(i64,)> = sqlx::query_as(
         "SELECT COUNT(*)::bigint FROM email_queue
          WHERE status IN ('pending', 'processing', 'deferred')",
@@ -261,16 +286,17 @@ async fn get_delivery_analytics(
     .flatten();
 
     Ok(Json(DeliveryAnalyticsResponse {
-        delivery_rate: counts.delivered as f64 / safe_sent,
-        bounce_rate: counts.bounced as f64 / safe_sent,
-        complaint_rate: complaint_count as f64 / safe_sent,
+        delivery_rate: counts.delivery_rate(),
+        bounce_rate: counts.bounce_rate(),
+        complaint_rate: counts.complaint_rate(),
         total_sent: counts.sent,
         total_delivered: counts.delivered,
         total_bounced: counts.bounced,
-        total_complaints: complaint_count,
-        delivery_by_provider: providers,
+        total_complaints: counts.complained,
+        delivery_by_provider,
         latency,
         queue_depth: queue.map(|(c,)| c).unwrap_or(0),
+        notes: delivery_notes(),
     }))
 }
 
@@ -286,27 +312,29 @@ async fn get_latency_percentiles(
 
     let percentiles = compute_latency_percentiles(db, &interval).await;
 
-    // Per-provider latency
+    // Per-transport latency: the dimension recorded at send time is
+    // `messages.transport`, resolved through email_queue.message_id.
     let provider_latency = sqlx::query_as::<_, ProviderLatencyRow>(
         "WITH delivery_times AS (
             SELECT
-                COALESCE(dl.smtp_response, 'unknown') as provider,
+                COALESCE(NULLIF(m.transport, ''), 'unknown') as transport,
                 EXTRACT(EPOCH FROM (dl.attempted_at - eq.sent_at)) * 1000 as latency_ms
             FROM email_delivery_log dl
             JOIN email_queue eq ON eq.id = dl.email_id
+            LEFT JOIN messages m ON m.id = eq.message_id
             WHERE dl.success = true
               AND eq.sent_at IS NOT NULL
               AND dl.attempted_at >= NOW() - $1::interval
         )
         SELECT
-            provider,
+            transport,
             PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY latency_ms) as p50,
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) as p95,
             PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms) as p99,
             AVG(latency_ms) as avg,
             COUNT(*)::bigint as count
         FROM delivery_times
-        GROUP BY provider
+        GROUP BY transport
         ORDER BY count DESC
         LIMIT 20",
     )
@@ -315,8 +343,8 @@ async fn get_latency_percentiles(
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(|r| ProviderLatencyStats {
-        provider: r.provider,
+    .map(|r| TransportLatencyStats {
+        transport: r.transport,
         p50_ms: r.p50,
         p95_ms: r.p95,
         p99_ms: r.p99,
@@ -340,51 +368,14 @@ async fn get_provider_breakdown(
 
     let interval = parse_range_interval(&params.range);
     let db = &state.db;
+    let columns = detect_event_columns(&state).await;
 
-    let providers = sqlx::query_as::<_, ProviderRow>(
-        "SELECT
-            COALESCE(headers->>'X-Mail-Provider',
-                     CASE
-                         WHEN headers->>'X-SES-Configuration-Set' IS NOT NULL THEN 'AWS SES'
-                         WHEN headers->>'X-Mailgun-Variables' IS NOT NULL THEN 'Mailgun'
-                         ELSE 'SMTP'
-                     END
-            ) as provider,
-            COUNT(*) as sent,
-            COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
-            COUNT(*) FILTER (WHERE status = 'bounced') as bounced,
-            NULL::float8 as avg_latency
-         FROM messages
-         WHERE created_at >= NOW() - $1::interval
-         GROUP BY 1
-         ORDER BY sent DESC
-         LIMIT 20",
-    )
-    .bind(&interval)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|r| ProviderDeliveryStats {
-        provider: r.provider,
-        sent: r.sent,
-        delivered: r.delivered,
-        bounced: r.bounced,
-        delivery_rate: if r.sent > 0 {
-            r.delivered as f64 / r.sent as f64
-        } else {
-            0.0
-        },
-        bounce_rate: if r.sent > 0 {
-            r.bounced as f64 / r.sent as f64
-        } else {
-            0.0
-        },
-        avg_latency_ms: r.avg_latency.unwrap_or(0.0),
-    })
-    .collect();
+    let providers = transport_breakdown(db, &interval, columns).await?;
 
-    Ok(Json(ProviderBreakdownResponse { providers }))
+    Ok(Json(ProviderBreakdownResponse {
+        providers,
+        notes: delivery_notes(),
+    }))
 }
 
 async fn get_queue_health(
@@ -417,7 +408,7 @@ async fn get_queue_health(
         oldest_minutes: None,
     });
 
-    // Throughput: messages sent in the last hour
+    // Throughput: sends accepted in the last hour, expressed per second.
     let throughput: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM email_queue
          WHERE sent_at >= NOW() - INTERVAL '1 hour'",
@@ -433,7 +424,7 @@ async fn get_queue_health(
         deferred_count: row.deferred,
         avg_attempts: row.avg_attempts.unwrap_or(0.0),
         oldest_pending_minutes: row.oldest_minutes.unwrap_or(0.0),
-        throughput_last_hour: throughput as f64 / 3600.0,
+        throughput_per_second: throughput as f64 / 3600.0,
     }))
 }
 
@@ -529,9 +520,93 @@ mod tests {
             bounced: 0,
             delivery_rate: 0.0,
             bounce_rate: 0.0,
-            avg_latency_ms: 0.0,
+            avg_latency_ms: None,
         };
         assert_eq!(stats.delivery_rate, 0.0);
         assert_eq!(stats.bounce_rate, 0.0);
+        // Per-transport latency is absent, never a placeholder zero.
+        assert!(stats.avg_latency_ms.is_none());
+    }
+
+    #[test]
+    fn rates_documented_as_fractions() {
+        let notes = delivery_notes();
+        assert!(
+            notes.iter().any(|n| n.contains("fractions in 0.0-1.0")),
+            "the response must document the rate unit: {notes:?}"
+        );
+    }
+
+    /// Executes the real event-based transport breakdown against the
+    /// canonical schema: two send copies of ONE message and one bounced
+    /// event count once (distinct message), proving the SQL is valid and the
+    /// cardinality convention holds. Gated on TEST_DATABASE_URL.
+    #[tokio::test]
+    async fn transport_breakdown_counts_distinct_messages_per_transport() {
+        let Some(pool) = crate::test_db::canonical_pool("delivery_transport_distinct").await else {
+            eprintln!(
+                "skipping transport_breakdown_counts_distinct_messages_per_transport: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = format!("t{}", &suffix[..25]);
+        let message_id = uuid::Uuid::new_v4();
+
+        // messages.tenant_id has an FK to tenants.
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'delivery-transport-test')")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, transport)
+             VALUES ($1, $2, 'a@apex.example', '[]'::jsonb, 's', 'sent', 'ses')",
+        )
+        .bind(message_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+
+        // Two per-recipient send copies + one delivered + two bounces, all
+        // for the SAME message.
+        for (event_type, occurrences) in [("sent", 2), ("delivered", 1), ("bounced", 2)] {
+            for _ in 0..occurrences {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp)
+                     VALUES ($1, $2, $3, $4, NOW())",
+                )
+                .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
+                .bind(&tenant)
+                .bind(message_id.to_string())
+                .bind(event_type)
+                .execute(&pool)
+                .await
+                .expect("seed event");
+            }
+        }
+
+        let rows = transport_breakdown(&pool, "30 days", EventColumns::default())
+            .await
+            .expect("transport breakdown query must execute");
+
+        let ses = rows
+            .iter()
+            .find(|r| r.provider == "ses")
+            .expect("transport dimension must be the message's transport");
+        assert_eq!(ses.sent, 1, "two send copies of one message count once");
+        assert_eq!(ses.delivered, 1);
+        assert_eq!(
+            ses.bounced, 1,
+            "two bounce events on one message count once"
+        );
+        assert!(ses.delivery_rate <= 1.0);
+        assert!(ses.bounce_rate <= 1.0);
+        assert!(ses.avg_latency_ms.is_none(), "no placeholder latency");
+
+        pool.close().await;
     }
 }

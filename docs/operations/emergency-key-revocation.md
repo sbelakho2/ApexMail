@@ -25,7 +25,7 @@ ApexMail uses multiple cryptographic key layers:
 |----------|---------|---------|-------|
 | **Master Encryption Key** (`TENANT_ENCRYPTION_KEY`) | Derives per-tenant data keys | Environment variable (`Zeroizing<String>`) | [`isolation/src/config.rs`](../../services/mail-server/crates/isolation/src/config.rs) |
 | **API Key Hash Secret** (`API_KEY_HASH_SECRET`) | HMAC key for API key hashing | Environment variable | [`api-server/src/middleware/auth.rs`](../../services/mail-server/crates/api-server/src/middleware/auth.rs) |
-| **DKIM Private Keys** | Email signing | Filesystem / env (`Zeroizing<String>`) | [`outbound-queue/src/dkim.rs`](../../services/mail-server/crates/outbound-queue/src/dkim.rs) |
+| **DKIM Private Keys** | Email signing | Postgres `domains.dkim_private_key` (encrypted; decrypted to `Zeroizing<String>`) | [`apexmail-lib/src/dkim.rs`](../../services/mail-server/crates/apexmail-lib/src/dkim.rs) |
 | **JWT Signing Keys** | Session tokens | Filesystem (PEM) | [`api-server/src/routes/auth.rs`](../../services/mail-server/crates/api-server/src/routes/auth.rs) |
 | **Webhook Signing Secret** | Webhook payload signing | Environment variable | [`worker-processors/src/webhook/`](../../services/mail-server/crates/worker-processors/src/webhook/) |
 | **Session Secret** | Session cookie encryption | Environment variable | [`api-server/src/routes/auth.rs`](../../services/mail-server/crates/api-server/src/routes/auth.rs) |

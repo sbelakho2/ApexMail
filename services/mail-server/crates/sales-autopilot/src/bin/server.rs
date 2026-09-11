@@ -122,6 +122,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Captured before `dispatcher` is moved into the router state: the durable
+    // action worker needs its own handle to the same dispatcher and pool.
+    let dispatcher_for_worker = dispatcher.clone();
+    let worker_db = db.clone();
+
     let mut campaigns = CampaignManager::new(cfg.max_campaigns, db.clone())
         .with_dispatch_batch_size(cfg.dispatch.dispatch_batch_size);
     if let Some(ref d) = dispatcher {
@@ -222,6 +227,56 @@ async fn main() -> anyhow::Result<()> {
                 .await;
             });
         }
+    }
+
+    // ── Durable sequence action worker ────────────────────────────────
+    // The canonical execution loop: claim `sales_actions` rows with
+    // FOR UPDATE SKIP LOCKED, run them through the sequence step handler, and
+    // report an outcome. Any number of replicas may run this concurrently.
+    //
+    // Requires the production dispatcher: without it there is no send path, so
+    // the worker is not started and the queue is left for a correctly
+    // configured deployment (a half-wired worker would dead-letter everything).
+    {
+        let needs_dispatcher = dispatcher_for_worker.is_some();
+        let queue = sales_autopilot::actions::ActionQueue::new(
+            worker_db.clone(),
+            format!("sales-worker-{}", std::process::id()),
+        );
+        let handler: std::sync::Arc<dyn sales_autopilot::actions::ActionHandler> =
+            match dispatcher_for_worker {
+                Some(dispatcher) => {
+                    std::sync::Arc::new(sales_autopilot::sequence_worker::SequenceStepHandler::new(
+                        worker_db.clone(),
+                        dispatcher,
+                    ))
+                }
+                None => std::sync::Arc::new(sales_autopilot::actions::UnhandledActionHandler),
+            };
+
+        if !needs_dispatcher {
+            tracing::warn!(
+                "sales action worker starting WITHOUT a send handler — sequence actions will \
+                 dead-letter with a precise reason (set SALES_CAMPAIGN_FROM_EMAIL and \
+                 SALES_UNSUBSCRIBE_SECRET to enable sequence sending)"
+            );
+        }
+
+        let mut worker_shutdown = shutdown_rx.clone();
+        let interval = cfg.dispatch.dispatch_interval_secs.max(1);
+        tokio::spawn(async move {
+            sales_autopilot::actions::run(
+                queue,
+                handler,
+                interval,
+                50,
+                sales_autopilot::actions::DEFAULT_LEASE_SECS,
+                async move {
+                    let _ = worker_shutdown.changed().await;
+                },
+            )
+            .await;
+        });
     }
 
     let mut server_shutdown = shutdown_rx.clone();

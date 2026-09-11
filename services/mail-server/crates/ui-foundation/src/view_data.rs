@@ -216,6 +216,129 @@ pub struct MfaSetupData {
     pub otpauth: String,
 }
 
+// ─── Sales autopilot control surface (`/sales`) ─────────────
+//
+// The CP owns no sales brain: every field below mirrors what the
+// authenticated `sales-autopilot` control API returns (proxied by the
+// api-server). The page renders only these values — it never invents a
+// metric to fill space.
+
+/// One `outcomes30d.revenueEur[]` entry (summed EUR per outcome).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SalesRevenueData {
+    /// Canonical outcome key (`paid_subscription`, `retained_mrr`, `trial`).
+    pub outcome: String,
+    /// Summed EUR value for the 30-day window.
+    pub eur: f64,
+}
+
+/// One `overview.enrollments[]` state count (the live replacement for
+/// the retired campaign table).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SalesEnrollmentCountData {
+    pub state: String,
+    pub count: i64,
+}
+
+/// `overview.autonomy` — the engine's steering state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SalesAutonomyData {
+    /// One of `disabled` / `shadow` / `assisted` / `approval_required` /
+    /// `autonomous_guarded`.
+    pub mode: String,
+    /// The API's `modeDescription`. Empty means the view falls back to the
+    /// canonical shipped meaning for the mode (never to a blank panel).
+    pub mode_description: String,
+    pub kill_switch: bool,
+    pub runs_brain: bool,
+    pub may_execute: bool,
+    pub last_action: Option<String>,
+    /// RFC 3339 UTC timestamp of the last autonomy action.
+    pub last_action_at: Option<String>,
+}
+
+/// `overview.actions` — durable action-queue stats.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SalesActionStatsData {
+    pub total: i64,
+    pub due_now: i64,
+    pub dead_lettered: i64,
+    /// `byState` as ordered (state, count) pairs.
+    pub by_state: Vec<(String, i64)>,
+}
+
+/// One `sales_decisions` row from
+/// `GET /v1/admin/autopilot/{decisions,exceptions}`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SalesDecisionData {
+    pub id: String,
+    pub account_id: Option<String>,
+    pub contact_id: Option<String>,
+    /// Decision vocabulary: `CONTACT` / `ENRICH` / `SKIP` (rendered as-is).
+    pub action: String,
+    pub expected_value_eur: Option<f64>,
+    /// 0..=1 confidence; `None` renders as "unavailable", never as 0%.
+    pub confidence: Option<f64>,
+    pub selected_offer: Option<String>,
+    pub selected_sequence: Option<String>,
+    pub selected_variant: Option<String>,
+    pub selected_sender: Option<String>,
+    pub rationale: String,
+    pub blocked: bool,
+    /// Hard-gate refusals, verbatim from the engine.
+    pub block_reasons: Vec<String>,
+    /// RFC 3339 UTC timestamp the action is scheduled for.
+    pub execute_after: Option<String>,
+    /// RFC 3339 UTC timestamp the decision was recorded.
+    pub created_at: Option<String>,
+}
+
+/// One `deadLetters[]` row (a `sales_actions` row in `dead_letter` state).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SalesDeadLetterData {
+    pub id: String,
+    pub action_type: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub state: String,
+    pub attempt: i32,
+    pub max_attempts: i32,
+    pub last_error: Option<String>,
+    /// RFC 3339 UTC timestamp.
+    pub due_at: Option<String>,
+    /// RFC 3339 UTC timestamp.
+    pub created_at: Option<String>,
+}
+
+/// The `GET /v1/admin/autopilot/overview` payload.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SalesOverviewData {
+    pub autonomy: SalesAutonomyData,
+    pub action_stats: SalesActionStatsData,
+    pub enrollments: Vec<SalesEnrollmentCountData>,
+    pub decisions_last_24h: i64,
+    pub blocked_last_24h: i64,
+    pub meetings_booked: i64,
+    pub revenue: Vec<SalesRevenueData>,
+}
+
+/// Server-loaded data for the CP sales-autopilot page.
+///
+/// Honesty contract: `None` on any section means the control API did not
+/// answer — the page renders an explicit unavailable state, never a zero.
+/// `Some(vec![])` means the API answered with no rows — the page renders
+/// an explicit empty state instead of an empty table.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SalesPageData {
+    /// Double-submit CSRF token for the SSR form posts (empty when the
+    /// render pipeline had none).
+    pub csrf_token: String,
+    pub overview: Option<SalesOverviewData>,
+    pub decisions: Option<Vec<SalesDecisionData>>,
+    pub exceptions: Option<Vec<SalesDecisionData>>,
+    pub dead_letters: Option<Vec<SalesDeadLetterData>>,
+}
+
 /// Render a `<td>` for a [`DataCell`] (mirrors `Table` cell classes).
 pub fn render_data_cell(cell: &DataCell) -> String {
     match cell {

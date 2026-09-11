@@ -504,8 +504,8 @@ impl PostgresQueueProvider {
     /// nothing reads, which is noise, not recovery. If/when a production
     /// owner appears (e.g. a `queue_jobs`-based processor in
     /// worker-processors), call this on a ~30-60s interval from that
-    /// processor's poll loop, mirroring `reap_expired_processing` in
-    /// outbound-queue's main loop.
+    /// processor's poll loop, mirroring the expired-lease reclaim in the
+    /// worker's `fetch_jobs` (`worker-processors/src/email/processor.rs`).
     pub async fn recover_stale(&self) -> Result<i64, QueueError> {
         let now = Utc::now();
 

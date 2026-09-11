@@ -259,7 +259,7 @@ DKIM keys are managed per-domain. Rotation requires adding a new selector before
    #   docker compose ... up -d --force-recreate api-server worker mta
    ```
 
-4. **Deploy** — The outbound-queue crate's [`dkim.rs`](../../services/mail-server/crates/outbound-queue/src/dkim.rs) supports multiple selectors.
+4. **Deploy** — The worker signs with the selector stored on the domain (`domains.dkim_selector`); key material is handled by [`apexmail-lib/src/dkim.rs`](../../services/mail-server/crates/apexmail-lib/src/dkim.rs) and the signer is built in [`worker-processors/src/email/transport.rs`](../../services/mail-server/crates/worker-processors/src/email/transport.rs). One selector is active per domain at a time.
 
 5. **DNS TTL expiry:** Wait for the TTL of the old DNS record to expire (typically 300–3600s).
 
@@ -615,5 +615,5 @@ If a secret rotation causes production issues:
 - [Incident Response Runbook](runbooks/incident-response.md) — General incident response
 - [Disaster Recovery Procedures](disaster-recovery.md) — DR and backup restoration
 - [Isolation Crate Encryption](../../services/mail-server/crates/isolation/src/encryption.rs) — Master key usage
-- [DKIM Module](../../services/mail-server/crates/outbound-queue/src/dkim.rs) — DKIM key handling with Zeroizing
+- [DKIM Module](../../services/mail-server/crates/apexmail-lib/src/dkim.rs) — DKIM key handling with Zeroizing
 - [Auth Middleware](../../services/mail-server/crates/api-server/src/middleware/auth.rs) — API key and session authentication

@@ -23,7 +23,7 @@ ApexMail's MTA handles outbound email delivery via:
 - **Dedicated IPs:** For enterprise tenants requiring warm-up and consistent reputation
 - **Direct SMTP:** Fallback for low-volume or non-critical messages
 - **Queue management:** PostgreSQL-backed email queue with dead letter queue for failed deliveries
-- **IP rotation:** Automatic warm-up of new dedicated IPs (see [`ip_rotation.rs`](../../../services/mail-server/crates/outbound-queue/src/ip_rotation.rs))
+- **IP rotation:** Automatic warm-up of new dedicated IPs (60-day schedule in [`mail-common/src/warmup.rs`](../../../services/mail-server/crates/mail-common/src/warmup.rs); admission enforced by the worker in [`worker-processors/src/email/processor.rs`](../../../services/mail-server/crates/worker-processors/src/email/processor.rs))
 
 ## Symptoms
 
@@ -310,7 +310,8 @@ curl -s http://localhost:9090/metrics | grep 'mta_bounce_rate'
 ## Related
 
 - [Crypto Incident Runbook](./crypto-incidents.md)
-- [Outbound queue module](../../../services/mail-server/crates/outbound-queue/src/queue.rs)
-- [IP rotation module](../../../services/mail-server/crates/outbound-queue/src/ip_rotation.rs)
+- [Email queue processor](../../../services/mail-server/crates/worker-processors/src/email/processor.rs)
+- [Warmup schedule](../../../services/mail-server/crates/mail-common/src/warmup.rs)
+- [Dedicated IP provider](../../../services/mail-server/crates/api-server/src/ip_provider.rs)
 - [Incident Response Runbook](./incident-response.md)
 - [DMARC/DKIM/SPF setup docs](../../security)

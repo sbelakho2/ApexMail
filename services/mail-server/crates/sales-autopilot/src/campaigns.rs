@@ -1150,27 +1150,37 @@ impl CampaignRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_db::{canonical_test_pool, unique_test_tenant};
 
-    /// Helper: create an in-memory SQLite-like manager backed by a
-    /// `connect_lazy` pool. Tests using this will not persist data
-    /// between test functions.
-    async fn make_mgr() -> CampaignManager {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_millis(100))
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        CampaignManager::new(10, db)
+    /// Manager on the canonical provisioned test database (fresh pool per
+    /// test). A dispatcher is attached so `start_campaign` exercises the real
+    /// transition path — without one it refuses with `ServiceUnavailable` by
+    /// design (fix I-1). These tests start campaigns with no recipients, so
+    /// the dispatcher is never asked to send anything.
+    async fn make_mgr(test_name: &str) -> Option<CampaignManager> {
+        make_mgr_with_limit(test_name, 10).await
+    }
+
+    async fn make_mgr_with_limit(test_name: &str, max_campaigns: usize) -> Option<CampaignManager> {
+        let db = canonical_test_pool(test_name).await?;
+        Some(
+            CampaignManager::new(max_campaigns, db)
+                .with_email_dispatcher(std::sync::Arc::new(NoopCampaignDispatcher)),
+        )
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
     #[ignore]
     #[tokio::test]
     async fn test_create_and_list() {
-        let mgr = make_mgr().await;
+        let Some(mgr) = make_mgr("campaigns::tests::test_create_and_list").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-list");
+        let other_tenant = unique_test_tenant("campaign-list-other");
         let c = mgr
             .create_campaign(
-                "tenant-a".into(),
+                tenant.clone(),
                 "Welcome".into(),
                 "tmpl_1".into(),
                 "all_leads".into(),
@@ -1178,10 +1188,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(c.status, CampaignStatus::Draft);
-        let list = mgr.list_campaigns("tenant-a", 100, 0).await.unwrap();
+        let list = mgr.list_campaigns(&tenant, 100, 0).await.unwrap();
         assert!(!list.is_empty());
         assert!(mgr
-            .list_campaigns("tenant-b", 100, 0)
+            .list_campaigns(&other_tenant, 100, 0)
             .await
             .unwrap()
             .is_empty());
@@ -1191,24 +1201,27 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_start_pause_lifecycle() {
-        let mgr = make_mgr().await;
+        let Some(mgr) = make_mgr("campaigns::tests::test_start_pause_lifecycle").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-lifecycle");
         let c = mgr
             .create_campaign(
-                "tenant-a".into(),
+                tenant.clone(),
                 "Drip".into(),
                 "tmpl_2".into(),
                 "new_leads".into(),
             )
             .await
             .unwrap();
-        let started = mgr.start_campaign("tenant-a", c.id).await.unwrap();
+        let started = mgr.start_campaign(&tenant, c.id).await.unwrap();
         assert_eq!(started.status, CampaignStatus::Active);
 
-        let paused = mgr.pause_campaign("tenant-a", c.id).await.unwrap();
+        let paused = mgr.pause_campaign(&tenant, c.id).await.unwrap();
         assert_eq!(paused.status, CampaignStatus::Paused);
 
         // re-start after pause
-        let restarted = mgr.start_campaign("tenant-a", c.id).await.unwrap();
+        let restarted = mgr.start_campaign(&tenant, c.id).await.unwrap();
         assert_eq!(restarted.status, CampaignStatus::Active);
     }
 
@@ -1216,21 +1229,21 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_max_campaigns_enforced() {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_millis(100))
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        let mgr = CampaignManager::new(1, db);
+        let Some(mgr) =
+            make_mgr_with_limit("campaigns::tests::test_max_campaigns_enforced", 1).await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-max");
         let c = mgr
-            .create_campaign("tenant-a".into(), "C1".into(), "t".into(), "a".into())
+            .create_campaign(tenant.clone(), "C1".into(), "t".into(), "a".into())
             .await
             .unwrap();
-        mgr.start_campaign("tenant-a", c.id).await.unwrap();
+        mgr.start_campaign(&tenant, c.id).await.unwrap();
 
         // second active campaign should be rejected
         let c2 = mgr
-            .create_campaign("tenant-a".into(), "C2".into(), "t".into(), "a".into())
+            .create_campaign(tenant.clone(), "C2".into(), "t".into(), "a".into())
             .await;
         assert!(c2.is_err());
     }
@@ -1243,28 +1256,28 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_max_campaigns_enforced_at_start() {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_millis(100))
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        let mgr = CampaignManager::new(1, db);
+        let Some(mgr) =
+            make_mgr_with_limit("campaigns::tests::test_max_campaigns_enforced_at_start", 1).await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-max-start");
 
         // Two drafts both pass the create-time check (zero active campaigns).
         let c1 = mgr
-            .create_campaign("tenant-x".into(), "C1".into(), "t".into(), "a".into())
+            .create_campaign(tenant.clone(), "C1".into(), "t".into(), "a".into())
             .await
             .unwrap();
         let c2 = mgr
-            .create_campaign("tenant-x".into(), "C2".into(), "t".into(), "a".into())
+            .create_campaign(tenant.clone(), "C2".into(), "t".into(), "a".into())
             .await
             .unwrap();
 
-        mgr.start_campaign("tenant-x", c1.id).await.unwrap();
+        mgr.start_campaign(&tenant, c1.id).await.unwrap();
 
         // Starting the second draft must be rejected by the start-time check.
         assert!(matches!(
-            mgr.start_campaign("tenant-x", c2.id).await,
+            mgr.start_campaign(&tenant, c2.id).await,
             Err(SalesError::MaxCampaignsReached(1))
         ));
     }
@@ -1273,10 +1286,13 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_recipients_and_stats() {
-        let mgr = make_mgr().await;
+        let Some(mgr) = make_mgr("campaigns::tests::test_recipients_and_stats").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-stats");
         let c = mgr
             .create_campaign(
-                "tenant-a".into(),
+                tenant.clone(),
                 "Outreach".into(),
                 "tmpl".into(),
                 "saas".into(),
@@ -1284,12 +1300,12 @@ mod tests {
             .await
             .unwrap();
         let added = mgr
-            .add_recipients("tenant-a", c.id, vec!["a@x.com".into(), "b@x.com".into()])
+            .add_recipients(&tenant, c.id, vec!["a@x.com".into(), "b@x.com".into()])
             .await
             .unwrap();
         assert_eq!(added, 2);
 
-        let stats = mgr.get_stats("tenant-a", c.id).await.unwrap();
+        let stats = mgr.get_stats(&tenant, c.id).await.unwrap();
         assert_eq!(stats["recipients"], 2);
         assert_eq!(stats["sent"], 0);
     }
@@ -1298,23 +1314,24 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_campaign_operations_are_tenant_scoped() {
-        let mgr = make_mgr().await;
+        let Some(mgr) =
+            make_mgr("campaigns::tests::test_campaign_operations_are_tenant_scoped").await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-scope");
+        let other_tenant = unique_test_tenant("campaign-scope-other");
         let campaign = mgr
-            .create_campaign(
-                "tenant-a".into(),
-                "Scoped".into(),
-                "tmpl".into(),
-                "all".into(),
-            )
+            .create_campaign(tenant.clone(), "Scoped".into(), "tmpl".into(), "all".into())
             .await
             .unwrap();
 
         assert!(matches!(
-            mgr.start_campaign("tenant-b", campaign.id).await,
+            mgr.start_campaign(&other_tenant, campaign.id).await,
             Err(SalesError::CampaignNotFound(id)) if id == campaign.id
         ));
         assert!(matches!(
-            mgr.add_recipients("tenant-b", campaign.id, vec!["user@example.com".into()]).await,
+            mgr.add_recipients(&other_tenant, campaign.id, vec!["user@example.com".into()]).await,
             Err(SalesError::CampaignNotFound(id)) if id == campaign.id
         ));
     }
@@ -1323,20 +1340,20 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_add_recipients_deduplicates_addresses() {
-        let mgr = make_mgr().await;
+        let Some(mgr) =
+            make_mgr("campaigns::tests::test_add_recipients_deduplicates_addresses").await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-dedup");
         let campaign = mgr
-            .create_campaign(
-                "tenant-a".into(),
-                "Scoped".into(),
-                "tmpl".into(),
-                "all".into(),
-            )
+            .create_campaign(tenant.clone(), "Scoped".into(), "tmpl".into(), "all".into())
             .await
             .unwrap();
 
         let added = mgr
             .add_recipients(
-                "tenant-a",
+                &tenant,
                 campaign.id,
                 vec![
                     "alice@example.com".into(),
@@ -1348,7 +1365,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(added, 2);
-        let stats = mgr.get_stats("tenant-a", campaign.id).await.unwrap();
+        let stats = mgr.get_stats(&tenant, campaign.id).await.unwrap();
         assert_eq!(stats["recipients"], 2);
     }
 
@@ -1423,28 +1440,22 @@ mod tests {
     #[ignore = "requires local PostgreSQL with the sales-autopilot schema"]
     #[tokio::test]
     async fn reconcile_sent_counter_follows_events_or_falls_back() {
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://apexmail:apexmail@localhost:5432/apexmail".to_string()
-            }))
-            .await
-            .unwrap();
-        crate::routes::initialize_schema(&db).await.unwrap();
-
+        let Some(db) = canonical_test_pool(
+            "campaigns::tests::reconcile_sent_counter_follows_events_or_falls_back",
+        )
+        .await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("stats-f");
         let manager = CampaignManager::new(10, db.clone());
         let campaign = manager
-            .create_campaign(
-                "stats-f-test".into(),
-                "stats".into(),
-                "t".into(),
-                "all".into(),
-            )
+            .create_campaign(tenant.clone(), "stats".into(), "t".into(), "all".into())
             .await
             .unwrap();
         manager
             .add_recipients(
-                "stats-f-test",
+                &tenant,
                 campaign.id,
                 vec!["a@x.com".into(), "b@x.com".into(), "c@x.com".into()],
             )
@@ -1484,7 +1495,7 @@ mod tests {
                  VALUES ($1, $2, $3, 'sent', 'x', NOW())",
             )
             .bind(format!("evt_{}", uuid::Uuid::new_v4()))
-            .bind("stats-f-test")
+            .bind(&tenant)
             .bind(mid.to_string())
             .execute(&db)
             .await

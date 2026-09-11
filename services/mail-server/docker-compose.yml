@@ -9,7 +9,8 @@ services:
   # MTA Server (unified inbound + submission)
   # Receives email on port 25 (inbound) and authenticated sends on port 587
   # (submission) in a single process. The legacy smtp-edge/submission split
-  # binaries and Docker targets were removed with the outbound-queue rework.
+  # binaries and Docker targets were removed when outbound delivery was
+  # consolidated into worker-processors.
   mta:
     build:
       context: ../..
