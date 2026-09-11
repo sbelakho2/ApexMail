@@ -368,19 +368,19 @@ const REQUIRED_CONSOLE_SCHEMA: &[(&str, &[&str])] = &[
             "id",
             "tenant_id",
             "status",
-            "total_cents",
+            "total",
             "currency",
             "created_at",
         ],
     ),
     ("plans", &["name", "email_limit"]),
     ("tenants", &["id", "name", "status", "created_at"]),
-    ("dedicated_ips", &["id", "tenant_id", "address"]),
+    ("dedicated_ips", &["id", "tenant_id", "ip_address"]),
     (
         "dedicated_ip_provisioning_requests",
         &["id", "tenant_id", "status"],
     ),
-    ("ip_pool_addresses", &["ip_pool_id", "address"]),
+    ("ip_pool_addresses", &["pool_id", "ip_address"]),
     ("queue_jobs", &["id", "queue", "created_at"]),
     ("audit_logs", &["id", "tenant_id", "created_at"]),
     ("gdpr_requests", &["id", "tenant_id", "status"]),
@@ -388,7 +388,11 @@ const REQUIRED_CONSOLE_SCHEMA: &[(&str, &[&str])] = &[
     ("system_alerts", &["id", "severity", "created_at"]),
 ];
 
-/// Probe the required console schema (F14). Returns the missing pieces as
+/// Probe the required console schema (F14). Column names are the CANONICAL
+/// production names (cross-checked against a fully-migrated database —
+/// `invoices.total`/`dedicated_ips.ip_address`/`ip_pool_addresses.pool_id`
+/// — not the historical aliases the loaders also alias at query time).
+/// Returns the missing pieces as
 /// `table.column` / `table` strings; empty means the schema is complete.
 /// Readiness (routes/health.rs) fails the deployment when this is non-empty
 /// so missing production columns never reach a page render.
@@ -4528,14 +4532,30 @@ mod tests {
         for required in ["invoices", "api_keys", "users", "tenants"] {
             assert!(tables.contains(&required), "{required} must be probed");
         }
-        // The invoice probe covers the columns the outstanding-balance
-        // summary reads.
+        // The invoice probe covers the canonical columns the
+        // outstanding-balance summary reads (total, not the old
+        // total_cents alias — the probe must name what the migration
+        // chain actually creates).
         let (_, invoice_columns) = REQUIRED_CONSOLE_SCHEMA
             .iter()
             .find(|(table, _)| *table == "invoices")
             .expect("invoices in manifest");
-        for column in ["total_cents", "currency", "status", "tenant_id"] {
+        for column in ["total", "currency", "status", "tenant_id"] {
             assert!(invoice_columns.contains(&column), "invoices.{column}");
+        }
+        // Every probed column must exist in a real migrated database:
+        // the canonical chain names are asserted here so an imagined
+        // column cannot reach the readiness gate again.
+        for (table, columns) in REQUIRED_CONSOLE_SCHEMA {
+            for column in *columns {
+                assert!(
+                    !matches!(
+                        (*table, *column),
+                        ("invoices", "total_cents") | (_, "address")
+                    ),
+                    "{table}.{column} is a historical alias, not a canonical column"
+                );
+            }
         }
     }
 
