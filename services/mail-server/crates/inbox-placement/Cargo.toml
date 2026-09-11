@@ -8,16 +8,10 @@ repository.workspace = true
 [dependencies]
 # Workspace crates
 analytics = { path = "../analytics" }
-apexmail-dns-resolver = { path = "../dns-resolver" }
-mta = { path = "../mta" }
-mail-common = { path = "../mail-common" }
-threat-intel = { path = "../threat-intel" }
 enterprise = { path = "../enterprise" }
 
 # Axum
 axum = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
 
 # Database
 sqlx = { workspace = true }
@@ -32,11 +26,8 @@ tokio-util = { version = "0.7" }
 
 # Utilities
 tracing = { workspace = true }
-thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-dashmap = { workspace = true }
-regex = { workspace = true }
 
 # SMTP delivery (lettre)
 lettre = { version = "0.11", default-features = false, features = ["tokio1-native-tls", "smtp-transport", "builder"] }

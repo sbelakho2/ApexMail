@@ -19,5 +19,4 @@ sqlx.workspace = true
 
 # Error handling / logging
 anyhow.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true

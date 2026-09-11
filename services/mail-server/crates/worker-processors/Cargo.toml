@@ -61,13 +61,9 @@ chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
-parking_lot.workspace = true
 
 # DNS (SSRF protection)
 trust-dns-resolver.workspace = true
-
-# IP networking
-ipnetwork.workspace = true
 
 # URL parsing
 url.workspace = true
@@ -82,15 +78,8 @@ regex.workspace = true
 # Concurrent cache
 moka.workspace = true
 
-# Rate limiting
-governor.workspace = true
-nonzero_ext.workspace = true
-
 # Email protocols (for email processor)
-mail-builder.workspace = true
-mail-auth.workspace = true
 mail-send = "0.4"
-tokio-rustls = "0.26"
 rustls.workspace = true
 hex = "0.4"
 
@@ -99,10 +88,8 @@ aws-config.workspace = true
 aws-sdk-sesv2.workspace = true
 
 [dev-dependencies]
-tokio-test = "0.4"
 # F67 DB-backed handoff test: canonical schema via the production migrator.
 migrator = { path = "../migrator" }
 # C: cross-crate round-trip tests — worker-encoded tracking tokens must
 # decode with the tracking-service codec under the same secret.
 tracking-service = { path = "../tracking-service" }
-

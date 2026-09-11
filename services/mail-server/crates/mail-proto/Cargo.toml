@@ -20,3 +20,11 @@ result_large_err = "allow"
 
 [build-dependencies]
 tonic-build.workspace = true
+
+[package.metadata.cargo-machete]
+# `tonic-build` is used from build.rs (`tonic_build::configure()...compile_protos(...)`).
+# Plain `cargo machete` (the CI gate) detects that usage; only
+# `cargo machete --with-metadata` mis-resolves the workspace-inherited
+# build-dependency and reports it as unused. Keeping it in this list keeps both
+# modes honest: the crate genuinely stops compiling if the build.rs call goes away.
+ignored = ["tonic-build"]

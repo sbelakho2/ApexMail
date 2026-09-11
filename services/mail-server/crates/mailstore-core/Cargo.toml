@@ -19,12 +19,10 @@ mail-proto = { path = "../mail-proto" }
 # Async runtime
 tokio.workspace = true
 tokio-stream = "0.1"
-async-trait.workspace = true
 futures.workspace = true
 
 # gRPC
 tonic.workspace = true
-prost.workspace = true
 
 # Database
 sqlx.workspace = true
@@ -46,9 +44,6 @@ tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
 clap.workspace = true
 argon2.workspace = true
-
-# Storage
-bytes.workspace = true
 
 # Rate limiting
 governor.workspace = true

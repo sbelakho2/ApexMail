@@ -19,9 +19,6 @@ apexmail-dns-resolver = { path = "../dns-resolver" }
 spam-filter = { path = "../spam-filter" }
 mta = { path = "../mta" }
 threat-intel = { path = "../threat-intel" }
-mail-common = { path = "../mail-common" }
-regex = { workspace = true }
-parking_lot = { workspace = true }
 dashmap = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }

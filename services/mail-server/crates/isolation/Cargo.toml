@@ -19,10 +19,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 observability-service = { path = "../observability-service" }
 axum = { workspace = true }
-tower = { workspace = true }
 tower-http = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
@@ -35,7 +33,6 @@ deadpool-redis = { workspace = true }
 clap = { workspace = true }
 dotenvy = { workspace = true }
 regex = { workspace = true }
-bytes = { workspace = true }
 hkdf = "0.12"
 zeroize = { workspace = true }
 urlencoding = { workspace = true }

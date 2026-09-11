@@ -7,44 +7,25 @@ license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "P
 
 [features]
 default = ["core"]
-full = ["core", "learning"]
+full = ["core"]
 core = []
-learning = ["dep:rand"]  # Adaptive false-positive learning
 
 [dependencies]
 # Async
-tokio = { version = "1.44", features = ["full"] }
 tracing = "0.1"
 mail-common = { path = "../mail-common" }
 
-# Concurrency
-parking_lot = "0.12"
-dashmap = "6.1"
-
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 
 # Pattern matching (Aho-Corasick, zero-backtrack)
 aho-corasick = { version = "1.1", features = ["perf-literal"] }
-regex = { version = "1.10", features = ["perf"] }
 unicode-normalization = "0.1"
-
-# Crypto (HMAC for signed cookies)
-sha2 = "0.10"
-
-# Metrics
-prometheus = "0.14"
 
 # Utilities
 thiserror = "2.0"
-chrono = { version = "0.4", features = ["serde"] }
-
-# Optional
-rand = { version = "0.9", optional = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
 criterion = "0.8"
 
 [[bench]]

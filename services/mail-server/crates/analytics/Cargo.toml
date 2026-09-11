@@ -15,7 +15,6 @@ mail-common = { path = "../mail-common" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
-async-trait.workspace = true
 
 # Database
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"] }
@@ -47,7 +46,6 @@ regex.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 dashmap.workspace = true
-parking_lot.workspace = true
 moka.workspace = true
 rand.workspace = true
 

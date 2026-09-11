@@ -8,11 +8,8 @@ description = "Shared billing logic (VAT rates, proration, audit, CSV) for billi
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]

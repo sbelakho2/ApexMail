@@ -20,11 +20,7 @@ observability-service = { path = "../observability-service" }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
-# OpenTelemetry (distributed tracing)
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-tracing-opentelemetry = { workspace = true }
+# Utils
 chrono     = { workspace = true }
 uuid       = { workspace = true }
 sha2       = { workspace = true }
@@ -37,21 +33,16 @@ thiserror  = { workspace = true }
 axum       = { workspace = true }
 tower      = { workspace = true }
 tower-http = { workspace = true }
-clap       = { workspace = true }
 dotenvy    = { workspace = true }
-dashmap    = { workspace = true }
 deadpool-redis = { workspace = true }
 redis      = { workspace = true }
 reqwest    = { workspace = true }
-bytes      = { workspace = true }
 aes-gcm    = { workspace = true }
 zeroize    = { workspace = true }
 hex        = { workspace = true }
 quick-xml  = "0.41"
-governor   = { workspace = true }
 mail-common = { path = "../mail-common" }
 apexmail-dns-resolver = { path = "../dns-resolver" }
-nonzero_ext = { workspace = true }
 urlencoding = { workspace = true }
 flate2 = "1.1"
 jsonwebtoken = "9.3"
