@@ -231,8 +231,28 @@ migration_validation() {
         || ci_die "ephemeral postgres failed to start"
     _mv_url="postgres://apexmail:apexmail@127.0.0.1:$_mv_port/apexmail_sec"
 
-    _mv_rc=0
+    # Alpine's entrypoint restarts postgres once after first-init (the
+    # password bootstrap) — pg_isready can pass against the bootstrap
+    # process and the next real connection fails with a protocol reset
+    # ("unexpected response from SSLRequest: 0x00"). Retry the first apply;
+    # the idempotency apply then runs against the settled server.
+    _mv_settle=0
     if command -v sqlx >/dev/null 2>&1; then
+        for _mv_try in 1 2 3; do
+            if (cd "$WS" && DATABASE_URL="$_mv_url" sqlx migrate run --source migrations) \
+                >>"$CI_STAGE_LOG" 2>&1; then
+                _mv_settle=1
+                break
+            fi
+            ci_warn "sqlx connect attempt $_mv_try failed (postgres finishing init?); retrying"
+            sleep 3
+        done
+    fi
+    _mv_rc=0
+    if command -v sqlx >/dev/null 2>&1 && [ "$_mv_settle" -ne 1 ]; then
+        ci_err "sqlx migrate run could not connect after 3 attempts — see $CI_STAGE_LOG"
+        _mv_rc=1
+    elif command -v sqlx >/dev/null 2>&1; then
         (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "sqlx migrate run (clean DB)" \
             sqlx migrate run --source migrations) || _mv_rc=1
         [ "$_mv_rc" -ne 0 ] || {

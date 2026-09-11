@@ -6,10 +6,10 @@
 # The file holds ONE float (percent). Comments (#) and blank lines are
 # ignored; the first non-comment line is the value.
 #
-# 0.0 is the SEED: the first run on the deploy host measures the real
-# workspace line coverage and the operator commits that number here (in the
-# same change, note the measured value in the commit message). From then on
-# the gate is a pure ratchet: raise it in the SAME PR as the tests that
-# earned the increase — that is a PR-positive action; lowering it requires a
-# deliberate, reviewed justification.
-0.0
+# Seeded 2026-09-11 from the first instrumented run on the deploy host
+# (run 20260911T040144, pipeline 20260911T032656's test stage): 63.0456%
+# workspace line coverage. Floored by 0.01 to absorb measurement jitter.
+# From here the gate is a pure ratchet: raise it in the SAME PR as the tests
+# that earned the increase — that is a PR-positive action; lowering it
+# requires a deliberate, reviewed justification.
+63.04
