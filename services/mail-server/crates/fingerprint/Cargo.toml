@@ -11,8 +11,4 @@ license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "P
 sha2 = "0.10"
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
-tracing = "0.1"
 dashmap = "6.1"
-
-[dev-dependencies]
-tokio-test = "0.4"

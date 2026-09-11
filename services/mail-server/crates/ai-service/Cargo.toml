@@ -14,7 +14,6 @@ path = "src/bin/server.rs"
 mail-parser.workspace = true
 sha2.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
-apexmail-db = { path = "../apexmail-db" }
 
 # Async runtime
 tokio.workspace = true
@@ -30,8 +29,6 @@ serde_json.workspace = true
 
 # Database and distributed rate limiting
 sqlx.workspace = true
-deadpool-redis.workspace = true
-redis.workspace = true
 
 # Cryptography and persistence
 aes-gcm.workspace = true

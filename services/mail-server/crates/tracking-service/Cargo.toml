@@ -28,25 +28,15 @@ tokio-stream.workspace = true
 
 # HTTP server
 axum.workspace = true
-tower.workspace = true
 tower-http.workspace = true
-hyper.workspace = true
-hyper-util.workspace = true
 
 # CLI / config
-clap.workspace = true
 dotenvy.workspace = true
 
 # Logging & Observability
 tracing.workspace = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
-
-# OpenTelemetry (distributed tracing)
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 
 # Metrics
 metrics.workspace = true
@@ -66,10 +56,6 @@ redis.workspace = true
 # Cache
 moka.workspace = true
 
-# Rate limiting
-governor.workspace = true
-nonzero_ext.workspace = true
-
 # Crypto
 aes-gcm.workspace = true
 hmac.workspace = true
@@ -81,7 +67,6 @@ jsonwebtoken = "9.3"
 
 # Pattern matching (linear-time)
 aho-corasick.workspace = true
-regex.workspace = true
 
 # IP networking
 ipnetwork.workspace = true
@@ -94,11 +79,8 @@ uuid.workspace = true
 
 # Error handling
 anyhow.workspace = true
-thiserror.workspace = true
 
 # Utils
-bytes.workspace = true
-once_cell.workspace = true
 hex.workspace = true
 url.workspace = true
 urlencoding.workspace = true

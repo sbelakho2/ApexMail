@@ -8,23 +8,15 @@ edition.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
 billing-service = { path = "../billing-service" }
 ai-service = { path = "../ai-service" }
-sales-autopilot = { path = "../sales-autopilot" }
 pattern-matcher = { path = "../pattern-matcher" }
-apexmail-rate-limiter = { path = "../rate-limiter" }
-compliance = { path = "../compliance" }
-template-renderer = { path = "../template-renderer" }
 observability-service = { path = "../observability-service" }
 
 rand = { workspace = true }
-tokio = { workspace = true, features = ["full", "test-util"] }
 serde_json.workspace = true
 chrono.workspace = true
-uuid.workspace = true
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
 
 # Property-based testing
 proptest = "1.4"
-proptest-derive = "0.4"
 
 # Security crates for fuzz testing
 waf-engine = { path = "../waf-engine" }

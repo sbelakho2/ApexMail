@@ -35,8 +35,6 @@ worker-processors = { path = "../worker-processors" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 axum = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
-http = "1"
-http-body-util = "0.1"
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
@@ -44,9 +42,7 @@ reqwest.workspace = true
 aws-config.workspace = true
 aws-sdk-sesv2.workspace = true
 deadpool-redis.workspace = true
-hyper = "1"
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
-dashmap = { workspace = true }
 parking_lot = { workspace = true }
 serial_test = "3"
 

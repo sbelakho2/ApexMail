@@ -8,15 +8,9 @@ repository.workspace = true
 
 [features]
 default = []
-leptos = ["dep:leptos", "dep:leptos_router", "dep:leptos_meta"]
-wasm = ["dep:wasm-bindgen", "dep:web-sys", "dep:js-sys"]
-ssr = ["leptos", "leptos?/ssr", "leptos_router?/ssr", "leptos_meta?/ssr"]
-hydrate = ["leptos", "leptos?/hydrate", "wasm"]
-full = ["ssr", "hydrate", "wasm"]
 
 [dependencies]
 once_cell.workspace = true
-regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
@@ -27,11 +21,5 @@ base64.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
-# Leptos UI framework (optional, gated behind features)
-leptos = { workspace = true, optional = true }
-leptos_router = { workspace = true, optional = true }
-leptos_meta = { workspace = true, optional = true }
-wasm-bindgen = { workspace = true, optional = true }
+# Logging
 tracing.workspace = true
-web-sys = { workspace = true, optional = true }
-js-sys = { workspace = true, optional = true }

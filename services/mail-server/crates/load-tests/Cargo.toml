@@ -10,15 +10,10 @@ billing-service = { path = "../billing-service" }
 ai-service = { path = "../ai-service" }
 sales-autopilot = { path = "../sales-autopilot" }
 pattern-matcher = { path = "../pattern-matcher" }
-apexmail-rate-limiter = { path = "../rate-limiter" }
 observability-service = { path = "../observability-service" }
-devex-service = { path = "../devex-service" }
-compliance = { path = "../compliance" }
 
 tokio = { workspace = true, features = ["full", "test-util"] }
 rand = { workspace = true }
-serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-sqlx = { workspace = true, features = ["postgres", "runtime-tokio-rustls"] }
 tracing = { workspace = true }

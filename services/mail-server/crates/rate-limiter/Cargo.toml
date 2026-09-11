@@ -13,12 +13,10 @@ redis = ["dep:redis"]
 
 [dependencies]
 governor = { workspace = true }
-nonzero_ext = { workspace = true }
 moka = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

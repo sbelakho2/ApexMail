@@ -13,7 +13,6 @@ path = "src/bin/server.rs"
 [dependencies]
 moka.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
-apexmail-db = { path = "../apexmail-db" }
 mail-common = { path = "../mail-common" }
 billing-common = { path = "../billing-common" }
 
@@ -25,7 +24,6 @@ futures.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
-hyper.workspace = true
 reqwest.workspace = true
 
 # CLI / config
@@ -37,7 +35,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
 metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
 
 # Database
 sqlx.workspace = true
