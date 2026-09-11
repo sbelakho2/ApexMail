@@ -125,7 +125,7 @@ main() {
   prepare_deploy_dir
   harden_sshd
   log "Bootstrap complete. Deploy directory: ${DEPLOY_DIR}"
-  log "Next: trigger the GitHub Action 'Deploy — Hetzner' (workflow_dispatch)."
+  log "Next: follow deploy/DEPLOYMENT.md 'Fresh-host bootstrap' steps 2-7 (in-place checkout, .env, secret files, ci/install.sh, first pipeline run, LE certificate)."
 }
 
 main "$@"

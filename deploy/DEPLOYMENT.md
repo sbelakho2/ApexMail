@@ -41,7 +41,7 @@ There is no GitHub Actions runner and no registry; bootstrap is done over
 SSH once:
 
 1. **Bootstrap the host** — `scp deploy/scripts/hetzner-bootstrap.sh "root@<host>:/root/"` then `ssh root@<host> 'bash /root/hetzner-bootstrap.sh'` (installs Docker + compose plugin, configures UFW, hardens sshd, creates `/opt/apexmail`).
-2. **Clone the repository on the host** — `ssh root@<host> 'git clone <repo-url> /opt/apexmail/src'` (or grant the deploy key read access and let the pipeline fetch; the fetch stage refuses to deploy unpushed commits).
+2. **Clone the repository on the host** — `${DEPLOY_DIR}` (`/opt/apexmail`) IS the repository root: the bootstrap pre-creates the directory (with `secrets/`), so initialize the checkout in place — `ssh root@<host> 'cd /opt/apexmail && git init -q && git remote add origin <repo-url> && git fetch --depth 1 origin main && git checkout -f main'` — and keep `.env`, `secrets/`, `certs/` and `backups/` in that same directory (host-local, gitignored). The fetch stage refuses to deploy unpushed commits.
 3. **Render the production `.env`** at `/opt/apexmail/.env` from `.env.production.example` (generate values with `openssl rand -base64 32`); validate locally with `make verify-env ENV_FILE=.env.production`.
 4. **Write the secret files** — for every `PROD_*_FILE` path in the `.env`
    (30 today; see § "Rendered production secrets"), create the file with the
@@ -57,9 +57,9 @@ SSH once:
    pipeline run (`ls /opt/apexmail/secrets | wc -l` — 32 files including
    `redis_password_map.json` and an empty `ai_model_api_key.txt`, generated per the comment in
    `.env.production.example`).
-5. **Install the CI pipeline** — `ssh root@<host> 'cd /opt/apexmail/src && ci/install.sh'` (installs the 5-minute systemd timer, pinned tools, and the fail-closed tool policy).
-6. **Run the first deploy** — `ssh root@<host> 'cd /opt/apexmail/src && ci/pipeline.sh run'`. A red stage stops before `docker compose up`; the verify stage probes health, HTTP, and the SMTP banner.
-7. **Issue a real certificate** — `ssh root@<host> "cd /opt/apexmail/src && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
+5. **Install the CI pipeline** — `ssh root@<host> 'cd /opt/apexmail && ci/install.sh'` (installs the 5-minute systemd timer, pinned tools, and the fail-closed tool policy).
+6. **Run the first deploy** — `ssh root@<host> 'cd /opt/apexmail && ci/pipeline.sh run'`. A red stage stops before `docker compose up`; the verify stage probes health, HTTP, and the SMTP banner.
+7. **Issue a real certificate** — `ssh root@<host> "cd /opt/apexmail && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
 
 ## Rendered production secrets (the real 32)
 

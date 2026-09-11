@@ -21,7 +21,7 @@ network segmentation between services)
 
 ## Initial Diagnosis
 
-All commands run on the deploy host (`/opt/apexmail/src`).
+All commands run on the deploy host, in the deployment directory (`/opt/apexmail`, which is the repository root).
 
 1. **Check host internet connectivity:**
    ```bash
