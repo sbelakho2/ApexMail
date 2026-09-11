@@ -129,23 +129,33 @@ stage_main() {
     # stage re-inspects the images and refuses to continue on any mismatch —
     # nothing runs in production that this run did not build and gate.
     ci_info "recording image digest manifest"
-    : >"$RUN_DIR/image-digests.txt"
-    for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do
-        _digest=$(docker image inspect "$_ns/$_svc:$CI_SHA" \
-            --format '{{.Id}}' 2>/dev/null) || _digest=""
-        if [ -n "$_digest" ]; then
-            printf '%s %s\n' "$_svc" "$_digest" >>"$RUN_DIR/image-digests.txt"
-        else
-            ci_err "cannot inspect $_ns/$_svc:$CI_SHA for the digest manifest"
-            return "$CI_EXIT_FAIL"
-        fi
-    done
+    if ci_dry; then
+        # Dry-run builds nothing — the :<sha> tags the manifest records do
+        # not exist, so recording them is echo-only intent (the previous
+        # code hard-failed here, which the selftest's full dry-run caught).
+        ci_info "check (dry-run): digest manifest would record every canonical + extra image"
+    else
+        : >"$RUN_DIR/image-digests.txt"
+        for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do
+            _digest=$(docker image inspect "$_ns/$_svc:$CI_SHA" \
+                --format '{{.Id}}' 2>/dev/null) || _digest=""
+            if [ -n "$_digest" ]; then
+                printf '%s %s\n' "$_svc" "$_digest" >>"$RUN_DIR/image-digests.txt"
+            else
+                ci_err "cannot inspect $_ns/$_svc:$CI_SHA for the digest manifest"
+                return "$CI_EXIT_FAIL"
+            fi
+        done
+    fi
     ( cd "$RUN_DIR" && sha256sum image-digests.txt > SHA256SUMS.images 2>/dev/null ) \
         || ci_warn "sha256sum unavailable — digest manifest left unsigned (advisory)"
 
     # --- 5. bounded :<sha> history ---------------------------------------------------
     _keep=${CI_KEEP_SHAS:-5}
     ci_info "pruning :<sha> image tags beyond the newest $_keep per service"
+    if ci_dry; then
+        ci_info "check (dry-run): :<sha> pruning and dangling-image prune skipped"
+    else
     for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do
         docker images "$_ns/$_svc" --format '{{.Tag}} {{.ID}}' 2>/dev/null \
             | grep -E '^[0-9a-f]{7,40} ' | grep -v "^${CI_SHA:-} " | head -n -"$_keep" | while IFS=' ' read -r _tag _id; do
@@ -155,6 +165,7 @@ stage_main() {
             done
     done
     docker image prune -f >/dev/null 2>&1 || true
+    fi
 
     ci_info "images: all canonical images built, sha-tagged and gated"
     return "$CI_EXIT_OK"
