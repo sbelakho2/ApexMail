@@ -222,27 +222,29 @@ impl TsdLedgerSource {
                 .all(|c| c == &self.currency.as_str())
     }
 
+    /// The reporting period label (`YYYY-MM`).
+    pub fn period_label(&self) -> String {
+        month_label(self.year, self.month)
+    }
+
     /// Every reason the declaration is not filable as derived, in the order
     /// the caller should fix them. Empty when [`Self::has_sufficient_data`].
     pub fn missing_fields(&self) -> Vec<String> {
         let mut missing = Vec::new();
+        let month = self.period_label();
         if self.periods.is_empty() {
             missing.push(format!(
-                "monthly fiscal period for {:04}-{:02} (no period contained in the month exists)",
-                self.year, self.month
+                "monthly fiscal period for {month} (no period contained in the month exists)"
             ));
         }
         if self.employees.is_empty() {
-            missing.push(format!(
-                "posted payroll postings for {:04}-{:02}",
-                self.year, self.month
-            ));
+            missing.push(format!("posted payroll postings for {month}"));
         }
         if self.unposted_payroll_records > 0 {
             missing.push(format!(
-                "{} payroll record(s) for {:04}-{:02} are not posted to the ledger \
+                "{} payroll record(s) for {month} are not posted to the ledger \
                  (the payroll sweep has not run, or their entry was reversed)",
-                self.unposted_payroll_records, self.year, self.month
+                self.unposted_payroll_records
             ));
         }
         for employee in &self.incomplete_employees {
@@ -291,12 +293,11 @@ impl TsdLedgerSource {
 
         if self.employees.is_empty() {
             return format!(
-                "No posted payroll postings for {:04}-{:02}. The TSD is derived from the \
+                "No posted payroll postings for {}. The TSD is derived from the \
                  posted ledger ({}); nothing was booked for this month. \
                  If team members were paid, post the payroll records first \
                  (payroll_records → payroll_postings → journal entry).{}",
-                self.year,
-                self.month,
+                self.period_label(),
                 self.provenance(),
                 ready
             );
