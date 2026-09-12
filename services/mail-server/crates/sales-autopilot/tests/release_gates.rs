@@ -1702,22 +1702,40 @@ async fn gate_18_delivered_unsubscribe_token_carries_no_identity_encoding() {
 // Gate 20 — lead indexes
 // ---------------------------------------------------------------------------
 
-/// Gate 20: "`pg_indexes` confirms the unique email index and the GIN search
-/// index."
+/// Gate 20: "lead uniqueness and the FTS search index are schema-owned, on
+/// the canonical tables."
 ///
-/// SCHEMA/DEPLOY-CONTRACT GATE (not a call-path gate): migration 203 owns
-/// these indexes, and a deploy that predates/omits it must go red here. The
-/// final probe proves the unique index actually enforces, not just exists.
+/// SCHEMA/DEPLOY-CONTRACT GATE (not a call-path gate): migration 223 retired
+/// the stored `sales_leads` table — and with it `idx_sales_leads_tenant_email`
+/// and `idx_sales_leads_fts_gin` — in favor of the canonical account/contact
+/// model. A deploy that predates/omits 223 (or a database where `sales_leads`
+/// is still a table) must go red here. The probes prove the canonical
+/// uniqueness and the GIN index actually enforce, not merely exist.
 #[tokio::test]
-async fn gate_20_sales_leads_unique_and_gin_indexes_are_schema_owned() {
+async fn gate_20_lead_uniqueness_and_search_indexes_are_schema_owned() {
     let Some(db) = common::test_pool("gate20_lead_indexes").await else {
         return;
     };
 
+    // sales_leads is a view now, not a table.
+    let relkind: String = sqlx::query_scalar(
+        "SELECT c.relkind::text FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = 'sales_leads'",
+    )
+    .fetch_one(&db)
+    .await
+    .expect("sales_leads relation");
+    assert_eq!(
+        relkind, "v",
+        "migration 223 must turn sales_leads into a derived VIEW"
+    );
+
     let defs: Vec<(String, String)> = sqlx::query_as(
         "SELECT indexname, indexdef FROM pg_indexes \
-         WHERE schemaname = 'public' AND tablename = 'sales_leads' \
-           AND indexname IN ('idx_sales_leads_tenant_email', 'idx_sales_leads_fts_gin')",
+         WHERE schemaname = 'public' AND tablename = 'sales_contacts' \
+           AND indexname IN ('idx_sales_contacts_tenant_legacy_lead_id', \
+                             'idx_sales_contacts_lead_search_gin')",
     )
     .fetch_all(&db)
     .await
@@ -1725,63 +1743,120 @@ async fn gate_20_sales_leads_unique_and_gin_indexes_are_schema_owned() {
 
     let unique = defs
         .iter()
-        .find(|(name, _)| name == "idx_sales_leads_tenant_email")
+        .find(|(name, _)| name == "idx_sales_contacts_tenant_legacy_lead_id")
         .map(|(_, def)| def.clone())
-        .expect("migration 203 must create idx_sales_leads_tenant_email");
+        .expect("migration 223 must create idx_sales_contacts_tenant_legacy_lead_id");
     assert!(
         unique.contains("UNIQUE"),
-        "the duplicate check depends on uniqueness: {unique}"
+        "the id mapping depends on uniqueness: {unique}"
     );
     assert!(
-        unique.contains("lower(contact_email)"),
-        "the duplicate key must be (tenant_id, lower(contact_email)): {unique}"
+        unique.contains("tenant_id") && unique.contains("legacy_lead_id"),
+        "the mapping key must be (tenant_id, legacy_lead_id): {unique}"
     );
 
     let gin = defs
         .iter()
-        .find(|(name, _)| name == "idx_sales_leads_fts_gin")
+        .find(|(name, _)| name == "idx_sales_contacts_lead_search_gin")
         .map(|(_, def)| def.clone())
-        .expect("migration 203 must create idx_sales_leads_fts_gin");
+        .expect("migration 223 must create idx_sales_contacts_lead_search_gin");
     assert!(
         gin.contains("USING gin"),
         "the search path requires a GIN index: {gin}"
     );
     assert!(
-        gin.contains("to_tsvector"),
-        "the GIN index must cover the search expression: {gin}"
+        gin.contains("lead_search_vector"),
+        "the GIN index must cover the maintained search document: {gin}"
     );
 
-    // Enforcement probe: the unique index must actually reject a second lead
-    // for the same (tenant, lower(email)) pair.
+    // Enforcement probe 1: the canonical contact point uniqueness must reject
+    // a second lead address for the same tenant — the guarantee that replaced
+    // the old (tenant, lower(email)) unique index.
     let suffix = Uuid::new_v4().simple().to_string();
-    let lead_id = format!("gate20-a-{suffix}");
+    let tenant = format!("gate20-{suffix}");
     let email = format!("gate20-{suffix}@example.com");
+    let account_id = Uuid::new_v4();
+    let contact_a = Uuid::new_v4();
+    let contact_b = Uuid::new_v4();
+    let cleanup = || async {
+        for statement in [
+            "DELETE FROM sales_contact_points WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            let _ = sqlx::query(statement).bind(&tenant).execute(&db).await;
+        }
+    };
+    cleanup().await;
+
     sqlx::query(
-        "INSERT INTO sales_leads (id, tenant_id, company_name, domain, status, contact_email) \
-         VALUES ($1, 'system', 'Gate 20', 'gate20.example', 'new', $2)",
+        "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+         VALUES ($1, $2, 'Gate 20', $3)",
     )
-    .bind(&lead_id)
+    .bind(account_id)
+    .bind(&tenant)
+    .bind(format!("{suffix}.example"))
+    .execute(&db)
+    .await
+    .expect("seed gate 20 account");
+    for contact in [contact_a, contact_b] {
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Gate 20')",
+        )
+        .bind(contact)
+        .bind(&tenant)
+        .bind(account_id)
+        .execute(&db)
+        .await
+        .expect("seed gate 20 contact");
+    }
+    sqlx::query(
+        "INSERT INTO sales_contact_points \
+             (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+         VALUES ($1, $2, $3, 'email', $4, lower($4), 'unverified')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(contact_a)
     .bind(&email)
     .execute(&db)
     .await
-    .expect("first lead insert");
-    let duplicate = sqlx::query(
-        "INSERT INTO sales_leads (id, tenant_id, company_name, domain, status, contact_email) \
-         VALUES ($1, 'system', 'Gate 20', 'gate20.example', 'new', $2)",
+    .expect("first canonical contact point");
+    let duplicate_point = sqlx::query(
+        "INSERT INTO sales_contact_points \
+             (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+         VALUES ($1, $2, $3, 'email', $4, lower($4), 'unverified')",
     )
-    .bind(format!("gate20-b-{suffix}"))
+    .bind(Uuid::new_v4())
+    .bind(&tenant)
+    .bind(contact_b)
     .bind(email.to_uppercase())
     .execute(&db)
     .await;
     assert!(
-        duplicate.is_err(),
-        "the unique index must reject a duplicate (tenant, lower(email)) pair"
+        duplicate_point.is_err(),
+        "the canonical contact point uniqueness must reject a second lead address"
     );
-    let _ = sqlx::query("DELETE FROM sales_leads WHERE id = $1 OR id = $2")
-        .bind(&lead_id)
-        .bind(format!("gate20-b-{suffix}"))
+
+    // Enforcement probe 2: the id mapping is uniqueness-checked per tenant.
+    sqlx::query("UPDATE sales_contacts SET legacy_lead_id = $1 WHERE id = $2")
+        .bind(format!("gate20-a-{suffix}"))
+        .bind(contact_a)
+        .execute(&db)
+        .await
+        .expect("map the first lead id");
+    let duplicate_mapping = sqlx::query("UPDATE sales_contacts SET legacy_lead_id = $1 WHERE id = $2")
+        .bind(format!("gate20-a-{suffix}"))
+        .bind(contact_b)
         .execute(&db)
         .await;
+    assert!(
+        duplicate_mapping.is_err(),
+        "the (tenant_id, legacy_lead_id) unique index must reject a reused lead id"
+    );
+
+    cleanup().await;
 }
 
 // ---------------------------------------------------------------------------

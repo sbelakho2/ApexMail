@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test fixture: entry point of a small but genuine XBRL 2.1 taxonomy.
+
+  It is written as a real taxonomy package, not a stub: the entry-point schema
+  imports the XBRL 2.1 instance/linkbase namespaces, includes the concept
+  declarations from concepts.xsd, and references real presentation, label and
+  calculation linkbases. The target namespace is deliberately under
+  `.test` — it is NOT the official Estonian e-aruande taksonoomia and must
+  never be mistaken for it.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:xbrli="http://www.xbrl.org/2003/instance"
+           xmlns:link="http://www.xbrl.org/2003/linkbase"
+           xmlns:xlink="http://www.w3.org/1999/xlink"
+           xmlns:ee="http://apexmail.test/xbrl/ee-annual-report/2026-01-01"
+           targetNamespace="http://apexmail.test/xbrl/ee-annual-report/2026-01-01"
+           elementFormDefault="qualified"
+           id="ee-annual-report-2026-01-01">
+
+  <xs:import namespace="http://www.xbrl.org/2003/instance"/>
+  <xs:import namespace="http://www.xbrl.org/2003/linkbase"/>
+  <xs:import namespace="http://www.w3.org/1999/xlink"/>
+
+  <xs:include schemaLocation="concepts.xsd"/>
+
+  <link:linkbaseRef xlink:type="simple" xlink:href="presentation.xml"
+                    xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+  <link:linkbaseRef xlink:type="simple" xlink:href="label.xml"
+                    xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+  <link:linkbaseRef xlink:type="simple" xlink:href="calculation.xml"
+                    xlink:arcrole="http://www.w3.org/1999/xlink/properties/linkbase"/>
+</xs:schema>

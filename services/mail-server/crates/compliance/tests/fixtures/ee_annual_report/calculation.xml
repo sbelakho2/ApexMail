@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test fixture: calculation linkbase. NetProfit = Revenue (1) + Expenses (-1). -->
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+               xmlns:xlink="http://www.w3.org/1999/xlink"
+               xmlns:xs="http://www.w3.org/2001/XMLSchema"
+               xmlns:xbrli="http://www.xbrl.org/2003/instance"
+               xmlns:ee="http://apexmail.test/xbrl/ee-annual-report/2026-01-01">
+
+  <link:calculationLink xlink:type="extended"
+                        xlink:role="http://apexmail.test/role/income-statement-calculation">
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_NetProfit" xlink:label="loc_NetProfit"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Revenue" xlink:label="loc_Revenue"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Expenses" xlink:label="loc_Expenses"/>
+    <link:calculationArc xlink:type="arc"
+                         xlink:arcrole="http://www.xbrl.org/2003/arcrole/summation-item"
+                         xlink:from="loc_NetProfit" xlink:to="loc_Revenue"
+                         weight="1" order="1"/>
+    <link:calculationArc xlink:type="arc"
+                         xlink:arcrole="http://www.xbrl.org/2003/arcrole/summation-item"
+                         xlink:from="loc_NetProfit" xlink:to="loc_Expenses"
+                         weight="-1" order="2"/>
+  </link:calculationLink>
+
+</link:linkbase>

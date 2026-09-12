@@ -188,23 +188,25 @@ fn default_limit() -> i64 {
     50
 }
 
-/// The CP's rendered lead row. Identity and [`LeadEntry::status`] are
-/// canonical (see [`CANONICAL_LEAD_CTE`]); the remaining fields are the
-/// **bounded legacy projection** that still lives on the `sales_leads`
-/// bridge row because the canonical model has no home for them yet:
+/// The CP's rendered lead row. Identity, [`LeadEntry::status`] and the
+/// lead-only fields are all projected by the derived `sales_leads` view
+/// (migration 223) from the canonical account/contact model:
 ///
-/// | field | bridge column (migration 200) | readers | retirement condition |
-/// |---|---|---|---|
-/// | `source` | `sales_leads.source` (200:69) | this response; `sales-autopilot` `/leads`; `admin::leads_discovery` source breakdown | retired when discovery/campaign provenance moves onto a canonical account source |
-/// | `score` | `sales_leads.score` (200:68) | this response; `admin::crm_leads` (sort/read); `sales-autopilot` `/leads` | retired when the CP renders the explainable `sales_scores` model (migration 200:403) instead of the single legacy integer |
-/// | `notes` | `sales_leads.notes` (200:79) | this response only | retired when a canonical CRM-notes model exists (or the CP stops rendering notes) |
-/// | `tags` | `sales_leads.tags` (200:80) | this response only | retired when a canonical tag model exists (or the CP stops rendering tags) |
-/// | `deal_value` | `sales_leads.deal_value` (200:81) | this response only | retired when deal value moves onto the canonical account/opportunity model (or the CP stops rendering it) |
+/// | field | canonical column on `sales_contacts` |
+/// |---|---|
+/// | `source` | `lead_source` |
+/// | `score` | `lead_score` |
+/// | `notes` | `lead_notes` |
+/// | `tags` | `lead_tags` |
+/// | `deal_value` | `lead_deal_value` |
+/// | `contact_email` | primary contact point (fallback `legacy_lead_email`) |
+/// | `contact_name` | `full_name` |
+/// | `company_name` / `domain` | `sales_accounts.company` / `.domain` |
+/// | `status` | derived lifecycle `CASE` |
 ///
-/// These are the ONLY fields the CP update path still writes to
-/// `sales_leads` (see [`LeadUpdate`]); identity (`contact_email`,
-/// `contact_name`, `company_name`, `domain`) and status are written to the
-/// canonical tables, never to the legacy bridge columns.
+/// These lead-only fields are the ONLY remaining non-canonical concepts the
+/// CP update path writes (see [`LeadUpdate`]); identity and status are
+/// written to the canonical tables.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeadEntry {
@@ -232,103 +234,53 @@ pub struct LeadsResponse {
     pub stats_by_status: serde_json::Value,
 }
 
-/// Canonical CP lead read (audit item 17): identity and status come from the
-/// canonical account/contact model, `sales_leads` is only the bridge for
-/// lead-only concepts.
+/// Canonical CP lead read (audit item 17, completed by migration 223):
+/// identity, status and lead-only fields all come from the canonical
+/// account/contact model through the derived `sales_leads` view.
 ///
 /// Column mapping, preserved so the CP UI keeps rendering the same
 /// [`LeadEntry`] shape:
 ///
-/// | `LeadEntry` field | canonical source | fallback |
-/// |---|---|---|
-/// | `id` | `sales_leads.id` (the API row key; lead-only) | — |
-/// | `contact_email` | newest unsuppressed `sales_contact_points.value` (migration 200:279) | legacy `sales_leads.contact_email` when the row predates the bridge |
-/// | `contact_name` | `sales_contacts.full_name` | legacy `sales_leads.contact_name` |
-/// | `company_name` | `sales_accounts.company` | legacy `sales_leads.company_name` |
-/// | `domain` | `sales_accounts.domain` | legacy `sales_leads.domain` |
-/// | `status` | `CASE` over canonical contact/account/enrollment lifecycle (below) | `'new'` when no canonical state exists |
-/// | `source`, `score`, `notes`, `tags`, `deal_value`, timestamps | `sales_leads` (lead-only fields with no canonical home yet) | — |
+/// | `LeadEntry` field | canonical source |
+/// |---|---|
+/// | `id` | `sales_leads.id` = `sales_contacts.legacy_lead_id` (the stable id the old stored table held) |
+/// | `tenant_id` | `sales_contacts.tenant_id` |
+/// | `contact_email` | primary `sales_contact_points.value`, falling back to the pre-canonical `legacy_lead_email` |
+/// | `contact_name` | `sales_contacts.full_name` |
+/// | `company_name` | `sales_accounts.company` |
+/// | `domain` | `sales_accounts.domain` |
+/// | `status` | derived `CASE` over contact/account/enrollment lifecycle |
+/// | `source`, `score`, `notes`, `tags`, `deal_value`, timestamps | `sales_contacts.lead_*` projection columns |
 ///
-/// The legacy `sales_leads.status` column is deliberately NOT selected: it is
-/// never written by any runtime path any more (see [`CanonicalLeadStatus`] —
-/// the CP admin update, the SSR form and the reply worker all write canonical
-/// lifecycle state), so selecting it would surface a frozen column as truth.
-/// The remaining readers of that column (`admin::dashboard` KPIs,
-/// `admin::crm_leads` and `admin::leads_discovery` list shapes) are legacy
-/// read surfaces that predate this change; they are listed in the item-17
-/// report as the precondition for making `sales_leads` a pure view.
-/// Rows without a canonical `contact_id` (pre-upgrade data, plus
-/// discovery-imported rows that deliberately have no reachable address) are
-/// not listed until the bridge transition backfills them.
+/// There is no stored status column to disagree with: migration 223 dropped
+/// the table, so the view's derivation is the only status the CP can see.
+/// Every contact with a `legacy_lead_id` (including discovery-imported
+/// contacts, which now carry a contact with no reachable address) is listed.
 ///
-/// The CTE projects `tenant_id`; callers scope with
-/// `WHERE tenant_id = $n` in the outer query (the positional binds are
-/// emitted by `QueryBuilder` at the call site, so a `$1` inside this raw
-/// string would not line up with them).
+/// The CTE projects `tenant_id`, `account_id` and `contact_id`; callers
+/// scope with `WHERE tenant_id = $n` in the outer query (the positional
+/// binds are emitted by `QueryBuilder` at the call site, so a `$1` inside
+/// this raw string would not line up with them).
 pub(crate) const CANONICAL_LEAD_CTE: &str = r#"
     WITH canonical_leads AS (
         SELECT
-            c.tenant_id AS tenant_id,
             l.id,
+            l.tenant_id,
+            l.account_id,
+            l.contact_id,
             l.source,
             l.score,
             l.notes,
-            COALESCE(to_jsonb(l.tags), '[]'::jsonb) AS tags,
+            COALESCE(l.tags, '[]'::jsonb) AS tags,
             l.deal_value,
             l.created_at,
             l.updated_at,
-            COALESCE(NULLIF(cp.value, ''), NULLIF(l.contact_email, '')) AS contact_email,
-            COALESCE(NULLIF(c.full_name, ''), NULLIF(l.contact_name, '')) AS contact_name,
-            COALESCE(NULLIF(a.company, ''), NULLIF(l.company_name, '')) AS company_name,
-            COALESCE(NULLIF(a.domain, ''), NULLIF(l.domain, '')) AS domain,
-            CASE
-                WHEN c.lifecycle = 'customer' OR a.lifecycle = 'customer' THEN 'converted'
-                WHEN c.lifecycle = 'meeting_booked' OR e.state = 'meeting_booked' THEN 'demo_scheduled'
-                WHEN c.lifecycle = 'replied' OR e.state = 'replied' THEN 'engaged'
-                WHEN c.lifecycle = 'do_not_contact'
-                     OR e.state IN ('suppressed', 'failed') THEN 'lost'
-                WHEN c.lifecycle = 'left_company'
-                     OR a.lifecycle = 'disqualified' THEN 'unqualified'
-                WHEN a.lifecycle = 'qualified' THEN 'qualified'
-                WHEN a.lifecycle = 'nurturing' THEN 'prospect'
-                WHEN e.state IN ('active', 'waiting', 'pending', 'completed')
-                     OR c.lifecycle = 'snoozed' THEN 'contacted'
-                ELSE 'new'
-            END AS status
-        FROM sales_contacts c
-        LEFT JOIN sales_accounts a
-               ON a.id = c.account_id AND a.tenant_id = c.tenant_id
-        LEFT JOIN LATERAL (
-            SELECT cp.value
-            FROM sales_contact_points cp
-            WHERE cp.contact_id = c.id
-              AND cp.tenant_id = c.tenant_id
-              AND cp.channel = 'email'
-            ORDER BY (cp.suppressed_at IS NULL) DESC,
-                     cp.confidence DESC,
-                     cp.created_at DESC
-            LIMIT 1
-        ) cp ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT e.state
-            FROM sales_enrollments e
-            WHERE e.contact_id = c.id AND e.tenant_id = c.tenant_id
-            ORDER BY CASE
-                         WHEN e.state IN ('completed', 'failed', 'suppressed') THEN 1
-                         ELSE 0
-                     END,
-                     e.updated_at DESC, e.id
-            LIMIT 1
-        ) e ON TRUE
-        JOIN LATERAL (
-            SELECT l.id, l.source, l.score, l.notes, l.tags, l.deal_value,
-                   l.contact_email, l.contact_name, l.company_name, l.domain,
-                   l.created_at, l.updated_at
-            FROM sales_leads l
-            WHERE l.contact_id = c.id AND l.tenant_id = c.tenant_id
-            ORDER BY l.created_at DESC, l.id DESC
-            LIMIT 1
-        ) l ON TRUE
+            l.contact_email,
+            l.contact_name,
+            l.company_name,
+            l.domain,
+            l.status
+        FROM sales_leads l
     )
 "#;
 
@@ -647,9 +599,14 @@ pub(crate) async fn apply_lead_status_in_tx(
         }
     }
 
+    // The lead row is the canonical contact's id mapping since migration
+    // 223, and a view cannot be locked: `FOR UPDATE OF c` locks the base
+    // contact so concurrent transitions serialize.
     let rows: Vec<(String, Option<uuid::Uuid>, Option<uuid::Uuid>)> = sqlx::query_as(
-        "SELECT id, account_id, contact_id FROM sales_leads \
-         WHERE tenant_id = $1 AND id = ANY($2) FOR UPDATE",
+        "SELECT c.legacy_lead_id AS id, c.account_id, c.id AS contact_id \
+         FROM sales_contacts c \
+         WHERE c.tenant_id = $1 AND c.legacy_lead_id = ANY($2) \
+         FOR UPDATE OF c",
     )
     .bind(tenant_id)
     .bind(&unique)
@@ -966,13 +923,16 @@ async fn apply_lead_update(
     let mut tx = db.begin().await?;
 
     // All-or-nothing preflight: every requested lead must exist for the
-    // tenant before any statement writes.
-    let found: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM sales_leads WHERE tenant_id = $1 AND id = ANY($2)")
-            .bind(tenant_id)
-            .bind(&ids)
-            .fetch_all(&mut *tx)
-            .await?;
+    // tenant before any statement writes. The lead id is the canonical
+    // contact's mapping since migration 223.
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT c.legacy_lead_id FROM sales_contacts c \
+         WHERE c.tenant_id = $1 AND c.legacy_lead_id = ANY($2)",
+    )
+    .bind(tenant_id)
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
     if found.len() != ids.len() {
         let missing = ids
             .iter()
@@ -990,33 +950,34 @@ async fn apply_lead_update(
             .map_err(lead_status_write_error)?;
     }
 
-    // Bounded legacy projection: the only `sales_leads` columns this path
-    // still writes (see [`LeadEntry`] for each field's reader and retirement
-    // condition). Identity and status never land here.
+    // Lead-only projection: the `lead_*` columns on the canonical contact
+    // (see [`LeadEntry`] for each field). Identity and status never land
+    // here, and `sales_leads` (the derived view) is never written.
     let projection_fields: Vec<&str> = [
-        body.notes.is_some().then_some("notes"),
-        body.tags.is_some().then_some("tags"),
-        body.deal_value.is_some().then_some("deal_value"),
+        body.notes.is_some().then_some("lead_notes"),
+        body.tags.is_some().then_some("lead_tags"),
+        body.deal_value.is_some().then_some("lead_deal_value"),
     ]
     .into_iter()
     .flatten()
     .collect();
     if !projection_fields.is_empty() {
-        let mut builder =
-            sqlx::QueryBuilder::<sqlx::Postgres>::new("UPDATE sales_leads SET updated_at = NOW()");
+        let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "UPDATE sales_contacts SET lead_updated_at = NOW()",
+        );
         if let Some(ref notes) = body.notes {
-            builder.push(", notes = ").push_bind(notes.clone());
+            builder.push(", lead_notes = ").push_bind(notes.clone());
         }
         if let Some(ref tags) = body.tags {
-            builder.push(", tags = ").push_bind(serde_json::json!(tags));
+            builder.push(", lead_tags = ").push_bind(serde_json::json!(tags));
         }
         if let Some(deal_value) = body.deal_value {
-            builder.push(", deal_value = ").push_bind(deal_value);
+            builder.push(", lead_deal_value = ").push_bind(deal_value);
         }
         builder
             .push(" WHERE tenant_id = ")
             .push_bind(tenant_id.to_string());
-        builder.push(" AND id = ANY(").push_bind(ids.clone());
+        builder.push(" AND legacy_lead_id = ANY(").push_bind(ids.clone());
         builder.push(")");
         builder.build().execute(&mut *tx).await?;
     }
@@ -1576,9 +1537,10 @@ async fn run_discovery(
         // Imported leads arrive without an email address, so they can only be
         // linked to their canonical account: there is no address to put in a
         // `sales_contact_points` row and none is fabricated — the lead has no
-        // reachable contact point until enrichment supplies one. The account
-        // write and the lead row share one transaction: if the lead insert
-        // fails, the account is not left behind either.
+        // reachable contact point until enrichment supplies one. Since
+        // migration 223 the lead itself is a canonical contact carrying the
+        // id mapping; the account write and the contact write share one
+        // transaction, so neither can be left behind alone.
         let mut tx = state.db.begin().await?;
         let account_id: uuid::Uuid = sqlx::query_scalar(
             "INSERT INTO sales_accounts
@@ -1594,22 +1556,23 @@ async fn run_discovery(
         .fetch_one(&mut *tx)
         .await?;
 
-        // `status` is deliberately not listed: the legacy column is never
-        // chosen by a write path (the NOT NULL DEFAULT 'new' applies), and
-        // the CP read derives status from the canonical lifecycle anyway.
+        // The discovered lead is a contact with an empty name and no contact
+        // point (nothing is fabricated), carrying the id mapping and the
+        // lead-only projection columns. It is listed by the derived view and
+        // by every canonical read immediately.
         sqlx::query(
-            "INSERT INTO sales_leads (
-                tenant_id, id, company_name, domain, source, notes,
-                account_id, contact_id, created_at, updated_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NOW(), NOW())",
+            "INSERT INTO sales_contacts (
+                id, tenant_id, account_id, full_name,
+                legacy_lead_id, lead_source, lead_notes,
+                lead_created_at, lead_updated_at, created_at, updated_at
+             ) VALUES ($1, $2, $3, '', $4, $5, $6, NOW(), NOW(), NOW(), NOW())",
         )
+        .bind(uuid::Uuid::new_v4())
         .bind(&auth.tenant_id)
+        .bind(account_id)
         .bind(&lead_id)
-        .bind(&company)
-        .bind(&domain)
         .bind(&primary_source)
         .bind(description.or(industry.clone()))
-        .bind(account_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -2011,24 +1974,23 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed contact point");
-        // The legacy status is deliberately `qualified`: the canonical read
-        // must NOT surface it (the canonical lifecycle says 'new').
+        // The lead mapping and lead-only projection live on the contact since
+        // migration 223. `legacy_lead_email` deliberately differs from the
+        // canonical point: the point must win.
         sqlx::query(
-            "INSERT INTO sales_leads \
-                 (id, tenant_id, company_name, domain, contact_email, contact_name, \
-                  score, source, status, notes, tags, deal_value, \
-                  account_id, contact_id, created_at, updated_at) \
-             VALUES ($1, $2, 'Legacy Co', 'legacy.example', 'ada@acme.example', 'Ada Lovelace', \
-                     42, 'import', 'qualified', 'seed notes', '[\"vip\"]'::jsonb, 1234.5, \
-                     $3, $4, NOW(), NOW())",
+            "UPDATE sales_contacts \
+                SET legacy_lead_id = $1, legacy_lead_email = 'ada@legacy.example', \
+                    lead_source = 'import', lead_score = 42, \
+                    lead_notes = 'seed notes', lead_tags = '[\"vip\"]'::jsonb, \
+                    lead_deal_value = 1234.5, lead_created_at = NOW(), lead_updated_at = NOW() \
+              WHERE id = $2 AND tenant_id = $3",
         )
         .bind(&lead_id)
-        .bind(&tenant)
-        .bind(account_id)
         .bind(contact_id)
+        .bind(&tenant)
         .execute(&pool)
         .await
-        .expect("seed lead bridge row");
+        .expect("map the contact as a lead");
 
         let old: (String, String, String) = sqlx::query_as(
             "SELECT id, COALESCE(email, contact_email, ''), COALESCE(contact_name, '') \
@@ -2038,7 +2000,7 @@ mod tests {
         .bind(&lead_id)
         .fetch_one(&pool)
         .await
-        .expect("legacy-shaped read");
+        .expect("view read");
 
         let rows = load_lead_entries(&pool, &tenant, None, None, 50, 0)
             .await
@@ -2050,7 +2012,12 @@ mod tests {
         assert_eq!(
             entry.contact_email.as_deref().unwrap_or_default(),
             old.1,
-            "email identity is unchanged for a linked lead"
+            "the view and the CTE must agree on the email identity"
+        );
+        assert_eq!(
+            entry.contact_email.as_deref(),
+            Some("ada@acme.example"),
+            "the canonical contact point must win over legacy_lead_email"
         );
         assert_eq!(
             entry.contact_name.as_deref().unwrap_or_default(),
@@ -2060,21 +2027,21 @@ mod tests {
         // Canonical fields win over stale legacy duplicates.
         assert_eq!(entry.company_name, "Canonical Co");
         assert_eq!(entry.domain, "acme.example");
-        // Lead-only fields still come from the bridge.
+        // Lead-only fields come from the canonical lead projection.
         assert_eq!(entry.source, "import");
         assert_eq!(entry.score, Some(42));
         assert_eq!(entry.notes.as_deref(), Some("seed notes"));
         assert_eq!(entry.tags, vec!["vip".to_string()]);
         assert_eq!(entry.deal_value, Some(1234.5));
-        // Status is canonical (contact active, account discovered → 'new'),
-        // NOT the legacy 'qualified' still sitting in sales_leads.status.
+        // Status is derived (contact active, account discovered → 'new').
         assert_eq!(
             entry.status, "new",
-            "the legacy status column must not be presented as truth"
+            "status must be the canonical derivation"
         );
 
         for statement in [
-            "DELETE FROM sales_leads WHERE tenant_id = $1",
+            "UPDATE sales_contacts SET legacy_lead_id = NULL, legacy_lead_email = NULL \
+             WHERE tenant_id = $1",
             "DELETE FROM sales_contact_points WHERE tenant_id = $1",
             "DELETE FROM sales_contacts WHERE tenant_id = $1",
             "DELETE FROM sales_accounts WHERE tenant_id = $1",
@@ -2094,14 +2061,14 @@ mod tests {
         lead_id: String,
     }
 
-    /// Seed one canonical account/contact/point plus the bridge row. The
-    /// legacy `status` starts at `legacy_status` so each test can prove the
-    /// column is neither written nor read.
+    /// Seed one canonical account/contact/point and map the contact as a
+    /// lead (`legacy_lead_id`) with the lead-only projection the view
+    /// renders. There is no stored status column since migration 223: status
+    /// is always derived.
     async fn seed_operator_lead(
         pool: &sqlx::PgPool,
         tenant: &str,
         suffix: &str,
-        legacy_status: &str,
     ) -> OperatorLeadFixture {
         let account_id = uuid::Uuid::new_v4();
         let contact_id = uuid::Uuid::new_v4();
@@ -2145,23 +2112,18 @@ mod tests {
         .await
         .expect("seed operator contact point");
         sqlx::query(
-            "INSERT INTO sales_leads \
-                 (id, tenant_id, company_name, domain, contact_email, contact_name, \
-                  score, source, status, account_id, contact_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, 0, 'test', $7, $8, $9)",
+            "UPDATE sales_contacts \
+                SET legacy_lead_id = $1, legacy_lead_email = $2, \
+                    lead_source = 'test', lead_score = 0 \
+              WHERE id = $3 AND tenant_id = $4",
         )
         .bind(&lead_id)
-        .bind(tenant)
-        .bind(format!("{suffix} Co"))
-        .bind(&domain)
         .bind(&email)
-        .bind(format!("{suffix} Contact"))
-        .bind(legacy_status)
-        .bind(account_id)
         .bind(contact_id)
+        .bind(tenant)
         .execute(pool)
         .await
-        .expect("seed operator lead bridge row");
+        .expect("map the operator contact as a lead");
 
         OperatorLeadFixture {
             contact_id,
@@ -2171,7 +2133,8 @@ mod tests {
 
     async fn cleanup_operator_fixture(pool: &sqlx::PgPool, tenant: &str) {
         for statement in [
-            "DELETE FROM sales_leads WHERE tenant_id = $1",
+            "UPDATE sales_contacts SET legacy_lead_id = NULL, legacy_lead_email = NULL \
+             WHERE tenant_id = $1",
             "DELETE FROM sales_contact_points WHERE tenant_id = $1",
             "DELETE FROM sales_contacts WHERE tenant_id = $1",
             "DELETE FROM sales_accounts WHERE tenant_id = $1",
@@ -2232,16 +2195,15 @@ mod tests {
 
     /// Adversarial test 1: the operator round trip. An `unqualified` decision
     /// through the admin update path must land on the canonical contact
-    /// lifecycle AND be visible in the CP's own read — not merely written to
-    /// a column. The legacy column starts at a contradictory `qualified` and
-    /// must stay untouched.
+    /// lifecycle AND be visible in the CP's own read AND in the derived view
+    /// — not merely written to a column.
     #[tokio::test]
     async fn operator_unqualified_decision_is_canonical_and_visible_in_the_cp_read() {
         let Some(pool) = crate::test_db::optional_pg_pool("cp_item17_unqualified").await else {
             return;
         };
         let tenant = format!("cp17u{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
-        let fixture = seed_operator_lead(&pool, &tenant, "unq", "qualified").await;
+        let fixture = seed_operator_lead(&pool, &tenant, "unq").await;
 
         let updated = apply_lead_update(
             &pool,
@@ -2265,16 +2227,16 @@ mod tests {
             "the operator's unqualified intent must land on the canonical lifecycle"
         );
 
-        let legacy: String =
+        let view_status: String =
             sqlx::query_scalar("SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2")
                 .bind(&fixture.lead_id)
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
-                .expect("legacy status");
+                .expect("view status");
         assert_eq!(
-            legacy, "qualified",
-            "the legacy status column must not be written"
+            view_status, "lost",
+            "the derived view must surface the operator's decision immediately"
         );
 
         let rows = load_lead_entries(&pool, &tenant, None, None, 50, 0)
@@ -2290,15 +2252,15 @@ mod tests {
     }
 
     /// Adversarial test 2: a status with no canonical equivalent is rejected
-    /// with the supported vocabulary named, and NOTHING is written (neither
-    /// the legacy column nor canonical state).
+    /// with the supported vocabulary named, and NOTHING is written (no
+    /// canonical lifecycle, no derived-status change).
     #[tokio::test]
     async fn unsupported_status_is_rejected_with_the_supported_list_and_writes_nothing() {
         let Some(pool) = crate::test_db::optional_pg_pool("cp_item17_unsupported").await else {
             return;
         };
         let tenant = format!("cp17x{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
-        let fixture = seed_operator_lead(&pool, &tenant, "bad", "qualified").await;
+        let fixture = seed_operator_lead(&pool, &tenant, "bad").await;
 
         let error = apply_lead_update(
             &pool,
@@ -2331,16 +2293,16 @@ mod tests {
             ("active", "discovered"),
             "a rejected status must not write canonical state"
         );
-        let legacy: String =
+        let view_status: String =
             sqlx::query_scalar("SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2")
                 .bind(&fixture.lead_id)
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
-                .expect("legacy status");
+                .expect("view status");
         assert_eq!(
-            legacy, "qualified",
-            "a rejected status must not write the legacy column either"
+            view_status, "new",
+            "a rejected status must not change the derived status either"
         );
 
         cleanup_operator_fixture(&pool, &tenant).await;
@@ -2355,7 +2317,7 @@ mod tests {
             return;
         };
         let tenant = format!("cp17m{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
-        let fixture = seed_operator_lead(&pool, &tenant, "mix", "qualified").await;
+        let fixture = seed_operator_lead(&pool, &tenant, "mix").await;
 
         let body = LeadUpdate {
             id: None,
@@ -2393,7 +2355,7 @@ mod tests {
                 .bind(&tenant)
                 .fetch_one(&pool)
                 .await
-                .expect("legacy projection row");
+                .expect("lead projection through the view");
         assert!(
             notes.is_none(),
             "the projection field must not be partially written"
@@ -2411,11 +2373,11 @@ mod tests {
             return;
         };
         let tenant = format!("cp17d{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
-        let first = seed_operator_lead(&pool, &tenant, "keep", "qualified").await;
-        let second = seed_operator_lead(&pool, &tenant, "gone", "qualified").await;
+        let first = seed_operator_lead(&pool, &tenant, "keep").await;
+        let second = seed_operator_lead(&pool, &tenant, "gone").await;
 
-        // The bridge row keeps the dangling uuid: `sales_leads.contact_id`
-        // has no FK (migration 200:90), so a deleted contact is a real state.
+        // Since migration 223 the lead id mapping lives ON the contact, so
+        // deleting the contact deletes the lead from the derived view.
         sqlx::query("DELETE FROM sales_contacts WHERE id = $1 AND tenant_id = $2")
             .bind(second.contact_id)
             .bind(&tenant)
@@ -2441,8 +2403,8 @@ mod tests {
             other => panic!("expected a validation rejection, got {other:?}"),
         };
         assert!(
-            message.contains("canonical contact"),
-            "the rejection must name the missing canonical link, got: {message}"
+            message.contains("was not found for this tenant"),
+            "the rejection must report the vanished lead, got: {message}"
         );
 
         let first_lifecycle: String = sqlx::query_scalar(
@@ -2462,15 +2424,16 @@ mod tests {
     }
 
     /// Identity updates are canonical too: `contactEmail`/`contactName` land
-    /// on `sales_contact_points`/`sales_contacts`, leaving the legacy bridge
-    /// identity columns untouched, and the CP read reflects the new values.
+    /// on `sales_contact_points`/`sales_contacts`, leaving the read-fallback
+    /// `legacy_lead_email` untouched, and the CP read reflects the new
+    /// values.
     #[tokio::test]
     async fn contact_identity_updates_are_written_canonically_not_to_the_bridge() {
         let Some(pool) = crate::test_db::optional_pg_pool("cp_item17_identity").await else {
             return;
         };
         let tenant = format!("cp17i{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
-        let fixture = seed_operator_lead(&pool, &tenant, "ident", "new").await;
+        let fixture = seed_operator_lead(&pool, &tenant, "ident").await;
 
         let body = LeadUpdate {
             id: Some(fixture.lead_id.clone()),
@@ -2502,18 +2465,20 @@ mod tests {
         );
         assert_eq!(contact_name, "Grace Hopper");
 
-        let (legacy_email, legacy_name): (Option<String>, Option<String>) = sqlx::query_as(
-            "SELECT contact_email, contact_name FROM sales_leads WHERE id = $1 AND tenant_id = $2",
+        // The read-fallback mirror is not the write target: it keeps the
+        // pre-update address while the canonical point carries the new one.
+        let fallback_email: Option<String> = sqlx::query_scalar(
+            "SELECT legacy_lead_email FROM sales_contacts WHERE id = $1 AND tenant_id = $2",
         )
-        .bind(&fixture.lead_id)
+        .bind(fixture.contact_id)
         .bind(&tenant)
         .fetch_one(&pool)
         .await
-        .expect("legacy identity columns");
+        .expect("lead email fallback");
         assert_eq!(
-            (legacy_email.as_deref(), legacy_name.as_deref()),
-            (Some("ident@example.com"), Some("ident Contact")),
-            "the bridge identity columns must not be the write target"
+            fallback_email.as_deref(),
+            Some("ident@example.com"),
+            "the fallback mirror must not be the write target"
         );
 
         let rows = load_lead_entries(&pool, &tenant, None, None, 50, 0)
@@ -2530,19 +2495,31 @@ mod tests {
         cleanup_operator_fixture(&pool, &tenant).await;
     }
 
-    /// Writer regression guard: the production halves of the two CP files
-    /// must not write the legacy `sales_leads.status` column. (The CP read
-    /// guard is the seeded `qualified` → `new` assertion above.)
+    /// Writer regression guard: `sales_leads` is a derived, read-only view
+    /// since migration 223, so the production halves of the CP files must
+    /// not contain ANY write against it. Identity/status/lead-only writes
+    /// all target the canonical tables.
     #[test]
-    fn cp_production_paths_never_write_the_legacy_lead_status() {
+    fn cp_production_paths_never_write_the_sales_leads_view() {
         let sales = include_str!("sales.rs");
         let sales_production = sales
             .split("#[cfg(test)]")
             .next()
             .expect("sales.rs has a test module");
+        for fragment in [
+            ["SET status", "="].join(" "),
+            ["INSERT INTO", "sales_leads"].join(" "),
+            ["UPDATE sales_leads", "SET"].join(" "),
+            ["DELETE FROM", "sales_leads"].join(" "),
+        ] {
+            assert!(
+                !sales_production.contains(&fragment),
+                "the admin sales route must not write the derived view (`{fragment}` found)"
+            );
+        }
         assert!(
-            !sales_production.contains(&["SET status", "="].join(" ")),
-            "the admin sales route must not write sales_leads.status"
+            sales_production.contains("UPDATE sales_contacts"),
+            "lead field writes must target the canonical contact table"
         );
 
         // web.rs has `#[cfg(test)]` blocks mid-file, so scan the whole file:

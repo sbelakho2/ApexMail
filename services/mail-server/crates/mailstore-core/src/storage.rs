@@ -2109,11 +2109,11 @@ mod tests {
 
     // ── DB-gated dedup semantics (skipped without TEST_DATABASE_URL) ──────
 
-    /// Connect to the test database when TEST_DATABASE_URL is set, following
-    /// the workspace convention of skipping (not failing) when absent.
-    async fn optional_pool() -> Option<PgPool> {
-        let url = std::env::var("TEST_DATABASE_URL").ok()?;
-        PgPool::connect(&url).await.ok()
+    /// The canonical database for this test (see `crate::test_db`): provisioned
+    /// through the production migrator so the shape is the canonical chain's,
+    /// never the base database's own history. `None` = TEST_DATABASE_URL unset.
+    async fn optional_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_pool(test_name).await
     }
 
     fn sample_message(account_id: Uuid, mailbox_id: Uuid, message_id: &str) -> StoredMessage {
@@ -2149,7 +2149,7 @@ mod tests {
 
     #[tokio::test]
     async fn delivery_dedup_collapses_but_user_copies_are_exempt() {
-        let Some(pool) = optional_pool().await else {
+        let Some(pool) = optional_pool("storage_dedup_exempt").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
@@ -2259,7 +2259,7 @@ mod tests {
     /// field NAME (case-insensitively) and matching the VALUE as a substring.
     #[tokio::test]
     async fn header_search_matches_field_and_value_not_subject() {
-        let Some(pool) = optional_pool().await else {
+        let Some(pool) = optional_pool("storage_header_search").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
@@ -2350,7 +2350,7 @@ mod tests {
     /// total_messages) must agree with the literal COUNT over rows.
     #[tokio::test]
     async fn message_count_quota_source_agrees_with_row_count() {
-        let Some(pool) = optional_pool().await else {
+        let Some(pool) = optional_pool("storage_message_count_quota").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };

@@ -1,31 +1,28 @@
-//! Interim production runner for the accounting-core payroll/expense sweeps.
+//! Production runner for the accounting-core payroll/expense/bank sweeps.
 //!
 //! The statutory reports this crate produces (KMD/TSD/annual report) must
 //! derive from the posted ledger, not from operational tables, so a complete
 //! ledger is a compliance concern. There is no dedicated accounting service or
-//! scheduler in the repository yet: the compliance server's existing cron is
-//! the honest interim host for the two sources whose policy lives in this
-//! crate.
+//! scheduler in the repository: the compliance server's existing cron is the
+//! host for all three unposted-source sweeps.
 //!
-//! # What is actually missing (stated plainly)
+//! # Writers are no longer missing
 //!
-//! * **Payroll** — nothing in the repository inserts `payroll_records`: there
-//!   is no payroll-run feature, admin endpoint or CLI. The missing piece is
-//!   the payroll-run feature itself; the posting side is complete.
+//! * **Payroll** — still no payroll-run feature writes `payroll_records`;
 //!   [`EstonianPayrollPolicy`] computes the statutory amounts from the
 //!   date-effective [`crate::tax_policy`] (the same formula as
 //!   `estonia_ou::query_employees`), and the sweep posts every unposted
 //!   record the moment any writer creates one.
 //! * **Expenses** — `operating_costs` is deployment-optional (migration 220
-//!   deliberately does not create it) and nothing writes it. The sweep
-//!   reports `source_table_missing` when the store is absent and posts every
-//!   positive row once a deployment provisions it or an expense feature
-//!   writes one. The missing piece is the expense-entry feature.
-//!
-//! The bank statement sweep is NOT run here: a bank ledger loop belongs to
-//! the bank feed service, which does not exist yet. It is implemented and
-//! tested in `accounting_core::sweeps` (`sweep_unposted_bank_statement_lines`)
-//! and awaits its host.
+//!   deliberately does not create it). The sweep reports
+//!   `source_table_missing` when the store is absent and posts every positive
+//!   row once a deployment provisions it or an expense feature writes one.
+//! * **Bank statements** — CLOSED: `accounting_core::bank_ingest` is the
+//!   writer (exposed at `POST /accounting/bank-statements/import` by this
+//!   service), and [`sweep_ledger_sources`] hosts
+//!   `sweep_unposted_bank_statement_lines` on the same tick. Ingested lines
+//!   reach the posted ledger with no further wiring; zero-amount lines are
+//!   reported unpostable and retained.
 
 use accounting_core::sweeps::{
     self, PayrollAmountsPolicy, PayrollRecordFacts, SweepConfig, SweepReport,
@@ -100,27 +97,49 @@ impl PayrollAmountsPolicy for EstonianPayrollPolicy {
     }
 }
 
-/// One sweep tick for the two compliance-owned financial sources.
+/// One sweep tick for the three compliance-owned financial sources.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct LedgerSweepReport {
     pub payroll: SweepReport,
     pub expenses: SweepReport,
+    pub bank_statement_lines: SweepReport,
 }
 
 impl LedgerSweepReport {
     pub fn total_posted(&self) -> u64 {
-        self.payroll.posted + self.expenses.posted
+        self.payroll.posted + self.expenses.posted + self.bank_statement_lines.posted
+    }
+
+    /// True when this tick saw no postable work and nothing worth reporting
+    /// (no claims, no unpostable rows, no missing optional store).
+    pub fn is_idle(&self) -> bool {
+        self.payroll.is_idle() && self.expenses.is_idle() && self.bank_statement_lines.is_idle()
     }
 }
 
-/// Run the payroll and expense sweeps once. Idempotent; safe to call on every
-/// tick and from multiple processes (SKIP LOCKED claim, see
+/// Run the payroll, expense and bank statement sweeps once. Idempotent; safe
+/// to call on every tick and from multiple processes (SKIP LOCKED claim, see
 /// `accounting_core::sweeps`).
-pub async fn sweep_payroll_and_expenses(db: &PgPool) -> anyhow::Result<LedgerSweepReport> {
+///
+/// Bank statement lines ingested through
+/// `POST /accounting/bank-statements/import` are picked up here within one
+/// tick; the ingest path itself performs no posting.
+pub async fn sweep_ledger_sources(db: &PgPool) -> anyhow::Result<LedgerSweepReport> {
     let config = SweepConfig::default();
     let payroll = sweeps::sweep_unposted_payroll(db, &config, &EstonianPayrollPolicy).await?;
     let expenses = sweeps::sweep_unposted_expenses(db, &config).await?;
-    Ok(LedgerSweepReport { payroll, expenses })
+    let bank_statement_lines = sweeps::sweep_unposted_bank_statement_lines(db, &config).await?;
+    Ok(LedgerSweepReport {
+        payroll,
+        expenses,
+        bank_statement_lines,
+    })
+}
+
+/// Historical name for [`sweep_ledger_sources`], kept because existing callers
+/// and DB-backed tests use it. It runs exactly the same three-source tick.
+pub async fn sweep_payroll_and_expenses(db: &PgPool) -> anyhow::Result<LedgerSweepReport> {
+    sweep_ledger_sources(db).await
 }
 
 #[cfg(test)]

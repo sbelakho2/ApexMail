@@ -1748,22 +1748,21 @@ mod tests {
             .await
             .expect("seed enrollment");
         }
-        // The transitional bridge points at contact B, NOT at the sender's
-        // canonical contact A: canonical-first must ignore it.
+        // Contact B — not the sender's canonical contact A — carries the lead
+        // id mapping: canonical-first resolution must ignore it. (Since
+        // migration 223 the mapping lives on the contact; `sales_leads` is a
+        // derived view.)
         sqlx::query(
-            "INSERT INTO sales_leads \
-                 (id, tenant_id, company_name, domain, contact_email, status, account_id, contact_id) \
-             VALUES ($1, $2, 'Item17 Co', $3, $4, 'new', $5, $6)",
+            "UPDATE sales_contacts SET legacy_lead_id = $1, legacy_lead_email = $2 \
+             WHERE id = $3 AND tenant_id = $4",
         )
         .bind(&lead_id)
-        .bind(&tenant)
-        .bind(format!("{suffix}.example"))
         .bind(&email_b)
-        .bind(account_id)
         .bind(contact_b)
+        .bind(&tenant)
         .execute(&pool)
         .await
-        .expect("seed bridge lead");
+        .expect("map contact B as a lead");
         sqlx::query(
             "INSERT INTO inbound_messages \
                  (id, tenant_id, lead_id, from_email, to_email, subject, body_text, \
@@ -1796,13 +1795,13 @@ mod tests {
         );
         assert_eq!(resolved.enrollment_id, enrollment_a);
 
-        // Remove the bridge row entirely: canonical resolution must not need
-        // the fallback.
-        sqlx::query("DELETE FROM sales_leads WHERE id = $1")
-            .bind(&lead_id)
+        // Remove the lead mapping entirely: canonical resolution must not
+        // need the fallback.
+        sqlx::query("UPDATE sales_contacts SET legacy_lead_id = NULL WHERE id = $1")
+            .bind(contact_b)
             .execute(&pool)
             .await
-            .expect("delete the bridge lead");
+            .expect("delete the bridge lead mapping");
         let resolved_without_bridge = handler
             .resolve_enrollment(&msg)
             .await
@@ -1828,6 +1827,178 @@ mod tests {
             .expect("resolution must ignore inbound_messages.lead_id entirely");
         assert_eq!(resolved_after_bogus_lead.contact_id, contact_a);
         assert_eq!(resolved_after_bogus_lead.enrollment_id, enrollment_a);
+
+        pool.close().await;
+    }
+
+    /// The reply handler's canonical lead update (the enrollment lock) is
+    /// visible through the derived `sales_leads` view immediately: before the
+    /// lock the active enrollment derives `contacted`, after the lock the
+    /// replied enrollment derives `engaged`. This is the reply-driven "lead
+    /// update lands" contract now that the handler writes no lead row.
+    #[tokio::test]
+    async fn reply_lock_is_visible_through_the_derived_lead_view() {
+        let pool =
+            match migrator::test_support::fresh_canonical_pool("worker_item17", "reply_view").await
+            {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            };
+        let Some(pool) = pool else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("item17v{suffix}");
+        let account_id = Uuid::new_v4();
+        let contact_id = Uuid::new_v4();
+        let point_id = Uuid::new_v4();
+        let sequence_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let enrollment_id = Uuid::new_v4();
+        let email = format!("reply-view-{suffix}@example.com");
+        let lead_id = format!("lead{suffix}");
+        let inbound_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..18]);
+
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+             VALUES ($1, $2, 'Reply View Co', $3)",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{suffix}.example"))
+        .execute(&pool)
+        .await
+        .expect("seed account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Reply View Contact')",
+        )
+        .bind(contact_id)
+        .bind(&tenant)
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("seed contact");
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+             VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid')",
+        )
+        .bind(point_id)
+        .bind(&tenant)
+        .bind(contact_id)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("seed contact point");
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, status) \
+             VALUES ($1, $2, 'Reply View Sequence', 'active')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed sequence");
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions \
+                 (id, tenant_id, sequence_id, version, status, locale, approved_by, approved_at) \
+             VALUES ($1, $2, $3, 1, 'active', 'en', 'fixture', NOW())",
+        )
+        .bind(version_id)
+        .bind(&tenant)
+        .bind(sequence_id)
+        .execute(&pool)
+        .await
+        .expect("seed version");
+        sqlx::query(
+            "INSERT INTO sales_enrollments \
+                 (id, tenant_id, sequence_version_id, account_id, contact_id, \
+                  contact_point_id, state, current_step_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'active', 0)",
+        )
+        .bind(enrollment_id)
+        .bind(&tenant)
+        .bind(version_id)
+        .bind(account_id)
+        .bind(contact_id)
+        .bind(point_id)
+        .execute(&pool)
+        .await
+        .expect("seed enrollment");
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, from_email, to_email, subject, body_text, headers, received_at) \
+             VALUES ($1, $2, $3, 'sales@apex.example', 'Re: reply view', 'sounds good', \
+                     '{}'::jsonb, NOW() - INTERVAL '1 minute')",
+        )
+        .bind(&inbound_id)
+        .bind(&tenant)
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("seed inbound");
+
+        // Map the canonical contact as the lead (migration 223).
+        sqlx::query(
+            "UPDATE sales_contacts \
+                SET legacy_lead_id = $1, legacy_lead_email = $2, \
+                    lead_created_at = NOW(), lead_updated_at = NOW() \
+              WHERE id = $3 AND tenant_id = $4",
+        )
+        .bind(&lead_id)
+        .bind(&email)
+        .bind(contact_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("map the reply contact as a lead");
+
+        let status_before: String =
+            sqlx::query_scalar("SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2")
+                .bind(&lead_id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("view status before the reply");
+        assert_eq!(
+            status_before, "contacted",
+            "an active enrollment derives `contacted`"
+        );
+
+        let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+        let msg = fetch_message_by_id(&handler, &inbound_id)
+            .await
+            .expect("claim the inbound reply");
+        let resolved = handler
+            .resolve_enrollment(&msg)
+            .await
+            .expect("resolve")
+            .expect("the canonical contact point must resolve");
+        assert_eq!(resolved.contact_id, contact_id);
+
+        let decision = policy::decide(
+            PolicyInput::new(ReplyDisposition::Positive, 0.95),
+            Utc::now(),
+        );
+        handler
+            .lock_enrollment(&msg, &decision, &resolved)
+            .await
+            .expect("the reply lock must land");
+
+        let status_after: String =
+            sqlx::query_scalar("SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2")
+                .bind(&lead_id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("view status after the reply");
+        assert_eq!(
+            status_after, "engaged",
+            "the handler's canonical enrollment lock must be visible through the view"
+        );
 
         pool.close().await;
     }

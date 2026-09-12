@@ -64,6 +64,9 @@ urlencoding = { workspace = true }
 moka = { workspace = true }
 
 # Internal crates
+# Statutory accounting ledger (migration 220/225): the bank statement import
+# route validates and stores statements through accounting-core::bank_ingest.
+accounting-core = { path = "../accounting-core" }
 email-grader = { path = "../email-grader" }
 threat-intel = { path = "../threat-intel" }
 billing-service = { path = "../billing-service" }

@@ -7,6 +7,8 @@ mod encryption;
 mod models;
 mod service;
 mod storage;
+#[cfg(test)]
+mod test_db;
 
 pub use encryption::*;
 pub use models::*;

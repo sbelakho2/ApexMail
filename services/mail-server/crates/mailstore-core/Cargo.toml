@@ -57,3 +57,11 @@ base64.workspace = true
 # Crypto helpers
 rand.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+# Canonical test fixtures (audit F01): DB-gated tests provision a throwaway
+# database carrying the REAL production migration chain through the production
+# migrator's test_support, instead of connecting to the base TEST_DATABASE_URL
+# — whose early history predates later canonical migrations (e.g. 097 drops the
+# account-wide UNIQUE(account_id, message_id) index these tests depend on).
+migrator = { path = "../migrator" }

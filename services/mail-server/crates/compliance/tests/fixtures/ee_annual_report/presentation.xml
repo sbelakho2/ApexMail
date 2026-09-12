@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test fixture: presentation linkbase (parent -> child statement structure). -->
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+               xmlns:xlink="http://www.w3.org/1999/xlink"
+               xmlns:xs="http://www.w3.org/2001/XMLSchema"
+               xmlns:xbrli="http://www.xbrl.org/2003/instance"
+               xmlns:ee="http://apexmail.test/xbrl/ee-annual-report/2026-01-01">
+
+  <link:presentationLink xlink:type="extended"
+                         xlink:role="http://apexmail.test/role/balance-sheet">
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Assets" xlink:label="loc_Assets"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Liabilities" xlink:label="loc_Liabilities"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Equity" xlink:label="loc_Equity"/>
+    <link:presentationArc xlink:type="arc"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child"
+                          xlink:from="loc_Assets" xlink:to="loc_Liabilities" order="1"/>
+    <link:presentationArc xlink:type="arc"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child"
+                          xlink:from="loc_Assets" xlink:to="loc_Equity" order="2"/>
+  </link:presentationLink>
+
+  <link:presentationLink xlink:type="extended"
+                         xlink:role="http://apexmail.test/role/income-statement">
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_NetProfit" xlink:label="loc_NetProfit"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Revenue" xlink:label="loc_Revenue"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Expenses" xlink:label="loc_Expenses"/>
+    <link:presentationArc xlink:type="arc"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child"
+                          xlink:from="loc_NetProfit" xlink:to="loc_Revenue" order="1"/>
+    <link:presentationArc xlink:type="arc"
+                          xlink:arcrole="http://www.xbrl.org/2003/arcrole/parent-child"
+                          xlink:from="loc_NetProfit" xlink:to="loc_Expenses" order="2"/>
+  </link:presentationLink>
+
+</link:linkbase>

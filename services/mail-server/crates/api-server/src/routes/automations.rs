@@ -3,19 +3,25 @@
 //! # Send admission (audit implementation-order item 3)
 //!
 //! This module is CRUD only: it persists `automations` rows and their ordered
-//! `actions` JSON. It has NO executor — nothing in this workspace reads
-//! `automations.actions` and enqueues mail (verified by a source search for
-//! `FROM automations` / `automation` consumers; the only readers are the five
-//! statements in this file, and no `email_queue` insert exists here).
-//!
-//! When an executor is added, its `send_email` action MUST pass the ONE shared
-//! admission gate before enqueueing:
-//! `billing_service::send_admission::SendAdmissionService::admit` with the
-//! tenant, [`AUTOMATION_MESSAGE_CATEGORY`], the run's stable idempotency
+//! `actions` JSON. The EXECUTOR now exists —
+//! `sales_autopilot::automations::AutomationExecutor` (migration 224 provides
+//! the event inbox, run log and per-action log) claims due trigger events,
+//! evaluates `trigger_config`/`conditions` and executes `actions`. Every
+//! `send_email` action passes the ONE shared admission gate before
+//! enqueueing: `billing_service::send_admission::SendAdmissionService::admit`
+//! with the tenant, an EXPLICIT category, the run's stable idempotency
 //! identity (so a retry cannot double-reserve), and the same
 //! commit-after-enqueue / rollback-on-refusal settlement the REST, SMTP
-//! submission and sales paths use. Refusals must map like sales: quota is a
-//! retryable deferral, suppression is a non-retryable skip.
+//! submission and sales paths use. Refusals are classified like sales: quota
+//! and metering/suppression-store unavailability are retryable deferrals, a
+//! suppression is a non-retryable skip.
+//!
+//! [`AUTOMATION_MESSAGE_CATEGORY`] is the category of automation/nurture
+//! mail (every contact-lifecycle trigger): commercial mail, so `marketing`
+//! and deliberately NOT preference-exempt. The executor's ONLY transactional
+//! automation sends are 1:1 replies to a message the recipient sent
+//! (`message.received`), which carry
+//! `sales_autopilot::automations::AUTOMATION_REPLY_CATEGORY` instead.
 
 use super::helpers::{clamp_limit, decode_cursor, encode_cursor, has_more};
 use axum::extract::{Path, Query, State};
@@ -30,20 +36,20 @@ use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
-/// The message category every automation `send_email` action carries through
-/// the ONE admission gate.
+/// The message category every contact-lifecycle automation `send_email`
+/// action carries through the ONE admission gate.
 ///
 /// Automations are CUSTOMER-configured, trigger-driven lifecycle messages
-/// (welcome series, onboarding, order follow-ups) — the documented action
-/// contract is "send a transactional email using a template". The category is
-/// declared here EXPLICITLY rather than defaulted: global suppression still
-/// applies to it (admission checks the canonical suppression list for every
-/// category; only the per-category marketing opt-out exemption differs), and
-/// the eventual executor passes this exact constant to
-/// `SendAdmissionService::admit` instead of letting the
-/// `message_category` schema default decide.
+/// (welcome series, onboarding, re-engagement): commercial mail. The category
+/// is `marketing` — declared EXPLICITLY rather than defaulted — and is NOT
+/// preference-exempt, exactly like the sales campaign path. Global
+/// suppression still applies to it (admission checks the canonical
+/// suppression list for every category). The ONLY transactional automation
+/// sends are 1:1 replies to an inbound message (`message.received`), which
+/// `sales_autopilot::automations` admits under
+/// `AUTOMATION_REPLY_CATEGORY`.
 pub const AUTOMATION_MESSAGE_CATEGORY: &str =
-    apexmail_lib::email_headers::message_category::TRANSACTIONAL;
+    apexmail_lib::email_headers::message_category::MARKETING;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -456,22 +462,25 @@ mod tests {
     /// Audit implementation-order item 3: the automation send category is
     /// declared explicitly and validated by the SAME shared helper the
     /// admission gate uses — it is never the `message_category` schema
-    /// default.
+    /// default. Contact-lifecycle automations are commercial mail: the
+    /// category is `marketing` and gets NO opt-out exemption (the executor's
+    /// only transactional automation sends are `message.received` replies,
+    /// admitted under `sales_autopilot::automations::AUTOMATION_REPLY_CATEGORY`).
     #[test]
-    fn automation_send_category_is_explicitly_transactional() {
+    fn automation_send_category_is_explicitly_marketing() {
         use apexmail_lib::email_headers::message_category;
         assert_eq!(
-            AUTOMATION_MESSAGE_CATEGORY, "transactional",
-            "automations carry the documented transactional class"
+            AUTOMATION_MESSAGE_CATEGORY, "marketing",
+            "automation/nurture mail is commercial mail"
         );
         assert_eq!(
             message_category::validate(AUTOMATION_MESSAGE_CATEGORY).as_deref(),
-            Some("transactional"),
+            Some("marketing"),
             "the constant must pass the ONE shared validator admission uses"
         );
         assert!(
-            message_category::is_preference_exempt(AUTOMATION_MESSAGE_CATEGORY),
-            "a customer-configured lifecycle automation is transactional-class"
+            !message_category::is_preference_exempt(AUTOMATION_MESSAGE_CATEGORY),
+            "an automation must not acquire an opt-out exemption"
         );
     }
 

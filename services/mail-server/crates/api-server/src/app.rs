@@ -574,6 +574,12 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::system_sender::router(),
         )
         .nest("/v1/admin/vat", routes::admin::vat::router())
+        // Bank statement ingestion — writes bank_statement_lines, the source
+        // the compliance cron's sweep posts (compliance::ledger_sweep).
+        .nest(
+            "/v1/admin/accounting",
+            routes::bank_statements::router(),
+        )
         // Zero-JS control-plane form routes (/web/admin/*) ride the SAME
         // system-tenant gate as the JSON admin surface: a customer session
         // (any non-system tenant) is rejected before the handler runs.

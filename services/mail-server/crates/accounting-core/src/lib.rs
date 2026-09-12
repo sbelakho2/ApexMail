@@ -48,9 +48,11 @@
 //! flow that already records the event (see
 //! `billing-service/src/accounting_postings.rs`).
 //!
-//! Payroll, expenses and bank statements have NO production writer in the
-//! repository (no payroll run, no expense entry, no bank feed). For those,
-//! [`sweeps`] posts every unposted source row with the same `FOR UPDATE SKIP
+//! Payroll and expenses still have NO production writer in the repository
+//! (no payroll run, no expense entry). Bank statements now do:
+//! [`bank_ingest`] validates and stores CSV statements (migration 225), and
+//! the compliance cron hosts the bank sweep. For sources without a writer,
+//! [`sweeps`] posts every unposted row with the same `FOR UPDATE SKIP
 //! LOCKED` discipline as the projectors, so a future writer — or `psql` — is
 //! posted with no further wiring; see the module docs for the exact claim
 //! protocol and the per-source gap statement.
@@ -68,6 +70,7 @@
 )]
 
 pub mod adapters;
+pub mod bank_ingest;
 pub mod chart;
 pub mod derive;
 pub mod error;

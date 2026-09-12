@@ -1820,17 +1820,17 @@ mod tests {
 
     #[tokio::test]
     async fn copy_message_creates_distinct_row_and_fresh_uid() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        // The canonical database for this test (see `crate::test_db`), not the
+        // base TEST_DATABASE_URL: that database's own history predates canonical
+        // migrations (097 drops the account-wide UNIQUE(account_id, message_id)
+        // index these tests depend on being gone).
+        let Some(pool) = crate::test_db::canonical_pool("copy_message_creates_distinct_row_and_fresh_uid").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
-            eprintln!("skipping: TEST_DATABASE_URL unreachable");
-            return;
-        };
         let storage = Arc::new(MessageStorage::new(pool.clone()));
-        if let Err(e) = storage.initialize().await {
-            eprintln!("skipping: migrator could not run ({e})");
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
             return;
         }
         let svc = MailstoreServiceImpl::new(storage);
@@ -1977,17 +1977,17 @@ mod tests {
     /// keeps deduplicating.
     #[tokio::test]
     async fn store_message_passes_dedup_exempt_through_to_storage() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        // The canonical database for this test (see `crate::test_db`), not the
+        // base TEST_DATABASE_URL: that database's own history predates canonical
+        // migrations (097 drops the account-wide UNIQUE(account_id, message_id)
+        // index these tests depend on being gone).
+        let Some(pool) = crate::test_db::canonical_pool("store_message_passes_dedup_exempt_through_to_storage").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
-            eprintln!("skipping: TEST_DATABASE_URL unreachable");
-            return;
-        };
         let storage = Arc::new(MessageStorage::new(pool.clone()));
-        if let Err(e) = storage.initialize().await {
-            eprintln!("skipping: migrator could not run ({e})");
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
             return;
         }
         let svc = MailstoreServiceImpl::new(storage);
@@ -2094,17 +2094,17 @@ mod tests {
 
     #[tokio::test]
     async fn store_message_without_internal_date_uses_now() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        // The canonical database for this test (see `crate::test_db`), not the
+        // base TEST_DATABASE_URL: that database's own history predates canonical
+        // migrations (097 drops the account-wide UNIQUE(account_id, message_id)
+        // index these tests depend on being gone).
+        let Some(pool) = crate::test_db::canonical_pool("store_message_without_internal_date_uses_now").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
-            eprintln!("skipping: TEST_DATABASE_URL unreachable");
-            return;
-        };
         let storage = Arc::new(MessageStorage::new(pool.clone()));
-        if let Err(e) = storage.initialize().await {
-            eprintln!("skipping: migrator could not run ({e})");
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
             return;
         }
         let svc = MailstoreServiceImpl::new(storage);
@@ -2469,17 +2469,17 @@ mod tests {
 
     #[tokio::test]
     async fn copy_failure_mid_batch_rolls_back_earlier_copies() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        // The canonical database for this test (see `crate::test_db`), not the
+        // base TEST_DATABASE_URL: that database's own history predates canonical
+        // migrations (097 drops the account-wide UNIQUE(account_id, message_id)
+        // index these tests depend on being gone).
+        let Some(pool) = crate::test_db::canonical_pool("copy_failure_mid_batch_rolls_back_earlier_copies").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
-            eprintln!("skipping: TEST_DATABASE_URL unreachable");
-            return;
-        };
         let storage = Arc::new(MessageStorage::new(pool.clone()));
-        if let Err(e) = storage.initialize().await {
-            eprintln!("skipping: migrator could not run ({e})");
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
             return;
         }
         let svc = MailstoreServiceImpl::new(storage);
@@ -2604,17 +2604,17 @@ mod tests {
 
     #[tokio::test]
     async fn move_batch_maps_every_uid_atomically() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        // The canonical database for this test (see `crate::test_db`), not the
+        // base TEST_DATABASE_URL: that database's own history predates canonical
+        // migrations (097 drops the account-wide UNIQUE(account_id, message_id)
+        // index these tests depend on being gone).
+        let Some(pool) = crate::test_db::canonical_pool("move_batch_maps_every_uid_atomically").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
-            eprintln!("skipping: TEST_DATABASE_URL unreachable");
-            return;
-        };
         let storage = Arc::new(MessageStorage::new(pool.clone()));
-        if let Err(e) = storage.initialize().await {
-            eprintln!("skipping: migrator could not run ({e})");
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
             return;
         }
         let svc = MailstoreServiceImpl::new(storage);
@@ -2709,17 +2709,17 @@ mod tests {
 
     #[tokio::test]
     async fn search_rpc_header_convention_honors_field_name() {
-        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+        // The canonical database for this test (see `crate::test_db`), not the
+        // base TEST_DATABASE_URL: that database's own history predates canonical
+        // migrations (097 drops the account-wide UNIQUE(account_id, message_id)
+        // index these tests depend on being gone).
+        let Some(pool) = crate::test_db::canonical_pool("search_rpc_header_convention_honors_field_name").await else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
-        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
-            eprintln!("skipping: TEST_DATABASE_URL unreachable");
-            return;
-        };
         let storage = Arc::new(MessageStorage::new(pool.clone()));
-        if let Err(e) = storage.initialize().await {
-            eprintln!("skipping: migrator could not run ({e})");
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
             return;
         }
         let svc = MailstoreServiceImpl::new(storage);

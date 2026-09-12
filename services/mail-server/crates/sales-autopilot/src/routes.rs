@@ -1016,9 +1016,9 @@ async fn create_conversion(
             return Err(SalesError::CampaignNotFound(body.campaign_id));
         }
 
-        // Verify the lead exists and belongs to this tenant
-        // `sales_leads.id` is TEXT (lead ids use several formats), so the
-        // Uuid must be bound as its string form — binding the raw Uuid
+        // Verify the lead exists and belongs to this tenant. `sales_leads` is
+        // the derived view and `id` is TEXT (lead ids use several formats),
+        // so the Uuid must be bound as its string form — binding the raw Uuid
         // produced `operator does not exist: text = uuid` (HTTP 500).
         let lead_exists: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM sales_leads WHERE id = $1 AND tenant_id = $2",
@@ -1033,6 +1033,9 @@ async fn create_conversion(
             return Err(SalesError::LeadNotFound(body.lead_id.to_string()));
         }
 
+        // `lead_id` is TEXT since migration 223 and FK-references
+        // sales_contacts.legacy_lead_id, so the id is stored as its string
+        // form (the API keeps exposing a Uuid; see ConversionRow).
         let conversion_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO sales_conversions (id, tenant_id, campaign_id, lead_id, revenue, description, converted_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -1040,7 +1043,7 @@ async fn create_conversion(
         .bind(conversion_id)
         .bind(&tenant_id)
         .bind(body.campaign_id)
-        .bind(body.lead_id)
+        .bind(body.lead_id.to_string())
         .bind(body.revenue)
         .bind(&body.description)
         .bind(chrono::Utc::now())
@@ -1081,9 +1084,15 @@ async fn list_conversions(
     let (limit, offset) = normalize_pagination(q.limit, q.offset, 100, 500);
     let span = tracing::info_span!("list_conversions", tenant_id = %tenant_id, operation = "list_conversions");
     async move {
+        // `sales_conversions.lead_id` is TEXT since migration 223 (a real
+        // reference to sales_contacts.legacy_lead_id). Conversion API lead
+        // ids are UUIDs, so the read casts back to the API's Uuid type; the
+        // cast is safe because only this API ever inserted the column and it
+        // always bound a Uuid string.
         let rows: Vec<ConversionRow> = if let Some(cid) = q.campaign_id {
             sqlx::query_as::<_, ConversionRow>(
-                "SELECT id, tenant_id, campaign_id, lead_id, revenue, description, converted_at \
+                "SELECT id, tenant_id, campaign_id, lead_id::uuid AS lead_id, revenue, \
+                        description, converted_at \
                  FROM sales_conversions \
                  WHERE tenant_id = $1 AND campaign_id = $2 \
                  ORDER BY converted_at DESC LIMIT $3 OFFSET $4",
@@ -1097,13 +1106,14 @@ async fn list_conversions(
             .map_err(|e| SalesError::Database(e.to_string()))?
         } else if let Some(lid) = q.lead_id {
             sqlx::query_as::<_, ConversionRow>(
-                "SELECT id, tenant_id, campaign_id, lead_id, revenue, description, converted_at \
+                "SELECT id, tenant_id, campaign_id, lead_id::uuid AS lead_id, revenue, \
+                        description, converted_at \
                  FROM sales_conversions \
                  WHERE tenant_id = $1 AND lead_id = $2 \
                  ORDER BY converted_at DESC LIMIT $3 OFFSET $4",
             )
             .bind(&tenant_id)
-            .bind(lid)
+            .bind(lid.to_string())
             .bind(limit)
             .bind(offset)
             .fetch_all(&state.db)
@@ -1111,7 +1121,8 @@ async fn list_conversions(
             .map_err(|e| SalesError::Database(e.to_string()))?
         } else {
             sqlx::query_as::<_, ConversionRow>(
-                "SELECT id, tenant_id, campaign_id, lead_id, revenue, description, converted_at \
+                "SELECT id, tenant_id, campaign_id, lead_id::uuid AS lead_id, revenue, \
+                        description, converted_at \
                  FROM sales_conversions \
                  WHERE tenant_id = $1 \
                  ORDER BY converted_at DESC LIMIT $2 OFFSET $3",

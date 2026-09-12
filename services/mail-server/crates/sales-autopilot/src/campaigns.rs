@@ -1124,7 +1124,8 @@ impl CampaignManager {
                  FROM sales_campaign_recipients r \
                  JOIN sales_campaigns c ON r.campaign_id = c.id \
                  LEFT JOIN sales_leads l \
-                   ON l.tenant_id = c.tenant_id AND LOWER(l.contact_email) = LOWER(r.email) \
+                   ON l.tenant_id = c.tenant_id \
+                  AND LOWER(COALESCE(l.contact_email, l.email)) = LOWER(r.email) \
                  WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL \
                  AND NOT EXISTS (\
                      SELECT 1 FROM sales_unsubscribes u \

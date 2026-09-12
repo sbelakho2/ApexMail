@@ -19,12 +19,11 @@ use crate::state::AppState;
 fn discovered_leads_sql() -> String {
     format!(
         "{cte}
-         SELECT l.id::text, l.company_name, l.domain, l.source, cl.status,
+         SELECT cl.id::text, cl.company_name, cl.domain, cl.source, cl.status,
                 COALESCE(a.industry, ''), cl.created_at
-         FROM sales_leads l
-         JOIN canonical_leads cl ON cl.id = l.id AND cl.tenant_id = l.tenant_id
+         FROM canonical_leads cl
          LEFT JOIN sales_accounts a
-                ON a.id = l.account_id AND a.tenant_id = l.tenant_id
+                ON a.id = cl.account_id AND a.tenant_id = cl.tenant_id
          ORDER BY cl.created_at DESC
          LIMIT 100",
         cte = super::sales::CANONICAL_LEAD_CTE
@@ -174,8 +173,8 @@ mod tests {
             &uuid::Uuid::new_v4().simple().to_string()[..12]
         );
 
-        // A canonical lead: account + contact + point + the bridge row the CTE
-        // joins through.
+        // A canonical lead: account + contact + point + the id mapping the
+        // derived view (and the CTE) reads.
         let account_id = uuid::Uuid::new_v4();
         let contact_id = uuid::Uuid::new_v4();
         let lead_id = format!("lead-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
@@ -215,18 +214,37 @@ mod tests {
         .await
         .expect("seed contact point");
         sqlx::query(
-            "INSERT INTO sales_leads \
-                 (id, tenant_id, company_name, domain, status, score, source, account_id, contact_id) \
-             VALUES ($1, $2, 'Canonical Co', $3, 'new', 42, 'fixture', $4, $5)",
+            "UPDATE sales_contacts \
+                SET legacy_lead_id = $1, lead_source = 'fixture', lead_score = 42 \
+              WHERE id = $2 AND tenant_id = $3",
         )
         .bind(&lead_id)
-        .bind(&tenant)
-        .bind(format!("{account_id}.example"))
-        .bind(account_id)
         .bind(contact_id)
+        .bind(&tenant)
         .execute(&pool)
         .await
-        .expect("seed bridge lead");
+        .expect("map the contact as a lead");
+
+        // A discovery-imported lead has the writer's exact shape: a contact
+        // carrying the id mapping and lead projection, NO contact point
+        // (nothing is fabricated), empty full_name.
+        let discovered_lead_id = format!(
+            "lead-discovery-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..11]
+        );
+        sqlx::query(
+            "INSERT INTO sales_contacts \
+                 (id, tenant_id, account_id, full_name, legacy_lead_id, \
+                  lead_source, lead_created_at, lead_updated_at) \
+             VALUES ($1, $2, $3, '', $4, 'discovery', NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(account_id)
+        .bind(&discovered_lead_id)
+        .execute(&pool)
+        .await
+        .expect("seed discovery-shaped lead");
 
         // Exactly the handler's tuple: id, company, domain, source, status,
         // industry, created_at.
@@ -253,8 +271,21 @@ mod tests {
             "description is the ACCOUNT industry — industry never lived on the lead"
         );
 
+        // The discovery insert is visible in the CP list immediately.
+        let discovered = rows
+            .iter()
+            .find(|r| r.0 == discovered_lead_id)
+            .expect("a discovery-imported lead must be visible in the CP list");
+        assert_eq!(discovered.3.as_deref(), Some("discovery"));
+        assert_eq!(discovered.4.as_deref(), Some("new"));
+        assert_eq!(
+            discovered.5.as_deref(),
+            Some("Email Infrastructure"),
+            "the discovery lead inherits the account industry"
+        );
+
         for stmt in [
-            "DELETE FROM sales_leads WHERE tenant_id = $1",
+            "UPDATE sales_contacts SET legacy_lead_id = NULL WHERE tenant_id = $1",
             "DELETE FROM sales_contact_points WHERE tenant_id = $1",
             "DELETE FROM sales_contacts WHERE tenant_id = $1",
             "DELETE FROM sales_accounts WHERE tenant_id = $1",

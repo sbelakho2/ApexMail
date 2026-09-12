@@ -13,9 +13,10 @@
 //!   `compliance/src/estonia_ou.rs` reads it, through a table-existence
 //!   guard). The missing piece is the expense-entry feature (and the
 //!   deployment's provisioning of the store).
-//! * **bank** — `bank_statement_lines` is created by migration 220 but there
-//!   is no bank feed / statement importer anywhere in the repository. The
-//!   missing piece is the feed/import feature.
+//! * **bank** — CLOSED by [`crate::bank_ingest`] (migration 225): statements
+//!   are ingested as CSV with a database-enforced identity, and the
+//!   compliance cron hosts [`sweep_unposted_bank_statement_lines`] on the
+//!   same tick as the payroll/expense sweeps.
 //!
 //! This module is the smallest honest closure of those gaps: a sweep per
 //! source that posts every row that is not yet posted. It needs no product
@@ -437,11 +438,13 @@ const CLAIM_BANK_SQL: &str = r#"
 /// Post every unreconciled, non-zero `bank_statement_lines` row (up to
 /// `batch_size` per tick).
 ///
-/// There is no bank feed writer in the repository: this sweep is what makes
-/// the bank adapter fire the moment a statement importer (or `psql`) inserts
-/// lines. Matching a receipt against a specific invoice remains the separate
-/// reconciliation workflow (`bank_reconciliations`); this posts the line's
-/// generic ledger effect exactly once.
+/// The writer is [`crate::bank_ingest::ingest_bank_statement`] (statements
+/// ingested as CSV, migration 225); the compliance cron hosts this sweep
+/// next to the payroll/expense sweeps, so an ingested line reaches the
+/// posted ledger within one tick. Matching a receipt against a specific
+/// invoice remains the separate reconciliation workflow
+/// (`bank_reconciliations`); this posts the line's generic ledger effect
+/// exactly once.
 pub async fn sweep_unposted_bank_statement_lines(
     pool: &PgPool,
     config: &SweepConfig,
@@ -494,9 +497,9 @@ pub async fn sweep_unposted_bank_statement_lines(
 // ---------------------------------------------------------------------------
 
 /// Run all three source sweeps once. A dedicated accounting scheduler does
-/// not exist yet: the compliance server's cron is the interim host for the
-/// payroll/expense pair (`compliance::ledger_sweep`), while the bank sweep
-/// awaits the bank-feed service that will own a statement ledger loop.
+/// not exist: the compliance server's cron hosts all three sources
+/// (`compliance::ledger_sweep::sweep_ledger_sources`), including the bank
+/// statement sweep fed by [`crate::bank_ingest`].
 pub async fn sweep_all_unposted(
     pool: &PgPool,
     config: &SweepConfig,

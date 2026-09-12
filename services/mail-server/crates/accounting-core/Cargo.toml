@@ -8,6 +8,10 @@ description = "ApexMail statutory accounting core — journals, periods, source 
 
 [dependencies]
 sqlx = { workspace = true }
+# Bank statement CSV parsing (the format the product receives; see
+# src/bank_ingest.rs). The crate is already in the workspace lockfile via
+# api-server.
+csv = "1.3"
 chrono = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }

@@ -1,155 +1,126 @@
 # Sales Autopilot
 
-> **Implementation Note (2026-04):** `sales-autopilot` runs as a separate Axum service for ApexMail's internal sales workflow. It is not part of the customer-facing `/v1` API surface.
+> **Implementation Note (2026-09):** `sales-autopilot` runs as a separate Axum service for ApexMail's internal sales workflow. It is not part of the customer-facing `/v1` API surface. This document describes the architecture AFTER the sales-autopilot audits; where an older revision of this file described in-memory stores and boot-time DDL, those descriptions are superseded below.
 
 ## Overview
 
-The `sales-autopilot` crate powers ApexMail's internal sales automation flow: lead intake, company enrichment, campaign orchestration, calendar booking support, inbox triage, and scraper utilities for prospect discovery.
+The `sales-autopilot` crate is the outreach engine behind ApexMail's own sales: account/contact intake, evidence-grounded enrichment and discovery, sequence orchestration, the central decision engine, durable action execution, reply intelligence, experiments, sender health, and the automations executor.
 
-The current server binary lives at `services/mail-server/crates/sales-autopilot/src/bin/server.rs` and starts a dedicated HTTP service on port `3010` by default.
+The server binary lives at `services/mail-server/crates/sales-autopilot/src/bin/server.rs` and listens on port `3010` by default (`SALES_PORT` / `SALES_AUTOPILOT_PORT`).
 
 ## Runtime Model
 
-- Separate process from the main API server.
-- Intended for trusted control-plane or operator workflows, not public tenant traffic.
-- Protects all routes except `/health` with `INTERNAL_SERVICE_TOKEN` via `x-api-key` or `Authorization: Bearer ...`.
-- Requires `DATABASE_URL` at startup.
-- Initializes the `enriched_companies` cache table on boot.
+- Separate process from the main API server; internal-only, protected by `INTERNAL_SERVICE_TOKEN` (`x-api-key` or `Authorization: Bearer …`) on every route except `/health` and the public unsubscribe path `/u/:token`.
+- Requires `DATABASE_URL` at startup. Schema is **migration-owned**: the canonical chain in `services/mail-server/migrations/` (embedded at compile time by the `migrator` crate) is the only writer of schema. There is no runtime DDL in this crate.
+- Startup VERIFIES the schema instead of creating it: `schema.rs` holds a required-table list and a required-view list, and a missing or wrong-shaped object refuses startup naming the object. The schema contract is also asserted by `crates/functional-tests/tests/schema_contract_tests.rs`.
+- A `256 KB` body limit and a `30-second` request timeout apply; `/health` reports degraded/503 when PostgreSQL is unreachable.
+
+## The canonical model: accounts and contacts, not leads
+
+The core objects are `sales_accounts` (one company) and `sales_contacts` (one human), with `sales_contact_points` for each channel address (email/phone/social), carrying verification provenance and suppression. Evidence, enrichment facts, provider stats, signals, scores, sequences, enrollments, step executions, decisions, actions, sender identities/health, reply classifications, meetings, opportunities, outcomes, experiments and discovery jobs hang off that model.
+
+`sales_leads` is **a derived, read-only VIEW** over `sales_contacts` + `sales_accounts` (migration 223). It exists so the control-plane lead UI and the lead-oriented API keep their shape — it is not a store. It exposes `id` (the contact's stable `legacy_lead_id` mapping), company/contact display fields, a derived `status`, and the lead-only projection columns (`score`, `source`, `notes`, `tags`, `deal_value`, `snoozed_until`, `last_reply_at`, `priority`). Writes target the canonical tables; a regression test in this crate scans the production source and fails if a write against the view is reintroduced.
+
+Identity is deliberately not an email address: an address is a verified contact point, so a person can change address without becoming a new person, and suppression attaches to the address rather than to the human.
 
 ## Core Components
 
-### CRM
+### Decision engine
 
-Two CRM implementations exist:
+`decision_engine::decide` is the mandatory gateway for every external sales action. It evaluates the legal policy, the sender pool and sender health, the kill switch, the frequency budget, the economic gate and the account-level coordination budget, then persists a `sales_decisions` row carrying an enforcement verdict (`execute` / `denied` / `shadowed` / `await_approval`), the selected sender identity and a review status. An approved decision is consumed later only through `revalidate_execution`, so a stale approval cannot outlive a policy or sender-health change. Refusals are recorded decisions, not silent skips.
 
-- `CrmService` provides an in-memory lead store for tests and self-contained development flows.
-- `SqlxCrmService` provides a PostgreSQL-backed lead store with `sales_leads` table initialization and async CRUD operations.
+### Sequence execution
 
-The shipped server binary now wires a `CrmBackend::Postgres` instance, so lead state is persisted in PostgreSQL across process restarts. The in-memory `CrmService` remains available for tests and self-contained local flows.
+A sequence version's steps execute as `sales_step_executions`. The idempotency identity is a logical step execution — `sa:{enrollment}:{version}:{step}:{attempt_kind}:{variant}` — with `sa-send:{step_execution_id}` as the logical send unit, so retrying a step cannot produce a second message.
 
-Lead scoring is currently deterministic and local: `40%` email engagement, `30%` company-size tier, `30%` recency, rounded to a `0..=100` score.
+`actions.rs` is a durable leased queue: claims use `FOR UPDATE SKIP LOCKED` with a per-claim `lease_token`, every write is fenced by that token (`verify_fence_in_tx`), expired leases are requeued, and the worker heartbeat makes a crashed process's work recoverable. The worker runs under a bounded semaphore, so a burst cannot open unbounded concurrent sends.
 
-### Company Enrichment
+### Delivery path
 
-`EnrichmentService` resolves firmographic data from a lead email or company domain.
+Outbound sales mail goes through the shared `SendAdmissionService` (in `billing-service`) before the message insert, with an explicit server-owned `message_category`: `marketing` for outreach (commercial mail gets no opt-out exemption), `transactional` only for a 1:1 reply answering a message the recipient sent us. The message and `email_queue` rows carry typed sales provenance (`sales_decision_id`, `sales_sender_identity_id`, `sales_step_execution_id`, `sales_enrollment_id`), and the footer is generated truthfully — it never claims a subscription the recipient never made.
 
-- Extracts the domain from the lead email address.
-- Uses deterministic mock data for known domains such as `acme.com`, `beta.io`, and `gamma.dev`.
-- Falls back to a derived company name with `Unknown` metadata for unrecognized domains.
-- Persists enrichment cache rows in `enriched_companies` and returns an error if persistence fails.
-- Requires tenant scope on the route surface and applies per-tenant request throttling before enrichment runs.
+Dedicated-IP routes are handled by the route-aware transport in `worker-processors`: a route that cannot report the actual source IP is refused BEFORE `DATA`, and warmup capacity is consumed only when the acceptance reports the requested IP.
 
-The cache schema includes domain, company attributes, confidence score, and enrichment timestamps keyed by `(tenant_id, domain)`.
+### Reply intelligence
 
-### Campaign Management
+Inbound replies are classified into a canonical taxonomy and mapped to sequence consequences (pause, stop, meeting intent, negative, out-of-office). The reply handler writes canonical state only; it no longer maintains legacy lead columns.
 
-`CampaignManager` manages outreach campaigns with an in-memory state machine:
+### Experiments
 
-- `Draft` -> `Active` -> `Paused`
-- Per-campaign recipient lists stored in memory
-- Active-campaign cap enforced by `MAX_CAMPAIGNS`
-- Lightweight delivery statistics tracked on the campaign record (`sent`, `opened`, `clicked`)
+Thompson sampling over `sales_experiments` / `sales_experiment_arms` selects variants for real sends; outcomes are recorded through an idempotent outcome ledger and rewards are projected back onto the arms by the outcome projector loop.
 
-The current implementation is orchestration-focused. It does not yet persist campaigns or recipients to PostgreSQL.
+### Automations executor
 
-### Calendar Scheduling
+`automations.rs` executes the automation rules stored by the customer-facing API. Trigger events are produced canonically (migration 224's triggers on `contacts` and `inbound_messages`), claimed with leases, and evaluated against the stored `trigger_config` / `conditions`; supported actions are `send_email` (through `SendAdmissionService`, category `marketing`), `add_tag` / `remove_tag`, list add/remove, and `webhook` (enqueued for the existing webhook worker — no in-process HTTP, no SSRF surface). Runs and per-action outcomes are persisted (`automation_runs`, `automation_run_actions`), so "why did nothing happen?" is answerable from the database. Unsupported trigger/action kinds are recorded as unsupported rather than silently ignored: `delay` has no durable per-action timer, and schedule/webhook triggers have no stored contract or inbound producer.
 
-`CalendarService` models demo scheduling with fixed business rules:
+### CRM, enrichment, discovery, calendar, inbox
 
-- Working hours: `09:00-17:00` UTC
-- Weekdays only
-- 30-minute slots
-- Overlap rejection for conflicting bookings
+- `crm.rs` is the in-memory store for tests and self-contained local flows; `crm_pg.rs` is the PostgreSQL implementation over the canonical tables.
+- Enrichment is an evidence waterfall: providers are tried in cost order, every fact carries its provenance, and `sales_provider_stats` accumulates per-provider yield and cost. Results land as `sales_enrichment_facts` / `sales_evidence`, never as unsourced account fields.
+- Discovery runs as leased, fenced jobs (`sales_discovery_jobs`): a crashed run is reclaimed and a duplicate run cannot double-write candidates.
+- The calendar models working hours in the entity's time zone with UTC storage (`sales_calendar_events`), 30-minute slots, and overlap rejection.
+- Inbox triage persists to `sales_inbox_messages`.
 
-This service currently keeps events in memory and supports create/list/cancel plus available-slot calculation.
+### Scraper utilities
 
-### Inbox Triage
-
-`InboxManager` classifies inbound messages into:
-
-- `Lead`
-- `Customer`
-- `Support`
-- `Spam`
-- `Other`
-
-Classification is keyword-based today. The service stores message metadata in memory and tracks reply status plus aggregate reply rate.
-
-### Scraper Utilities
-
-`WebScraper` provides deterministic prospecting helpers:
-
-- Email extraction from arbitrary text
-- Basic company info derivation from domains
-- HTTP(S) URL validation
-- Conservative `robots.txt` allow/disallow evaluation
-
-These utilities are text-processing helpers only; the crate does not embed a browser or autonomous crawler.
+`WebScraper` provides deterministic prospecting helpers (email extraction, company-info derivation, URL validation, conservative `robots.txt` evaluation). These are text-processing helpers; the crate embeds no browser and no autonomous crawler.
 
 ## HTTP Surface
 
-The router defined in `src/routes.rs` exposes:
-
 | Route | Method | Purpose |
 |-------|--------|---------|
-| `/health` | `GET` | Liveness probe |
-| `/leads` | `GET`, `POST` | List or create leads |
-| `/leads/{id}` | `GET` | Fetch a single lead |
-| `/companies` | `GET` | List enriched companies |
-| `/enrich` | `POST` | Enrich a lead or company |
-| `/campaigns` | `GET`, `POST` | List or create campaigns |
-| `/campaigns/:id/recipients` | `POST` | Add campaign recipients |
-| `/campaigns/:id/start` | `POST` | Start a campaign |
-| `/campaigns/:id/pause` | `POST` | Pause a campaign |
-| `/calendar` | `GET` | List calendar events / availability |
-| `/inbox` | `GET` | List triaged inbox messages |
-
-The service applies a `256 KB` body limit and a `30-second` request timeout. `/health` now returns a degraded/503 response when PostgreSQL is unavailable instead of always returning healthy.
+| `/health` | `GET` | Liveness/readiness |
+| `/leads`, `/leads/{id}` | `GET`, `POST` | Lead-shaped read/create over the canonical model |
+| `/companies`, `/enrich` | `GET`, `POST` | Enriched companies and the enrichment waterfall |
+| `/campaigns`, `/campaigns/:id/{recipients,start,pause,dry-run}` | `GET`, `POST` | Campaign orchestration and dry-run profiling |
+| `/calendar` | `GET` | List events / availability |
+| `/calendar/events`, `/calendar/events/:id` | `POST`, `DELETE` | Create / cancel an event |
+| `/calendar/slots` | `GET` | Available slots |
+| `/inbox`, `/inbox/:id/reply` | `GET`, `POST` | Reply triage and handling |
+| `/discovery/jobs`, `/discovery/jobs/:id`, `/discovery/jobs/:id/run` | `GET`, `POST` | Leased discovery jobs |
+| `/control/{overview,decisions,actions,actions/:id/replay,exceptions,mode,pause,resume,kill-switch}` | `GET`, `POST` | The autonomous control surface: mode, kill switch, decision/action inspection, exception queue, replay |
+| `/u/:token` | `GET`, `POST` | Public unsubscribe (token-scoped; no PII in the token) |
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SALES_PORT` | `3010` | HTTP listen port |
-| `ENRICHMENT_API_URL` | `https://enrich.apexmail.ee/v1` | Upstream enrichment endpoint configuration |
-| `CALENDAR_SYNC_INTERVAL` | `300` | Calendar sync interval in seconds |
+| `SALES_PORT` / `SALES_AUTOPILOT_PORT` | `3010` | HTTP listen port |
+| `DATABASE_URL` | none (required) | Postgres connection string |
+| `REDIS_URL` | none | Rate limiting / caches |
+| `INTERNAL_SERVICE_TOKEN` | empty | Internal route authentication |
+| `ENRICHMENT_API_URL`, `ENRICHMENT_API_KEY` (or the `SALES_ENRICHMENT_*` template names) | — | Enrichment provider |
+| `CALENDAR_SYNC_INTERVAL` | `300` | Calendar sync interval (seconds) |
 | `MAX_CAMPAIGNS` | `50` | Maximum active campaigns |
-| `SCRAPER_RPM` | `30` | Ethical rate limit for scraper workflows |
-| `INTERNAL_SERVICE_TOKEN` | empty | Internal route authentication secret |
-| `DATABASE_URL` | none | Required Postgres connection string |
+| `SALES_DISPATCH_BATCH_SIZE`, `SALES_DISPATCH_CONCURRENCY`, `SALES_DISPATCH_INTERVAL_SECS` | — | Sequence dispatcher pacing |
+| `SALES_CAMPAIGN_FROM_EMAIL`, `SALES_CAMPAIGN_FROM_NAME` | — | Campaign sender identity defaults |
+| `SALES_PUBLIC_BASE_URL`, `SALES_UNSUBSCRIBE_REDIRECT_URL` | — | Public URLs used in footers and unsubscribe links |
+| `SALES_ALLOWED_TENANTS` | — | Tenant allowlist (unset = all) |
+| `AUTOMATION_TICK_SECS` | `30` | Automation executor tick period |
+| `LEAD_SCORE_{ENGAGEMENT,COMPANY_SIZE,RECENCY}_WEIGHT` | compile-time defaults | Legacy lead-score weights (canonical scoring is the explainable `OpportunityScore`) |
+| `EMAIL_TRANSPORT_TYPE` | — | Transport selection for local runs |
 
-If config validation fails, the service falls back to `SalesConfig::default()` and logs the error.
+An unparseable configured value is an error (`SalesConfig::from_env`); the service does not silently fall back to a default for a value an operator set.
 
 ## Persistence Boundaries
 
-Current persisted state:
+Every sales object is persisted in PostgreSQL through the canonical chain. There is no in-memory-only state in the shipped binary and no runtime DDL anywhere: `enriched_companies`, `sales_calendar_events`, `sales_inbox_messages`, `sales_conversions` and `sales_campaign_recipients` — which older revisions of this document listed as boot-time creations — are canonical tables (migration 200).
 
-- `enriched_companies` cache table created by `routes::initialize_schema()`
-- `sales_leads` table initialized by the PostgreSQL CRM backend on startup
+In-memory state exists only in tests and in `crm.rs` for self-contained local flows.
 
-Current in-memory-only state in the shipped binary:
+## Honest limitations
 
-- campaigns and recipients
-- calendar events
-- inbox messages
-
-## Current Implementation Notes
-
-- The service is documented as storing ApexMail's own sales leads rather than tenant customer data.
-- Resource-level tenant scoping is enforced on the company-enrichment and campaign-management routes that accept tenant scope, but the service should still be treated as internal-only.
-- Scoring weights are compile-time constants today.
-- Enrichment currently behaves like a deterministic mock for known domains and a fallback generator for unknown ones.
-- Campaign execution is orchestration state only; it is not yet tied to an event-driven outbound delivery pipeline.
+- Dedicated-IP *provisioning* (ordering, PTR, reputation ramp) is a control-plane/compliance concern; this service selects and reports, it does not provision.
+- Schedule- and webhook-triggered automations, and the `delay` action, are reported as unsupported rather than half-implemented (see above).
+- The automations executor and the action worker run inside this service's process, so automation and sequence execution require `sales-autopilot` to be running.
 
 ## Relevant Source Files
 
-- `services/mail-server/crates/sales-autopilot/src/bin/server.rs`
-- `services/mail-server/crates/sales-autopilot/src/routes.rs`
-- `services/mail-server/crates/sales-autopilot/src/config.rs`
-- `services/mail-server/crates/sales-autopilot/src/crm.rs`
-- `services/mail-server/crates/sales-autopilot/src/crm_pg.rs`
-- `services/mail-server/crates/sales-autopilot/src/campaigns.rs`
-- `services/mail-server/crates/sales-autopilot/src/enrichment.rs`
-- `services/mail-server/crates/sales-autopilot/src/calendar.rs`
-- `services/mail-server/crates/sales-autopilot/src/inbox.rs`
-- `services/mail-server/crates/sales-autopilot/src/scrapers.rs`
+- `src/bin/server.rs` — the service and its loops (action worker, outcome projector, automation executor)
+- `src/decision_engine.rs`, `src/legal_policy.rs` — the decision gateway and jurisdiction policy
+- `src/actions.rs`, `src/sequence_worker.rs`, `src/dispatcher.rs` — durable execution and the delivery path
+- `src/crm_pg.rs`, `src/schema.rs` — canonical persistence and the startup schema contract
+- `src/automations.rs` — the automations executor
+- `src/control.rs`, `src/control_read.rs`, `src/routes.rs` — the control surface and HTTP routing
+- `src/experiments.rs`, `src/outcome_projector.rs` — experiment arms and reward projection
+- `src/enrichment.rs`, `src/discovery.rs`, `src/calendar.rs`, `src/inbox.rs` — the supporting workflows

@@ -51,21 +51,20 @@ pub struct CrmLead {
 fn crm_leads_sql() -> String {
     format!(
         "{cte}
-         SELECT l.id::text, l.company_name, l.domain, l.contact_email,
-                l.contact_name, cl.status, l.score, l.source,
-                lc.last_contacted_at, l.created_at,
-                COALESCE(l.tags, '[]'::jsonb)
-         FROM sales_leads l
-         JOIN canonical_leads cl ON cl.id = l.id AND cl.tenant_id = l.tenant_id
+         SELECT cl.id::text, cl.company_name, cl.domain, cl.contact_email,
+                cl.contact_name, cl.status, cl.score, cl.source,
+                lc.last_contacted_at, cl.created_at,
+                COALESCE(cl.tags, '[]'::jsonb)
+         FROM canonical_leads cl
          LEFT JOIN LATERAL (
              SELECT MAX(se.executed_at) AS last_contacted_at
              FROM sales_step_executions se
              JOIN sales_enrollments e ON e.id = se.enrollment_id
-             WHERE e.contact_id = l.contact_id AND e.tenant_id = l.tenant_id
+             WHERE e.contact_id = cl.contact_id AND e.tenant_id = cl.tenant_id
                AND se.executed_at IS NOT NULL
          ) lc ON TRUE
-         WHERE l.tenant_id = $3
-         ORDER BY l.score DESC NULLS LAST, l.created_at DESC
+         WHERE cl.tenant_id = $3
+         ORDER BY cl.score DESC NULLS LAST, cl.created_at DESC
          LIMIT $1 OFFSET $2",
         cte = super::sales::CANONICAL_LEAD_CTE
     )
@@ -170,8 +169,8 @@ mod tests {
             &uuid::Uuid::new_v4().simple().to_string()[..12]
         );
 
-        // A canonical lead: account + contact + point + the bridge row the CTE
-        // joins through.
+        // A canonical lead: account + contact + point + the id mapping the
+        // derived view (and the CTE) reads.
         let account_id = uuid::Uuid::new_v4();
         let contact_id = uuid::Uuid::new_v4();
         let lead_id = format!("lead-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
@@ -211,18 +210,16 @@ mod tests {
         .await
         .expect("seed contact point");
         sqlx::query(
-            "INSERT INTO sales_leads \
-                 (id, tenant_id, company_name, domain, status, score, source, account_id, contact_id) \
-             VALUES ($1, $2, 'Canonical Co', $3, 'new', 42, 'fixture', $4, $5)",
+            "UPDATE sales_contacts \
+                SET legacy_lead_id = $1, lead_source = 'fixture', lead_score = 42 \
+              WHERE id = $2 AND tenant_id = $3",
         )
         .bind(&lead_id)
-        .bind(&tenant)
-        .bind(format!("{account_id}.example"))
-        .bind(account_id)
         .bind(contact_id)
+        .bind(&tenant)
         .execute(&pool)
         .await
-        .expect("seed bridge lead");
+        .expect("map the contact as a lead");
 
         let rows: Vec<(
             String,
@@ -256,7 +253,7 @@ mod tests {
         assert_eq!(row.6, Some(42), "the bounded projection score is returned");
 
         for stmt in [
-            "DELETE FROM sales_leads WHERE tenant_id = $1",
+            "UPDATE sales_contacts SET legacy_lead_id = NULL WHERE tenant_id = $1",
             "DELETE FROM sales_contact_points WHERE tenant_id = $1",
             "DELETE FROM sales_contacts WHERE tenant_id = $1",
             "DELETE FROM sales_accounts WHERE tenant_id = $1",

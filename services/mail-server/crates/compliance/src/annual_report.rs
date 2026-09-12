@@ -39,21 +39,39 @@
 //! * An approved/submitted report is frozen: regeneration is only possible
 //!   while `draft`.
 //!
-//! # XBRL / structured output — an honest format decision
+//! # XBRL / structured output — taxonomy-driven, never invented
 //!
-//! The repository contains no Estonian e-aruande (Äriregister) taxonomy and
-//! no tool contract pinning an XBRL schema, and XBRL is not used anywhere
-//! else in this workspace. The official taxonomy is therefore **not
-//! guessed**: the canonical machine output is the documented structured JSON
-//! document ([`ANNUAL_REPORT_FORMAT`], persisted in
-//! `annual_reports.structured_document` and `balance_sheet` /
-//! `income_statement`), and [`build_xbrl_instance`] additionally emits a
-//! **well-formed XBRL 2.1 instance container**: standard
-//! `http://www.xbrl.org/2003/instance` contexts/units with facts in the
-//! documented ApexMail extension namespace ([`XBRL_EXTENSION_NAMESPACE`]).
-//! It is deliberately NOT claimed to be a submission-ready e-aruande file —
-//! turning it into one requires the official taxonomy, which must be vendored
-//! (and its version pinned) before any authority submission is attempted.
+//! The repository vendors no Estonian e-aruande (Äriregister) taxonomy, and
+//! the official package is not reachable from the build environment. The
+//! emitter therefore does **not** guess element names: it is driven by a
+//! CONFIGURED taxonomy package ([`AnnualReportXbrlConfig`], loaded from
+//! `APEXMAIL_EE_ANNUAL_REPORT_TAXONOMY` plus a slot-to-concept binding in
+//! `APEXMAIL_EE_ANNUAL_REPORT_TAXONOMY_BINDING`) and emits facts only through
+//! the model in [`crate::xbrl_taxonomy`]. Facts the configured taxonomy has
+//! no concept for stay in the documented ApexMail extension namespace
+//! ([`XBRL_EXTENSION_NAMESPACE`]) and are declared in an extension schema the
+//! emitter writes alongside the instance, so the instance is
+//! self-describing.
+//!
+//! The state of the claim is derived, recorded in
+//! `annual_reports.structured_document.xbrl.readiness` and auditable later:
+//!
+//! * **no taxonomy configured** — the report is NOT submission-ready; the
+//!   readiness report names exactly what is missing (the taxonomy entry
+//!   point);
+//! * **taxonomy loaded, binding resolved, every fact validated** — the report
+//!   is submission-ready *for that taxonomy*, and the readiness report
+//!   records the taxonomy identity (entry point, target namespace, digest of
+//!   the loaded documents);
+//! * **any validation failure** — the report is NOT submission-ready and the
+//!   failures are listed with the concepts and amounts involved. The emitted
+//!   instance then falls back to the extension-only container (still
+//!   well-formed, still self-describing) so no invalid official-namespace
+//!   fact is ever stored.
+//!
+//! `official_estonian_taxonomy` stays `false`: this repository still vendors
+//! no official package, and nothing here certifies that a configured package
+//! is the registrar's official one.
 
 #![deny(unsafe_code)]
 
@@ -62,6 +80,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use crate::xbrl_taxonomy::{
+    validate_instance, Balance, Context, ContextPeriod, DecimalAmount, Decimals, DeclaredConcept,
+    ExtensionSchema, Fact, FactValue, InstanceDocument, NumericKind, PeriodType, QName,
+    TaxonomyError, TaxonomyLimits, TaxonomySource, Unit, ValidationFailure, XbrlReadiness,
+    XbrlTaxonomy, FAIL_BINDING_INVALID, FAIL_BINDING_MISSING,
+};
 
 /// Canonical structured-document format identifier.
 pub const ANNUAL_REPORT_FORMAT: &str = "apexmail.annual-report/1";
@@ -74,6 +102,26 @@ pub const XBRL_ISO4217_NAMESPACE: &str = "http://www.xbrl.org/2003/iso4217";
 /// Documented ApexMail extension namespace for annual-report facts. This is
 /// NOT the official Estonian e-aruande taksonoomia.
 pub const XBRL_EXTENSION_NAMESPACE: &str = "https://apexmail.com/xbrl/ee-annual-report/1";
+/// Logical file name of the extension schema the emitter writes (its content
+/// is stored in `structured_document.xbrl.extension_schema.xml`).
+pub const XBRL_EXTENSION_SCHEMA_NAME: &str = "apex-ee-annual-report-extension.xsd";
+/// Configuration: filesystem path or URL of the e-aruande taxonomy entry
+/// point. Unset means "no taxonomy", which keeps the report NOT
+/// submission-ready and says so.
+pub const ANNUAL_REPORT_XBRL_TAXONOMY_ENV: &str = "APEXMAIL_EE_ANNUAL_REPORT_TAXONOMY";
+/// Configuration: JSON document mapping annual-report slots to taxonomy
+/// concepts (see [`TaxonomyBinding`]).
+pub const ANNUAL_REPORT_XBRL_TAXONOMY_BINDING_ENV: &str =
+    "APEXMAIL_EE_ANNUAL_REPORT_TAXONOMY_BINDING";
+/// Optional override for the taxonomy loader's document bound.
+pub const ANNUAL_REPORT_XBRL_MAX_DOCUMENTS_ENV: &str =
+    "APEXMAIL_EE_ANNUAL_REPORT_TAXONOMY_MAX_DOCUMENTS";
+/// Optional override for the taxonomy loader's import-depth bound.
+pub const ANNUAL_REPORT_XBRL_MAX_DEPTH_ENV: &str = "APEXMAIL_EE_ANNUAL_REPORT_TAXONOMY_MAX_DEPTH";
+
+/// The entity identifier scheme used for the Estonian business register; the
+/// scheme is part of the context structure, never an element name.
+pub const ENTITY_IDENTIFIER_SCHEME: &str = "https://ariregister.rik.ee";
 
 /// Annual report lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,14 +334,336 @@ pub fn ledger_hash(
 }
 
 // ---------------------------------------------------------------------------
-// XBRL instance
+// XBRL emission — taxonomy-driven
 // ---------------------------------------------------------------------------
+
+/// Annual-report slots the XBRL emitter can map onto taxonomy concepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReportSlot {
+    Assets,
+    Liabilities,
+    Equity,
+    Revenue,
+    Expenses,
+    PeriodProfit,
+    NetProfit,
+    CompanyName,
+}
+
+impl ReportSlot {
+    /// Slots that must be bound for a report to be submission-ready.
+    pub const REQUIRED: [ReportSlot; 6] = [
+        ReportSlot::Assets,
+        ReportSlot::Liabilities,
+        ReportSlot::Equity,
+        ReportSlot::Revenue,
+        ReportSlot::Expenses,
+        ReportSlot::NetProfit,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assets => "assets",
+            Self::Liabilities => "liabilities",
+            Self::Equity => "equity",
+            Self::Revenue => "revenue",
+            Self::Expenses => "expenses",
+            Self::PeriodProfit => "period_profit",
+            Self::NetProfit => "net_profit",
+            Self::CompanyName => "company_name",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim() {
+            "assets" => Some(Self::Assets),
+            "liabilities" => Some(Self::Liabilities),
+            "equity" => Some(Self::Equity),
+            "revenue" => Some(Self::Revenue),
+            "expenses" => Some(Self::Expenses),
+            "period_profit" => Some(Self::PeriodProfit),
+            "net_profit" => Some(Self::NetProfit),
+            "company_name" => Some(Self::CompanyName),
+            _ => None,
+        }
+    }
+}
+
+/// Maps annual-report slots to concepts of the configured taxonomy. The JSON
+/// document is an object of `"slot": "concept reference"` pairs, where a
+/// concept reference is `prefix:name` (using a prefix the taxonomy declares),
+/// `{namespace}name`, or a bare local name in the taxonomy's target
+/// namespace. Nothing is guessed: a slot without a mapping is reported as a
+/// missing binding, and a reference to an undeclared concept is refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaxonomyBinding {
+    entries: BTreeMap<ReportSlot, String>,
+}
+
+impl TaxonomyBinding {
+    pub fn from_json_str(json: &str) -> Result<Self, String> {
+        let raw: BTreeMap<String, String> = serde_json::from_str(json)
+            .map_err(|error| format!("taxonomy binding is not a JSON object of slot -> concept: {error}"))?;
+        let mut entries = BTreeMap::new();
+        for (name, reference) in raw {
+            let slot = ReportSlot::from_name(&name).ok_or_else(|| {
+                format!(
+                    "unknown annual-report slot {name:?} in the taxonomy binding; expected one \
+                     of: assets, liabilities, equity, revenue, expenses, period_profit, \
+                     net_profit, company_name"
+                )
+            })?;
+            entries.insert(slot, reference);
+        }
+        Ok(Self { entries })
+    }
+
+    pub fn from_json_file(path: &Path) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            format!("cannot read taxonomy binding {}: {error}", path.display())
+        })?;
+        Self::from_json_str(&content)
+    }
+
+    pub fn reference(&self, slot: ReportSlot) -> Option<&str> {
+        self.entries.get(&slot).map(String::as_str)
+    }
+
+    pub fn insert(&mut self, slot: ReportSlot, reference: impl Into<String>) {
+        self.entries.insert(slot, reference.into());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// A CONFIGURED taxonomy package plus its concept binding. Loaded from the
+/// environment ([`AnnualReportXbrlConfig::from_env`]) or supplied explicitly
+/// (tests, callers that already hold a loaded taxonomy).
+#[derive(Debug, Clone)]
+pub struct AnnualReportXbrlConfig {
+    pub taxonomy: XbrlTaxonomy,
+    pub binding: Option<TaxonomyBinding>,
+}
+
+impl AnnualReportXbrlConfig {
+    /// Load a taxonomy entry point (filesystem path or URI) and an optional
+    /// binding document with the default loader bounds.
+    pub fn from_source(source: &str, binding_path: Option<&Path>) -> Result<Self, String> {
+        Self::from_source_with_limits(source, binding_path, &TaxonomyLimits::default())
+    }
+
+    pub fn from_source_with_limits(
+        source: &str,
+        binding_path: Option<&Path>,
+        limits: &TaxonomyLimits,
+    ) -> Result<Self, String> {
+        let parsed = TaxonomySource::parse(source).map_err(|error| {
+            format!("invalid {ANNUAL_REPORT_XBRL_TAXONOMY_ENV} value {source:?}: {error}")
+        })?;
+        let taxonomy = crate::xbrl_taxonomy::load_taxonomy(&parsed, limits).map_err(|error| {
+            format!("failed to load the configured XBRL taxonomy from {source:?}: {error}")
+        })?;
+        let binding = match binding_path {
+            Some(path) => Some(TaxonomyBinding::from_json_file(path)?),
+            None => None,
+        };
+        Ok(Self { taxonomy, binding })
+    }
+
+    /// Resolve the configuration from the environment. `Ok(None)` means no
+    /// entry point is configured, which keeps the report not submission-ready
+    /// (and the readiness report says why). A configured but unloadable
+    /// taxonomy is a hard error: an operator who configured a package must
+    /// not silently receive an unvalidated document.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let Some(source) = env_value(ANNUAL_REPORT_XBRL_TAXONOMY_ENV) else {
+            return Ok(None);
+        };
+        let binding_path = env_value(ANNUAL_REPORT_XBRL_TAXONOMY_BINDING_ENV).map(PathBuf::from);
+        let defaults = TaxonomyLimits::default();
+        let limits = TaxonomyLimits {
+            max_documents: env_usize(ANNUAL_REPORT_XBRL_MAX_DOCUMENTS_ENV)?
+                .unwrap_or(defaults.max_documents),
+            max_depth: env_usize(ANNUAL_REPORT_XBRL_MAX_DEPTH_ENV)?.unwrap_or(defaults.max_depth),
+            ..defaults
+        };
+        Self::from_source_with_limits(&source, binding_path.as_deref(), &limits).map(Some)
+    }
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_usize(key: &str) -> Result<Option<usize>, String> {
+    match env_value(key) {
+        None => Ok(None),
+        Some(value) => value
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|error| format!("{key} must be a positive integer: {error}")),
+    }
+}
+
+/// Resolved concept binding: every required slot mapped to a declared,
+/// non-abstract taxonomy item.
+#[derive(Debug, Clone)]
+struct BoundConcepts {
+    assets: QName,
+    liabilities: QName,
+    equity: QName,
+    revenue: QName,
+    expenses: QName,
+    net_profit: QName,
+    period_profit: Option<QName>,
+    company_name: Option<QName>,
+}
+
+fn binding_failure(error: TaxonomyError, reference: &str) -> ValidationFailure {
+    ValidationFailure::new(
+        error.code(),
+        format!("taxonomy binding reference {reference:?} cannot be used: {error}"),
+    )
+    .with_concepts(vec![reference.to_string()])
+}
+
+fn resolve_binding(
+    taxonomy: &XbrlTaxonomy,
+    binding: &TaxonomyBinding,
+) -> Result<BoundConcepts, Vec<ValidationFailure>> {
+    let mut failures: Vec<ValidationFailure> = Vec::new();
+    let mut resolve = |slot: ReportSlot, required: bool| -> Option<QName> {
+        let Some(reference) = binding.reference(slot) else {
+            if required {
+                failures.push(
+                    ValidationFailure::new(
+                        FAIL_BINDING_MISSING,
+                        format!(
+                            "the taxonomy binding does not map the required annual-report slot \
+                             {:?}; map it to a declared concept of the taxonomy (target \
+                             namespace {})",
+                            slot.as_str(),
+                            taxonomy.target_namespace
+                        ),
+                    )
+                    .with_concepts(vec![slot.as_str().to_string()]),
+                );
+            }
+            return None;
+        };
+        let qname = match taxonomy.resolve_qname(reference) {
+            Ok(qname) => qname,
+            Err(error) => {
+                failures.push(binding_failure(error, reference));
+                return None;
+            }
+        };
+        match taxonomy.declare(&qname) {
+            None => {
+                failures.push(
+                    ValidationFailure::new(
+                        FAIL_BINDING_INVALID,
+                        format!(
+                            "the taxonomy binding maps {:?} to {reference:?}, which the loaded \
+                             taxonomy does not declare (target namespace {})",
+                            slot.as_str(),
+                            taxonomy.target_namespace
+                        ),
+                    )
+                    .with_concepts(vec![reference.to_string(), qname.clark()]),
+                );
+                None
+            }
+            Some(declared) if declared.is_abstract => {
+                failures.push(
+                    ValidationFailure::new(
+                        FAIL_BINDING_INVALID,
+                        format!(
+                            "the taxonomy binding maps {:?} to abstract concept {reference:?}; \
+                             abstract concepts cannot carry facts",
+                            slot.as_str()
+                        ),
+                    )
+                    .with_concepts(vec![reference.to_string()]),
+                );
+                None
+            }
+            Some(declared) if !declared.is_item => {
+                failures.push(
+                    ValidationFailure::new(
+                        FAIL_BINDING_INVALID,
+                        format!(
+                            "the taxonomy binding maps {:?} to {reference:?}, which is not an \
+                             XBRL item (substitution group xbrli:item)",
+                            slot.as_str()
+                        ),
+                    )
+                    .with_concepts(vec![reference.to_string()]),
+                );
+                None
+            }
+            Some(_) => Some(qname),
+        }
+    };
+
+    let assets = resolve(ReportSlot::Assets, true);
+    let liabilities = resolve(ReportSlot::Liabilities, true);
+    let equity = resolve(ReportSlot::Equity, true);
+    let revenue = resolve(ReportSlot::Revenue, true);
+    let expenses = resolve(ReportSlot::Expenses, true);
+    let net_profit = resolve(ReportSlot::NetProfit, true);
+    let period_profit = resolve(ReportSlot::PeriodProfit, false);
+    let company_name = resolve(ReportSlot::CompanyName, false);
+
+    match (assets, liabilities, equity, revenue, expenses, net_profit) {
+        (
+            Some(assets),
+            Some(liabilities),
+            Some(equity),
+            Some(revenue),
+            Some(expenses),
+            Some(net_profit),
+        ) => Ok(BoundConcepts {
+            assets,
+            liabilities,
+            equity,
+            revenue,
+            expenses,
+            net_profit,
+            period_profit,
+            company_name,
+        }),
+        _ => Err(failures),
+    }
+}
+
+/// The emitted XBRL artifacts plus the derived readiness statement. The
+/// `document`/`extension` pair is exactly what the instance XML encodes, so a
+/// caller (or a test) can re-validate it without re-parsing.
+#[derive(Debug, Clone)]
+pub struct AnnualReportXbrl {
+    pub instance_xml: String,
+    pub extension_schema_xml: String,
+    pub extension_schema_name: String,
+    pub instance_sha256: String,
+    pub extension_schema_sha256: String,
+    pub readiness: XbrlReadiness,
+    pub document: InstanceDocument,
+    pub extension: ExtensionSchema,
+}
 
 /// Build a well-formed XBRL 2.1 instance container.
 ///
-/// Standard `xbrli` contexts/units carry facts in the documented ApexMail
-/// extension namespace. See the module docs: this is NOT the official
-/// Estonian e-aruande taksonoomia.
+/// This is the legacy extension-only entry point: without a configured
+/// taxonomy every fact lives in the documented ApexMail extension namespace
+/// and is declared in the emitted extension schema. See
+/// [`build_annual_report_xbrl`] for the taxonomy-driven path; this function
+/// returns its instance XML.
 pub fn build_xbrl_instance(
     company: &CompanyIdentity,
     fiscal_year: i32,
@@ -303,107 +673,636 @@ pub fn build_xbrl_instance(
     income_statement: &IncomeStatement,
     lines: &[LedgerBalanceLine],
 ) -> String {
+    build_annual_report_xbrl(
+        company,
+        fiscal_year,
+        period_start,
+        period_end,
+        balance_sheet,
+        income_statement,
+        lines,
+        None,
+    )
+    .instance_xml
+}
+
+/// Emit the XBRL instance and extension schema for an annual report, driven
+/// by the configured taxonomy when one is supplied.
+///
+/// The numbers come from the caller's ledger derivation; this function only
+/// maps them onto concepts and validates the resulting facts. With no
+/// taxonomy (or a binding that does not resolve) the emitted instance is the
+/// extension-only container, and the readiness statement is NOT
+/// submission-ready with the reason recorded.
+#[allow(clippy::too_many_arguments)]
+pub fn build_annual_report_xbrl(
+    company: &CompanyIdentity,
+    fiscal_year: i32,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    balance_sheet: &BalanceSheet,
+    income_statement: &IncomeStatement,
+    lines: &[LedgerBalanceLine],
+    config: Option<&AnnualReportXbrlConfig>,
+) -> AnnualReportXbrl {
+    let mut missing: Vec<String> = Vec::new();
+    let mut failures: Vec<ValidationFailure> = Vec::new();
+    let mut bound: Option<BoundConcepts> = None;
+    match config {
+        None => missing.push(format!(
+            "the Estonian annual-report taxonomy entry point is not configured; set \
+             {ANNUAL_REPORT_XBRL_TAXONOMY_ENV} to a vendored e-aruande entry-point schema (a \
+             filesystem path or URL) to make the XBRL output submission-ready"
+        )),
+        Some(config) => match &config.binding {
+            None => missing.push(format!(
+                "a taxonomy is loaded ({}), but no concept binding is configured; set {} to a \
+                 JSON document mapping the annual-report slots to taxonomy concepts",
+                config.taxonomy.entry_point, ANNUAL_REPORT_XBRL_TAXONOMY_BINDING_ENV
+            )),
+            Some(binding) => match resolve_binding(&config.taxonomy, binding) {
+                Ok(resolved) => bound = Some(resolved),
+                Err(binding_failures) => failures.extend(binding_failures),
+            },
+        },
+    }
+
+    let (mut document, extension) = if let (Some(config), Some(bound)) = (config, bound.as_ref())
+    {
+        let (candidate, candidate_extension) = build_report_facts(
+            company,
+            fiscal_year,
+            period_start,
+            period_end,
+            balance_sheet,
+            income_statement,
+            lines,
+            Some(bound),
+        );
+        let candidate_failures =
+            validate_instance(&config.taxonomy, &candidate_extension, &candidate);
+        if candidate_failures.is_empty() {
+            (candidate, candidate_extension)
+        } else {
+            // A failing fact set is never stored: fall back to the
+            // self-describing extension-only container and report the
+            // failures, instead of silently fixing or emitting invalid
+            // official-namespace facts.
+            failures.extend(candidate_failures);
+            build_report_facts(
+                company,
+                fiscal_year,
+                period_start,
+                period_end,
+                balance_sheet,
+                income_statement,
+                lines,
+                None,
+            )
+        }
+    } else {
+        build_report_facts(
+            company,
+            fiscal_year,
+            period_start,
+            period_end,
+            balance_sheet,
+            income_statement,
+            lines,
+            None,
+        )
+    };
+
+    document.schema_refs = match config {
+        Some(config) => vec![
+            config.taxonomy.entry_point.clone(),
+            XBRL_EXTENSION_SCHEMA_NAME.to_string(),
+        ],
+        None => vec![
+            "urn:apexmail:xbrl:ee-annual-report:1".to_string(),
+            XBRL_EXTENSION_SCHEMA_NAME.to_string(),
+        ],
+    };
+
+    let readiness = if missing.is_empty() && failures.is_empty() {
+        XbrlReadiness {
+            submission_ready: true,
+            taxonomy: config.map(|config| config.taxonomy.identity()),
+            missing: Vec::new(),
+            validation_failures: Vec::new(),
+        }
+    } else {
+        XbrlReadiness {
+            submission_ready: false,
+            taxonomy: config.map(|config| config.taxonomy.identity()),
+            missing,
+            validation_failures: failures,
+        }
+    };
+
+    let prefixes = namespace_prefixes(&document, config);
+    let instance_xml = render_instance(&document, &prefixes, &readiness);
+    let extension_schema_xml =
+        render_extension_schema(&extension, config.map(|config| &config.taxonomy));
+    let instance_sha256 = hex::encode(Sha256::digest(instance_xml.as_bytes()));
+    let extension_schema_sha256 =
+        hex::encode(Sha256::digest(extension_schema_xml.as_bytes()));
+
+    AnnualReportXbrl {
+        instance_xml,
+        extension_schema_xml,
+        extension_schema_name: XBRL_EXTENSION_SCHEMA_NAME.to_string(),
+        instance_sha256,
+        extension_schema_sha256,
+        readiness,
+        document,
+        extension,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_amount(
+    facts: &mut Vec<Fact>,
+    extension: &mut ExtensionSchema,
+    concept: QName,
+    context_ref: &str,
+    cents: i64,
+    period_type: PeriodType,
+    balance: Option<Balance>,
+    is_extension: bool,
+) {
+    if is_extension {
+        extension.insert(DeclaredConcept {
+            qname: concept.clone(),
+            period_type: Some(period_type),
+            balance,
+            is_abstract: false,
+            is_item: true,
+            numeric: Some(NumericKind::Monetary),
+            source: XBRL_EXTENSION_SCHEMA_NAME.to_string(),
+        });
+    }
+    facts.push(Fact {
+        concept,
+        context_ref: context_ref.to_string(),
+        unit_ref: Some("EUR".to_string()),
+        value: FactValue::Numeric(DecimalAmount::from_cents(cents)),
+        decimals: Some(Decimals::Finite(2)),
+        id: None,
+    });
+}
+
+/// Build the contexts, units and facts for a report. With `bound` the
+/// statement totals use the configured taxonomy's concepts; without it every
+/// fact is an ApexMail extension concept declared in the returned extension
+/// schema.
+#[allow(clippy::too_many_arguments)]
+fn build_report_facts(
+    company: &CompanyIdentity,
+    fiscal_year: i32,
+    period_start: NaiveDate,
+    period_end: NaiveDate,
+    balance_sheet: &BalanceSheet,
+    income_statement: &IncomeStatement,
+    lines: &[LedgerBalanceLine],
+    bound: Option<&BoundConcepts>,
+) -> (InstanceDocument, ExtensionSchema) {
     let duration_context = format!("duration-FY{fiscal_year}");
     let instant_context = format!("instant-{period_end}");
-    let mut xml = String::with_capacity(4096);
+    let context = |id: String, period: ContextPeriod| Context {
+        id,
+        entity_identifier: Some(company.registry_code.clone()),
+        entity_scheme: Some(ENTITY_IDENTIFIER_SCHEME.to_string()),
+        period: Some(period),
+    };
+    let contexts = vec![
+        context(
+            duration_context.clone(),
+            ContextPeriod::Duration {
+                start: period_start,
+                end: period_end,
+            },
+        ),
+        context(
+            instant_context.clone(),
+            ContextPeriod::Instant { date: period_end },
+        ),
+    ];
+    let units = vec![Unit {
+        id: "EUR".to_string(),
+        measures: vec![format!("iso4217:{}", company.currency)],
+    }];
 
-    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    xml.push_str(
-        "<!-- Generated by ApexMail from posted journal lines of a CLOSED fiscal period. \
-         This instance uses the documented ApexMail extension namespace \
-         (https://apexmail.com/xbrl/ee-annual-report/1); the official Estonian e-aruande \
-         taksonoomia is not bundled, so this file is a well-formed structured container, \
-         not a submission-ready e-aruande document. -->\n",
-    );
-    xml.push_str(&format!(
-        "<xbrli:xbrl xmlns:xbrli=\"{XBRL_INSTANCE_NAMESPACE}\" \
-         xmlns:link=\"{XBRL_LINKBASE_NAMESPACE}\" \
-         xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
-         xmlns:iso4217=\"{XBRL_ISO4217_NAMESPACE}\" \
-         xmlns:apex=\"{XBRL_EXTENSION_NAMESPACE}\">\n"
-    ));
+    let mut facts: Vec<Fact> = Vec::new();
+    let mut extension = ExtensionSchema {
+        target_namespace: XBRL_EXTENSION_NAMESPACE.to_string(),
+        concepts: BTreeMap::new(),
+    };
 
-    xml.push_str(
-        "  <link:schemaRef xlink:type=\"simple\" \
-         xlink:href=\"urn:apexmail:xbrl:ee-annual-report:1\"/>\n",
-    );
+    match bound {
+        Some(bound) => {
+            push_amount(&mut facts, &mut extension, 
+                bound.assets.clone(),
+                &instant_context,
+                balance_sheet.assets_cents,
+                PeriodType::Instant,
+                None,
+                false,
+            );
+            push_amount(&mut facts, &mut extension, 
+                bound.liabilities.clone(),
+                &instant_context,
+                balance_sheet.liabilities_cents,
+                PeriodType::Instant,
+                None,
+                false,
+            );
+            push_amount(&mut facts, &mut extension, 
+                bound.equity.clone(),
+                &instant_context,
+                balance_sheet.equity_cents,
+                PeriodType::Instant,
+                None,
+                false,
+            );
+            push_amount(&mut facts, &mut extension, 
+                bound.revenue.clone(),
+                &duration_context,
+                income_statement.revenue_cents,
+                PeriodType::Duration,
+                None,
+                false,
+            );
+            push_amount(&mut facts, &mut extension, 
+                bound.expenses.clone(),
+                &duration_context,
+                income_statement.expenses_cents,
+                PeriodType::Duration,
+                None,
+                false,
+            );
+            push_amount(&mut facts, &mut extension, 
+                bound.net_profit.clone(),
+                &duration_context,
+                income_statement.net_profit_cents,
+                PeriodType::Duration,
+                None,
+                false,
+            );
+            if let Some(period_profit) = &bound.period_profit {
+                push_amount(&mut facts, &mut extension, 
+                    period_profit.clone(),
+                    &duration_context,
+                    balance_sheet.period_profit_cents,
+                    PeriodType::Duration,
+                    None,
+                    false,
+                );
+            }
+            if let Some(company_name) = &bound.company_name {
+                facts.push(Fact {
+                    concept: company_name.clone(),
+                    context_ref: duration_context.clone(),
+                    unit_ref: None,
+                    value: FactValue::Text(company.legal_name.clone()),
+                    decimals: None,
+                    id: None,
+                });
+            }
+        }
+        None => {
+            let extension_concept = |name: &str| QName::new(XBRL_EXTENSION_NAMESPACE, name);
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("Assets"),
+                &instant_context,
+                balance_sheet.assets_cents,
+                PeriodType::Instant,
+                Some(Balance::Debit),
+                true,
+            );
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("Liabilities"),
+                &instant_context,
+                balance_sheet.liabilities_cents,
+                PeriodType::Instant,
+                Some(Balance::Credit),
+                true,
+            );
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("Equity"),
+                &instant_context,
+                balance_sheet.equity_cents,
+                PeriodType::Instant,
+                Some(Balance::Credit),
+                true,
+            );
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("ProfitLossForPeriod"),
+                &duration_context,
+                balance_sheet.period_profit_cents,
+                PeriodType::Duration,
+                Some(Balance::Credit),
+                true,
+            );
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("Revenue"),
+                &duration_context,
+                income_statement.revenue_cents,
+                PeriodType::Duration,
+                Some(Balance::Credit),
+                true,
+            );
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("Expenses"),
+                &duration_context,
+                income_statement.expenses_cents,
+                PeriodType::Duration,
+                Some(Balance::Debit),
+                true,
+            );
+            push_amount(&mut facts, &mut extension, 
+                extension_concept("NetProfit"),
+                &duration_context,
+                income_statement.net_profit_cents,
+                PeriodType::Duration,
+                Some(Balance::Credit),
+                true,
+            );
+        }
+    }
 
-    xml.push_str(&format!("  <xbrli:context id=\"{duration_context}\">\n"));
-    xml.push_str(&format!(
-        "    <xbrli:entity><xbrli:identifier scheme=\"https://ariregister.rik.ee\">{}</xbrli:identifier></xbrli:entity>\n",
-        xml_escape(&company.registry_code)
-    ));
-    xml.push_str(&format!(
-        "    <xbrli:period><xbrli:startDate>{period_start}</xbrli:startDate>\
-         <xbrli:endDate>{period_end}</xbrli:endDate></xbrli:period>\n"
-    ));
-    xml.push_str("  </xbrli:context>\n");
-
-    xml.push_str(&format!("  <xbrli:context id=\"{instant_context}\">\n"));
-    xml.push_str(&format!(
-        "    <xbrli:entity><xbrli:identifier scheme=\"https://ariregister.rik.ee\">{}</xbrli:identifier></xbrli:entity>\n",
-        xml_escape(&company.registry_code)
-    ));
-    xml.push_str(&format!(
-        "    <xbrli:period><xbrli:instant>{period_end}</xbrli:instant></xbrli:period>\n"
-    ));
-    xml.push_str("  </xbrli:context>\n");
-
-    xml.push_str(&format!(
-        "  <xbrli:unit id=\"EUR\"><xbrli:measure>iso4217:{}</xbrli:measure></xbrli:unit>\n",
-        xml_escape(&company.currency)
-    ));
-
-    // Statement totals.
-    {
-        let mut fact = |name: &str, context: &str, cents: i64| {
-            xml.push_str(&format!(
-                "  <apex:{name} contextRef=\"{context}\" unitRef=\"EUR\" decimals=\"2\">{}</apex:{name}>\n",
-                format_cents(cents)
-            ));
+    // Account-level facts (traceable to chart-of-accounts codes). The
+    // official taxonomy has no concept for an individual ApexMail account, so
+    // these are always ApexMail extension elements, visibly in their own
+    // namespace and declared in the extension schema.
+    let mut used_names: BTreeSet<String> = BTreeSet::new();
+    for line in lines {
+        let (period_type, context_ref, balance) = match line.account_type.as_str() {
+            "revenue" => (
+                PeriodType::Duration,
+                duration_context.as_str(),
+                Balance::Credit,
+            ),
+            "expense" => (
+                PeriodType::Duration,
+                duration_context.as_str(),
+                Balance::Debit,
+            ),
+            "liability" | "equity" => (
+                PeriodType::Instant,
+                instant_context.as_str(),
+                Balance::Credit,
+            ),
+            _ => (
+                PeriodType::Instant,
+                instant_context.as_str(),
+                Balance::Debit,
+            ),
         };
-        fact("Assets", &instant_context, balance_sheet.assets_cents);
-        fact(
-            "Liabilities",
-            &instant_context,
-            balance_sheet.liabilities_cents,
-        );
-        fact("Equity", &instant_context, balance_sheet.equity_cents);
-        fact(
-            "ProfitLossForPeriod",
-            &duration_context,
-            balance_sheet.period_profit_cents,
-        );
-        fact("Revenue", &duration_context, income_statement.revenue_cents);
-        fact(
-            "Expenses",
-            &duration_context,
-            income_statement.expenses_cents,
-        );
-        fact(
-            "NetProfit",
-            &duration_context,
-            income_statement.net_profit_cents,
+        let base = xml_fact_name(&line.account_code);
+        let mut name = format!("Account_{base}");
+        let mut suffix = 2;
+        while !used_names.insert(name.clone()) {
+            name = format!("Account_{base}_{suffix}");
+            suffix += 1;
+        }
+        push_amount(&mut facts, &mut extension, 
+            QName::new(XBRL_EXTENSION_NAMESPACE, name),
+            context_ref,
+            line.balance_debit_positive,
+            period_type,
+            Some(balance),
+            true,
         );
     }
 
-    // Account-level facts (traceable to chart-of-accounts codes).
-    for line in lines {
-        let context = if line.account_type == "revenue" || line.account_type == "expense" {
-            &duration_context
-        } else {
-            &instant_context
+    (
+        InstanceDocument {
+            contexts,
+            units,
+            facts,
+            schema_refs: Vec::new(),
+            namespaces: BTreeMap::new(),
+        },
+        extension,
+    )
+}
+
+fn namespace_prefixes(
+    document: &InstanceDocument,
+    config: Option<&AnnualReportXbrlConfig>,
+) -> BTreeMap<String, String> {
+    let mut prefixes: BTreeMap<String, String> = BTreeMap::new();
+    prefixes.insert(
+        XBRL_EXTENSION_NAMESPACE.to_string(),
+        "apex".to_string(),
+    );
+    let mut next = 0usize;
+    for fact in &document.facts {
+        if prefixes.contains_key(&fact.concept.namespace) {
+            continue;
+        }
+        let prefix = match fact.concept.namespace.as_str() {
+            XBRL_INSTANCE_NAMESPACE => "xbrli".to_string(),
+            XBRL_LINKBASE_NAMESPACE => "link".to_string(),
+            namespace => config
+                .and_then(|config| config.taxonomy.prefix_for_namespace(namespace))
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    next += 1;
+                    format!("ns{next}")
+                }),
         };
+        prefixes.insert(fact.concept.namespace.clone(), prefix);
+    }
+    prefixes
+}
+
+fn render_instance(
+    document: &InstanceDocument,
+    prefixes: &BTreeMap<String, String>,
+    readiness: &XbrlReadiness,
+) -> String {
+    let mut xml = String::with_capacity(8192);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let comment = format!(
+        " Generated by ApexMail from posted journal lines of a CLOSED fiscal period. {} \
+         Extension facts use the documented ApexMail namespace {XBRL_EXTENSION_NAMESPACE} and \
+         are declared in {XBRL_EXTENSION_SCHEMA_NAME} (stored in \
+         structured_document.xbrl.extension_schema). ",
+        readiness.summary()
+    );
+    xml.push_str(&format!("<!--{}-->\n", sanitize_xml_comment(&comment)));
+    xml.push_str("<xbrli:xbrl");
+    xml.push_str(&format!(
+        " xmlns:xbrli=\"{XBRL_INSTANCE_NAMESPACE}\" \
+         xmlns:link=\"{XBRL_LINKBASE_NAMESPACE}\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+         xmlns:iso4217=\"{XBRL_ISO4217_NAMESPACE}\""
+    ));
+    for (namespace, prefix) in prefixes {
+        if matches!(
+            namespace.as_str(),
+            XBRL_INSTANCE_NAMESPACE | XBRL_LINKBASE_NAMESPACE
+        ) {
+            continue;
+        }
+        xml.push_str(&format!(" xmlns:{prefix}=\"{}\"", xml_escape(namespace)));
+    }
+    xml.push_str(">\n");
+
+    for schema_ref in &document.schema_refs {
         xml.push_str(&format!(
-            "  <apex:Account_{} contextRef=\"{context}\" unitRef=\"EUR\" decimals=\"2\">{}</apex:Account_{}>\n",
-            xml_fact_name(&line.account_code),
-            format_cents(line.balance_debit_positive),
-            xml_fact_name(&line.account_code)
+            "  <link:schemaRef xlink:type=\"simple\" xlink:href=\"{}\"/>\n",
+            xml_escape(schema_ref)
         ));
+    }
+
+    for context in &document.contexts {
+        xml.push_str(&format!(
+            "  <xbrli:context id=\"{}\">\n",
+            xml_escape(&context.id)
+        ));
+        xml.push_str(&format!(
+            "    <xbrli:entity><xbrli:identifier scheme=\"{}\">{}</xbrli:identifier></xbrli:entity>\n",
+            xml_escape(context.entity_scheme.as_deref().unwrap_or("")),
+            xml_escape(context.entity_identifier.as_deref().unwrap_or(""))
+        ));
+        match context.period {
+            Some(ContextPeriod::Instant { date }) => {
+                xml.push_str(&format!(
+                    "    <xbrli:period><xbrli:instant>{date}</xbrli:instant></xbrli:period>\n"
+                ));
+            }
+            Some(ContextPeriod::Duration { start, end }) => {
+                xml.push_str(&format!(
+                    "    <xbrli:period><xbrli:startDate>{start}</xbrli:startDate>\
+                     <xbrli:endDate>{end}</xbrli:endDate></xbrli:period>\n"
+                ));
+            }
+            None => xml.push_str("    <xbrli:period/>\n"),
+        }
+        xml.push_str("  </xbrli:context>\n");
+    }
+
+    for unit in &document.units {
+        xml.push_str(&format!(
+            "  <xbrli:unit id=\"{}\">",
+            xml_escape(&unit.id)
+        ));
+        for measure in &unit.measures {
+            xml.push_str(&format!(
+                "<xbrli:measure>{}</xbrli:measure>",
+                xml_escape(measure)
+            ));
+        }
+        xml.push_str("</xbrli:unit>\n");
+    }
+
+    for fact in &document.facts {
+        let prefix = prefixes
+            .get(&fact.concept.namespace)
+            .map(String::as_str)
+            .unwrap_or("apex");
+        let element = format!("{prefix}:{}", fact.concept.name);
+        let mut attributes = format!(" contextRef=\"{}\"", xml_escape(&fact.context_ref));
+        if let Some(unit_ref) = &fact.unit_ref {
+            attributes.push_str(&format!(" unitRef=\"{}\"", xml_escape(unit_ref)));
+        }
+        if let Some(decimals) = fact.decimals {
+            let value = match decimals {
+                Decimals::Finite(places) => places.to_string(),
+                Decimals::Infinite => "INF".to_string(),
+            };
+            attributes.push_str(&format!(" decimals=\"{value}\""));
+        }
+        let value = match &fact.value {
+            FactValue::Numeric(amount) => amount.to_display(),
+            FactValue::Text(text) => xml_escape(text),
+        };
+        xml.push_str(&format!("  <{element}{attributes}>{value}</{element}>\n"));
     }
 
     xml.push_str("</xbrli:xbrl>\n");
     xml
+}
+
+fn render_extension_schema(
+    extension: &ExtensionSchema,
+    taxonomy: Option<&XbrlTaxonomy>,
+) -> String {
+    let mut xml = String::with_capacity(4096);
+    xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    xml.push_str(&format!(
+        "<!-- ApexMail extension schema: declares every non-taxonomy element the annual-report \
+         instance reports. These elements live in their own namespace \
+         ({XBRL_EXTENSION_NAMESPACE}) and never masquerade as official concepts. \
+         Generated by compliance::annual_report. -->\n",
+    ));
+    xml.push_str("<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"");
+    xml.push_str(&format!(
+        " xmlns:xbrli=\"{XBRL_INSTANCE_NAMESPACE}\""
+    ));
+    xml.push_str(&format!(
+        " xmlns:link=\"{XBRL_LINKBASE_NAMESPACE}\""
+    ));
+    xml.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
+    xml.push_str(&format!(
+        " xmlns:apex=\"{XBRL_EXTENSION_NAMESPACE}\""
+    ));
+    xml.push_str(&format!(
+        " targetNamespace=\"{XBRL_EXTENSION_NAMESPACE}\" elementFormDefault=\"qualified\" \
+         id=\"apex-ee-annual-report-extension\">\n"
+    ));
+    xml.push_str(&format!(
+        "  <xs:import namespace=\"{XBRL_INSTANCE_NAMESPACE}\"/>\n"
+    ));
+    if let Some(taxonomy) = taxonomy {
+        xml.push_str(&format!(
+            "  <xs:import namespace=\"{}\" schemaLocation=\"{}\"/>\n",
+            xml_escape(&taxonomy.target_namespace),
+            xml_escape(&taxonomy.entry_point)
+        ));
+    }
+    for concept in extension.concepts.values() {
+        let period_type = concept
+            .period_type
+            .map(PeriodType::as_str)
+            .unwrap_or("duration");
+        match concept.numeric {
+            Some(_) => {
+                let balance = match concept.balance {
+                    Some(Balance::Debit) => "debit",
+                    Some(Balance::Credit) => "credit",
+                    None => "debit",
+                };
+                xml.push_str(&format!(
+                    "  <xs:element name=\"{}\" id=\"apex_{}\" type=\"xbrli:monetaryItemType\" \
+                     substitutionGroup=\"xbrli:item\" xbrli:periodType=\"{period_type}\" \
+                     xbrli:balance=\"{balance}\"/>\n",
+                    concept.qname.name, concept.qname.name
+                ));
+            }
+            None => {
+                xml.push_str(&format!(
+                    "  <xs:element name=\"{}\" id=\"apex_{}\" type=\"xbrli:stringItemType\" \
+                     substitutionGroup=\"xbrli:item\" xbrli:periodType=\"{period_type}\"/>\n",
+                    concept.qname.name, concept.qname.name
+                ));
+            }
+        }
+    }
+    xml.push_str("</xs:schema>\n");
+    xml
+}
+
+/// XML comments must not contain `--` or end with `-`.
+fn sanitize_xml_comment(text: &str) -> String {
+    let mut sanitized = text.replace("--", "- -");
+    if sanitized.ends_with('-') {
+        sanitized.push(' ');
+    }
+    sanitized
 }
 
 /// Format euro cents as a decimal amount (`12345` -> `123.45`), without
@@ -459,11 +1358,31 @@ struct FiscalPeriodRow {
 ///
 /// `actor` is the authenticated identity performing the machine generation;
 /// it is recorded but confers no approval.
+///
+/// The XBRL taxonomy is resolved from the environment
+/// ([`AnnualReportXbrlConfig::from_env`]). Without a configured entry point
+/// the report is generated as today and is explicitly NOT submission-ready;
+/// a configured but unloadable taxonomy is a hard error.
 pub async fn generate_annual_report(
     db: &PgPool,
     legal_entity_id: Uuid,
     fiscal_period_id: Uuid,
     actor: &str,
+) -> Result<AnnualReport, String> {
+    let config = AnnualReportXbrlConfig::from_env()?;
+    generate_annual_report_configured(db, legal_entity_id, fiscal_period_id, actor, config.as_ref())
+        .await
+}
+
+/// Generate (or regenerate, while draft) the annual report with an explicit
+/// taxonomy configuration. `None` keeps the documented extension-only output
+/// and the not-submission-ready readiness statement.
+pub async fn generate_annual_report_configured(
+    db: &PgPool,
+    legal_entity_id: Uuid,
+    fiscal_period_id: Uuid,
+    actor: &str,
+    xbrl_config: Option<&AnnualReportXbrlConfig>,
 ) -> Result<AnnualReport, String> {
     let actor = actor.trim();
     if actor.is_empty() {
@@ -518,7 +1437,7 @@ pub async fn generate_annual_report(
         country_code: period.country_code.clone(),
         currency: period.default_currency.clone(),
     };
-    let xbrl = build_xbrl_instance(
+    let xbrl = build_annual_report_xbrl(
         &company,
         period.end_date.year(),
         period.start_date,
@@ -526,6 +1445,7 @@ pub async fn generate_annual_report(
         &balance_sheet,
         &income_statement,
         &lines,
+        xbrl_config,
     );
     let structured = build_structured_document(
         &period,
@@ -601,7 +1521,7 @@ pub async fn generate_annual_report(
         .bind(&balance_sheet_json)
         .bind(&income_statement_json)
         .bind(&structured)
-        .bind(&xbrl)
+        .bind(&xbrl.instance_xml)
         .bind(balance_sheet.balance_check_ok)
         .bind(balance_sheet.balance_difference_cents)
         .fetch_one(&mut *tx)
@@ -630,7 +1550,7 @@ pub async fn generate_annual_report(
         .bind(&balance_sheet_json)
         .bind(&income_statement_json)
         .bind(&structured)
-        .bind(&xbrl)
+        .bind(&xbrl.instance_xml)
         .bind(balance_sheet.balance_check_ok)
         .bind(balance_sheet.balance_difference_cents)
         .fetch_one(&mut *tx)
@@ -760,7 +1680,7 @@ fn build_structured_document(
     balance_sheet: &BalanceSheet,
     income_statement: &IncomeStatement,
     lines: &[LedgerBalanceLine],
-    xbrl: &str,
+    xbrl: &AnnualReportXbrl,
 ) -> serde_json::Value {
     let mut warnings: Vec<String> = Vec::new();
     if !balance_sheet.balance_check_ok {
@@ -775,6 +1695,12 @@ fn build_structured_document(
             "the closed period contains no posted journal entries; all statement values are zero"
                 .to_string(),
         );
+    }
+    if !xbrl.readiness.submission_ready {
+        warnings.push(format!(
+            "the XBRL output is NOT submission-ready: {}",
+            xbrl.readiness.summary()
+        ));
     }
 
     serde_json::json!({
@@ -822,16 +1748,53 @@ fn build_structured_document(
             "ledger_hash": ledger_hash,
         },
         "xbrl": {
+            // Existing readers keep these fields unchanged.
             "instance_embedded": true,
-            "instance_sha256": hex::encode(Sha256::digest(xbrl.as_bytes())),
+            "instance_sha256": &xbrl.instance_sha256,
             "namespace": XBRL_EXTENSION_NAMESPACE,
             "official_estonian_taxonomy": false,
-            "note": "Well-formed XBRL 2.1 container in the documented ApexMail extension \
-                namespace. The official e-aruande taksonoomia is not bundled by this repository; \
-                do not treat this as a submission-ready e-aruande file.",
+            "note": xbrl_note(&xbrl.readiness),
+            // Added for taxonomy-driven readiness (auditable after the fact).
+            "submission_ready": xbrl.readiness.submission_ready,
+            "readiness": &xbrl.readiness,
+            "extension_schema": {
+                "name": &xbrl.extension_schema_name,
+                "sha256": &xbrl.extension_schema_sha256,
+                "xml": &xbrl.extension_schema_xml,
+            },
         },
         "warnings": warnings,
     })
+}
+
+/// The honest note that travels with the instance: what the readiness claim
+/// covers, and what it does not.
+fn xbrl_note(readiness: &XbrlReadiness) -> String {
+    match (&readiness.taxonomy, readiness.submission_ready) {
+        (Some(identity), true) => format!(
+            "Well-formed XBRL 2.1 instance emitted through the configured taxonomy {} (target \
+             namespace {}, digest {} over {} document(s)) and validated against it: \
+             submission-ready for that taxonomy. The official Estonian e-aruande taksonoomia is \
+             not vendored by this repository, and nothing here certifies that the configured \
+             package is the registrar's official one.",
+            identity.entry_point,
+            identity.target_namespace,
+            identity.digest,
+            identity.document_count
+        ),
+        (Some(identity), false) => format!(
+            "Well-formed XBRL 2.1 instance container. A taxonomy is configured ({}) but the \
+             report is NOT submission-ready: {}",
+            identity.entry_point,
+            readiness.summary()
+        ),
+        (None, _) => format!(
+            "Well-formed XBRL 2.1 container in the documented ApexMail extension namespace \
+             ({XBRL_EXTENSION_NAMESPACE}), with every extension fact declared in the \
+             accompanying extension schema. NOT submission-ready: {}",
+            readiness.summary()
+        ),
+    }
 }
 
 /// The documented state transition: draft -> management_approved.

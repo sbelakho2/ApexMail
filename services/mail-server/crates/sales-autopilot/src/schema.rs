@@ -15,11 +15,15 @@ use sqlx::PgPool;
 
 use crate::types::SalesError;
 
+/// Views this service reads. They must exist AND be views: `sales_leads` is
+/// derived from the canonical account/contact model (migration 223), so a
+/// stored table of that name means the deployment is running the retired
+/// shape.
+pub const REQUIRED_VIEWS: &[&str] = &["sales_leads"];
+
 /// Tables this service reads or writes. Missing any of them means the
 /// canonical migration chain has not been applied.
 pub const REQUIRED_TABLES: &[&str] = &[
-    // Lead bridge (still read by the CP list and the reply handler).
-    "sales_leads",
     "sales_unsubscribes",
     "sales_settings",
     // Tables that previously existed only through runtime DDL. They are
@@ -77,6 +81,9 @@ pub const REQUIRED_TABLES: &[&str] = &[
 /// exists in a pre-unification shape is reported precisely rather than
 /// producing a runtime 42703 on the first send.
 pub const REQUIRED_COLUMNS: &[(&str, &str)] = &[
+    ("sales_contacts", "legacy_lead_id"),
+    ("sales_contacts", "lead_search_vector"),
+    ("sales_contacts", "legacy_lead_email"),
     ("sales_campaigns", "last_error"),
     ("sales_campaign_recipients", "sent_at"),
     ("sales_campaign_recipients", "message_id"),
@@ -127,9 +134,34 @@ pub async fn verify(pool: &PgPool) -> Result<(), SalesError> {
         }
     }
 
-    // Missing required columns (only checkable for tables that exist).
+    // Required views: they must exist AND be views. A stored table with the
+    // same name is the retired pre-223 shape, not a valid substitute.
+    let present_views: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relkind = 'v' \
+           AND c.relname = ANY($1)",
+    )
+    .bind(REQUIRED_VIEWS)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    for required in REQUIRED_VIEWS {
+        if !present_views.iter().any(|name| name == required) {
+            problems.push(format!(
+                "missing view `{required}` (migration 223 makes it a derived view; a stored \
+                 table with that name is the retired shape)"
+            ));
+        }
+    }
+
+    // Missing required columns (only checkable for relations that exist).
     for (table, column) in REQUIRED_COLUMNS {
-        if !present.iter().any(|name| name == table) {
+        if !present.iter().any(|name| name == table)
+            && !present_views.iter().any(|name| name == table)
+        {
             continue;
         }
         let exists: bool = sqlx::query_scalar(
@@ -195,11 +227,35 @@ mod tests {
     }
 
     #[test]
-    fn required_columns_reference_required_tables() {
+    fn required_columns_reference_required_tables_or_views() {
         for (table, _) in REQUIRED_COLUMNS {
             assert!(
-                REQUIRED_TABLES.contains(table),
-                "`{table}` has required columns but is not a required table"
+                REQUIRED_TABLES.contains(table) || REQUIRED_VIEWS.contains(table),
+                "`{table}` has required columns but is not a required table or view"
+            );
+        }
+    }
+
+    /// `sales_leads` must be verified as a VIEW, never as a stored table:
+    /// migration 223 made it derived, and the old shape must be rejected.
+    #[test]
+    fn sales_leads_is_a_required_view_and_not_a_required_table() {
+        assert!(
+            REQUIRED_VIEWS.contains(&"sales_leads"),
+            "sales_leads must be verified as a view"
+        );
+        assert!(
+            !REQUIRED_TABLES.contains(&"sales_leads"),
+            "sales_leads must not be verified as a stored table"
+        );
+    }
+
+    #[test]
+    fn required_views_are_disjoint_from_required_tables() {
+        for view in REQUIRED_VIEWS {
+            assert!(
+                !REQUIRED_TABLES.contains(view),
+                "`{view}` is required as both a table and a view"
             );
         }
     }

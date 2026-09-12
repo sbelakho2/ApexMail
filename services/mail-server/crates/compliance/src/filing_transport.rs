@@ -65,6 +65,40 @@
 //! package, and (when the receipt carries a `package_sha256`) a hash that
 //! matches the package. Rejections are recorded as receipts too and leave
 //! the return in `failed`.
+//!
+//! # Only a validated package can be submitted
+//!
+//! The package handed to the transport (or the human operator) is built by
+//! [`crate::filing_package`] from the domain model of the form. The transport
+//! refuses to create a submission when
+//!
+//! * the package's validation report is not `valid` (a required field is
+//!   absent, or the source declaration itself declares its data insufficient),
+//!   naming every offending field;
+//! * the package carries a named gap — a legally required field no repository
+//!   model can supply — naming the gap;
+//! * the stored package's payload no longer hashes to its recorded digest
+//!   (mutated after validation).
+//!
+//! The form, the digest, the validation report and the named gaps are
+//! persisted with the submission row (`filing_submission_packages`), so the
+//! evidence survives a DB round trip.
+//!
+//! # Trusted timestamps are never fabricated
+//!
+//! When a TSA is configured (`APEXMAIL_TSA_URL`, see
+//! [`crate::signing::timestamp`]), the transport obtains an RFC 3161
+//! timestamp for the package's canonical payload bytes — the same bytes the
+//! digest is computed over — and stores the full evidence (nonce, genTime,
+//! policy, signer certificate summary, per-check verdicts, proven /
+//! not-proven property lists) with the submission. A timestamp verification
+//! failure is a submission refusal, not a warning. When no TSA is configured
+//! the submission proceeds and the record says plainly `no trusted timestamp
+//! obtained (no TSA configured)`; the return is never described as
+//! timestamped.
+//!
+//! [`submit_filing_with_policy`] exists so tests and embedders can inject an
+//! explicit [`TimestampPolicy`] instead of the environment.
 
 #![deny(unsafe_code)]
 
@@ -75,7 +109,128 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::filing_package::{
+    build_oss_package, build_vd_package, payload_digest_matches, FilingPackage,
+    OssRegistrationIdentity, OssReturnDeclaration, OssSupplyEntryDeclaration, OssTotals,
+    VdEntryDeclaration, VdReturnDeclaration, VdTotals,
+};
+use crate::signing::timestamp::{
+    timestamp_document, HashAlgorithm, TimeStampError, TsaConfig, TimeStampEvidence,
+};
+use crate::signing::CheckVerdict;
 use crate::vat_oss::{transition_return_in, FilingStatus};
+
+// ---------------------------------------------------------------------------
+// Trusted-timestamp policy and evidence
+// ---------------------------------------------------------------------------
+
+/// Where the TSA configuration for a submission comes from.
+pub enum TimestampPolicy<'a> {
+    /// Read `APEXMAIL_TSA_URL` (and the other `APEXMAIL_TSA_*` variables)
+    /// from the environment — the production default. An invalid configured
+    /// value refuses the submission; unset means "no TSA configured".
+    FromEnv,
+    /// Explicit configuration (tests, embedders). `Explicit(None)` means no
+    /// TSA is configured for this call.
+    Explicit(Option<&'a TsaConfig>),
+}
+
+impl TimestampPolicy<'_> {
+    fn resolve(&self) -> Result<Option<TsaConfig>, String> {
+        match self {
+            Self::FromEnv => TsaConfig::from_env().map_err(|error| {
+                format!(
+                    "TSA configuration is present but invalid; refusing to submit without a \
+                     working trusted timestamp: {error}"
+                )
+            }),
+            Self::Explicit(config) => Ok((*config).cloned()),
+        }
+    }
+}
+
+/// Status values persisted in `filing_submission_packages.timestamp_status`.
+pub const TIMESTAMP_STATUS_OBTAINED: &str = "obtained";
+pub const TIMESTAMP_STATUS_NOT_CONFIGURED: &str = "not_configured";
+pub const TIMESTAMP_STATUS_FAILED: &str = "failed";
+
+/// The plain-language record stored when no TSA is configured. The exact
+/// wording is part of the contract (tests pin it).
+pub const NO_TRUSTED_TIMESTAMP_NOTE: &str =
+    "no trusted timestamp obtained (no TSA configured)";
+
+/// The persisted timestamp record for a submission. Serde/JSONB round-trippable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimestampRecord {
+    /// Schema version of the embedded evidence.
+    pub schema_version: u32,
+    /// [`TIMESTAMP_STATUS_OBTAINED`], [`TIMESTAMP_STATUS_NOT_CONFIGURED`] or
+    /// [`TIMESTAMP_STATUS_FAILED`].
+    pub status: String,
+    /// Plain-language status; never claims a timestamp that was not obtained.
+    pub note: String,
+    /// The full RFC 3161 evidence, when one was obtained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<TimeStampEvidence>,
+    /// The failing checks, when verification failed after a response was
+    /// received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_checks: Option<Vec<CheckVerdict>>,
+}
+
+impl TimestampRecord {
+    /// The honest "nothing to attach" record.
+    pub fn not_configured() -> Self {
+        Self {
+            schema_version: crate::signing::EVIDENCE_SCHEMA_VERSION,
+            status: TIMESTAMP_STATUS_NOT_CONFIGURED.to_string(),
+            note: NO_TRUSTED_TIMESTAMP_NOTE.to_string(),
+            evidence: None,
+            failure_checks: None,
+        }
+    }
+
+    /// A successfully verified RFC 3161 timestamp.
+    pub fn obtained(evidence: TimeStampEvidence) -> Self {
+        Self {
+            schema_version: crate::signing::EVIDENCE_SCHEMA_VERSION,
+            status: TIMESTAMP_STATUS_OBTAINED.to_string(),
+            note: format!(
+                "RFC 3161 timestamp obtained for the package digest (genTime {})",
+                evidence
+                    .gen_time_rfc3339
+                    .clone()
+                    .unwrap_or_else(|| evidence.gen_time_raw.clone())
+            ),
+            evidence: Some(evidence),
+            failure_checks: None,
+        }
+    }
+
+    /// A failed timestamp attempt; carries the check results when the
+    /// response parsed but verification failed.
+    pub fn failed(error: &TimeStampError) -> Self {
+        let (note, failure_checks, evidence) = match error {
+            TimeStampError::VerificationFailed { failures, evidence } => (
+                format!("timestamp verification failed: {error}"),
+                Some(failures.clone()),
+                Some((**evidence).clone()),
+            ),
+            other => (format!("timestamp not obtained: {other}"), None, None),
+        };
+        Self {
+            schema_version: crate::signing::EVIDENCE_SCHEMA_VERSION,
+            status: TIMESTAMP_STATUS_FAILED.to_string(),
+            note,
+            evidence,
+            failure_checks,
+        }
+    }
+
+    pub fn is_obtained(&self) -> bool {
+        self.status == TIMESTAMP_STATUS_OBTAINED
+    }
+}
 
 /// Configuration for the VD/OSS machine submission transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,11 +501,11 @@ impl FilingTransport for HttpFilingTransport {
 // Package construction
 // ---------------------------------------------------------------------------
 
-/// Deterministic package hash (sha256 over the canonical JSON encoding; the
-/// object map is key-sorted by serde_json).
+/// Deterministic package hash: SHA-256 over the canonical JSON encoding
+/// ([`crate::filing_package::canonical_json`], independent of map insertion
+/// order and number formatting).
 pub fn package_hash(payload: &serde_json::Value) -> String {
-    let canonical = serde_json::to_string(payload).unwrap_or_default();
-    hex::encode(Sha256::digest(canonical.as_bytes()))
+    crate::filing_package::payload_digest(payload)
 }
 
 /// Hash a receipt payload exactly as received.
@@ -383,6 +538,9 @@ async fn load_return(
 }
 
 /// Build the exact submission payload for a return.
+///
+/// This is the validated package's payload: it is only returned when the
+/// form contract accepts it, so callers never see an unchecked payload.
 pub async fn build_package_payload(
     db: &PgPool,
     kind: ReturnKind,
@@ -390,105 +548,162 @@ pub async fn build_package_payload(
     period: &str,
     return_payload_hash: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    Ok(
+        build_validated_package(db, kind, return_id, period, return_payload_hash)
+            .await?
+            .payload,
+    )
+}
+
+/// Load the declaration from the canonical tables and build its validated
+/// package. Hard refusals (missing required fields, insufficient source data)
+/// come back as the builder's error string naming every offending field.
+pub(crate) async fn build_validated_package(
+    db: &PgPool,
+    kind: ReturnKind,
+    return_id: Uuid,
+    period: &str,
+    return_payload_hash: Option<&str>,
+) -> Result<FilingPackage, String> {
     match kind {
         ReturnKind::Oss => {
-            let registration: Option<(Uuid, String, String, String)> = sqlx::query_as(
-                "SELECT r.registration_id, g.scheme, g.registration_country, g.registration_number \
-                 FROM oss_returns r JOIN oss_registrations g ON g.id = r.registration_id \
-                 WHERE r.id = $1",
-            )
-            .bind(return_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|error| format!("failed to load OSS registration: {error}"))?;
-
-            let entries: Vec<serde_json::Value> = sqlx::query_as::<_, OssEntryRow>(
-                "SELECT supply_id, tenant_id, invoice_id, customer_country, consumption_country, \
-                        taxable_amount_cents, vat_rate, vat_amount_cents, currency, status \
-                 FROM oss_supply_entries WHERE registration_id = $1 AND period = $2 \
-                 ORDER BY supply_id",
-            )
-            .bind(registration.as_ref().map(|row| row.0))
-            .bind(period)
-            .fetch_all(db)
-            .await
-            .map_err(|error| format!("failed to load OSS entries: {error}"))?
-            .into_iter()
-            .map(|row| {
-                serde_json::json!({
-                    "supply_id": row.supply_id,
-                    "tenant_id": row.tenant_id,
-                    "invoice_id": row.invoice_id,
-                    "customer_country": row.customer_country,
-                    "consumption_country": row.consumption_country,
-                    "taxable_amount_cents": row.taxable_amount_cents,
-                    "vat_rate": row.vat_rate,
-                    "vat_amount_cents": row.vat_amount_cents,
-                    "currency": row.currency,
-                    "status": row.status,
-                })
-            })
-            .collect();
-
-            let (scheme, country, number) = registration
-                .map(|row| (row.1, row.2, row.3))
-                .unwrap_or_else(|| ("union".into(), "EE".into(), String::new()));
-
-            Ok(serde_json::json!({
-                "format": "apexmail.filing.oss/1",
-                "return_kind": "oss",
-                "period": period,
-                "registration": {
-                    "scheme": scheme,
-                    "registration_country": country,
-                    "registration_number": number,
-                },
-                "return_payload_hash": return_payload_hash,
-                "entries": entries,
-            }))
+            let declaration =
+                load_oss_declaration(db, return_id, period, return_payload_hash).await?;
+            build_oss_package(&declaration).map_err(|error| error.to_string())
         }
         ReturnKind::Vd => {
-            let seller: Option<String> =
-                sqlx::query_scalar("SELECT seller_vat_number FROM vd_returns WHERE id = $1")
-                    .bind(return_id)
-                    .fetch_optional(db)
-                    .await
-                    .map_err(|error| format!("failed to load VD return: {error}"))?;
-
-            let entries: Vec<serde_json::Value> = sqlx::query_as::<_, VdEntryRow>(
-                "SELECT supply_id, invoice_id, customer_vat_number, customer_country, \
-                        vat_evidence_id, transaction_nature, taxable_amount_cents, currency \
-                 FROM vd_entries WHERE return_id = $1 ORDER BY supply_id",
-            )
-            .bind(return_id)
-            .fetch_all(db)
-            .await
-            .map_err(|error| format!("failed to load VD entries: {error}"))?
-            .into_iter()
-            .map(|row| {
-                serde_json::json!({
-                    "supply_id": row.supply_id,
-                    "invoice_id": row.invoice_id,
-                    "customer_vat_number": row.customer_vat_number,
-                    "customer_country": row.customer_country,
-                    "vat_evidence_id": row.vat_evidence_id,
-                    "transaction_nature": row.transaction_nature,
-                    "taxable_amount_cents": row.taxable_amount_cents,
-                    "currency": row.currency,
-                })
-            })
-            .collect();
-
-            Ok(serde_json::json!({
-                "format": "apexmail.filing.vd/1",
-                "return_kind": "vd",
-                "period": period,
-                "seller_vat_number": seller,
-                "return_payload_hash": return_payload_hash,
-                "entries": entries,
-            }))
+            let declaration =
+                load_vd_declaration(db, return_id, period, return_payload_hash).await?;
+            build_vd_package(&declaration).map_err(|error| error.to_string())
         }
     }
+}
+
+async fn load_oss_declaration(
+    db: &PgPool,
+    return_id: Uuid,
+    period: &str,
+    return_payload_hash: Option<&str>,
+) -> Result<OssReturnDeclaration, String> {
+    let registration: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT g.scheme, g.registration_country, g.registration_number \
+         FROM oss_returns r JOIN oss_registrations g ON g.id = r.registration_id \
+         WHERE r.id = $1",
+    )
+    .bind(return_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to load OSS registration: {error}"))?;
+    let Some((scheme, registration_country, registration_number)) = registration else {
+        return Err(format!(
+            "OSS return {return_id} has no registration row; refusing to build a package without \
+             the union-scheme identity"
+        ));
+    };
+
+    let totals: Option<(i64, i64, i64)> = sqlx::query_as(
+        "SELECT total_taxable_cents, total_vat_cents, supply_count FROM oss_returns WHERE id = $1",
+    )
+    .bind(return_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to load OSS return totals: {error}"))?;
+    let Some((total_taxable_cents, total_vat_cents, supply_count)) = totals else {
+        return Err(format!("OSS return {return_id} not found"));
+    };
+
+    let entries: Vec<OssSupplyEntryDeclaration> = sqlx::query_as::<_, OssEntryRow>(
+        "SELECT supply_id, tenant_id, invoice_id, customer_country, consumption_country, \
+                taxable_amount_cents, vat_rate, vat_amount_cents, currency \
+         FROM oss_supply_entries WHERE registration_id = ( \
+             SELECT registration_id FROM oss_returns WHERE id = $1 \
+         ) AND period = $2 ORDER BY supply_id",
+    )
+    .bind(return_id)
+    .bind(period)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("failed to load OSS entries: {error}"))?
+    .into_iter()
+    .map(|row| OssSupplyEntryDeclaration {
+        supply_id: row.supply_id,
+        tenant_id: row.tenant_id,
+        invoice_id: row.invoice_id,
+        customer_country: row.customer_country,
+        consumption_country: row.consumption_country,
+        taxable_amount_cents: row.taxable_amount_cents,
+        vat_rate: row.vat_rate,
+        vat_amount_cents: row.vat_amount_cents,
+        currency: row.currency,
+    })
+    .collect();
+
+    Ok(OssReturnDeclaration {
+        period: period.to_string(),
+        return_payload_hash: return_payload_hash.map(str::to_string),
+        registration: OssRegistrationIdentity {
+            scheme,
+            registration_country,
+            registration_number,
+        },
+        totals: OssTotals {
+            total_taxable_cents,
+            total_vat_cents,
+            supply_count,
+        },
+        entries,
+    })
+}
+
+async fn load_vd_declaration(
+    db: &PgPool,
+    return_id: Uuid,
+    period: &str,
+    return_payload_hash: Option<&str>,
+) -> Result<VdReturnDeclaration, String> {
+    let header: Option<(Option<String>, i64, i64)> = sqlx::query_as(
+        "SELECT seller_vat_number, total_taxable_cents, line_count FROM vd_returns WHERE id = $1",
+    )
+    .bind(return_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to load VD return: {error}"))?;
+    let Some((seller_vat_number, total_taxable_cents, line_count)) = header else {
+        return Err(format!("VD return {return_id} not found"));
+    };
+
+    let entries: Vec<VdEntryDeclaration> = sqlx::query_as::<_, VdEntryRow>(
+        "SELECT supply_id, invoice_id, customer_vat_number, customer_country, \
+                vat_evidence_id, transaction_nature, taxable_amount_cents, currency \
+         FROM vd_entries WHERE return_id = $1 ORDER BY supply_id",
+    )
+    .bind(return_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("failed to load VD entries: {error}"))?
+    .into_iter()
+    .map(|row| VdEntryDeclaration {
+        supply_id: row.supply_id,
+        invoice_id: row.invoice_id,
+        customer_vat_number: row.customer_vat_number,
+        customer_country: row.customer_country,
+        vat_evidence_id: row.vat_evidence_id,
+        transaction_nature: row.transaction_nature,
+        taxable_amount_cents: row.taxable_amount_cents,
+        currency: row.currency,
+    })
+    .collect();
+
+    Ok(VdReturnDeclaration {
+        period: period.to_string(),
+        return_payload_hash: return_payload_hash.map(str::to_string),
+        seller_vat_number,
+        totals: VdTotals {
+            total_taxable_cents,
+            line_count,
+        },
+        entries,
+    })
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -502,7 +717,6 @@ struct OssEntryRow {
     vat_rate: f64,
     vat_amount_cents: i64,
     currency: String,
-    status: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -524,14 +738,29 @@ struct VdEntryRow {
 /// Submit a validated return through the configured transport, or open the
 /// mandatory human task when no machine API is configured.
 ///
-/// The return must be `validated`; submission is never inferred from a
-/// package existing.
+/// The return must be `validated` AND the package built from it must pass the
+/// form contract with no named gaps; see the module docs. The trusted
+/// timestamp policy is the environment (`APEXMAIL_TSA_URL`).
 pub async fn submit_filing(
     db: &PgPool,
     kind: ReturnKind,
     return_id: Uuid,
     config: &FilingTransportConfig,
     transport: Option<&dyn FilingTransport>,
+) -> Result<SubmissionOutcome, String> {
+    submit_filing_with_policy(db, kind, return_id, config, transport, TimestampPolicy::FromEnv)
+        .await
+}
+
+/// [`submit_filing`] with an explicit trusted-timestamp policy (tests,
+/// embedders).
+pub async fn submit_filing_with_policy(
+    db: &PgPool,
+    kind: ReturnKind,
+    return_id: Uuid,
+    config: &FilingTransportConfig,
+    transport: Option<&dyn FilingTransport>,
+    timestamp_policy: TimestampPolicy<'_>,
 ) -> Result<SubmissionOutcome, String> {
     let summary = load_return(db, kind, return_id).await?;
     let from = FilingStatus::from_db(&summary.status)
@@ -543,7 +772,7 @@ pub async fn submit_filing(
         ));
     }
 
-    let payload = build_package_payload(
+    let mut package = build_validated_package(
         db,
         kind,
         return_id,
@@ -551,60 +780,104 @@ pub async fn submit_filing(
         summary.payload_hash.as_deref(),
     )
     .await?;
-    let payload_sha256 = package_hash(&payload);
-    let idempotency_key = format!("{}:{return_id}:{payload_sha256}", kind.as_str());
-    let package = SubmissionPackage {
-        return_kind: kind,
-        return_id,
-        period: summary.period.clone(),
-        payload,
-        payload_sha256: payload_sha256.clone(),
-        idempotency_key: idempotency_key.clone(),
-    };
+
+    // The one clock-dependent observation is an envelope warning; it never
+    // enters the hashed payload, so package bytes stay deterministic.
+    if package.period == Utc::now().format("%Y-%m").to_string() {
+        package.push_warning(format!(
+            "period {} is still open: the filing period has not ended",
+            package.period
+        ));
+    }
+
+    // A package with validation problems or named gaps is refused with the
+    // reason, never accepted-and-flagged.
+    if let Some(reason) = package.refusal_reason() {
+        return Err(reason);
+    }
 
     let machine = config.machine_ready() && transport.is_some();
+    let transport_kind = if machine { "machine" } else { "human_task" };
     let endpoint = if machine {
         config.endpoint.as_deref()
     } else {
         None
     };
 
-    // Persist the exact package first: the package row is the evidence the
+    // Trusted timestamp for the exact canonical package bytes the digest is
+    // computed over. Fail closed: a configured-but-failing TSA refuses the
+    // submission; an unconfigured TSA is recorded plainly, never faked.
+    let tsa = timestamp_policy.resolve()?;
+    let timestamp = match &tsa {
+        None => TimestampRecord::not_configured(),
+        Some(tsa_config) => {
+            match timestamp_document(
+                Some(tsa_config),
+                &package.canonical_payload_bytes(),
+                HashAlgorithm::Sha256,
+            )
+            .await
+            {
+                Ok(evidence) => TimestampRecord::obtained(evidence),
+                Err(error) => {
+                    let record = TimestampRecord::failed(&error);
+                    let recorded = persist_package(
+                        db,
+                        kind,
+                        return_id,
+                        &package,
+                        transport_kind,
+                        endpoint,
+                        "failed",
+                        Some(&record),
+                        Some(&error.to_string()),
+                    )
+                    .await;
+                    return match recorded {
+                        Ok(_) => Err(format!(
+                            "submission refused: trusted timestamp not obtained: {error}"
+                        )),
+                        Err(db_error) => Err(format!(
+                            "submission refused: trusted timestamp not obtained: {error}; \
+                             additionally, recording the refusal failed: {db_error}"
+                        )),
+                    };
+                }
+            }
+        }
+    };
+
+    let payload_sha256 = package.payload_sha256.clone();
+    let idempotency_key = format!("{}:{return_id}:{payload_sha256}", kind.as_str());
+    let http_package = SubmissionPackage {
+        return_kind: kind,
+        return_id,
+        period: package.period.clone(),
+        payload: package.payload.clone(),
+        payload_sha256: payload_sha256.clone(),
+        idempotency_key: idempotency_key.clone(),
+    };
+
+    // Persist the exact package first: the package row (payload, digest,
+    // validation report, named gaps, timestamp record) is the evidence the
     // human task and any receipt are matched against.
-    let package_id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO filing_submission_packages
-            (return_kind, return_id, period, payload, payload_sha256, transport, status,
-             endpoint, attempts)
-        VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, 1)
-        ON CONFLICT (return_kind, return_id, payload_sha256) DO UPDATE SET
-            transport = EXCLUDED.transport,
-            endpoint = EXCLUDED.endpoint,
-            attempts = filing_submission_packages.attempts + 1,
-            error = NULL,
-            status = CASE
-                WHEN filing_submission_packages.status = 'sent' THEN 'sent'
-                ELSE 'queued'
-            END
-        RETURNING id
-        "#,
+    let package_id = persist_package(
+        db,
+        kind,
+        return_id,
+        &package,
+        transport_kind,
+        endpoint,
+        "queued",
+        Some(&timestamp),
+        None,
     )
-    .bind(kind.as_str())
-    .bind(return_id)
-    .bind(&package.period)
-    .bind(&package.payload)
-    .bind(&package.payload_sha256)
-    .bind(if machine { "machine" } else { "human_task" })
-    .bind(endpoint)
-    .fetch_one(db)
-    .await
-    .map_err(|error| format!("failed to persist submission package: {error}"))?;
+    .await?;
 
     if !machine {
         // No machine API: persist the package and open the mandatory
         // authenticated human task. The return is NOT marked submitted.
-        let task_id =
-            open_human_task(db, package_id, kind, return_id, &package.payload_sha256).await?;
+        let task_id = open_human_task(db, package_id, kind, return_id, &payload_sha256).await?;
         sqlx::query(
             "UPDATE filing_submission_packages SET status = 'awaiting_human' WHERE id = $1 \
              AND status = 'queued'",
@@ -620,7 +893,7 @@ pub async fn submit_filing(
     }
 
     let transport = transport.ok_or_else(|| "machine transport missing".to_string())?;
-    match transport.submit(&package).await {
+    match transport.submit(&http_package).await {
         Ok(receipt) => {
             let reference = receipt.receipt_reference.trim();
             if reference.is_empty() {
@@ -709,6 +982,196 @@ pub async fn submit_filing(
             ))
         }
     }
+}
+
+/// Persist (or refresh) the package row with its validation report, named
+/// gaps and timestamp record. Returns the package id.
+#[allow(clippy::too_many_arguments)]
+async fn persist_package(
+    db: &PgPool,
+    kind: ReturnKind,
+    return_id: Uuid,
+    package: &FilingPackage,
+    transport: &str,
+    endpoint: Option<&str>,
+    status: &str,
+    timestamp: Option<&TimestampRecord>,
+    error: Option<&str>,
+) -> Result<Uuid, String> {
+    let validation_report = serde_json::to_value(&package.validation)
+        .map_err(|error| format!("failed to serialise validation report: {error}"))?;
+    let named_gaps = serde_json::to_value(&package.named_gaps)
+        .map_err(|error| format!("failed to serialise named gaps: {error}"))?;
+    let (timestamp_status, timestamp_evidence) = match timestamp {
+        Some(record) => (
+            Some(record.status.clone()),
+            Some(
+                serde_json::to_value(record)
+                    .map_err(|error| format!("failed to serialise timestamp record: {error}"))?,
+            ),
+        ),
+        None => (None, None),
+    };
+
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO filing_submission_packages
+            (return_kind, return_id, period, payload, payload_sha256, transport, status,
+             endpoint, attempts, form, validation_report, validation_outcome, named_gaps,
+             timestamp_status, timestamp_evidence, error)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (return_kind, return_id, payload_sha256) DO UPDATE SET
+            transport = EXCLUDED.transport,
+            endpoint = EXCLUDED.endpoint,
+            attempts = filing_submission_packages.attempts + 1,
+            error = EXCLUDED.error,
+            status = CASE
+                WHEN filing_submission_packages.status = 'sent' AND EXCLUDED.status <> 'failed'
+                    THEN 'sent'
+                ELSE EXCLUDED.status
+            END,
+            form = EXCLUDED.form,
+            validation_report = EXCLUDED.validation_report,
+            validation_outcome = EXCLUDED.validation_outcome,
+            named_gaps = EXCLUDED.named_gaps,
+            -- A timestamp obtained on an earlier attempt for the SAME payload
+            -- is never downgraded to "not configured" by a later attempt.
+            timestamp_status = CASE
+                WHEN filing_submission_packages.timestamp_status = 'obtained'
+                     AND EXCLUDED.timestamp_status = 'not_configured'
+                    THEN filing_submission_packages.timestamp_status
+                ELSE EXCLUDED.timestamp_status
+            END,
+            timestamp_evidence = CASE
+                WHEN filing_submission_packages.timestamp_status = 'obtained'
+                     AND EXCLUDED.timestamp_status = 'not_configured'
+                    THEN filing_submission_packages.timestamp_evidence
+                ELSE EXCLUDED.timestamp_evidence
+            END
+        RETURNING id
+        "#,
+    )
+    .bind(kind.as_str())
+    .bind(return_id)
+    .bind(&package.period)
+    .bind(&package.payload)
+    .bind(&package.payload_sha256)
+    .bind(transport)
+    .bind(status)
+    .bind(endpoint)
+    .bind(package.form.as_str())
+    .bind(&validation_report)
+    .bind(package.validation.outcome.as_str())
+    .bind(&named_gaps)
+    .bind(timestamp_status)
+    .bind(timestamp_evidence)
+    .bind(error)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("failed to persist submission package: {error}"))
+}
+
+/// The persisted evidence a package row must still satisfy before any
+/// submission act relies on it.
+#[derive(Debug, sqlx::FromRow)]
+struct StoredPackageEvidence {
+    payload: serde_json::Value,
+    payload_sha256: String,
+    validation_outcome: Option<String>,
+    named_gaps: serde_json::Value,
+    #[sqlx(rename = "timestamp_outcome")]
+    timestamp_outcome: Option<String>,
+}
+
+async fn load_stored_package_evidence(
+    conn: &mut sqlx::PgConnection,
+    package_id: Uuid,
+) -> Result<StoredPackageEvidence, String> {
+    sqlx::query_as::<_, StoredPackageEvidence>(
+        "SELECT payload, payload_sha256, validation_outcome, named_gaps, \
+                timestamp_status AS timestamp_outcome \
+         FROM filing_submission_packages WHERE id = $1",
+    )
+    .bind(package_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|error| format!("failed to load submission package: {error}"))?
+    .ok_or_else(|| format!("submission package {package_id} not found"))
+}
+
+/// A stored package is only submittable when it was validated, carries no
+/// named gaps, still hashes to its recorded digest (mutation after validation
+/// is refused) and is not marked as having a failed timestamp.
+fn verify_stored_package(evidence: &StoredPackageEvidence) -> Result<(), String> {
+    match evidence.validation_outcome.as_deref() {
+        Some("valid") => {}
+        Some(other) => {
+            return Err(format!(
+                "refusing to submit package: recorded validation outcome is {other:?}"
+            ));
+        }
+        None => {
+            return Err(
+                "refusing to submit package: no package-validation outcome is recorded (the \
+                 package predates package validation)"
+                    .to_string(),
+            );
+        }
+    }
+
+    let gap_fields: Vec<String> = evidence
+        .named_gaps
+        .as_array()
+        .map(|gaps| {
+            gaps.iter()
+                .filter_map(|gap| {
+                    gap.get("field")
+                        .and_then(|field| field.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !gap_fields.is_empty() {
+        return Err(format!(
+            "refusing to submit package: named gap(s) recorded: {}",
+            gap_fields.join(", ")
+        ));
+    }
+
+    if !payload_digest_matches(&evidence.payload, &evidence.payload_sha256) {
+        return Err(
+            "refusing to submit package: the stored payload does not match its recorded sha256 \
+             digest (payload mutated after validation)"
+                .to_string(),
+        );
+    }
+
+    match evidence.timestamp_outcome.as_deref() {
+        Some(TIMESTAMP_STATUS_OBTAINED) | Some(TIMESTAMP_STATUS_NOT_CONFIGURED) => Ok(()),
+        Some(TIMESTAMP_STATUS_FAILED) => Err(
+            "refusing to submit package: its trusted timestamp failed verification".to_string(),
+        ),
+        Some(other) => Err(format!(
+            "refusing to submit package: unknown timestamp status {other:?}"
+        )),
+        None => Err(
+            "refusing to submit package: no trusted-timestamp status is recorded (the package \
+             predates package validation)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Re-verify a persisted package row as it must be verified before any
+/// submission act depends on it.
+pub async fn verify_package_row(db: &PgPool, package_id: Uuid) -> Result<(), String> {
+    let mut conn = db
+        .acquire()
+        .await
+        .map_err(|error| format!("failed to acquire connection: {error}"))?;
+    let evidence = load_stored_package_evidence(&mut conn, package_id).await?;
+    verify_stored_package(&evidence)
 }
 
 async fn open_human_task(
@@ -819,6 +1282,12 @@ pub async fn record_manual_submission(
             kind.as_str()
         ));
     }
+
+    // A human submission records the exact validated package; a package whose
+    // payload was mutated after validation (or that was never validated) is
+    // refused here, before the task is completed and the return moved.
+    let evidence = load_stored_package_evidence(&mut *tx, package_id).await?;
+    verify_stored_package(&evidence)?;
 
     let payload = receipt_payload.unwrap_or_else(|| {
         serde_json::json!({
@@ -934,8 +1403,8 @@ pub async fn ingest_acknowledgement(
         ));
     }
 
-    let package: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, payload_sha256 FROM filing_submission_packages \
+    let package: Option<(Uuid, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, payload_sha256, payload FROM filing_submission_packages \
          WHERE return_kind = $1 AND return_id = $2 AND status = 'sent' \
          ORDER BY sent_at DESC NULLS LAST, created_at DESC LIMIT 1",
     )
@@ -944,13 +1413,23 @@ pub async fn ingest_acknowledgement(
     .fetch_optional(db)
     .await
     .map_err(|error| format!("failed to load sent package: {error}"))?;
-    let Some((package_id, package_sha256)) = package else {
+    let Some((package_id, package_sha256, package_payload)) = package else {
         return Err(format!(
             "no sent submission package exists for {} return {return_id}; refusing to acknowledge \
              without submission evidence",
             kind.as_str()
         ));
     };
+
+    // The sent package's payload must still hash to the digest the receipt is
+    // matched against; a mutated payload cannot anchor an acknowledgement.
+    if !payload_digest_matches(&package_payload, &package_sha256) {
+        return Err(format!(
+            "the sent package {package_id} for {} return {return_id} no longer matches its \
+             recorded sha256 digest; refusing to acknowledge against mutated evidence",
+            kind.as_str()
+        ));
+    }
 
     // Reject hostile/mismatched receipts: a receipt that names a different
     // package hash cannot acknowledge this return.

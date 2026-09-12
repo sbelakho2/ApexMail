@@ -554,23 +554,26 @@ async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(),
     .await
     .map_err(store_lead_failure)?;
 
-    // 4. Compatibility lead row carrying the canonical links. The public form
-    // still tolerates a duplicate submission (`ON CONFLICT DO NOTHING`); a
-    // duplicate adds no second canonical row because steps 1-3 are idempotent.
+    // 4. Map the canonical contact as a lead (migration 223: the lead is the
+    // `legacy_lead_id` mapping plus the `lead_*` projection; `sales_leads` is
+    // a derived view). The public form still tolerates a duplicate
+    // submission: a contact that is already mapped updates 0 rows and the
+    // submission succeeds, the same behaviour the old `ON CONFLICT DO
+    // NOTHING` gave, and no second canonical row is created because steps
+    // 1-3 are idempotent.
     sqlx::query(
-        "INSERT INTO sales_leads (id, tenant_id, company_name, domain, contact_email, status, source, notes, score, account_id, contact_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'new', $6, $7, 0, $8, $9, now())
-         ON CONFLICT DO NOTHING",
+        "UPDATE sales_contacts \
+            SET legacy_lead_id = $1, legacy_lead_email = $2, \
+                lead_source = $3, lead_notes = $4, lead_score = 0, \
+                lead_created_at = NOW(), lead_updated_at = NOW() \
+          WHERE id = $5 AND tenant_id = $6 AND legacy_lead_id IS NULL",
     )
     .bind(&id)
-    .bind(system_tenant)
-    .bind(company)
-    .bind(&domain)
     .bind(email)
     .bind(source)
     .bind(&notes)
-    .bind(account_id)
     .bind(contact_id)
+    .bind(system_tenant)
     .execute(&mut *tx)
     .await
     .map_err(store_lead_failure)?;
@@ -1060,11 +1063,18 @@ mod tests {
 
         // A previous crashed run may have left the fixture behind; the tenant
         // is shared (`system`), so clean by the unique address/domain first.
-        sqlx::query("DELETE FROM sales_leads WHERE tenant_id = 'system' AND contact_email = $1")
-            .bind(&email)
-            .execute(&pool)
-            .await
-            .expect("clean form leads");
+        // `sales_leads` is a derived view: unmapping is the delete.
+        sqlx::query(
+            "UPDATE sales_contacts SET legacy_lead_id = NULL, legacy_lead_email = NULL \
+             WHERE tenant_id = 'system' AND id IN ( \
+                 SELECT contact_id FROM sales_contact_points \
+                 WHERE tenant_id = 'system' AND normalized_value = lower($1) \
+             )",
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("clean form leads");
         sqlx::query(
             "DELETE FROM sales_contacts WHERE tenant_id = 'system' AND id IN (
                  SELECT contact_id FROM sales_contact_points
@@ -1099,7 +1109,7 @@ mod tests {
             .await
             .expect("canonical form write");
 
-        let (lead_id, account_id, contact_id): (String, Option<uuid::Uuid>, Option<uuid::Uuid>) =
+        let (_lead_id, account_id, contact_id): (String, Option<uuid::Uuid>, Option<uuid::Uuid>) =
             sqlx::query_as(
                 "SELECT id, account_id, contact_id FROM sales_leads \
                  WHERE tenant_id = 'system' AND contact_email = $1",
@@ -1145,9 +1155,10 @@ mod tests {
                 .expect("form contact");
         assert_eq!(Some(contact_account), account_id);
 
-        // Cleanup (child → parent).
-        sqlx::query("DELETE FROM sales_leads WHERE id = $1")
-            .bind(&lead_id)
+        // Cleanup (child → parent). The lead id is asserted above; deleting
+        // it means clearing the mapping before the contact rows go.
+        sqlx::query("UPDATE sales_contacts SET legacy_lead_id = NULL WHERE id = $1")
+            .bind(contact_id.unwrap())
             .execute(&pool)
             .await
             .unwrap();

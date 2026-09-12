@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test fixture: label linkbase (standard label + one terse label role). -->
+<link:linkbase xmlns:link="http://www.xbrl.org/2003/linkbase"
+               xmlns:xlink="http://www.w3.org/1999/xlink"
+               xmlns:xs="http://www.w3.org/2001/XMLSchema"
+               xmlns:xbrli="http://www.xbrl.org/2003/instance"
+               xmlns:ee="http://apexmail.test/xbrl/ee-annual-report/2026-01-01">
+
+  <link:labelLink xlink:type="extended"
+                  xlink:role="http://apexmail.test/role/labels">
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Assets" xlink:label="loc_Assets"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Liabilities" xlink:label="loc_Liabilities"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Equity" xlink:label="loc_Equity"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Revenue" xlink:label="loc_Revenue"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_Expenses" xlink:label="loc_Expenses"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_NetProfit" xlink:label="loc_NetProfit"/>
+    <link:loc xlink:type="locator" xlink:href="concepts.xsd#ee_CompanyName" xlink:label="loc_CompanyName"/>
+
+    <link:label xlink:type="resource" xlink:label="lab_Assets"
+                xlink:role="http://www.xbrl.org/2003/role/label">Total assets</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_Assets_terse"
+                xlink:role="http://www.xbrl.org/2003/role/terseLabel">Assets</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_Liabilities"
+                xlink:role="http://www.xbrl.org/2003/role/label">Total liabilities</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_Equity"
+                xlink:role="http://www.xbrl.org/2003/role/label">Total equity</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_Revenue"
+                xlink:role="http://www.xbrl.org/2003/role/label">Revenue for the period</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_Expenses"
+                xlink:role="http://www.xbrl.org/2003/role/label">Expenses for the period</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_NetProfit"
+                xlink:role="http://www.xbrl.org/2003/role/label">Net profit for the period</link:label>
+    <link:label xlink:type="resource" xlink:label="lab_CompanyName"
+                xlink:role="http://www.xbrl.org/2003/role/label">Reporting entity name</link:label>
+
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_Assets" xlink:to="lab_Assets"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_Assets" xlink:to="lab_Assets_terse"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_Liabilities" xlink:to="lab_Liabilities"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_Equity" xlink:to="lab_Equity"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_Revenue" xlink:to="lab_Revenue"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_Expenses" xlink:to="lab_Expenses"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_NetProfit" xlink:to="lab_NetProfit"/>
+    <link:labelArc xlink:type="arc"
+                   xlink:arcrole="http://www.xbrl.org/2003/arcrole/concept-label"
+                   xlink:from="loc_CompanyName" xlink:to="lab_CompanyName"/>
+  </link:labelLink>
+
+</link:linkbase>

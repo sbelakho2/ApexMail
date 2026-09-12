@@ -7,6 +7,7 @@ name = "accounting-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "csv",
  "hex",
  "migrator",
  "serde",
@@ -355,6 +356,7 @@ dependencies = [
 name = "api-server"
 version = "0.1.0"
 dependencies = [
+ "accounting-core",
  "analytics",
  "anyhow",
  "apexmail-db",
@@ -1766,6 +1768,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "x509-parser 0.16.0",
  "zeroize",
 ]
 
@@ -4540,6 +4543,7 @@ dependencies = [
  "mail-common",
  "mail-parser 0.10.2",
  "mail-proto",
+ "migrator",
  "nonzero_ext",
  "observability-service",
  "rand 0.9.4",

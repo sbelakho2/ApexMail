@@ -1048,6 +1048,10 @@ pub async fn cleanup_tenant(pool: &PgPool, tenant_id: &str) {
         "DELETE FROM sales_sequence_steps WHERE tenant_id = $1",
         "DELETE FROM sales_sequence_versions WHERE tenant_id = $1",
         "DELETE FROM sales_sequences WHERE tenant_id = $1",
+        // `sales_leads` is a derived view (migration 223): leads disappear by
+        // unmapping them before the canonical rows are deleted.
+        "UPDATE sales_contacts SET legacy_lead_id = NULL, legacy_lead_email = NULL \
+         WHERE tenant_id = $1",
         "DELETE FROM sales_contact_points WHERE tenant_id = $1",
         "DELETE FROM sales_contacts WHERE tenant_id = $1",
         "DELETE FROM sales_accounts WHERE tenant_id = $1",
@@ -1063,7 +1067,6 @@ pub async fn cleanup_tenant(pool: &PgPool, tenant_id: &str) {
              (SELECT id FROM sales_campaigns WHERE tenant_id = $1)",
         "DELETE FROM sales_campaigns WHERE tenant_id = $1",
         "DELETE FROM sales_inbox_messages WHERE tenant_id = $1",
-        "DELETE FROM sales_leads WHERE tenant_id = $1",
         "DELETE FROM tenants WHERE id = $1",
     ] {
         sqlx::query(statement)

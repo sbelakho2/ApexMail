@@ -44,6 +44,13 @@ url        = { workspace = true }
 anyhow     = { workspace = true }
 reqwest    = { workspace = true }
 async-trait = { workspace = true }
+# Statutory document emission and authenticity:
+#  * quick-xml — XBRL instances are parsed/validated (and, for tests,
+#    re-parsed) with the same parser the mta/enterprise crates use;
+#  * x509-parser — the TSA certificate chain and the certificates inside an
+#    ASiC signature container.
+quick-xml = "0.41"
+x509-parser = { version = "0.16", features = ["verify"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
@@ -51,6 +58,3 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 # carrying the REAL production migration chain through the production
 # migrator's test_support, instead of hand-written schema subsets.
 migrator = { path = "../migrator" }
-# A real XML parser for the annual-report XBRL well-formedness test (the
-# same parser version the mta/enterprise crates use).
-quick-xml = "0.41"

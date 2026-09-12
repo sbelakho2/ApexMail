@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test fixture: global element declarations of the taxonomy. Included by
+  entry.xsd (same target namespace). Includes one custom monetary type derived
+  from xbrli:monetaryItemType so the loader has to walk the type chain.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:xbrli="http://www.xbrl.org/2003/instance"
+           xmlns:ee="http://apexmail.test/xbrl/ee-annual-report/2026-01-01"
+           targetNamespace="http://apexmail.test/xbrl/ee-annual-report/2026-01-01"
+           elementFormDefault="qualified">
+
+  <xs:simpleType name="MonetaryAmountType" id="ee_MonetaryAmountType">
+    <xs:restriction base="xbrli:monetaryItemType"/>
+  </xs:simpleType>
+
+  <!-- Instant (balance-sheet) concepts. -->
+  <xs:element id="ee_Assets" name="Assets" type="ee:MonetaryAmountType"
+              substitutionGroup="xbrli:item" xbrli:periodType="instant"
+              xbrli:balance="debit" abstract="false" nillable="true"/>
+  <xs:element id="ee_Liabilities" name="Liabilities" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="instant"
+              xbrli:balance="credit" abstract="false" nillable="true"/>
+  <xs:element id="ee_Equity" name="Equity" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="instant"
+              xbrli:balance="credit" abstract="false" nillable="true"/>
+
+  <!-- Duration (income-statement) concepts. -->
+  <xs:element id="ee_Revenue" name="Revenue" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration"
+              xbrli:balance="credit" abstract="false" nillable="true"/>
+  <xs:element id="ee_Expenses" name="Expenses" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration"
+              xbrli:balance="debit" abstract="false" nillable="true"/>
+  <xs:element id="ee_NetProfit" name="NetProfit" type="xbrli:monetaryItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration"
+              xbrli:balance="credit" abstract="false" nillable="true"/>
+  <xs:element id="ee_ProfitLossForPeriod" name="ProfitLossForPeriod"
+              type="xbrli:monetaryItemType" substitutionGroup="xbrli:item"
+              xbrli:periodType="duration" xbrli:balance="credit" abstract="false"
+              nillable="true"/>
+
+  <!-- A non-monetary (text) duration concept. -->
+  <xs:element id="ee_CompanyName" name="CompanyName" type="xbrli:stringItemType"
+              substitutionGroup="xbrli:item" xbrli:periodType="duration"
+              abstract="false" nillable="true"/>
+
+  <!-- An abstract heading: it exists in the taxonomy but can never carry a
+       fact, which the validator must refuse. -->
+  <xs:element id="ee_StatementAbstract" name="StatementAbstract"
+              type="xbrli:stringItemType" substitutionGroup="xbrli:item"
+              xbrli:periodType="duration" abstract="true"/>
+</xs:schema>

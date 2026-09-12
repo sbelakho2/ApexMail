@@ -138,6 +138,10 @@ async fn main() -> anyhow::Result<()> {
     // action worker needs its own handle to the same dispatcher and pool.
     let dispatcher_for_worker = dispatcher.clone();
     let worker_db = db.clone();
+    // The automation executor needs the SAME admission backend (db + redis)
+    // the REST/SMTP/sales send paths use; `redis` is moved into AppState
+    // below, so keep a handle here.
+    let worker_redis = redis.clone();
 
     // The campaign manager is a compatibility planner only: `start_campaign`
     // adapts legacy campaign recipients into canonical contacts/sequence
@@ -311,6 +315,74 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Customer automation executor ──────────────────────────────────
+    // The missing consumer of `automations.actions` (audit implementation-
+    // order item 3). This host already owns the process's background work
+    // (durable action worker + feedback projector) and is the crate that has
+    // the executor, the pooled database and the shared
+    // `PostgresAdmissionBackend`, so the tick is registered here with the same
+    // shutdown watch as every other background job.
+    //
+    // Each tick claims a bounded batch of due trigger events with
+    // FOR UPDATE SKIP LOCKED (migration 224), evaluates the tenant's enabled
+    // rules and executes their actions; every send passes
+    // `SendAdmissionService` — the ONE admission gate.
+    {
+        let admission = Arc::new(
+            billing_service::send_admission::PostgresAdmissionBackend::new(
+                worker_db.clone(),
+                worker_redis,
+            ),
+        );
+        let executor = Arc::new(sales_autopilot::automations::AutomationExecutor::new(
+            worker_db.clone(),
+            billing_service::send_admission::SendAdmissionService::new(admission),
+            unique_worker_id(),
+        ));
+        let interval_secs = std::env::var("AUTOMATION_TICK_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(AUTOMATION_TICK_SECS_DEFAULT)
+            .max(1);
+        tracing::info!(
+            interval_secs,
+            batch = sales_autopilot::automations::DEFAULT_BATCH_SIZE,
+            "automation executor started"
+        );
+        let mut automation_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        match executor.tick().await {
+                            Ok(report) if report.events_claimed > 0 => {
+                                tracing::info!(
+                                    events_claimed = report.events_claimed,
+                                    events_processed = report.events_processed,
+                                    events_deferred = report.events_deferred,
+                                    runs_succeeded = report.runs_succeeded,
+                                    runs_skipped = report.runs_skipped,
+                                    runs_failed = report.runs_failed,
+                                    actions_enqueued = report.actions_enqueued,
+                                    "automation executor tick"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                // The next tick retries; claim leases make a
+                                // crash mid-tick a recoverable state.
+                                tracing::error!(error = %error, "automation executor tick failed");
+                            }
+                        }
+                    }
+                    _ = automation_shutdown.changed() => break,
+                }
+            }
+        });
+    }
+
     let mut server_shutdown = shutdown_rx.clone();
     let shutdown = async move {
         let _ = server_shutdown.changed().await;
@@ -334,6 +406,11 @@ const ACTION_WORKER_CONCURRENCY: i64 = 8;
 
 /// Maximum feedback-projection batches in flight simultaneously.
 const OUTCOME_PROJECTOR_CONCURRENCY: i64 = 4;
+
+/// Default automation-executor tick period (seconds); `AUTOMATION_TICK_SECS`
+/// overrides. A tick is cheap when there is no due work (one bounded claim
+/// query + one bounded prune).
+const AUTOMATION_TICK_SECS_DEFAULT: u64 = 30;
 
 /// A worker identity that is unique per process across replicas.
 ///

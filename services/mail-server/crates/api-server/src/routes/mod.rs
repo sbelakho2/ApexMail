@@ -4,6 +4,7 @@ pub mod ai_insights;
 pub mod analytics;
 pub mod auth;
 pub mod automations;
+pub mod bank_statements;
 pub mod billing;
 pub mod campaigns;
 pub mod client_errors;

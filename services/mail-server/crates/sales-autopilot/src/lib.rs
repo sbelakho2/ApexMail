@@ -27,6 +27,10 @@
 pub mod account_coordination;
 pub mod actions;
 pub mod attribution;
+// Automation execution engine: the missing consumer of `automations.actions`
+// (audit implementation-order item 3). Sends only through the shared
+// `billing_service::send_admission::SendAdmissionService` gate.
+pub mod automations;
 pub mod autonomy;
 pub mod calendar;
 pub mod calibration;

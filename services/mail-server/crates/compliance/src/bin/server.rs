@@ -38,7 +38,10 @@
 //! 5. Data retention enforcement (consents/exports) — daily
 //! 6. Retention sweep (registry-driven canonical-store purges + report) — daily
 //! 7. DSR verification-outbox flush — every 60s
-//! 8. Statutory ledger sweeps (payroll/expenses unposted → accounting-core) — every 5min
+//! 8. Statutory ledger sweeps (payroll/expenses/bank statement lines unposted
+//!    → accounting-core) — every 5min. The bank ingest route
+//!    (`POST /accounting/bank-statements/import`) is the writer the sweep
+//!    posts from, so the statement ledger loop is live end to end.
 
 use clap::Parser;
 use observability_service::otlp_exporter::{
@@ -191,7 +194,7 @@ async fn shutdown_signal() {
 /// 5. Data retention enforcement (consents/exports) — daily (every 24h)
 /// 6. Retention sweep (H-6: registry-driven event-store purges + report) — daily
 /// 7. DSR verification-outbox flush (D: queue tokens as system email) — every 60s
-/// 8. Statutory ledger sweeps (payroll/expenses) — every 5min
+/// 8. Statutory ledger sweeps (payroll/expenses/bank statement lines) — every 5min
 async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     let mut gdpr_ticker = interval(Duration::from_secs(30));
     let mut rotation_ticker = interval(Duration::from_secs(3600));
@@ -200,8 +203,9 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     let mut retention_ticker = interval(Duration::from_secs(86400));
     let mut sweep_ticker = interval(Duration::from_secs(86400));
     let mut outbox_flush_ticker = interval(Duration::from_secs(60));
-    // Interim host for the payroll/expense sweeps: there is no accounting
-    // service or payroll-run writer yet; see compliance::ledger_sweep.
+    // Host for the payroll/expense/bank statement sweeps: there is no
+    // dedicated accounting service; see compliance::ledger_sweep. Bank lines
+    // arrive through the compliance route POST /accounting/bank-statements/import.
     let mut ledger_ticker = interval(Duration::from_secs(300));
 
     loop {
@@ -310,23 +314,34 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
                         }
                     }
                     _ = ledger_ticker.tick() => {
-                        // Follow-up: the payroll/expense adapters had no
-                        // production writer. The sweeps post every unposted
-                        // source row idempotently (SKIP LOCKED claim + post in
-                        // one transaction), so a payroll run / expense entry
-                        // written by any future writer (or psql) reaches the
-                        // statutory ledger with no further wiring.
-                        match compliance::ledger_sweep::sweep_payroll_and_expenses(&state.db).await {
-                            Ok(report) if report.total_posted() > 0 => {
+                        // Payroll/expense/bank statement adapters post every
+                        // unposted source row idempotently (SKIP LOCKED claim
+                        // + post in one transaction). Bank lines are written
+                        // by POST /accounting/bank-statements/import; payroll
+                        // and expense writers remain future features, and any
+                        // row they (or psql) create is posted the same way.
+                        // Reported whenever the tick did anything at all —
+                        // including unpostable rows, which are RETAINED and
+                        // must be visible to an operator.
+                        match compliance::ledger_sweep::sweep_ledger_sources(&state.db).await {
+                            Ok(report) if !report.is_idle() => {
                                 info!(
+                                    payroll_claimed = report.payroll.claimed,
                                     payroll_posted = report.payroll.posted,
                                     payroll_failed = report.payroll.failed,
                                     payroll_unpostable = report.payroll.unpostable,
+                                    expenses_claimed = report.expenses.claimed,
                                     expenses_posted = report.expenses.posted,
                                     expenses_failed = report.expenses.failed,
                                     expenses_source_table_missing =
                                         report.expenses.source_table_missing,
-                                    "Statutory ledger sweep posted source documents"
+                                    bank_claimed = report.bank_statement_lines.claimed,
+                                    bank_posted = report.bank_statement_lines.posted,
+                                    bank_already_posted =
+                                        report.bank_statement_lines.already_posted,
+                                    bank_failed = report.bank_statement_lines.failed,
+                                    bank_unpostable = report.bank_statement_lines.unpostable,
+                                    "Statutory ledger sweep ran"
                                 );
                             }
                             Ok(_) => {}
