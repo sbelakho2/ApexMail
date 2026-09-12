@@ -353,6 +353,18 @@ pub async fn request_contact_slot(
 ///
 /// `is_referral` promotes a referred contact (R6): it bypasses the cooldown
 /// and persona ordering and, at a multi-threading tier, the contact cap.
+///
+/// # Referral input on the live path
+///
+/// There is no canonical column that marks a *contact* as referred:
+/// `sales_reply_classifications.disposition = 'referral'` records an inbound
+/// referral reply (and `enrollments::lock_on_reply` moves that enrollment to
+/// `replied`), and `sales_contacts`/`sales_accounts`/`sales_enrollments` carry
+/// no `is_referral`/`referred_by` field. The live enrollment path therefore
+/// passes `false` and R6 can only fire for callers that hold first-party
+/// referral knowledge (they call this function or the pure [`decide`]
+/// directly). Adding a canonical referral column is the prerequisite for
+/// enforcing referral promotion in the live path.
 #[allow(clippy::too_many_arguments)]
 pub async fn request_contact_slot_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -505,6 +517,49 @@ pub async fn request_contact_slot_in_tx(
         is_referral,
         now,
     ))
+}
+
+/// The live-path admission gate: hold the account reservation lock, then
+/// evaluate every coordination rule.
+///
+/// This is what makes coordination a production gate rather than a library
+/// feature. The explicit `SELECT ... FOR UPDATE` on `sales_accounts` is the
+/// documented serialisation point (migration 206): while the caller's
+/// transaction holds it, no concurrent enrollment for the same account can
+/// re-count the active contacts between this decision and the enrollment
+/// insert, so `max_active_contacts` cannot be exceeded by a race.
+///
+/// [`request_contact_slot_in_tx`] takes the same lock itself; doing it here
+/// first keeps the lock in the caller's hands for the rest of the admission
+/// work (the enrollment and the touch reservation) instead of only for the
+/// count. `is_referral` carries the same meaning and the same live-path
+/// limitation documented on [`request_contact_slot_in_tx`].
+pub async fn request_contact_slot_locked_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    account_id: Uuid,
+    contact_id: Uuid,
+    now: DateTime<Utc>,
+    is_referral: bool,
+) -> Result<CoordinationVerdict, SalesError> {
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM sales_accounts \
+         WHERE id = $1 AND tenant_id = $2 \
+         FOR UPDATE",
+    )
+    .bind(account_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| SalesError::Database(error.to_string()))?;
+    if locked.is_none() {
+        return Err(SalesError::InvalidInput(format!(
+            "account {account_id} not found for tenant '{tenant_id}'; \
+             contact slot coordination cannot be evaluated"
+        )));
+    }
+
+    request_contact_slot_in_tx(tx, tenant_id, account_id, contact_id, now, is_referral).await
 }
 
 // ---------------------------------------------------------------------------

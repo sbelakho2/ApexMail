@@ -1182,13 +1182,18 @@ async fn auto_provision_dedicated_ips_background(
         r#"
         SELECT COUNT(*)::bigint
         FROM dedicated_ips
-        WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')
+        WHERE tenant_id = $1
+          AND status NOT IN ('retired', 'releasing', 'failed', 'cleanup_failed')
         "#,
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
     .await
     .map_err(|error| format!("Failed to load active dedicated IP count: {error}"))?;
+    // Terminal provisioning-failure rows (`failed`, `cleanup_failed`) do not
+    // occupy the allowance: the API-side `NON_OCCUPYING_STATUSES` is the
+    // canonical list (crates/api-server/src/ip_provider.rs) and must stay in
+    // sync with the literal above.
 
     let to_allocate = i64::from(included_count) - active_count;
     if to_allocate <= 0 {

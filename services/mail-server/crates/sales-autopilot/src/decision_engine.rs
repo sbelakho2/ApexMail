@@ -43,13 +43,14 @@
 //! 1. global kill switch
 //! 2. autonomy mode `disabled`
 //! 3. suppression (`sales_unsubscribes` ∪ platform `suppressions`)
-//! 4. contact point verification `invalid`
+//! 4. contact point verification not sendable (only `valid`/`risky` pass;
+//!    see [`email_point_is_sendable`])
 //! 5. legal policy, re-evaluated from the current canonical store:
 //!    `prohibited` denies; `approval_required` forces a human; no policy input
 //!    at all fails closed
 //! 6. enrollment already has a human reply
 //! 7. sender-health gate
-//! 8. per-account weekly frequency budget
+//! 8. per-account weekly frequency budget (a reservation, not a check)
 //! 9. contact point `suppressed_at`
 //!
 //! The autonomy state is loaded inline from `sales_autonomy_state` (the
@@ -58,14 +59,14 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use crate::legal_policy::{self, ContactPolicyInput};
+use crate::legal_policy::{self, ContactPolicyInput, SubscriberType};
 use crate::sender_health;
 use crate::types::{
-    AutonomyMode, AutonomyState, ContactDecision, DecisionAction, Enforcement, OpportunityScore,
-    SalesError,
+    AutonomyMode, AutonomyState, ContactDecision, DecisionAction, Enforcement, JurisdictionPolicy,
+    OpportunityScore, SalesError,
 };
 
 /// Default weekly per-account touch budget when the account has no explicit
@@ -117,6 +118,17 @@ pub fn review_status_for(enforcement: Enforcement) -> Option<&'static str> {
     }
 }
 
+/// Is this contact-point verification state sendable?
+///
+/// The single definition used by enrollment, the live worker and approval
+/// revalidation: `verification IN ('valid', 'risky')`. `unknown`, `unverified`
+/// and `invalid` are all refused, so a contact point that regresses from
+/// `valid` to any other state is stopped by every gate that consults this
+/// function rather than only by the literal `invalid` case.
+pub fn email_point_is_sendable(verification: &str) -> bool {
+    matches!(verification, "valid" | "risky")
+}
+
 /// Everything one decision needs. Built by callers from the canonical tables.
 #[derive(Debug, Clone)]
 pub struct DecisionContext {
@@ -159,6 +171,20 @@ pub struct ContactPolicyInputOwned {
     pub consent_status: Option<String>,
     pub soft_opt_in: bool,
     pub legitimate_interest_assessed: bool,
+    /// Authoritative subscriber classification (§103¹). `#[serde(default)]`
+    /// so a decision packet recorded before this field existed deserializes
+    /// to the fail-closed `Unknown` instead of becoming unreadable.
+    #[serde(default)]
+    pub subscriber_type: SubscriberType,
+    /// Active `sales_consent_evidence` row evidencing consent.
+    #[serde(default)]
+    pub consent_evidence_id: Option<Uuid>,
+    #[serde(default)]
+    pub existing_customer: bool,
+    #[serde(default)]
+    pub similar_product_basis: bool,
+    #[serde(default)]
+    pub collection_opt_out_offered_at: Option<DateTime<Utc>>,
 }
 
 impl ContactPolicyInputOwned {
@@ -179,6 +205,11 @@ impl ContactPolicyInputOwned {
             consent_status: self.consent_status.as_deref(),
             soft_opt_in: self.soft_opt_in,
             legitimate_interest_assessed: self.legitimate_interest_assessed,
+            subscriber_type: self.subscriber_type,
+            consent_evidence_id: self.consent_evidence_id,
+            existing_customer: self.existing_customer,
+            similar_product_basis: self.similar_product_basis,
+            collection_opt_out_offered_at: self.collection_opt_out_offered_at,
         }
     }
 }
@@ -311,11 +342,15 @@ pub async fn decide(db: &PgPool, ctx: DecisionContext) -> Result<DecisionOutcome
                     }
                 }
 
-                // Gate 4 — an invalid address must never be contacted.
-                if verification == "invalid" {
+                // Gate 4 — only a sendable address may ever be contacted.
+                // The rule is the one canonical definition shared with
+                // enrollment and approval revalidation:
+                // `verification IN ('valid', 'risky')`.
+                if !email_point_is_sendable(&verification) {
                     failures.push(format!(
-                        "contact_point_invalid: verification is 'invalid' for contact point \
-                         {contact_point_id}"
+                        "contact_point_not_sendable: verification is '{verification}' for \
+                         contact point {contact_point_id}; only 'valid' or 'risky' may be \
+                         contacted"
                     ));
                 }
 
@@ -579,8 +614,11 @@ struct EnrollmentGateRow {
 /// execution that carries the decision id, an enrollment created from the
 /// decision, then the contact's newest enrollment as a last resort (so a
 /// missing link cannot silently skip the human-reply gate).
-async fn resolve_enrollment(
-    db: &PgPool,
+///
+/// Connection-scoped so it can run inside [`revalidate_execution_tx`]'s
+/// transaction.
+async fn resolve_enrollment_conn(
+    conn: &mut PgConnection,
     tenant_id: &str,
     decision_id: Uuid,
     contact_id: Option<Uuid>,
@@ -592,7 +630,7 @@ async fn resolve_enrollment(
     )
     .bind(tenant_id)
     .bind(decision_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
@@ -603,7 +641,7 @@ async fn resolve_enrollment(
                  WHERE decision_id = $1 ORDER BY created_at DESC LIMIT 1",
         )
         .bind(decision_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?,
     };
@@ -617,7 +655,7 @@ async fn resolve_enrollment(
         )
         .bind(tenant_id)
         .bind(decision_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?,
     };
@@ -629,7 +667,7 @@ async fn resolve_enrollment(
         )
         .bind(enrollment_id)
         .bind(tenant_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| SalesError::Database(e.to_string()));
     }
@@ -644,7 +682,7 @@ async fn resolve_enrollment(
     )
     .bind(tenant_id)
     .bind(contact_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))
 }
@@ -655,8 +693,8 @@ async fn resolve_enrollment(
 /// Only the `inputs` are used: they are recipient FACTS. The verdict itself is
 /// deliberately ignored and re-derived by [`revalidate_execution`], so a stale
 /// policy decision can never be replayed as an indefinite capability.
-async fn latest_policy_audit(
-    db: &PgPool,
+async fn latest_policy_audit_conn(
+    conn: &mut PgConnection,
     tenant_id: &str,
     contact_id: Option<Uuid>,
     contact_point_id: Option<Uuid>,
@@ -669,7 +707,7 @@ async fn latest_policy_audit(
         )
         .bind(tenant_id)
         .bind(point_id)
-        .fetch_optional(db)
+        .fetch_optional(&mut *conn)
         .await
         .map_err(|e| SalesError::Database(e.to_string()));
     }
@@ -684,15 +722,15 @@ async fn latest_policy_audit(
     )
     .bind(tenant_id)
     .bind(contact_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))
 }
 
 /// The contact's newest email contact point, used only when neither the
 /// enrollment link nor the policy audit row identifies one.
-async fn newest_email_contact_point(
-    db: &PgPool,
+async fn newest_email_contact_point_conn(
+    conn: &mut PgConnection,
     tenant_id: &str,
     contact_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, SalesError> {
@@ -706,7 +744,7 @@ async fn newest_email_contact_point(
     )
     .bind(tenant_id)
     .bind(contact_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))
 }
@@ -725,17 +763,70 @@ async fn newest_email_contact_point(
 /// check does not stop at the first): global kill switch; autonomy mode still
 /// permits execution; suppression on the contact point's current email (both
 /// `sales_unsubscribes` and platform `suppressions`); the contact point's
-/// `suppressed_at`; its current address verification; the enrollment's
-/// `has_human_reply`; the selected sender's current health; the account's
-/// current frequency budget; the current legal policy (re-evaluated from the
+/// `suppressed_at`; its current address verification, through the one
+/// canonical rule [`email_point_is_sendable`] (`valid`/`risky` only); the
+/// enrollment's `has_human_reply`; the selected sender's current health; the
+/// account's weekly touch budget — now an atomic **reservation**, not a
+/// count-and-compare; the current legal policy (re-evaluated from the
 /// canonical store, never replayed from the packet).
+///
+/// Admission and the reservation are one transaction. [`revalidate_execution`]
+/// opens its own transaction; [`revalidate_execution_tx`] runs the identical
+/// gates inside a caller's transaction so a review's decision lock,
+/// revalidation, linked-action transition and terminal status are atomic.
+///
+/// Reservation policy: the logical send unit is
+/// `sa-send:{step_execution_id}` (falling back to `decision:{decision_id}`),
+/// so re-validating the same send never consumes a second slot; a
+/// revalidation that ultimately refuses the send releases the slot it just
+/// reserved, in the same transaction. A caller that admits a touch and then
+/// does not send it must call [`settle_account_touch_tx`] with
+/// `settled = false`; the send's own transaction settles it with `true`.
 ///
 /// `allowed` is true only when no gate failed. A missing decision is
 /// [`SalesError::InvalidInput`]. Internal actions (not
 /// [`DecisionAction::is_external_send`]) short-circuit to `allowed: true` with
 /// `checked: []` — there is no external effect to protect.
+/// Re-open the decision and all its gates in one transaction. This is the
+/// safe wrapper for callers that do not already hold one; the approval path
+/// uses [`revalidate_execution_tx`] so its decision lock, revalidation,
+/// linked-action transition and terminal review status are a single atomic
+/// unit.
 pub async fn revalidate_execution(
     db: &PgPool,
+    decision_id: Uuid,
+) -> Result<ExecutionRevalidation, SalesError> {
+    let mut tx = db.begin().await.map_err(db_error)?;
+    let result = revalidate_execution_conn(tx.as_mut(), decision_id).await;
+    match result {
+        Ok(revalidation) => {
+            tx.commit().await.map_err(db_error)?;
+            Ok(revalidation)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// Transaction-scoped revalidation. Same gate set as
+/// [`revalidate_execution`], but evaluated on the caller's connection so the
+/// review transition (decision lock, revalidation, linked-action transition,
+/// terminal `review_status`) can be atomic.
+///
+/// The frequency-budget gate is an atomic reservation taken inside this
+/// transaction (see [`reserve_account_touch_tx`]); if any gate ultimately
+/// refuses the send, the slot is released before this function returns.
+pub async fn revalidate_execution_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    decision_id: Uuid,
+) -> Result<ExecutionRevalidation, SalesError> {
+    revalidate_execution_conn(tx.as_mut(), decision_id).await
+}
+
+async fn revalidate_execution_conn(
+    conn: &mut PgConnection,
     decision_id: Uuid,
 ) -> Result<ExecutionRevalidation, SalesError> {
     let decision: Option<ExecutionDecisionRow> = sqlx::query_as(
@@ -745,9 +836,9 @@ pub async fn revalidate_execution(
          WHERE id = $1",
     )
     .bind(decision_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    .map_err(db_error)?;
 
     let Some(decision) = decision else {
         return Err(SalesError::InvalidInput(format!(
@@ -767,7 +858,7 @@ pub async fn revalidate_execution(
     // Gates 1 and 2 — the autonomy state as it is NOW. The kill switch stops
     // new outbound actions immediately, and a mode that blocks all execution
     // (`disabled`/`shadow`) must not be bypassed by replaying an old decision.
-    let autonomy = load_autonomy_state(db, tenant_id).await?;
+    let autonomy = load_autonomy_state_conn(conn, tenant_id).await?;
     checked.push(GATE_KILL_SWITCH);
     if autonomy.kill_switch {
         reasons.push(
@@ -785,21 +876,22 @@ pub async fn revalidate_execution(
     }
 
     // Resolve the enrollment and the contact point this decision was made for.
-    let enrollment = resolve_enrollment(db, tenant_id, decision_id, decision.contact_id).await?;
+    let enrollment =
+        resolve_enrollment_conn(conn, tenant_id, decision_id, decision.contact_id).await?;
     let enrollment_point = enrollment.as_ref().and_then(|e| e.contact_point_id);
     let mut policy_audit = match enrollment_point {
         Some(point_id) => {
-            latest_policy_audit(db, tenant_id, decision.contact_id, Some(point_id)).await?
+            latest_policy_audit_conn(conn, tenant_id, decision.contact_id, Some(point_id)).await?
         }
         None => None,
     };
     if policy_audit.is_none() {
-        policy_audit = latest_policy_audit(db, tenant_id, decision.contact_id, None).await?;
+        policy_audit = latest_policy_audit_conn(conn, tenant_id, decision.contact_id, None).await?;
     }
     let contact_point_id =
         match enrollment_point.or_else(|| policy_audit.as_ref().and_then(|(point, _)| *point)) {
             Some(point_id) => Some(point_id),
-            None => newest_email_contact_point(db, tenant_id, decision.contact_id).await?,
+            None => newest_email_contact_point_conn(conn, tenant_id, decision.contact_id).await?,
         };
 
     // Gates 3-5 — the contact point's current suppression status, its own
@@ -817,9 +909,9 @@ pub async fn revalidate_execution(
             )
             .bind(point_id)
             .bind(tenant_id)
-            .fetch_optional(db)
+            .fetch_optional(&mut *conn)
             .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
+            .map_err(db_error)?;
 
             match point {
                 None => reasons.push(format!(
@@ -836,7 +928,7 @@ pub async fn revalidate_execution(
                         ));
                     } else {
                         checked.push(GATE_SUPPRESSION);
-                        if check_suppression(db, tenant_id, &value).await? {
+                        if check_suppression_conn(conn, tenant_id, &value).await? {
                             reasons.push(format!(
                                 "suppressed: {value} is on the unsubscribe/suppression list"
                             ));
@@ -853,13 +945,17 @@ pub async fn revalidate_execution(
                         ));
                     }
 
-                    // Gate 5 — an address that is now invalid must never be
-                    // contacted.
+                    // Gate 5 — an address that is not sendable NOW must never
+                    // be contacted. The rule is the one canonical definition
+                    // shared with enrollment and the live worker
+                    // ([`email_point_is_sendable`]): only `valid`/`risky` pass,
+                    // so a regression from `valid` to `unverified`/`unknown`
+                    // stops the send just as `invalid` does.
                     checked.push(GATE_ADDRESS_VERIFICATION);
-                    if verification == "invalid" {
+                    if !email_point_is_sendable(&verification) {
                         reasons.push(format!(
-                            "contact_point_invalid: verification is 'invalid' for contact point \
-                             {point_id}"
+                            "contact_point_not_sendable: verification is '{verification}' for \
+                             contact point {point_id}; only 'valid' or 'risky' may be contacted"
                         ));
                     }
                 }
@@ -878,18 +974,27 @@ pub async fn revalidate_execution(
         }
     }
 
-    // Gate 7 — the selected sender's current health.
+    // Gate 7 — the selected sender's current health, on this connection.
     if let Some(sender_identity_id) = decision.selected_sender_id {
         checked.push(GATE_SENDER_HEALTH);
-        if let Err(err) = sender_health::gate(db, tenant_id, sender_identity_id).await {
+        if let Err(err) = sender_health_gate_conn(conn, tenant_id, sender_identity_id).await {
             reasons.push(format!("sender_health_denied: {err}"));
         }
     }
 
-    // Gate 8 — the account's current weekly frequency budget.
+    // Gate 8 — the account's weekly touch budget as an atomic RESERVATION.
+    // The count and the insert happen on this connection while the account
+    // row is locked below (`SELECT ... FOR UPDATE`), so two concurrent
+    // workers cannot both take the last slot the way a bare `count < budget`
+    // check allowed. Idempotent per logical send: re-validating the same send
+    // never consumes a second slot.
+    let mut reserved: Option<(Uuid, String)> = None;
     if let Some(account_id) = decision.account_id {
         checked.push(GATE_FREQUENCY_BUDGET);
-        if !check_frequency_budget(db, tenant_id, account_id).await? {
+        let logical_send = logical_send_for_decision_conn(conn, decision_id).await?;
+        if reserve_account_touch_conn(conn, tenant_id, account_id, &logical_send).await? {
+            reserved = Some((account_id, logical_send));
+        } else {
             reasons.push(format!(
                 "account_frequency_budget_exhausted: account {account_id} reached its weekly \
                  touch budget"
@@ -899,7 +1004,8 @@ pub async fn revalidate_execution(
 
     // Gate 9 — the legal policy as it stands NOW. The recorded inputs are
     // recipient facts; the verdict is re-derived from the current canonical
-    // store, never replayed from the decision's policy_id.
+    // store (on this connection), never replayed from the decision's
+    // policy_id.
     checked.push(GATE_LEGAL_POLICY);
     match policy_audit {
         None => reasons.push(
@@ -923,7 +1029,7 @@ pub async fn revalidate_execution(
                     owned.contact_point_id = contact_point_id;
                 }
                 let input = owned.as_borrowed(tenant_id);
-                let verdict = legal_policy::evaluate(db, &input).await?;
+                let verdict = evaluate_legal_policy_conn(conn, &input).await?;
                 if let Some(reason) = legal_revalidation_failure(
                     verdict.decision,
                     &verdict.reason,
@@ -935,12 +1041,501 @@ pub async fn revalidate_execution(
         },
     }
 
+    // A refusal must not leak the slot it just reserved: release the
+    // reservation in this same transaction when any gate failed. This is the
+    // documented policy — a reservation whose send is refused is released;
+    // one that sends is settled (see [`settle_account_touch_tx`]).
+    if !reasons.is_empty() {
+        if let Some((account_id, logical_send)) = reserved.as_ref() {
+            settle_account_touch_conn(conn, tenant_id, *account_id, logical_send, false).await?;
+        }
+    }
+
     let allowed = reasons.is_empty();
     Ok(ExecutionRevalidation {
         allowed,
         reasons,
         checked,
     })
+}
+
+/// [`load_autonomy_state`] on an explicit connection, so it can run inside
+/// [`revalidate_execution_tx`]'s transaction.
+async fn load_autonomy_state_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+) -> Result<AutonomyState, SalesError> {
+    let row: Option<(String, bool)> =
+        sqlx::query_as("SELECT mode, kill_switch FROM sales_autonomy_state WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db_error)?;
+
+    Ok(match row {
+        Some((mode, kill_switch)) => AutonomyState {
+            tenant_id: tenant_id.to_string(),
+            mode: AutonomyMode::parse(&mode),
+            kill_switch,
+            rules: serde_json::json!({}),
+            last_action: None,
+            last_action_at: None,
+        },
+        // No row means autonomy was never granted for this tenant: fail
+        // closed to disabled rather than assuming a permissive default.
+        None => AutonomyState {
+            tenant_id: tenant_id.to_string(),
+            ..AutonomyState::default()
+        },
+    })
+}
+
+/// Sender-health gate on an explicit connection.
+///
+/// Mirrors [`sender_health::gate`] with the module's default thresholds (the
+/// canonical thresholds stay in `sender_health.rs`; only the executor
+/// differs) so the check can run inside the caller's transaction.
+async fn sender_health_gate_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    sender_identity_id: Uuid,
+) -> Result<(), SalesError> {
+    let thresholds = sender_health::HealthThresholds::default();
+    let row: Option<(String, f64)> = sqlx::query_as(
+        "SELECT state, health_score FROM sales_sender_health \
+         WHERE tenant_id = $1 AND sender_identity_id = $2",
+    )
+    .bind(tenant_id)
+    .bind(sender_identity_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+
+    let Some((state, health_score)) = row else {
+        return Err(SalesError::PolicyDenied(format!(
+            "sender identity {sender_identity_id} has never been health-assessed; \
+             fail closed until it is"
+        )));
+    };
+
+    if matches!(state.as_str(), "quarantined" | "paused") {
+        return Err(SalesError::PolicyDenied(format!(
+            "sender identity {sender_identity_id} is {state}; sending is blocked"
+        )));
+    }
+
+    if health_score < thresholds.min_health_to_send {
+        return Err(SalesError::PolicyDenied(format!(
+            "sender identity {sender_identity_id} health {health_score:.3} is below \
+             the minimum {:.3}",
+            thresholds.min_health_to_send
+        )));
+    }
+
+    Ok(())
+}
+
+/// [`check_suppression`] on an explicit connection.
+async fn check_suppression_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    email: &str,
+) -> Result<bool, SalesError> {
+    let suppressed: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+             SELECT 1 FROM sales_unsubscribes \
+             WHERE tenant_id = $1 AND lower(email) = lower($2) \
+         ) OR EXISTS ( \
+             SELECT 1 FROM suppressions \
+             WHERE tenant_id = $1 AND lower(email) = lower($2) \
+         )",
+    )
+    .bind(tenant_id)
+    .bind(email)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_error)?;
+    Ok(suppressed)
+}
+
+/// The legal-policy row shape [`evaluate_legal_policy_conn`] reads. It mirrors
+/// the private `PolicyRow` in `legal_policy.rs`; the decision logic itself is
+/// never duplicated — the public pure helpers
+/// ([`legal_policy::resolve_jurisdiction`], [`legal_policy::policy_is_authoritative`],
+/// [`legal_policy::decide_with_state`]) are called with this row.
+#[derive(sqlx::FromRow)]
+struct TxPolicyRow {
+    id: Uuid,
+    jurisdiction: String,
+    channel: String,
+    contact_type: String,
+    decision: String,
+    basis: String,
+    required_disclosure: serde_json::Value,
+    version: i32,
+    approved_by: Option<String>,
+    approved_at: Option<DateTime<Utc>>,
+    valid_from: DateTime<Utc>,
+    valid_until: Option<DateTime<Utc>>,
+}
+
+/// Map a persisted `sales_jurisdiction_policies.decision` value. Mirrors the
+/// private parser in `legal_policy.rs`: unknown values fail closed to
+/// `ApprovalRequired`.
+fn tx_parse_contact_decision(raw: &str) -> ContactDecision {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "allowed" => ContactDecision::Allowed,
+        "prohibited" => ContactDecision::Prohibited,
+        _ => ContactDecision::ApprovalRequired,
+    }
+}
+
+/// [`legal_policy::evaluate`] on an explicit connection.
+///
+/// Same two queries and the same public pure decision function, so the
+/// verdict is identical to the pool version; only the executor differs. This
+/// is what lets the legal gate run inside the review transaction.
+async fn evaluate_legal_policy_conn(
+    conn: &mut PgConnection,
+    input: &ContactPolicyInput<'_>,
+) -> Result<legal_policy::ContactPolicyVerdict, SalesError> {
+    let jurisdiction = legal_policy::resolve_jurisdiction(
+        input.recipient_country.as_deref(),
+        input.country_confidence,
+    );
+    let contact_type = legal_policy::normalize_contact_type(input.contact_type);
+    let channel = legal_policy::normalize_channel(input.channel);
+
+    // Highest version for the exact triple, regardless of approval/validity:
+    // an unapproved or expired top version must not silently delegate to an
+    // older row — it falls through to the unknown default instead.
+    let row: Option<TxPolicyRow> = sqlx::query_as(
+        "SELECT id, jurisdiction, channel, contact_type, decision, basis, \
+                required_disclosure, version, approved_by, approved_at, \
+                valid_from, valid_until \
+         FROM sales_jurisdiction_policies \
+         WHERE jurisdiction = $1 AND channel = $2 AND contact_type = $3 \
+         ORDER BY version DESC \
+         LIMIT 1",
+    )
+    .bind(&jurisdiction)
+    .bind(channel)
+    .bind(contact_type)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+
+    let now = Utc::now();
+    let policy = row.and_then(|row| {
+        let authoritative = legal_policy::policy_is_authoritative(
+            row.approved_by.as_deref(),
+            row.approved_at,
+            row.valid_from,
+            row.valid_until,
+            now,
+        );
+        authoritative.then(|| JurisdictionPolicy {
+            id: row.id,
+            jurisdiction: row.jurisdiction,
+            channel: row.channel,
+            contact_type: row.contact_type,
+            decision: tx_parse_contact_decision(&row.decision),
+            basis: row.basis,
+            required_disclosure: row.required_disclosure,
+            version: row.version,
+        })
+    });
+
+    // Distinguish "jurisdiction is listed but this channel is not configured"
+    // from "jurisdiction is entirely unlisted" for the operator-facing reason.
+    let channel_configured = if policy.is_some() {
+        true
+    } else {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS ( \
+                 SELECT 1 FROM sales_jurisdiction_policies \
+                 WHERE jurisdiction = $1 AND contact_type = $2 \
+                   AND approved_by IS NOT NULL AND approved_at IS NOT NULL \
+                   AND valid_from <= NOW() \
+                   AND (valid_until IS NULL OR valid_until > NOW()) \
+             )",
+        )
+        .bind(&jurisdiction)
+        .bind(contact_type)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_error)?
+    };
+
+    Ok(legal_policy::decide_with_state(
+        policy.as_ref(),
+        channel_configured,
+        input,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Account touch budget: admission as a reservation
+// ---------------------------------------------------------------------------
+
+/// Realised touches for an account over the rolling 7-day window, counted as
+/// distinct logical sends (one `sales_outcomes` row per step execution at
+/// most). `open`/`click` are deliberately excluded as weak, machine-generatable
+/// signals; every other outcome is a send that reached a terminal fate — the
+/// same set the budget check has always counted.
+async fn count_realised_touches_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    account_id: Uuid,
+) -> Result<i64, SalesError> {
+    sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT COALESCE(step_execution_id::text, id::text))::bigint \
+         FROM sales_outcomes \
+         WHERE tenant_id = $1 AND account_id = $2 \
+           AND occurred_at >= NOW() - INTERVAL '7 days' \
+           AND outcome IN ('delivered', 'reply', 'positive_reply', 'meeting_booked', \
+                           'meeting_attended', 'trial', 'paid_subscription', \
+                           'retained_mrr', 'bounce', 'complaint', 'unsubscribe')",
+    )
+    .bind(tenant_id)
+    .bind(account_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_error)
+}
+
+/// Live (not yet settled or released) reservations for an account.
+async fn count_live_reservations_conn(
+    conn: &mut PgConnection,
+    account_id: Uuid,
+) -> Result<i64, SalesError> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM sales_account_touch_reservations \
+         WHERE account_id = $1 AND state = 'reserved'",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_error)
+}
+
+/// Account weekly touch budget: `max(DEFAULT_WEEKLY_ACCOUNT_BUDGET,
+/// max_active_contacts * WEEKLY_BUDGET_PER_ACTIVE_CONTACT)`. A missing account
+/// row uses the default.
+fn weekly_budget_for(max_active_contacts: Option<i16>) -> i64 {
+    max_active_contacts
+        .map(|n| DEFAULT_WEEKLY_ACCOUNT_BUDGET.max(i64::from(n) * WEEKLY_BUDGET_PER_ACTIVE_CONTACT))
+        .unwrap_or(DEFAULT_WEEKLY_ACCOUNT_BUDGET)
+}
+
+/// Lock the account row and read its weekly budget.
+///
+/// `SELECT ... FOR UPDATE` is the serialisation point: a caller that already
+/// holds the lock (for a multi-step admission decision) simply re-selects in
+/// the same transaction; a caller that does not acquires it here. Either way
+/// the budget count and the reservation insert that follow cannot interleave
+/// with another worker's admission for the same account.
+async fn lock_account_budget_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    account_id: Uuid,
+) -> Result<i64, SalesError> {
+    let max_active_contacts: Option<i16> = sqlx::query_scalar(
+        "SELECT max_active_contacts FROM sales_accounts \
+         WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+    )
+    .bind(account_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+
+    max_active_contacts
+        .map(|n| weekly_budget_for(Some(n)))
+        .ok_or_else(|| {
+            SalesError::InvalidInput(format!(
+                "reserve_account_touch_tx: account {account_id} does not exist for tenant \
+             {tenant_id}; refusing to admit a touch against an unknown account"
+            ))
+        })
+}
+
+/// Reserve one touch slot for an account.
+///
+/// MUST run inside a transaction that holds (or acquires) the
+/// `sales_accounts` row lock; this function acquires it itself with
+/// `SELECT ... FOR UPDATE`, so the count of reservations plus realised
+/// outcomes and the insert cannot race. Returns `Ok(false)` when the budget
+/// is exhausted — a refusal, not an error. An unknown account is an error
+/// (fail closed, never a silent refusal).
+///
+/// Idempotent per `(account_id, logical_send)`: an existing `reserved` or
+/// `settled` row returns `Ok(true)` without consuming another slot, and a
+/// `released` row may be re-reserved when budget allows.
+pub async fn reserve_account_touch_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    account_id: Uuid,
+    logical_send: &str,
+) -> Result<bool, SalesError> {
+    reserve_account_touch_conn(tx.as_mut(), tenant_id, account_id, logical_send).await
+}
+
+async fn reserve_account_touch_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    account_id: Uuid,
+    logical_send: &str,
+) -> Result<bool, SalesError> {
+    let budget = lock_account_budget_conn(conn, tenant_id, account_id).await?;
+    reserve_account_touch_with_budget_conn(conn, tenant_id, account_id, logical_send, budget).await
+}
+
+/// [`reserve_account_touch_conn`] with an explicit budget, for tests that
+/// need a budget the account formula can never produce (the formula's floor
+/// is [`DEFAULT_WEEKLY_ACCOUNT_BUDGET`]). The caller must already hold the
+/// account row lock.
+async fn reserve_account_touch_with_budget_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    account_id: Uuid,
+    logical_send: &str,
+    budget: i64,
+) -> Result<bool, SalesError> {
+    // Idempotency: this logical send already holds (or consumed) its slot.
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM sales_account_touch_reservations \
+         WHERE account_id = $1 AND logical_send = $2",
+    )
+    .bind(account_id)
+    .bind(logical_send)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+
+    if matches!(existing.as_deref(), Some("reserved") | Some("settled")) {
+        return Ok(true);
+    }
+
+    // The budget is `live reservations + realised outcomes in the window`.
+    let live = count_live_reservations_conn(conn, account_id).await?;
+    let realised = count_realised_touches_conn(conn, tenant_id, account_id).await?;
+    if live + realised >= budget {
+        return Ok(false);
+    }
+
+    // Fresh admission, or re-admission of a released logical send. The unique
+    // key `(account_id, logical_send)` is the second line of defence: even if
+    // two reservations raced, the logical send could consume only one slot.
+    sqlx::query(
+        "INSERT INTO sales_account_touch_reservations \
+             (account_id, logical_send, tenant_id, state) \
+         VALUES ($1, $2, $3, 'reserved') \
+         ON CONFLICT (account_id, logical_send) DO UPDATE \
+             SET state = 'reserved', reserved_at = NOW(), settled_at = NULL \
+             WHERE sales_account_touch_reservations.state = 'released'",
+    )
+    .bind(account_id)
+    .bind(logical_send)
+    .bind(tenant_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_error)?;
+
+    Ok(true)
+}
+
+/// Settle or release a reservation once the send's fate is known.
+///
+/// `settled = true` keeps the slot consumed (the send happened; its outcome
+/// becomes the durable touch record). `settled = false` releases the slot
+/// (the touch was refused or will never happen). Only a live `reserved` row
+/// transitions, so repeated calls — and a call after the other transition —
+/// are a safe no-op.
+pub async fn settle_account_touch_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    account_id: Uuid,
+    logical_send: &str,
+    settled: bool,
+) -> Result<(), SalesError> {
+    settle_account_touch_conn(tx.as_mut(), tenant_id, account_id, logical_send, settled).await
+}
+
+async fn settle_account_touch_conn(
+    conn: &mut PgConnection,
+    tenant_id: &str,
+    account_id: Uuid,
+    logical_send: &str,
+    settled: bool,
+) -> Result<(), SalesError> {
+    sqlx::query(
+        "UPDATE sales_account_touch_reservations \
+         SET state = CASE WHEN $4 THEN 'settled' ELSE 'released' END, settled_at = NOW() \
+         WHERE account_id = $1 AND logical_send = $2 AND tenant_id = $3 AND state = 'reserved'",
+    )
+    .bind(account_id)
+    .bind(logical_send)
+    .bind(tenant_id)
+    .bind(settled)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_error)?;
+    Ok(())
+}
+
+/// The stable logical send unit for a decision: the queue's idempotency key
+/// for its send step execution (`sa-send:{step_execution_id}`, the same unit
+/// migration 205 keys the delivery ledger by), or `decision:{decision_id}`
+/// when no step execution is linked.
+async fn logical_send_for_decision_conn(
+    conn: &mut PgConnection,
+    decision_id: Uuid,
+) -> Result<String, SalesError> {
+    let step_execution_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM sales_step_executions \
+         WHERE decision_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(decision_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_error)?;
+
+    Ok(match step_execution_id {
+        Some(id) => format!("sa-send:{id}"),
+        None => format!("decision:{decision_id}"),
+    })
+}
+
+/// Release the live touch reservation a decision's logical send may hold.
+///
+/// Used by the review transition when a decision is rejected (or an approval
+/// is refused): the touch will never happen, so its slot must not stay
+/// consumed. A missing reservation is a no-op.
+pub(crate) async fn release_decision_touch_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    decision_id: Uuid,
+) -> Result<(), SalesError> {
+    let account_id: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT account_id FROM sales_decisions WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(decision_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_error)?;
+
+    let Some(Some(account_id)) = account_id else {
+        return Ok(());
+    };
+    let logical_send = logical_send_for_decision_conn(tx.as_mut(), decision_id).await?;
+    settle_account_touch_conn(tx.as_mut(), tenant_id, account_id, &logical_send, false).await
+}
+
+/// Map a SQL error into the crate error type.
+fn db_error(error: sqlx::Error) -> SalesError {
+    SalesError::Database(error.to_string())
 }
 
 /// Is this address on either suppression authority?
@@ -996,42 +1591,29 @@ async fn account_weekly_budget(
     .bind(tenant_id)
     .fetch_optional(db)
     .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    .map_err(db_error)?;
 
-    Ok(max_active_contacts
-        .map(|n| DEFAULT_WEEKLY_ACCOUNT_BUDGET.max(i64::from(n) * WEEKLY_BUDGET_PER_ACTIVE_CONTACT))
-        .unwrap_or(DEFAULT_WEEKLY_ACCOUNT_BUDGET))
+    Ok(weekly_budget_for(max_active_contacts))
 }
 
 /// Does the account still have weekly budget for another touch?
 ///
-/// Counts distinct sends (one `sales_outcomes` row per step execution at
-/// most; `open`/`click` are deliberately excluded as weak signals) for the
-/// account over the last 7 days and compares against the account budget.
-/// Returns `true` when a touch is still allowed.
+/// Counts the account's live reservations (`state = 'reserved'`) plus its
+/// realised touches over the rolling 7-day window and compares against the
+/// account budget. This is the early, read-only pre-gate used by [`decide`];
+/// the authoritative admission is the atomic reservation inside
+/// [`revalidate_execution_tx`], which serialises the same count and the insert
+/// under the account row lock.
 pub async fn check_frequency_budget(
     db: &PgPool,
     tenant_id: &str,
     account_id: Uuid,
 ) -> Result<bool, SalesError> {
     let budget = account_weekly_budget(db, tenant_id, account_id).await?;
-
-    let touches: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT COALESCE(step_execution_id::text, id::text))::bigint \
-         FROM sales_outcomes \
-         WHERE tenant_id = $1 AND account_id = $2 \
-           AND occurred_at >= NOW() - INTERVAL '7 days' \
-           AND outcome IN ('delivered', 'reply', 'positive_reply', 'meeting_booked', \
-                           'meeting_attended', 'trial', 'paid_subscription', \
-                           'retained_mrr', 'bounce', 'complaint', 'unsubscribe')",
-    )
-    .bind(tenant_id)
-    .bind(account_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    Ok(touches < budget)
+    let mut conn = db.acquire().await.map_err(db_error)?;
+    let live = count_live_reservations_conn(&mut conn, account_id).await?;
+    let realised = count_realised_touches_conn(&mut conn, tenant_id, account_id).await?;
+    Ok(live + realised < budget)
 }
 
 #[cfg(test)]
@@ -1122,7 +1704,49 @@ mod tests {
     }
 
     #[test]
+    fn address_rule_accepts_only_valid_and_risky() {
+        for sendable in ["valid", "risky"] {
+            assert!(
+                email_point_is_sendable(sendable),
+                "'{sendable}' must be sendable"
+            );
+        }
+        // The adversarial states: `unknown`/`unverified` are regressions too,
+        // not only the literal `invalid`.
+        for refused in [
+            "unverified",
+            "unknown",
+            "invalid",
+            "",
+            "VALID",
+            "Risky",
+            "valid ",
+        ] {
+            assert!(
+                !email_point_is_sendable(refused),
+                "'{refused}' must not be sendable"
+            );
+        }
+    }
+
+    #[test]
+    fn weekly_budget_uses_the_larger_of_default_and_per_contact_room() {
+        assert_eq!(weekly_budget_for(None), DEFAULT_WEEKLY_ACCOUNT_BUDGET);
+        assert_eq!(weekly_budget_for(Some(1)), DEFAULT_WEEKLY_ACCOUNT_BUDGET);
+        assert_eq!(weekly_budget_for(Some(3)), DEFAULT_WEEKLY_ACCOUNT_BUDGET);
+        assert_eq!(
+            weekly_budget_for(Some(4)),
+            4 * WEEKLY_BUDGET_PER_ACTIVE_CONTACT
+        );
+        assert_eq!(
+            weekly_budget_for(Some(10)),
+            10 * WEEKLY_BUDGET_PER_ACTIVE_CONTACT
+        );
+    }
+
+    #[test]
     fn owned_policy_input_borrows_correctly() {
+        let evidence_id = Uuid::new_v4();
         let owned = ContactPolicyInputOwned {
             account_id: None,
             contact_id: None,
@@ -1137,6 +1761,11 @@ mod tests {
             consent_status: Some("granted".into()),
             soft_opt_in: false,
             legitimate_interest_assessed: true,
+            subscriber_type: SubscriberType::NaturalPerson,
+            consent_evidence_id: Some(evidence_id),
+            existing_customer: false,
+            similar_product_basis: false,
+            collection_opt_out_offered_at: None,
         };
         let borrowed = owned.as_borrowed("tenant-a");
         assert_eq!(borrowed.tenant_id, "tenant-a");
@@ -1144,12 +1773,109 @@ mod tests {
         assert_eq!(borrowed.contact_type, "b2b_professional");
         assert_eq!(borrowed.channel, "email");
         assert_eq!(borrowed.consent_status, Some("granted"));
+        // The §103¹ inputs survive the owned→borrowed conversion.
+        assert_eq!(borrowed.subscriber_type, SubscriberType::NaturalPerson);
+        assert_eq!(borrowed.consent_evidence_id, Some(evidence_id));
+        assert!(!borrowed.existing_customer);
+        assert!(!borrowed.similar_product_basis);
+        assert!(borrowed.collection_opt_out_offered_at.is_none());
         assert_eq!(
             legal_policy::resolve_jurisdiction(
                 borrowed.recipient_country.as_deref(),
                 borrowed.country_confidence
             ),
             legal_policy::EU_POLICY_KEY
+        );
+    }
+
+    #[test]
+    fn policy_input_serialization_carries_the_section_1031_inputs() {
+        // These are the fields `legal_policy::record` writes into
+        // `sales_contact_policy_decisions.inputs` (JSONB), so the audit trail
+        // shows exactly which §103¹ facts the verdict was derived from.
+        let evidence_id = Uuid::new_v4();
+        let collected_at = Utc::now();
+        let owned = ContactPolicyInputOwned {
+            account_id: None,
+            contact_id: Some(Uuid::new_v4()),
+            contact_point_id: None,
+            recipient_country: Some("EE".into()),
+            country_confidence: 0.9,
+            contact_type: "b2c".into(),
+            channel: "email".into(),
+            source: Some("form:newsletter".into()),
+            purpose: Some("outbound_sales".into()),
+            has_existing_relationship: true,
+            consent_status: Some("granted".into()),
+            soft_opt_in: true,
+            legitimate_interest_assessed: false,
+            subscriber_type: SubscriberType::NaturalPerson,
+            consent_evidence_id: Some(evidence_id),
+            existing_customer: true,
+            similar_product_basis: true,
+            collection_opt_out_offered_at: Some(collected_at),
+        };
+
+        let json = serde_json::to_value(&owned).expect("policy input serializes");
+        assert_eq!(json["subscriber_type"], "natural_person");
+        assert_eq!(json["consent_evidence_id"], evidence_id.to_string());
+        assert_eq!(json["existing_customer"], true);
+        assert_eq!(json["similar_product_basis"], true);
+        let collected_round_trip: DateTime<Utc> =
+            serde_json::from_value(json["collection_opt_out_offered_at"].clone())
+                .expect("the collection opt-out timestamp round-trips");
+        assert_eq!(collected_round_trip, collected_at);
+        assert_eq!(json["purpose"], "outbound_sales");
+        assert_eq!(json["jurisdiction"], serde_json::Value::Null);
+        // No separate `jurisdiction` key exists: the resolved jurisdiction is
+        // derived from `recipient_country` + `country_confidence`, exactly as
+        // `legal_policy::evaluate` does.
+    }
+
+    #[test]
+    fn owned_policy_input_deserializes_legacy_packets_to_fail_closed_defaults() {
+        // A Decision Packet recorded before the §103¹ fields existed must not
+        // become unreadable at revalidation time; it deserializes to the
+        // fail-closed defaults instead.
+        let legacy = serde_json::json!({
+            "account_id": null,
+            "contact_id": null,
+            "contact_point_id": null,
+            "recipient_country": "EE",
+            "country_confidence": 0.9,
+            "contact_type": "b2b_professional",
+            "channel": "email",
+            "source": "public_registry",
+            "purpose": "sales_outreach",
+            "has_existing_relationship": false,
+            "consent_status": null,
+            "soft_opt_in": true,
+            "legitimate_interest_assessed": true
+        });
+        let owned: ContactPolicyInputOwned =
+            serde_json::from_value(legacy).expect("legacy packet must deserialize");
+        assert_eq!(owned.subscriber_type, SubscriberType::Unknown);
+        assert_eq!(owned.consent_evidence_id, None);
+        assert!(!owned.existing_customer);
+        assert!(!owned.similar_product_basis);
+        assert_eq!(owned.collection_opt_out_offered_at, None);
+
+        // And the fail-closed default means the legacy packet can never be
+        // executed autonomously off an old soft-opt-in boolean.
+        let borrowed = owned.as_borrowed("tenant-a");
+        let policy = JurisdictionPolicy {
+            id: Uuid::new_v4(),
+            jurisdiction: legal_policy::EU_POLICY_KEY.into(),
+            channel: "email".into(),
+            contact_type: "b2b_professional".into(),
+            decision: ContactDecision::Allowed,
+            basis: "soft_opt_in".into(),
+            required_disclosure: serde_json::json!({}),
+            version: 1,
+        };
+        assert_ne!(
+            legal_policy::decide_with_state(Some(&policy), true, &borrowed).decision,
+            ContactDecision::Allowed
         );
     }
 
@@ -1322,6 +2048,14 @@ mod tests {
                 consent_status: None,
                 soft_opt_in: false,
                 legitimate_interest_assessed: true,
+                // The fixture declares the legal-person classification
+                // explicitly; the production loader passes Unknown because no
+                // canonical source exists yet.
+                subscriber_type: SubscriberType::LegalPerson,
+                consent_evidence_id: None,
+                existing_customer: false,
+                similar_product_basis: false,
+                collection_opt_out_offered_at: None,
             }
         }
     }
@@ -1775,5 +2509,231 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(err.to_string().contains(&missing.to_string()));
+    }
+
+    /// The adversarial address case: the point was `valid` when the decision
+    /// was made and regresses to `unverified` before approval. The weaker
+    /// "reject only literal `invalid`" rule let this through; the canonical
+    /// rule (`email_point_is_sendable`) refuses it.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn revalidation_refuses_a_contact_that_regressed_from_valid_to_unverified() {
+        let Some(pool) = live_pool("decision_engine::tests::revalidation_refuses_unverified").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("reval-regress");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.enforcement,
+            Enforcement::Execute,
+            "fixture must start executable: {:?}",
+            outcome.block_reasons
+        );
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+
+        // The provider re-checks the address after the decision: `valid` →
+        // `unverified` (not `invalid`).
+        sqlx::query("UPDATE sales_contact_points SET verification = 'unverified' WHERE id = $1")
+            .bind(fixture.contact_point_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let revalidation = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            !revalidation.allowed,
+            "an unverified address must be refused, not just an invalid one"
+        );
+        assert!(
+            revalidation
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("contact_point_not_sendable")),
+            "reasons: {:?}",
+            revalidation.reasons
+        );
+        assert!(revalidation.checked.contains(&GATE_ADDRESS_VERIFICATION));
+    }
+
+    /// Budget = 1, 16 concurrent workers: the atomic reservation admits exactly
+    /// one. The old count-and-compare gate let every worker see the same
+    /// remaining slot.
+    ///
+    /// The budget is injected as 1 because the production formula floors at
+    /// [`DEFAULT_WEEKLY_ACCOUNT_BUDGET`]; the account row lock held by each
+    /// worker is the real serialisation point, so the test exercises the same
+    /// code path the formula-driven budget does.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_budget_of_one_admits_exactly_one_of_sixteen_concurrent_workers() {
+        let Some(pool) = live_pool("decision_engine::tests::budget_race").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("budget-race");
+        let account_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, max_active_contacts) \
+             VALUES ($1, $2, 'Budget Race Co', $3, 1)",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{account_id}.example"))
+        .execute(&pool)
+        .await
+        .expect("insert sales_accounts");
+
+        let mut handles = Vec::new();
+        for worker in 0..16u32 {
+            let pool = pool.clone();
+            let tenant = tenant.clone();
+            handles.push(tokio::spawn(async move {
+                let mut tx = pool.begin().await.expect("begin");
+                // Acquire the account row lock first, exactly as the admission
+                // contract requires; the count and insert then cannot race.
+                lock_account_budget_conn(&mut tx, &tenant, account_id)
+                    .await
+                    .expect("lock account");
+                let admitted = reserve_account_touch_with_budget_conn(
+                    &mut tx,
+                    &tenant,
+                    account_id,
+                    &format!("sa-send:budget-race-{worker}"),
+                    1,
+                )
+                .await
+                .expect("reserve");
+                tx.commit().await.expect("commit");
+                admitted
+            }));
+        }
+
+        let mut admitted = 0usize;
+        for handle in handles {
+            if handle.await.expect("join") {
+                admitted += 1;
+            }
+        }
+        assert_eq!(
+            admitted, 1,
+            "exactly one of 16 concurrent workers may take the last slot"
+        );
+
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_account_touch_reservations \
+             WHERE account_id = $1 AND state = 'reserved'",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_account_touch_reservations WHERE account_id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live, 1);
+        assert_eq!(total, 1, "refusals must not leave reservation rows behind");
+
+        // The account row is the FK parent; deleting it cascades the reservations.
+        sqlx::query("DELETE FROM sales_accounts WHERE id = $1")
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// A reservation is consumed once per logical send and can be released
+    /// when the send never happens.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn revalidation_reserves_once_per_logical_send_and_release_frees_the_slot() {
+        let Some(pool) = live_pool("decision_engine::tests::reservation_lifecycle").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("reserve-life");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+
+        let first = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            first.allowed,
+            "clean send must revalidate: {:?}",
+            first.reasons
+        );
+
+        let expected_key = format!("sa-send:{}", fixture.step_execution_id);
+        let (state, logical_send): (String, String) = sqlx::query_as(
+            "SELECT state, logical_send FROM sales_account_touch_reservations \
+             WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "reserved");
+        assert_eq!(logical_send, expected_key);
+
+        // Re-validating the same logical send is idempotent: one row, still
+        // admitted, no second slot consumed.
+        let again = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(again.allowed, "{:?}", again.reasons);
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_account_touch_reservations \
+             WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+
+        // A pre-send refusal releases the slot...
+        let mut tx = pool.begin().await.unwrap();
+        settle_account_touch_tx(&mut tx, &tenant, fixture.account_id, &expected_key, false)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM sales_account_touch_reservations WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "released");
+
+        // ... and a released logical send may be admitted again.
+        let third = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(third.allowed, "{:?}", third.reasons);
+        let (state, rows): (String, i64) = sqlx::query_as(
+            "SELECT MIN(state), COUNT(*)::bigint FROM sales_account_touch_reservations \
+             WHERE account_id = $1",
+        )
+        .bind(fixture.account_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "reserved");
+        assert_eq!(rows, 1);
     }
 }

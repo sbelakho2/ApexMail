@@ -212,8 +212,15 @@ async fn main() -> Result<()> {
                         "SMTP_HOST environment variable must be set when EMAIL_TRANSPORT_TYPE=smtp"
                     ));
                 }
-                warn!("SMTP_HOST not set; SES transport selected, defaulting SMTP host to localhost:25");
-                "localhost".to_string()
+                // Leave the deliberately invalid sentinel host in place: the
+                // hybrid dispatcher must know the relay is NOT configured, so
+                // dedicated-route sends defer before DATA instead of being
+                // routed at a defaulted/localhost address.
+                warn!(
+                    "SMTP_HOST not set; SES shared-pool transport selected — dedicated \
+                     delivery routes (dedicated_ips rows) will defer until a relay is configured"
+                );
+                SmtpConfig::default().host
             }
         };
 

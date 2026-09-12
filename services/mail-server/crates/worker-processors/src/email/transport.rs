@@ -15,6 +15,7 @@ use mail_send::mail_builder::headers::address::Address;
 use mail_send::mail_builder::headers::text::Text;
 use mail_send::mail_builder::MessageBuilder;
 use mail_send::{Credentials, SmtpClientBuilder};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
@@ -25,10 +26,24 @@ use crate::common::{EmailConfig, SesConfig, SmtpConfig, TransportType};
 /// Email transport trait for sending emails.
 ///
 /// `send` takes the per-send [`DeliveryRoute`] the processor selected from
-/// the tenant's warmup-IP identity and returns a [`DeliveryReceipt`] that
-/// MUST report the recipient-facing source IP it actually used (or `None`
-/// when the transport cannot report it — see the receipt docs). The
-/// processor fails the send closed when a dedicated route is not confirmed.
+/// the tenant's dedicated identities and returns a [`DeliveryReceipt`].
+///
+/// ## Route capability (pre-DATA contract)
+///
+/// Each transport DECLARES whether it can carry a route whose source binding
+/// must be verifiable:
+///
+/// * [`EmailTransport::supports_source_binding`] — true only when the
+///   transport can bind the recipient-facing socket to the requested
+///   `source_ip` AND report the actually-bound IP in the same acceptance
+///   contract that says the message was accepted. The processor refuses to
+///   submit a [`DeliveryRoute::Dedicated`] anywhere else (a retryable,
+///   pre-DATA deferral), because a verification that happens after relay
+///   acceptance cannot be undone: the message is already out, and treating
+///   the unverifiable result as a failure would refund quota and retry an
+///   already-accepted send.
+/// * The shared-pool route ([`DeliveryRoute::SesShared`]) has no dedicated
+///   binding to confirm and never consults this capability.
 #[async_trait]
 pub trait EmailTransport: Send + Sync {
     /// Verify transport connection.
@@ -46,6 +61,13 @@ pub trait EmailTransport: Send + Sync {
 
     /// Human-readable transport name for logging.
     fn transport_name(&self) -> &str;
+
+    /// Whether this transport can carry a [`DeliveryRoute::Dedicated`] route
+    /// with a VERIFIABLE source binding: it must bind the recipient-facing
+    /// socket to the requested IP and report the actual IP as part of the
+    /// acceptance contract (see the trait docs). `false` is the honest
+    /// default for every backend that cannot do both.
+    fn supports_source_binding(&self) -> bool;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -103,9 +125,12 @@ pub trait EmailTransport: Send + Sync {
 //   4. report the actually-used source IP back to the worker; the agreed
 //      reply-token contract is [`APEXMAIL_SOURCE_IP_REPLY_HEADER`]
 //      (`X-ApexMail-Source-IP: <ip>`) in the end-of-DATA reply. Until that
-//      exists, `SmtpTransport` reports `actual_source_ip: None` and the
-//      processor REFUSES to count the send as dedicated (hard error,
-//      warmup capacity released) — the route is unverified, not assumed.
+//      exists, `SmtpTransport::supports_source_binding()` is FALSE and the
+//      processor REFUSES to submit a dedicated route at all (retryable,
+//      pre-DATA deferral). It never submits first and verifies afterwards:
+//      a post-acceptance mismatch would mean refunding warmup capacity for a
+//      message that is already out, and retrying it would duplicate an
+//      externally accepted send.
 
 /// The internal SMTP route header injected by `SmtpTransport` for a
 /// dedicated route (see the wire contract above). It lives inside the
@@ -619,6 +644,20 @@ impl EmailTransport for SmtpTransport {
         "smtp"
     }
 
+    /// FALSE — honestly: `SmtpTransport` injects the
+    /// [`APEXMAIL_ROUTE_HEADER`] routing metadata, but the pinned mail-send
+    /// 0.4.x client returns only `Result<()>` for DATA, so the end-of-DATA
+    /// reply carrying the agreed [`APEXMAIL_SOURCE_IP_REPLY_HEADER`] cannot be
+    /// parsed — and the relay side of the contract is NOT implemented in this
+    /// repository (`crates/mta` has no outgoing relay connector). Binding
+    /// therefore cannot be VERIFIED in the acceptance contract, and the
+    /// processor refuses to submit dedicated routes on this transport. When
+    /// the relay reports the bound IP in the acceptance reply, this becomes
+    /// true together with a receipt that carries `actual_source_ip`.
+    fn supports_source_binding(&self) -> bool {
+        false
+    }
+
     async fn verify(&self) -> ProcessorResult<()> {
         debug!(host = %self.config.host, port = self.config.port, "Verifying SMTP connection");
         let builder = self.smtp_builder()?;
@@ -645,6 +684,17 @@ impl EmailTransport for SmtpTransport {
         email: &PreparedEmail,
         route: &DeliveryRoute,
     ) -> ProcessorResult<DeliveryReceipt> {
+        // The relay carries the DEDICATED route only. A shared-pool send must
+        // ride SES (reputation isolation): silently accepting it here would
+        // put shared-pool mail on a dedicated IP — or, in a worker without
+        // SES, hide a misconfigured dispatcher. Refuse BEFORE connecting.
+        if !matches!(route, DeliveryRoute::Dedicated { .. }) {
+            return Err(ProcessorError::Transport(format!(
+                "the SMTP relay transport only carries the dedicated delivery route; \
+                 route {route} belongs to the shared SES pool — refusing before DATA"
+            )));
+        }
+
         // DKIM signer (when signing) is built BEFORE connecting so a key
         // error cannot leak an open connection.
         let signer = match &email.dkim {
@@ -739,10 +789,10 @@ impl EmailTransport for SmtpTransport {
         // because the pinned mail-send 0.4.x API returns only `Result<()>`
         // for DATA — it does not surface the end-of-DATA reply, so the
         // agreed relay report ([`APEXMAIL_SOURCE_IP_REPLY_HEADER`]) cannot
-        // be parsed yet. That is reported HONESTLY as "not verified": the
-        // processor refuses to count a dedicated send until the relay
-        // reports the bound source IP (TODO(mta-owner), see the module
-        // contract above). For the shared route the receipt needs no IP.
+        // be parsed yet. That is why `supports_source_binding()` is false:
+        // the processor refuses a DEDICATED route on this transport BEFORE
+        // DATA (see the module contract above) instead of sending first and
+        // discovering the source IP cannot be verified.
         result.map(|_| DeliveryReceipt {
             transport: TransportType::Smtp,
             transport_message_id: None,
@@ -974,6 +1024,14 @@ impl EmailTransport for SesTransport {
         "ses"
     }
 
+    /// FALSE — SES has no per-message dedicated source-IP binding in this
+    /// design (the shared pool is the whole point of the route), and its
+    /// `SendEmail` response reports only a `MessageId`, never a bound source
+    /// address. A dedicated route is refused before the API call in `send`.
+    fn supports_source_binding(&self) -> bool {
+        false
+    }
+
     async fn verify(&self) -> ProcessorResult<()> {
         debug!(region = %self.config.region, "Verifying SES connectivity");
 
@@ -1080,6 +1138,186 @@ impl EmailTransport for SesTransport {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Hybrid transport (route dispatcher)
+// ═══════════════════════════════════════════════════════════════
+
+/// The route-aware transport dispatcher.
+///
+/// Each resolved [`DeliveryRoute`] maps to exactly ONE backend:
+///
+/// | Route | Backend | Missing-slot behaviour |
+/// |-------|---------|------------------------|
+/// | [`DeliveryRoute::SesShared`] | `ses_shared` | fail closed, naming the route and the missing SES shared transport |
+/// | [`DeliveryRoute::Dedicated`] | `dedicated_smtp` | fail closed, naming the route and the missing dedicated SMTP transport |
+///
+/// There is deliberately NO fallback between the slots: sending shared-pool
+/// mail through a dedicated IP (or dedicated mail through the shared pool)
+/// would break the reputation-isolation invariant the route exists to
+/// enforce. A worker booted for one backend can still carry the other when
+/// both are configured — that is the hybrid the old single-transport
+/// processor could not express.
+pub struct HybridTransport {
+    /// AWS SES shared-pool transport — carries `SesShared` only.
+    ses_shared: Option<Arc<dyn EmailTransport>>,
+    /// Self-hosted relay MTA transport — carries `Dedicated` only.
+    dedicated_smtp: Option<Arc<dyn EmailTransport>>,
+}
+
+impl HybridTransport {
+    /// Build the dispatcher from the configured backends. `None` means the
+    /// backend is NOT configured on this worker; routes bound to a missing
+    /// backend fail closed at dispatch time.
+    pub fn new(
+        ses_shared: Option<Arc<dyn EmailTransport>>,
+        dedicated_smtp: Option<Arc<dyn EmailTransport>>,
+    ) -> Self {
+        Self {
+            ses_shared,
+            dedicated_smtp,
+        }
+    }
+
+    /// Whether the SES shared-pool transport is configured.
+    pub fn has_ses_shared(&self) -> bool {
+        self.ses_shared.is_some()
+    }
+
+    /// Whether the dedicated SMTP relay transport is configured.
+    pub fn has_dedicated_smtp(&self) -> bool {
+        self.dedicated_smtp.is_some()
+    }
+
+    /// Whether the configured dedicated transport can bind and REPORT the
+    /// source IP (see [`EmailTransport::supports_source_binding`]). `false`
+    /// when the dedicated transport is not configured.
+    pub fn dedicated_supports_source_binding(&self) -> bool {
+        self.dedicated_smtp
+            .as_ref()
+            .is_some_and(|transport| transport.supports_source_binding())
+    }
+
+    /// The ONE transport allowed to carry `route`. Fails closed — never
+    /// crosses the shared/dedicated boundary — when the route's backend is
+    /// not configured.
+    pub fn transport_for(&self, route: &DeliveryRoute) -> ProcessorResult<&dyn EmailTransport> {
+        match route {
+            DeliveryRoute::SesShared => self.ses_shared.as_deref().ok_or_else(|| {
+                ProcessorError::Config(format!(
+                    "delivery route {route} requires the SES shared-pool transport, \
+                     which is not configured on this worker — refusing to fall back to \
+                     the dedicated SMTP relay (reputation isolation)"
+                ))
+            }),
+            DeliveryRoute::Dedicated { .. } => self.dedicated_smtp.as_deref().ok_or_else(|| {
+                ProcessorError::Config(format!(
+                    "delivery route {route} requires the dedicated SMTP transport, \
+                     which is not configured on this worker — refusing to fall back to \
+                     the shared SES pool (reputation isolation)"
+                ))
+            }),
+        }
+    }
+
+    /// Pre-DATA admission for a resolved route. Fails closed when:
+    ///
+    /// * the route's backend is not configured, or
+    /// * the route is dedicated and the configured dedicated transport does
+    ///   not support verifiable source binding.
+    ///
+    /// The processor calls this BEFORE reserving acceptance state, so a
+    /// refusal leaves no ledger row and no external submission. Verification
+    /// never happens after relay acceptance.
+    pub fn ensure_route_dispatchable(&self, route: &DeliveryRoute) -> ProcessorResult<()> {
+        let transport = self.transport_for(route)?;
+        if route.is_dedicated() && !transport.supports_source_binding() {
+            return Err(ProcessorError::Config(format!(
+                "delivery route {route} requires a transport that can bind and report the \
+                 source IP; transport '{}' does not support verifiable source binding — \
+                 refusing before DATA rather than submitting an unverifiable dedicated send",
+                transport.transport_name()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EmailTransport for HybridTransport {
+    fn transport_name(&self) -> &str {
+        match (&self.ses_shared, &self.dedicated_smtp) {
+            (Some(_), Some(_)) => "hybrid",
+            (Some(_), None) => "ses",
+            (None, Some(_)) => "smtp",
+            (None, None) => "unconfigured",
+        }
+    }
+
+    fn supports_source_binding(&self) -> bool {
+        self.dedicated_supports_source_binding()
+    }
+
+    async fn verify(&self) -> ProcessorResult<()> {
+        // Verify every configured backend, but let the worker start when at
+        // least one is healthy: a transiently-down secondary must not disable
+        // the route the primary can still serve. Zero healthy backends is a
+        // hard startup failure (nothing could be sent).
+        let mut verified = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        if let Some(transport) = &self.ses_shared {
+            match transport.verify().await {
+                Ok(()) => verified += 1,
+                Err(error) => failures.push(format!("ses: {error}")),
+            }
+        }
+        if let Some(transport) = &self.dedicated_smtp {
+            match transport.verify().await {
+                Ok(()) => verified += 1,
+                Err(error) => failures.push(format!("smtp: {error}")),
+            }
+        }
+        if verified == 0 {
+            return Err(ProcessorError::Config(format!(
+                "no configured email transport could be verified: {}",
+                if failures.is_empty() {
+                    "none configured".to_string()
+                } else {
+                    failures.join("; ")
+                }
+            )));
+        }
+        for failure in failures {
+            warn!(
+                failure,
+                "secondary email transport failed verification; \
+                 routes bound to it will fail closed until it recovers"
+            );
+        }
+        Ok(())
+    }
+
+    async fn send(
+        &self,
+        email: &PreparedEmail,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<DeliveryReceipt> {
+        // Defense in depth: the processor already gate-checks the route, but
+        // no caller may ever cross the shared/dedicated boundary.
+        self.ensure_route_dispatchable(route)?;
+        self.transport_for(route)?.send(email, route).await
+    }
+
+    async fn close(&self) -> ProcessorResult<()> {
+        if let Some(transport) = &self.ses_shared {
+            transport.close().await?;
+        }
+        if let Some(transport) = &self.dedicated_smtp {
+            transport.close().await?;
+        }
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Transport factory
 // ═══════════════════════════════════════════════════════════════
 
@@ -1090,24 +1328,63 @@ pub fn create_transport(config: &SmtpConfig) -> Box<dyn EmailTransport> {
     Box::new(SmtpTransport::new(config.clone()))
 }
 
-/// Create an email transport based on the full `EmailConfig`.
-/// This is the preferred factory — it inspects `transport_type` and builds
-/// the appropriate backend. For SES, it initialises the AWS SDK config
-/// synchronously (credentials from env / IAM role).
+/// Whether a relay is actually configured for dedicated-route delivery.
+///
+/// `SmtpConfig::default().host` is the deliberately invalid sentinel
+/// (`smtp.unset.invalid`) used to force explicit configuration; the worker
+/// keeps that sentinel when `SMTP_HOST` is unset, so a defaulted config can
+/// never masquerade as a configured relay.
+pub fn smtp_relay_configured(config: &SmtpConfig) -> bool {
+    let host = config.host.trim();
+    !host.is_empty() && host != SmtpConfig::default().host
+}
+
+/// Create the route-aware [`HybridTransport`] from the full `EmailConfig`.
+///
+/// Both slots are populated when their backend is configured, regardless of
+/// `transport_type` (which select the BACKEND A NEW DEPLOYMENT PREFERS, not
+/// the only one it can speak):
+///
+/// * `ses_shared` — always built. SES client construction is credential-lazy
+///   (the AWS provider chain resolves at request time); the shared-pool route
+///   must never silently fall back to the SMTP relay, and a deployment
+///   without usable AWS credentials fails the shared route loudly at send
+///   time instead.
+/// * `dedicated_smtp` — built when `transport_type == Smtp` (the operator
+///   explicitly selected the relay) or when a concrete `SMTP_HOST` is
+///   configured (`smtp_relay_configured`).
+///
+/// Signature change (reported): this used to return `Box<dyn EmailTransport>`
+/// of the single selected backend; it now returns the dispatcher itself.
 pub async fn create_transport_from_config(
     config: &EmailConfig,
-) -> ProcessorResult<Box<dyn EmailTransport>> {
-    match config.transport_type {
-        TransportType::Smtp => {
-            info!("Initialising SMTP transport (self-hosted)");
-            Ok(Box::new(SmtpTransport::new(config.smtp.clone())))
-        }
-        TransportType::Ses => {
-            info!(region = %config.ses.region, "Initialising SES transport");
-            let transport = SesTransport::from_env(config.ses.clone()).await?;
-            Ok(Box::new(transport))
-        }
-    }
+) -> ProcessorResult<HybridTransport> {
+    info!(region = %config.ses.region, "Initialising SES shared-pool transport");
+    let ses_shared: Arc<dyn EmailTransport> =
+        Arc::new(SesTransport::from_env(config.ses.clone()).await?);
+
+    let dedicated_smtp: Option<Arc<dyn EmailTransport>> =
+        if config.transport_type == TransportType::Smtp || smtp_relay_configured(&config.smtp) {
+            info!(
+                host = %config.smtp.host,
+                "Initialising dedicated SMTP relay transport"
+            );
+            Some(Arc::new(SmtpTransport::new(config.smtp.clone())))
+        } else {
+            warn!(
+                "no SMTP relay configured (SMTP_HOST unset) — dedicated delivery routes \
+                 will defer before DATA instead of silently using the shared SES pool"
+            );
+            None
+        };
+
+    let transport = HybridTransport::new(Some(ses_shared), dedicated_smtp);
+    info!(
+        transport = transport.transport_name(),
+        dedicated_smtp = transport.has_dedicated_smtp(),
+        "Hybrid email transport initialised"
+    );
+    Ok(transport)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1541,6 +1818,10 @@ mod tests {
         );
     }
 
+    /// P0: `create_transport_from_config` now returns the route-aware hybrid
+    /// dispatcher. An SMTP-selected deployment still gets the relay; the SES
+    /// shared-pool slot is always present so shared routes never fall back to
+    /// the relay.
     #[tokio::test]
     async fn test_create_transport_from_config_smtp() {
         let config = EmailConfig {
@@ -1548,7 +1829,68 @@ mod tests {
             ..Default::default()
         };
         let transport = create_transport_from_config(&config).await.unwrap();
-        assert_eq!(transport.transport_name(), "smtp");
+        assert!(
+            transport.has_ses_shared(),
+            "the shared-pool transport must always be available"
+        );
+        assert!(
+            transport.has_dedicated_smtp(),
+            "an SMTP-selected deployment must have the relay"
+        );
+        assert_eq!(transport.transport_name(), "hybrid");
+    }
+
+    /// P0: without a concrete SMTP relay the dedicated slot stays empty, so
+    /// a dedicated route fails closed instead of being sent at a defaulted
+    /// address. The `smtp.unset.invalid` sentinel is the marker.
+    #[tokio::test]
+    async fn test_create_transport_from_config_ses_without_relay_has_no_dedicated_slot() {
+        let config = EmailConfig {
+            transport_type: TransportType::Ses,
+            ..Default::default()
+        };
+        assert!(
+            !smtp_relay_configured(&config.smtp),
+            "the unset sentinel must not count as a configured relay"
+        );
+        let transport = create_transport_from_config(&config).await.unwrap();
+        assert!(transport.has_ses_shared());
+        assert!(!transport.has_dedicated_smtp());
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+        assert!(
+            transport.ensure_route_dispatchable(&dedicated).is_err(),
+            "no relay => dedicated routes must fail closed"
+        );
+        assert!(transport
+            .ensure_route_dispatchable(&DeliveryRoute::SesShared)
+            .is_ok());
+    }
+
+    /// P0: a concrete `SMTP_HOST` on a SES-selected worker enables the
+    /// dedicated slot — the hybrid the single-transport processor could not
+    /// express.
+    #[test]
+    fn smtp_relay_configured_requires_a_concrete_host() {
+        assert!(!smtp_relay_configured(&SmtpConfig::default()));
+        assert!(!smtp_relay_configured(&SmtpConfig {
+            host: "   ".into(),
+            ..Default::default()
+        }));
+        assert!(smtp_relay_configured(&SmtpConfig {
+            host: "relay.example.com".into(),
+            ..Default::default()
+        }));
+    }
+
+    /// The concrete backends honestly declare the dedicated-binding
+    /// capability: neither the pinned SMTP client nor the SES API can verify
+    /// it today.
+    #[test]
+    fn concrete_backends_do_not_claim_verifiable_source_binding() {
+        assert!(!SmtpTransport::new(SmtpConfig::default()).supports_source_binding());
     }
 
     #[test]
@@ -2015,5 +2357,27 @@ mod tests {
             dedicated_ip_id: "dip-1".into(),
             source_ip: "203.0.113.9".parse().expect("valid test IP"),
         }));
+    }
+
+    /// The mirror invariant: the SMTP relay transport refuses the SHARED
+    /// route before touching the network — shared-pool mail must never ride a
+    /// dedicated IP. The host points nowhere; a refusal that happens after a
+    /// connection attempt would surface a different (transport) error.
+    #[tokio::test]
+    async fn smtp_transport_refuses_the_shared_route_before_connecting() {
+        let transport = SmtpTransport::new(SmtpConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            secure: false,
+            ..Default::default()
+        });
+        let error = transport
+            .send(&route_test_email(vec![]), &DeliveryRoute::SesShared)
+            .await
+            .expect_err("the relay must refuse the shared route");
+        assert!(
+            error.to_string().contains("dedicated delivery route"),
+            "the refusal must name the route invariant: {error}"
+        );
     }
 }

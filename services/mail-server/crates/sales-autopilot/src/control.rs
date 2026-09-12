@@ -5,6 +5,14 @@
 //! every read here is a view over the canonical tables, and every write is an
 //! operator intent (mode, kill switch, review, replay) rather than a decision.
 //!
+//! The review transition is atomic: the decision row lock, the revalidation of
+//! every gate, the linked-action transition and the terminal `review_status`
+//! all happen in one transaction, so a failure cannot leave the decision
+//! recorded as approved while its work is still parked. Operator identity is
+//! taken from `x-operator-id` (legacy alias `x-user-id`) and is trusted only
+//! behind the service-token authentication this router applies to every
+//! `/control/*` route.
+//!
 //! All responses are plain JSON with camelCase keys, matching the CP's
 //! existing admin API conventions.
 
@@ -14,13 +22,18 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::actions::ActionQueue;
 use crate::enrollments;
 use crate::routes::AppState;
 use crate::types::{AutonomyMode, EnrollmentState, SalesError};
+
+/// Map a SQL error into the crate error type.
+fn db_error(error: sqlx::Error) -> SalesError {
+    SalesError::Database(error.to_string())
+}
 
 /// Build an action queue handle for this request's tenant.
 fn queue_for(state: &AppState, worker_id: &str) -> ActionQueue {
@@ -596,30 +609,108 @@ struct ReviewOutcome {
     revalidation: RevalidationReport,
 }
 
-/// Who performed the review, for `sales_decisions.reviewed_by`.
+/// Maximum accepted length of an operator identifier, in bytes.
+pub const MAX_OPERATOR_ID_LEN: usize = 128;
+
+/// Reviewer recorded when the authenticated caller supplies no operator
+/// identity. `sales_decisions.reviewed_by` is NOT NULL, so a name must always
+/// be written; naming the authenticated control plane is honest, whereas
+/// inventing an operator id is not.
+pub const CONTROL_PLANE_REVIEWER: &str = "control-plane";
+
+/// Does this request carry the sales service credential?
 ///
-/// The CP proxy currently forwards no user header, so the fallback names the
-/// authenticated control plane itself rather than inventing an operator id.
-fn reviewer_identity(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-user-id")
-        .or_else(|| headers.get("x-operator-id"))
+/// Mirrors `routes::require_service_token`'s credential extraction exactly
+/// (`x-api-key`, or `Authorization: Bearer`) so the operator identity cannot
+/// be trusted on a request the middleware would have rejected.
+fn request_has_valid_service_token(headers: &axum::http::HeaderMap, service_token: &str) -> bool {
+    if service_token.is_empty() {
+        return false;
+    }
+    if headers
+        .get("x-api-key")
         .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("control-plane")
-        .to_string()
+        .is_some_and(|provided| apexmail_lib::timing_safe_compare(provided, service_token))
+    {
+        return true;
+    }
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.trim().strip_prefix("Bearer "))
+        .is_some_and(|provided| apexmail_lib::timing_safe_compare(provided, service_token))
+}
+
+/// The operator identity to record in `sales_decisions.reviewed_by`.
+///
+/// Contract with the control plane:
+///
+/// * the canonical header is `x-operator-id` (legacy alias: `x-user-id`, used
+///   only when `x-operator-id` is absent);
+/// * it is honoured only when the request carries the sales service token
+///   (`x-api-key`, or `Authorization: Bearer`) — the same credential
+///   `routes::require_service_token` enforces on every `/control/*` route;
+/// * the value is trimmed and must then be a non-empty identifier of at most
+///   [`MAX_OPERATOR_ID_LEN`] bytes containing only printable ASCII characters
+///   (`char::is_ascii_graphic`), so a header can never smuggle control
+///   characters into the audit trail;
+/// * absent header → [`CONTROL_PLANE_REVIEWER`]; present-but-invalid
+///   (non-UTF-8, empty/blank, oversized, non-printable) → [`SalesError::InvalidInput`],
+///   never a silent drop.
+fn operator_identity(
+    headers: &axum::http::HeaderMap,
+    service_token: &str,
+) -> Result<String, SalesError> {
+    let Some(raw) = headers
+        .get("x-operator-id")
+        .or_else(|| headers.get("x-user-id"))
+    else {
+        return Ok(CONTROL_PLANE_REVIEWER.to_string());
+    };
+
+    if !request_has_valid_service_token(headers, service_token) {
+        return Err(SalesError::InvalidInput(
+            "x-operator-id is only accepted on a request authenticated with the sales service \
+             token (x-api-key or Authorization: Bearer)"
+                .to_string(),
+        ));
+    }
+
+    let value = raw.to_str().map_err(|_| {
+        SalesError::InvalidInput("x-operator-id must be valid ASCII header text".to_string())
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(SalesError::InvalidInput(
+            "x-operator-id must not be empty".to_string(),
+        ));
+    }
+    if value.len() > MAX_OPERATOR_ID_LEN {
+        return Err(SalesError::InvalidInput(format!(
+            "x-operator-id must be at most {MAX_OPERATOR_ID_LEN} bytes"
+        )));
+    }
+    if !value.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(SalesError::InvalidInput(
+            "x-operator-id must contain only printable ASCII characters".to_string(),
+        ));
+    }
+    Ok(value.to_string())
 }
 
 /// Move the decision's linked actions out of `awaiting_approval` back into the
-/// queue.
+/// queue, inside the caller's review transaction.
 ///
 /// The lease columns are ASSERTED NULL in the predicate rather than cleared:
 /// an `awaiting_approval` row written by `ActionQueue::finish` never carries a
 /// lease, so a non-null owner/token here means the row was mutated outside the
 /// contract. Clearing it silently would overwrite that writer; refusing is the
 /// only safe response. Returns the number of actions released.
-async fn release_actions(db: &PgPool, tenant: &str, decision_id: Uuid) -> Result<u64, SalesError> {
+async fn release_actions_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &str,
+    decision_id: Uuid,
+) -> Result<u64, SalesError> {
     let still_leased: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)::bigint FROM sales_actions \
          WHERE tenant_id = $1 AND decision_id = $2 AND state = 'awaiting_approval' \
@@ -628,9 +719,9 @@ async fn release_actions(db: &PgPool, tenant: &str, decision_id: Uuid) -> Result
     )
     .bind(tenant)
     .bind(decision_id)
-    .fetch_one(db)
+    .fetch_one(&mut **tx)
     .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    .map_err(db_error)?;
 
     if still_leased > 0 {
         return Err(SalesError::Database(format!(
@@ -647,18 +738,19 @@ async fn release_actions(db: &PgPool, tenant: &str, decision_id: Uuid) -> Result
     )
     .bind(tenant)
     .bind(decision_id)
-    .execute(db)
+    .execute(&mut **tx)
     .await
-    .map_err(|e| SalesError::Database(e.to_string()))?
+    .map_err(db_error)?
     .rows_affected();
     Ok(affected)
 }
 
 /// Cancel every non-terminal action linked to the decision, recording the
-/// reason. This is the "did not release the work" transition: an action that
-/// was queued by a review must not run after the review was refused.
-async fn cancel_linked_actions(
-    db: &PgPool,
+/// reason, inside the caller's review transaction. This is the "did not
+/// release the work" transition: an action that was queued by a review must
+/// not run after the review was refused.
+async fn cancel_linked_actions_tx(
+    tx: &mut Transaction<'_, Postgres>,
     tenant: &str,
     decision_id: Uuid,
     reason: &str,
@@ -674,31 +766,56 @@ async fn cancel_linked_actions(
     .bind(tenant)
     .bind(decision_id)
     .bind(reason)
-    .execute(db)
+    .execute(&mut **tx)
     .await
-    .map_err(|e| SalesError::Database(e.to_string()))?
+    .map_err(db_error)?
     .rows_affected();
     Ok(affected)
 }
 
+/// Write the review columns on the locked decision row. Must only run inside a
+/// transaction that holds the decision row lock (see `apply_review_tx`).
+async fn write_review_status_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &str,
+    decision_id: Uuid,
+    status: &str,
+    reviewed_by: &str,
+    note: &str,
+) -> Result<(), SalesError> {
+    sqlx::query(
+        "UPDATE sales_decisions \
+         SET review_status = $3, reviewed_by = $4, reviewed_at = NOW(), review_note = $5 \
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(decision_id)
+    .bind(tenant)
+    .bind(status)
+    .bind(reviewed_by)
+    .bind(note)
+    .execute(&mut **tx)
+    .await
+    .map_err(db_error)?;
+    Ok(())
+}
+
 /// Apply an operator review to a decision and its linked actions.
 ///
-/// Flow:
-/// 1. Write the authoritative review state, guarded by the decision's own
-///    recorded state (`enforcement = 'await_approval' AND
-///    review_status = 'pending'`). Zero rows is a hard error, never a fallback
-///    to replaying actions.
-/// 2. On approve, re-check every gate with
-///    [`crate::decision_engine::revalidate_execution`] BEFORE releasing the
-///    work. Approval is not a bypass: if the gates now refuse, the actions are
-///    cancelled and the review is durably recorded as `rejected` with the
-///    reasons in `review_note`.
-/// 3. On reject, cancel the linked actions with the operator's note.
+/// Everything happens in ONE transaction:
+/// 1. lock the decision row (`SELECT ... FOR UPDATE`) and verify it is
+///    `enforcement = 'await_approval' AND review_status = 'pending'`; any
+///    other state is a hard error, never a fallback to replaying actions;
+/// 2. on approve, re-run every gate with
+///    [`crate::decision_engine::revalidate_execution_tx`] on this same
+///    transaction — approval is not a bypass;
+/// 3. transition the linked actions (`awaiting_approval` → `queued` when the
+///    gates pass, → `cancelled` on reject or on a revalidation refusal);
+/// 4. write the terminal `review_status` + `reviewed_by` + `reviewed_at` +
+///    `review_note`.
 ///
-/// The revalidation happens before the requeue on purpose: releasing the
-/// actions first would open a window in which a worker claims work that the
-/// gates refuse, which is exactly the defect this transition exists to
-/// prevent.
+/// Any failure rolls back ALL of it, leaving the decision reviewable; there is
+/// no window in which `review_status = 'approved'` is durable while the
+/// linked action is still `awaiting_approval`.
 async fn apply_review(
     db: &PgPool,
     tenant: &str,
@@ -707,46 +824,57 @@ async fn apply_review(
     note: &str,
     reviewed_by: &str,
 ) -> Result<ReviewOutcome, SalesError> {
-    // 1. The only path that may write a review decision.
-    let updated: Option<Uuid> = sqlx::query_scalar(
-        "UPDATE sales_decisions \
-         SET review_status = $3, reviewed_by = $4, reviewed_at = NOW(), review_note = $5 \
-         WHERE id = $1 AND tenant_id = $2 \
-           AND enforcement = 'await_approval' AND review_status = 'pending' \
-         RETURNING id",
+    let mut tx = db.begin().await.map_err(db_error)?;
+    let result = apply_review_tx(&mut tx, tenant, decision_id, action, note, reviewed_by).await;
+    match result {
+        Ok(outcome) => {
+            tx.commit().await.map_err(db_error)?;
+            Ok(outcome)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// The body of [`apply_review`], on the caller's transaction.
+async fn apply_review_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: &str,
+    decision_id: Uuid,
+    action: ReviewAction,
+    note: &str,
+    reviewed_by: &str,
+) -> Result<ReviewOutcome, SalesError> {
+    // 1. The decision row lock is the review's serialisation point: a second
+    //    reviewer blocks here until the first transaction commits or rolls
+    //    back, and the state it then reads is the durable one.
+    let current: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT enforcement, review_status FROM sales_decisions \
+         WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
     )
     .bind(decision_id)
     .bind(tenant)
-    .bind(action.review_status())
-    .bind(reviewed_by)
-    .bind(note)
-    .fetch_optional(db)
+    .fetch_optional(&mut **tx)
     .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    .map_err(db_error)?;
 
-    if updated.is_none() {
-        // Diagnose which condition failed. A silent no-op here would let the
-        // CP believe a review happened when nothing was written.
-        let current: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT enforcement, review_status FROM sales_decisions \
-             WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(decision_id)
-        .bind(tenant)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        return match current {
-            None => Err(SalesError::InvalidInput(format!(
+    match current {
+        None => {
+            return Err(SalesError::InvalidInput(format!(
                 "decision {decision_id} not found for this tenant"
-            ))),
-            Some((enforcement, review_status)) => Err(SalesError::InvalidInput(format!(
-                "decision {decision_id} cannot be reviewed: {}",
+            )))
+        }
+        Some((enforcement, review_status)) => {
+            if let Some(violation) =
                 review_guard_violation(enforcement.as_deref(), review_status.as_deref())
-                    .unwrap_or_else(|| "the review transition was refused".to_string())
-            ))),
-        };
+            {
+                return Err(SalesError::InvalidInput(format!(
+                    "decision {decision_id} cannot be reviewed: {violation}"
+                )));
+            }
+        }
     }
 
     match action {
@@ -756,7 +884,20 @@ async fn apply_review(
             } else {
                 note.trim().to_string()
             };
-            let affected = cancel_linked_actions(db, tenant, decision_id, &reason).await?;
+            // Transition the work, release any touch slot the decision had
+            // reserved (the touch will never happen), then write the terminal
+            // review state. The transaction makes the three atomic.
+            let affected = cancel_linked_actions_tx(tx, tenant, decision_id, &reason).await?;
+            crate::decision_engine::release_decision_touch_tx(tx, tenant, decision_id).await?;
+            write_review_status_tx(
+                tx,
+                tenant,
+                decision_id,
+                action.review_status(),
+                reviewed_by,
+                &reason,
+            )
+            .await?;
             Ok(ReviewOutcome {
                 decision_id,
                 status: ReviewAction::Reject.as_str().to_string(),
@@ -765,22 +906,39 @@ async fn apply_review(
             })
         }
         ReviewAction::Approve => {
-            // 2. Approval is not a bypass: re-run every hard gate before the
-            // work is released. A failure to re-check fails closed.
-            let report = match crate::decision_engine::revalidate_execution(db, decision_id).await {
-                Ok(result) => RevalidationReport {
-                    allowed: result.allowed,
-                    reasons: result.reasons,
-                    checked: result.checked,
-                },
-                Err(error) => RevalidationReport::denied(format!(
-                    "revalidation_failed: the gates could not be re-checked ({error}); \
-                         refusing to release the work"
-                )),
-            };
+            // 2. Approval is not a bypass, but the legal gate requires a
+            //    CURRENT human approval under an approval-required policy, so
+            //    record the operator's decision provisionally before
+            //    re-running the gates. It is invisible outside this
+            //    transaction until COMMIT, and every failure below rolls it
+            //    back: `approved` becomes durable only after the revalidation
+            //    passed AND the requeue succeeded.
+            write_review_status_tx(
+                tx,
+                tenant,
+                decision_id,
+                action.review_status(),
+                reviewed_by,
+                note,
+            )
+            .await?;
+
+            let report =
+                match crate::decision_engine::revalidate_execution_tx(tx, decision_id).await {
+                    Ok(result) => RevalidationReport {
+                        allowed: result.allowed,
+                        reasons: result.reasons,
+                        checked: result.checked,
+                    },
+                    Err(error) => RevalidationReport::denied(format!(
+                        "revalidation_failed: the gates could not be re-checked ({error}); \
+                     refusing to release the work"
+                    )),
+                };
 
             if report.allowed {
-                let affected = release_actions(db, tenant, decision_id).await?;
+                // 3. Only a successful requeue commits the approval above.
+                let affected = release_actions_tx(tx, tenant, decision_id).await?;
                 Ok(ReviewOutcome {
                     decision_id,
                     status: ReviewAction::Approve.as_str().to_string(),
@@ -794,34 +952,29 @@ async fn apply_review(
                     report.reasons.join("; ")
                 };
                 let refusal = format!("approval refused by revalidation: {reasons}");
-                let affected = cancel_linked_actions(db, tenant, decision_id, &refusal).await?;
+                let affected = cancel_linked_actions_tx(tx, tenant, decision_id, &refusal).await?;
+                // The touch will never happen: give back any reserved slot.
+                crate::decision_engine::release_decision_touch_tx(tx, tenant, decision_id).await?;
 
-                // The durable review record must say the approval was refused,
-                // or a later reader would see an approved decision with
-                // cancelled work and no explanation.
-                let note = if note.trim().is_empty() {
+                // 4. The durable review record must say the approval was
+                //    refused, or a later reader would see an approved decision
+                //    with cancelled work and no explanation.
+                let final_note = if note.trim().is_empty() {
                     refusal
                 } else {
                     format!("{refusal} | operator note: {}", note.trim())
                 };
-                let updated = sqlx::query(
+                sqlx::query(
                     "UPDATE sales_decisions \
                      SET review_status = 'rejected', review_note = $3 \
-                     WHERE id = $1 AND tenant_id = $2 AND review_status = 'approved'",
+                     WHERE id = $1 AND tenant_id = $2",
                 )
                 .bind(decision_id)
                 .bind(tenant)
-                .bind(&note)
-                .execute(db)
+                .bind(&final_note)
+                .execute(&mut **tx)
                 .await
-                .map_err(|e| SalesError::Database(e.to_string()))?
-                .rows_affected();
-                if updated == 0 {
-                    tracing::warn!(
-                        decision_id = %decision_id,
-                        "revalidation refusal could not be recorded on the decision"
-                    );
-                }
+                .map_err(db_error)?;
 
                 Ok(ReviewOutcome {
                     decision_id,
@@ -838,13 +991,21 @@ async fn apply_review(
 ///
 /// The decision's `review_status` is the authority: only a decision recorded
 /// as `await_approval` with `review_status = 'pending'` can be decided, and
-/// only the durable transition releases (or cancels) its linked actions.
-/// Approval re-runs the hard gates first — an approval that the gates now
-/// refuse cancels the work and is recorded as a rejection with the reasons.
+/// only the atomic transaction in `apply_review` releases (or cancels) its
+/// linked actions. Approval re-runs the hard gates first — an approval that
+/// the gates now refuse cancels the work and is recorded as a rejection with
+/// the reasons.
+///
+/// The operator identity is taken from the `x-operator-id` header (legacy
+/// alias `x-user-id`) and is honoured only because this route sits behind the
+/// service-token middleware; see [`operator_identity`] for the exact
+/// validation contract. Without the header, `reviewed_by` records
+/// [`CONTROL_PLANE_REVIEWER`].
 ///
 /// The response reports `outcome` (the final authoritative status),
-/// `actionsAffected`, and `revalidation: {allowed, reasons, checked}` so the
-/// CP can show why an approval did or did not release the work.
+/// `reviewedBy`, `actionsAffected`, and `revalidation: {allowed, reasons,
+/// checked}` so the CP can show why an approval did or did not release the
+/// work.
 pub async fn review_decision(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -855,7 +1016,7 @@ pub async fn review_decision(
     let decision_id = parse_uuid(&id, "decision id")?;
     let action = ReviewAction::parse(&body.outcome)?;
     let note = body.note.unwrap_or_default();
-    let reviewed_by = reviewer_identity(&headers);
+    let reviewed_by = operator_identity(&headers, &state.service_token)?;
 
     let result = apply_review(&state.db, &tenant, decision_id, action, &note, &reviewed_by).await?;
 
@@ -864,6 +1025,7 @@ pub async fn review_decision(
         "decisionId": result.decision_id,
         "outcome": result.status,
         "reviewStatus": result.status,
+        "reviewedBy": reviewed_by,
         "actionsAffected": result.actions_affected,
         "revalidation": result.revalidation.into_json(),
     })))
@@ -1113,18 +1275,114 @@ mod tests {
         assert!(review_guard_violation(None, Some("pending")).is_some());
     }
 
-    #[test]
-    fn reviewer_identity_falls_back_to_the_control_plane() {
+    /// The service token used by the identity tests.
+    const TEST_SERVICE_TOKEN: &str = "service-token-abc";
+
+    fn headers_with_token() -> axum::http::HeaderMap {
         let mut headers = axum::http::HeaderMap::new();
-        assert_eq!(reviewer_identity(&headers), "control-plane");
+        headers.insert("x-api-key", TEST_SERVICE_TOKEN.parse().unwrap());
+        headers
+    }
 
-        headers.insert("x-user-id", "user-42".parse().unwrap());
-        assert_eq!(reviewer_identity(&headers), "user-42");
+    #[test]
+    fn operator_identity_is_trusted_only_behind_the_service_token() {
+        // No header: the authenticated CP itself is named; the column is NOT
+        // NULL and inventing an operator id would be dishonest.
+        assert_eq!(
+            operator_identity(&axum::http::HeaderMap::new(), TEST_SERVICE_TOKEN).unwrap(),
+            CONTROL_PLANE_REVIEWER
+        );
 
-        // A blank header must not be recorded as the reviewer.
-        let mut blank = axum::http::HeaderMap::new();
-        blank.insert("x-user-id", "   ".parse().unwrap());
-        assert_eq!(reviewer_identity(&blank), "control-plane");
+        // A valid service token makes the operator id authoritative.
+        let mut authenticated = headers_with_token();
+        authenticated.insert("x-operator-id", "user-42".parse().unwrap());
+        assert_eq!(
+            operator_identity(&authenticated, TEST_SERVICE_TOKEN).unwrap(),
+            "user-42"
+        );
+
+        // Legacy alias `x-user-id` is still accepted; the canonical header wins.
+        let mut legacy = headers_with_token();
+        legacy.insert("x-user-id", "legacy-7".parse().unwrap());
+        assert_eq!(
+            operator_identity(&legacy, TEST_SERVICE_TOKEN).unwrap(),
+            "legacy-7"
+        );
+        legacy.insert("x-operator-id", "operator-9".parse().unwrap());
+        assert_eq!(
+            operator_identity(&legacy, TEST_SERVICE_TOKEN).unwrap(),
+            "operator-9"
+        );
+
+        // Surrounded by whitespace is trimmed to the identifier.
+        let mut padded = headers_with_token();
+        padded.insert("x-operator-id", "  user-42  ".parse().unwrap());
+        assert_eq!(
+            operator_identity(&padded, TEST_SERVICE_TOKEN).unwrap(),
+            "user-42"
+        );
+
+        // Bearer is the middleware's other accepted credential.
+        let mut bearer = axum::http::HeaderMap::new();
+        bearer.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {TEST_SERVICE_TOKEN}").parse().unwrap(),
+        );
+        bearer.insert("x-operator-id", "bearer-user".parse().unwrap());
+        assert_eq!(
+            operator_identity(&bearer, TEST_SERVICE_TOKEN).unwrap(),
+            "bearer-user"
+        );
+
+        // The operator id is NOT trusted without the service credential
+        // (defence in depth: this route is already behind the middleware).
+        let mut unauthenticated = axum::http::HeaderMap::new();
+        unauthenticated.insert("x-operator-id", "impostor".parse().unwrap());
+        assert!(operator_identity(&unauthenticated, TEST_SERVICE_TOKEN).is_err());
+
+        // ... nor with a wrong token, nor when the configured token is empty.
+        let mut wrong = axum::http::HeaderMap::new();
+        wrong.insert("x-api-key", "not-the-token".parse().unwrap());
+        wrong.insert("x-operator-id", "impostor".parse().unwrap());
+        assert!(operator_identity(&wrong, TEST_SERVICE_TOKEN).is_err());
+        assert!(operator_identity(&authenticated, "").is_err());
+    }
+
+    #[test]
+    fn operator_identity_rejects_empty_oversized_and_non_printable_values() {
+        // A present-but-blank header is an error, not the fallback.
+        let mut blank = headers_with_token();
+        blank.insert("x-operator-id", "   ".parse().unwrap());
+        let err = operator_identity(&blank, TEST_SERVICE_TOKEN).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+
+        // Oversized is refused, exactly the bound is accepted.
+        let mut oversized = headers_with_token();
+        oversized.insert(
+            "x-operator-id",
+            "a".repeat(MAX_OPERATOR_ID_LEN + 1).parse().unwrap(),
+        );
+        let err = operator_identity(&oversized, TEST_SERVICE_TOKEN).unwrap_err();
+        assert!(err.to_string().contains("at most"), "{err}");
+
+        let mut bounded = headers_with_token();
+        bounded.insert(
+            "x-operator-id",
+            "a".repeat(MAX_OPERATOR_ID_LEN).parse().unwrap(),
+        );
+        assert_eq!(
+            operator_identity(&bounded, TEST_SERVICE_TOKEN)
+                .unwrap()
+                .len(),
+            MAX_OPERATOR_ID_LEN
+        );
+
+        // A header value may contain a space, but an identifier may not: only
+        // printable non-space ASCII is recorded, so control/format characters
+        // can never reach the audit trail.
+        let mut spaced = headers_with_token();
+        spaced.insert("x-operator-id", "bad id".parse().unwrap());
+        assert!(operator_identity(&spaced, TEST_SERVICE_TOKEN).is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -1326,6 +1584,110 @@ mod tests {
         assert_eq!(reviewed_by.as_deref(), Some("tester"));
         assert!(reviewed_at.is_some());
         assert_eq!(review_note.as_deref(), Some("ship it"));
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    /// (a) Atomicity: a failure AFTER revalidation passed — the requeue refuses
+    /// because the parked action carries lease ownership — must roll back the
+    /// whole review. Before this fix, `review_status` was committed as
+    /// `approved` before the release ran, so the action stayed parked and the
+    /// retry was rejected as "already approved".
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn failed_requeue_rolls_back_the_review_and_keeps_it_reviewable() {
+        let Some(pool) = crate::test_db::canonical_test_pool("review_rollback").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("rollback");
+        set_autonomy(&pool, &tenant, "approval_required", false).await;
+        let (decision_id, action_id) =
+            seed_awaiting_approval(&pool, &tenant, "rollback", "enrich").await;
+
+        // Inject the failure: an `awaiting_approval` row written by the real
+        // queue never carries a lease, so `release_actions_tx` refuses one
+        // that does. This lands after revalidation (the internal enrich action
+        // revalidates cleanly) and before the terminal status write.
+        sqlx::query(
+            "UPDATE sales_actions SET lease_owner = 'rogue-writer', \
+                 lease_expires_at = NOW() + INTERVAL '5 minutes' WHERE id = $1",
+        )
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .expect("inject the post-revalidation failure");
+
+        let failed = apply_review(
+            &pool,
+            &tenant,
+            decision_id,
+            ReviewAction::Approve,
+            "go",
+            "tester",
+        )
+        .await;
+        assert!(failed.is_err(), "the requeue failure must abort the review");
+
+        // The transaction rolled back: no durable approval, work still parked.
+        let (review_status, reviewed_by, reviewed_at, review_note): (
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT review_status, reviewed_by, reviewed_at, review_note \
+             FROM sales_decisions WHERE id = $1",
+        )
+        .bind(decision_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            review_status.as_deref(),
+            Some("pending"),
+            "a failed review must not be durable"
+        );
+        assert_eq!(reviewed_by, None);
+        assert_eq!(reviewed_at, None);
+        assert_eq!(review_note, None);
+
+        let (state, owner): (String, Option<String>) =
+            sqlx::query_as("SELECT state, lease_owner FROM sales_actions WHERE id = $1")
+                .bind(action_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "awaiting_approval");
+        assert_eq!(owner.as_deref(), Some("rogue-writer"));
+
+        // The decision remains reviewable: clear the injected lease and retry.
+        // (Under the old flow this retry was rejected because the review was
+        // already recorded as approved.)
+        sqlx::query(
+            "UPDATE sales_actions SET lease_owner = NULL, lease_expires_at = NULL WHERE id = $1",
+        )
+        .bind(action_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let retried = apply_review(
+            &pool,
+            &tenant,
+            decision_id,
+            ReviewAction::Approve,
+            "go",
+            "tester",
+        )
+        .await
+        .expect("the decision must remain reviewable after the rollback");
+        assert_eq!(retried.status, "approved");
+        assert_eq!(retried.actions_affected, 1);
+        let state: String = sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "queued");
 
         cleanup(&pool, &tenant).await;
     }

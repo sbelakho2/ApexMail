@@ -27,7 +27,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::ip_provider::IpProviderError;
+use crate::ip_provider::{non_occupying_status_list_sql, IpProviderError};
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
@@ -350,10 +350,13 @@ async fn build_allocation_summary(
         None => return Ok(None),
     };
 
-    let (active,): (i64,) = sqlx::query_as(
+    // Occupying statuses only: terminal provisioning-failure records
+    // (`failed`, `cleanup_failed`) must not consume the plan allowance.
+    let (active,): (i64,) = sqlx::query_as(&format!(
         "SELECT COUNT(*) FROM dedicated_ips
-         WHERE tenant_id = $1 AND status NOT IN ('retired', 'releasing')",
-    )
+         WHERE tenant_id = $1 AND status NOT IN ({})",
+        non_occupying_status_list_sql()
+    ))
     .bind(tenant_id)
     .fetch_one(&state.db)
     .await?;
@@ -435,6 +438,56 @@ fn ip_provider_to_api_error(e: IpProviderError) -> ApiError {
         IpProviderError::Database(err) => {
             tracing::error!(error = %err, "database error in dedicated IP operation");
             ApiError::Internal("database error".into())
+        }
+        IpProviderError::InvalidStateTransition { from, to } => {
+            tracing::warn!(from = %from, to = %to, "dedicated IP state transition refused");
+            ApiError::Conflict(
+                "dedicated IP is not ready for this operation — complete provisioning first".into(),
+            )
+        }
+        IpProviderError::NoVerifiedDomain { ref tenant_id } => {
+            tracing::warn!(tenant_id = %tenant_id, "dedicated IP allocation refused: no verified domain");
+            ApiError::BadRequest(
+                "verify a sending domain before allocating a dedicated IP — rDNS cannot be configured without one"
+                    .into(),
+            )
+        }
+        IpProviderError::AttachFailed(msg) => {
+            tracing::error!(error = %msg, "dedicated IP attach failed; provider resource released");
+            ApiError::ServiceUnavailable(
+                "could not attach the dedicated IP to an MTA server — the address was released, please retry"
+                    .into(),
+            )
+        }
+        IpProviderError::AttachTargetUnavailable => ApiError::ServiceUnavailable(
+            "dedicated IP provisioning has no MTA server configured — contact support".into(),
+        ),
+        IpProviderError::RdnsNotVerified { ip, reason } => {
+            tracing::error!(ip = %ip, reason = %reason, "dedicated IP rDNS verification failed");
+            ApiError::ServiceUnavailable(
+                "the dedicated IP's reverse DNS could not be verified — the address was released, please retry"
+                    .into(),
+            )
+        }
+        IpProviderError::EmptyProviderIp => {
+            tracing::error!("IP provider returned an empty address");
+            ApiError::Internal("failed to provision a usable dedicated IP".into())
+        }
+        IpProviderError::CompensationFailed {
+            ref ip,
+            provider_resource_id,
+            ref reason,
+        } => {
+            tracing::error!(
+                ip = %ip,
+                provider_resource_id = ?provider_resource_id,
+                reason = %reason,
+                "dedicated IP provider cleanup failed — orphaned resource recorded as cleanup_failed"
+            );
+            ApiError::Internal(
+                "provisioning failed and provider cleanup is pending — support has been alerted"
+                    .into(),
+            )
         }
     }
 }
@@ -664,6 +717,41 @@ mod tests {
 
         let db_err = ip_provider_to_api_error(IpProviderError::Database("conn refused".into()));
         assert!(matches!(db_err, ApiError::Internal(_)));
+
+        // ── State-machine and provisioning-failure variants ────
+        let transition_err = ip_provider_to_api_error(IpProviderError::InvalidStateTransition {
+            from: "created".into(),
+            to: "warming".into(),
+        });
+        assert!(matches!(transition_err, ApiError::Conflict(_)));
+
+        let no_domain = ip_provider_to_api_error(IpProviderError::NoVerifiedDomain {
+            tenant_id: "t1".into(),
+        });
+        assert!(matches!(no_domain, ApiError::BadRequest(_)));
+
+        let attach_failed =
+            ip_provider_to_api_error(IpProviderError::AttachFailed("server 500".into()));
+        assert!(matches!(attach_failed, ApiError::ServiceUnavailable(_)));
+
+        let no_target = ip_provider_to_api_error(IpProviderError::AttachTargetUnavailable);
+        assert!(matches!(no_target, ApiError::ServiceUnavailable(_)));
+
+        let rdns_failed = ip_provider_to_api_error(IpProviderError::RdnsNotVerified {
+            ip: "1.2.3.4".into(),
+            reason: "PTR mismatch".into(),
+        });
+        assert!(matches!(rdns_failed, ApiError::ServiceUnavailable(_)));
+
+        let empty_ip = ip_provider_to_api_error(IpProviderError::EmptyProviderIp);
+        assert!(matches!(empty_ip, ApiError::Internal(_)));
+
+        let compensation = ip_provider_to_api_error(IpProviderError::CompensationFailed {
+            ip: "1.2.3.4".into(),
+            provider_resource_id: Some(7),
+            reason: "delete 500".into(),
+        });
+        assert!(matches!(compensation, ApiError::Internal(_)));
     }
 
     #[test]

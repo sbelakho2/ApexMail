@@ -2611,6 +2611,100 @@ mod tests {
         assert!(rendered.html.unwrap().contains("opted in"));
     }
 
+    /// Release gate (§103¹ / CAN-SPAM): the central footer renderer must
+    /// carry the unsubscribe link and a truthful disclosure for EVERY
+    /// [`FooterReason`] — a reason that renders without them is a bypass of
+    /// the compliant footer.
+    #[test]
+    fn every_footer_reason_carries_the_unsubscribe_link_and_disclosure() {
+        let link = "https://apexmail.example/u/token-123";
+        let reasons = [
+            (
+                FooterReason::BusinessContact {
+                    basis: "your organisation appears to be a potential fit for ApexMail's \
+                            email delivery platform.",
+                },
+                "not claiming that you signed up",
+            ),
+            (FooterReason::ConsentedRelationship, "opted in"),
+            (
+                FooterReason::AccountNotification,
+                "part of your ApexMail account",
+            ),
+        ];
+
+        for (reason, disclosure) in reasons {
+            let (html, text) = render_outreach_footer(&OutreachFooter {
+                sender_identity: "ApexMail OÜ",
+                reason,
+                unsubscribe_link: link,
+                postal_address: Some("Tallinn, Estonia"),
+                privacy_url: Some("https://apexmail.ee/privacy"),
+            });
+            for body in [&html, &text] {
+                assert!(
+                    body.contains(link),
+                    "every footer reason must carry the unsubscribe link"
+                );
+                assert!(
+                    body.to_ascii_lowercase().contains("unsubscribe"),
+                    "every footer reason must name the unsubscribe mechanism"
+                );
+                assert!(
+                    body.contains(disclosure),
+                    "the footer must disclose its reason: expected {disclosure:?}"
+                );
+            }
+        }
+    }
+
+    /// The sequenced send path's template arm goes through
+    /// [`render_for_recipient_with_footer`]; both bodies it produces must
+    /// already contain the footer, so the worker can never enqueue a bare
+    /// template body.
+    #[test]
+    fn sequenced_template_render_contains_the_footer_in_both_bodies() {
+        let template = TemplateContent {
+            subject: "Hello".into(),
+            html_body: Some("<html><body><p>Hi {{first_name}}</p></body></html>".into()),
+            text_body: Some("Hi {{first_name}}".into()),
+        };
+        let recipient = DispatchRecipient::new(
+            "prospect@example.com",
+            "https://apexmail.example/u/token-sequenced",
+        );
+        let reasons = [
+            FooterReason::BusinessContact {
+                basis: "your organisation appears to be a potential fit.",
+            },
+            FooterReason::ConsentedRelationship,
+            FooterReason::AccountNotification,
+        ];
+
+        for reason in reasons {
+            let rendered = render_for_recipient_with_footer(
+                &template,
+                &recipient,
+                OutreachFooter {
+                    sender_identity: "ApexMail OÜ",
+                    reason,
+                    unsubscribe_link: &recipient.unsubscribe_link,
+                    postal_address: None,
+                    privacy_url: None,
+                },
+            )
+            .expect("a template with both bodies renders");
+
+            let html = rendered.html.expect("html body rendered");
+            let text = rendered.text.expect("text body rendered");
+            assert!(html.contains("apexmail-unsubscribe-footer"));
+            assert!(html.contains(&recipient.unsubscribe_link));
+            assert!(text.contains(&recipient.unsubscribe_link));
+            assert!(html.contains("Unsubscribe</a>"));
+            assert!(text.contains("Unsubscribe:"));
+        }
+    }
+
     /// The regression the identity fix exists for: two different steps of the
     /// same enrollment to the same recipient must NOT collide.
     #[test]

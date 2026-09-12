@@ -1061,6 +1061,20 @@ impl SequenceStepHandler {
             return Ok(None);
         };
 
+        // §103¹ consent evidence, loaded from the canonical
+        // `sales_consent_evidence` store — never taken on trust from a
+        // boolean. An active row (withdrawn_at IS NULL, newest by
+        // collected_at) yields `consent_status = "granted"`; a withdrawn row
+        // yields "withdrawn", which the legal engine treats as an absolute
+        // prohibition.
+        let consent = crate::legal_policy::load_consent_state(
+            &self.db,
+            &ctx.tenant_id,
+            ctx.contact_id,
+            ctx.contact_point_id,
+        )
+        .await?;
+
         Ok(Some(crate::decision_engine::ContactPolicyInputOwned {
             account_id: ctx.account_id,
             contact_id: Some(ctx.contact_id),
@@ -1068,16 +1082,42 @@ impl SequenceStepHandler {
             recipient_country: country,
             country_confidence: confidence,
             // The canonical model carries no corporate-form field, so a
-            // professional recipient is the truthful default; the policy engine
-            // treats an unrecognised type as its fail-closed case.
+            // professional recipient is the truthful default for the
+            // contact/relationship classification; the policy engine treats an
+            // unrecognised type as its fail-closed case.
             contact_type: "b2b_professional".to_string(),
             channel: "email".to_string(),
             source: Some("sequence".to_string()),
             purpose: Some("outbound_sales".to_string()),
             has_existing_relationship: existing_relationship,
-            consent_status: None,
+            consent_status: consent.status().map(str::to_string),
             soft_opt_in: false,
             legitimate_interest_assessed: true,
+            // No canonical column carries the recipient's legal character and
+            // inferring "legal person" from a work email address or a B2B
+            // persona is exactly what the audit forbids. Until a verified
+            // subscriber-type source exists (e.g. a
+            // `sales_contacts.subscriber_type` set by the collector, with
+            // evidence), every recipient is Unknown and the engine refuses to
+            // send autonomously.
+            subscriber_type: crate::legal_policy::SubscriberType::Unknown,
+            consent_evidence_id: consent.evidence_id(),
+            // The account-lifecycle customer fact is the only canonical
+            // relationship source today; it is not a per-recipient purchase
+            // record, so it is used only as the relationship flag.
+            existing_customer: existing_relationship,
+            // No canonical source records that the marketed product is similar
+            // to one the customer already bought (the offer/purchase history
+            // is not joined here). Pass the fail-closed value; a canonical
+            // offer-to-purchase mapping would need to exist.
+            similar_product_basis: false,
+            // No canonical source records a collection-time opt-out offer
+            // (`sales_consent_evidence` stores the consent text, not the
+            // refusal offer, and `sales_contact_points` has no such column).
+            // None fails the §103¹(2) soft-opt-in exception closed; it would
+            // need a `collection_opt_out_offered_at` on the evidence or
+            // contact-point row.
+            collection_opt_out_offered_at: None,
         }))
     }
 
@@ -2670,6 +2710,60 @@ mod tests {
         assert!(!SenderPool::InternalTransactional.is_sales_pool());
         assert!(SenderPool::SalesOutbound.is_sales_pool());
         assert!(SenderPool::SalesWarmup.is_sales_pool());
+    }
+
+    // ── Footer enforcement (release gate) ─────────────────────────────────
+
+    /// Every autonomous sales email body must be rendered through the central
+    /// compliant footer/unsubscribe renderer. The worker has exactly two
+    /// content arms — validated strategy and static template — and both must
+    /// consume the footer renderer's output before the enqueue. This is a
+    /// structural gate so a future third arm cannot quietly enqueue a bare
+    /// body.
+    #[test]
+    fn every_autonomous_send_body_is_rendered_through_the_footer() {
+        let source = include_str!("sequence_worker.rs");
+
+        // Exactly one message-construction literal exists in this module (the
+        // strategy arm). Its surrounding arm must append the footer outputs.
+        // `concat!` keeps this test from matching its own source text.
+        let literal = concat!("Rendered", "Message {");
+        assert_eq!(
+            source.matches(literal).count(),
+            1,
+            "a second RenderedMessage construction site appeared in the send path; \
+             it must go through the compliant footer renderer and be added to this gate"
+        );
+        let literal_at = source
+            .find(literal)
+            .expect("the strategy arm constructs the message");
+        let arm = &source[literal_at.saturating_sub(400)..literal_at];
+        assert!(
+            arm.contains("render_outreach_footer"),
+            "the strategy arm must build its bodies from render_outreach_footer"
+        );
+        assert!(
+            arm.contains("footer_html") && arm.contains("footer_text"),
+            "the strategy arm must append the rendered footer to both bodies"
+        );
+
+        // The template arm must go through the same renderer.
+        assert!(
+            source.contains(concat!(
+                "render_for_recipient",
+                "_with_footer(&template, &recipient, footer)"
+            )),
+            "the template arm must render through render_for_recipient_with_footer"
+        );
+
+        // Both arms run before the only external enqueue in this module.
+        let enqueue_at = source
+            .find(".enqueue_sequenced(")
+            .expect("the handler must dispatch through enqueue_sequenced");
+        assert!(
+            literal_at < enqueue_at,
+            "the footer must be rendered before the external enqueue"
+        );
     }
 
     #[test]

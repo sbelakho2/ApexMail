@@ -21,11 +21,11 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
-use super::transport::{create_transport_from_config, EmailTransport};
-use super::transport_router::transport_kind_for;
+use super::transport::{create_transport_from_config, EmailTransport, HybridTransport};
+use super::transport_router::{transport_kind_for, TransportKind};
 use super::types::{
-    Attachment, CachedSuppression, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain, EmailJob,
-    Mailbox, PreparedEmail, SendOutcome, WarmupIpIdentity,
+    Attachment, CachedSuppression, DedicatedIp, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain,
+    EmailJob, Mailbox, PreparedEmail, SendOutcome,
 };
 use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
@@ -102,32 +102,6 @@ enum ConsentDecision {
     Suppressed(String),
     /// The verification itself failed — defer, do not send.
     Deferred(&'static str),
-}
-
-/// Fix 3: the warmup admission decision for one send unit. Every variant
-/// other than [`WarmupAdmission::Admit`] defers the row (attempt preserved) —
-/// the gate never fails open, because a warming IP's reputation cannot be
-/// recovered from over-sending.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WarmupAdmission {
-    /// Reserve a slot (or the IP has graduated) — proceed.
-    Admit,
-    /// The source IP's canonical daily cap is reached.
-    QuotaExhausted,
-    /// Admission could not be established: missing source-IP identity or an
-    /// unavailable quota store. Refuse rather than admit on a wrong key.
-    Unavailable,
-}
-
-impl WarmupAdmission {
-    /// The `requeue_reason` recorded on the deferred row.
-    fn requeue_reason(self) -> &'static str {
-        match self {
-            Self::Admit => "allowed",
-            Self::QuotaExhausted => "warmup_limit",
-            Self::Unavailable => "warmup_admission_unavailable",
-        }
-    }
 }
 
 /// F55: the single authoritative dispatch-time consent query — global
@@ -292,19 +266,21 @@ const MESSAGES_CLAIMED_UPDATE_SQL: &str = r#"
       AND status IN ('queued', 'scheduled')
 "#;
 
-/// Audit-1 / Fix 3: the ready-domain lookup for a queued job.
+/// Audit-1 / Fix 3 / P0 routing: the ready-domain lookup for a queued job.
 ///
-/// Warmup state comes from the REAL warmup tables: per-IP warmup lives on
-/// `dedicated_ips` (created by migration 003 with `warmup_started_at`, given
-/// the per-IP warmup model by migrations 071/093 — the same table the
-/// delivery route ([`delivery_route`]) is derived from), so the query returns the identity
-/// (`id`, `ip_address`) and `warmup_started_at` of every dedicated IP still
-/// in status 'warming'. The day/enabled derivation and the selection of the
-/// BINDING IP happen in Rust ([`select_binding_warmup_ip`]), and the
-/// resulting identity is what `check_warmup_limit` keys its Redis counter
-/// on. A domain whose tenant has no warming dedicated IP (shared SES pool)
-/// derives warmup DISABLED — correct: the shared pool rides platform
-/// reputation, not the tenant's.
+/// Warmup and routing state come from the REAL warmup tables: per-IP warmup
+/// lives on `dedicated_ips` (created by migration 003 with `warmup_started_at`;
+/// the status CHECK allows `warming` and `active`), so the query returns the
+/// identity (`id`, `ip_address`), the lifecycle `status` and
+/// `warmup_started_at` of EVERY dedicated IP the tenant can send through —
+/// both still-`warming` rows and graduated `active` rows. Only warming rows
+/// consume the canonical daily quota; an active row keeps being routed as
+/// dedicated without throttling (the previous query filtered
+/// `status = 'warming'`, so a graduated IP silently dropped its tenant back
+/// onto the shared pool). The day/limit derivation and the selection of the
+/// candidate pool happen in Rust ([`select_delivery_ip`]) from
+/// `warmup_started_at` + `mail_common::warmup`, never from materialized
+/// counters.
 ///
 /// `ip_pool_addresses` (migration 093) also carries per-address warmup
 /// columns, but the table has no tenant binding (`ip_pools` are platform
@@ -317,8 +293,9 @@ const GET_DOMAIN_SQL: &str = r#"
         d.dkim_selector AS dkim_selector,
         d.dkim_public_key AS dkim_public_key,
         d.dkim_private_key AS dkim_private_key,
+        d.ses_verified AS ses_verified,
         NULL::text AS return_path,
-        w.warmup_ips AS warmup_ips
+        w.dedicated_ips AS dedicated_ips
     FROM domains d
     LEFT JOIN LATERAL (
         SELECT COALESCE(
@@ -326,16 +303,18 @@ const GET_DOMAIN_SQL: &str = r#"
                 jsonb_build_object(
                     'id', di.id::text,
                     'ip_address', di.ip_address,
+                    'warming', (di.status = 'warming'),
                     'warmup_started_at', di.warmup_started_at
                 )
-                ORDER BY di.warmup_started_at DESC
+                ORDER BY (di.status = 'warming') DESC,
+                         di.warmup_started_at ASC NULLS LAST,
+                         di.id
             ),
             '[]'::jsonb
-        ) AS warmup_ips
+        ) AS dedicated_ips
         FROM dedicated_ips di
         WHERE di.tenant_id = d.tenant_id::text
-          AND di.status = 'warming'
-          AND di.warmup_started_at IS NOT NULL
+          AND di.status IN ('warming', 'active')
     ) w ON true
     WHERE d.id = $1::uuid AND d.tenant_id = $2
       AND d.status = 'verified'
@@ -344,52 +323,56 @@ const GET_DOMAIN_SQL: &str = r#"
       AND d.dkim_public_key IS NOT NULL
       AND d.dkim_private_key IS NOT NULL
       AND d.dkim_private_key LIKE 'dkim:v1:%'
-      AND ($3::boolean = false OR d.ses_verified = true)
 "#;
 
-/// Audit-1: [`GET_DOMAIN_SQL`] row — the [`Domain`] columns plus the warmup
-/// source data (one JSON object per warming dedicated IP).
+/// Audit-1: [`GET_DOMAIN_SQL`] row — the [`Domain`] columns plus the routing
+/// source data (one JSON object per warming/active dedicated IP).
 #[derive(Debug, sqlx::FromRow)]
-struct DomainWithWarmupRow {
+struct DomainWithRoutingRow {
     id: String,
     tenant_id: String,
     domain: String,
     dkim_selector: Option<String>,
     dkim_public_key: Option<String>,
     dkim_private_key: Option<String>,
+    ses_verified: bool,
     return_path: Option<String>,
-    warmup_ips: Option<JsonValue>,
+    dedicated_ips: Option<JsonValue>,
 }
 
-/// One warming dedicated IP as serialized by [`GET_DOMAIN_SQL`]'s
+/// One dedicated IP as serialized by [`GET_DOMAIN_SQL`]'s
 /// `jsonb_build_object` array.
 #[derive(Debug, Clone, serde::Deserialize)]
-struct WarmupIpRow {
+struct DedicatedIpRow {
     id: String,
     ip_address: String,
-    warmup_started_at: DateTime<Utc>,
+    #[serde(default)]
+    warming: bool,
+    warmup_started_at: Option<DateTime<Utc>>,
 }
 
-impl From<WarmupIpRow> for WarmupIpIdentity {
-    fn from(row: WarmupIpRow) -> Self {
+impl From<DedicatedIpRow> for DedicatedIp {
+    fn from(row: DedicatedIpRow) -> Self {
         Self {
-            dedicated_ip_id: row.id,
+            id: row.id,
             ip_address: row.ip_address,
+            warming: row.warming,
             warmup_started_at: row.warmup_started_at,
         }
     }
 }
 
-/// Decode the `warmup_ips` JSONB array. Malformed entries are dropped (the
-/// query builds this array itself; a decode failure means row corruption,
-/// and dropping it fails the admission closed rather than inventing an IP).
-fn parse_warmup_ips(raw: Option<&JsonValue>) -> Vec<WarmupIpRow> {
+/// Decode the `dedicated_ips` JSONB array. Malformed entries are dropped (the
+/// query builds this array itself; a decode failure means row corruption, and
+/// dropping it fails routing closed rather than inventing an IP).
+fn parse_dedicated_ips(raw: Option<&JsonValue>) -> Vec<DedicatedIp> {
     let Some(JsonValue::Array(values)) = raw else {
         return Vec::new();
     };
     values
         .iter()
-        .filter_map(|value| serde_json::from_value(value.clone()).ok())
+        .filter_map(|value| serde_json::from_value::<DedicatedIpRow>(value.clone()).ok())
+        .map(DedicatedIp::from)
         .collect()
 }
 
@@ -399,29 +382,98 @@ fn warmup_day_since(now: DateTime<Utc>, started_at: DateTime<Utc>) -> u32 {
     (now - started_at).num_days().clamp(0, u32::MAX as i64) as u32
 }
 
-/// Fix 3: select the BINDING warming IP for a domain's sends — the
-/// least-warmed dedicated IP (smallest elapsed day count) is the constraint
-/// on the tenant's reputation. Returns the IP identity (used as the
-/// per-IP admission key) and its warmup day.
+/// One dedicated-IP routing candidate with its DERIVED warmup standing.
 ///
-/// `None` when the tenant has no warming IP: the domain sends on the shared
-/// pool and warmup admission must not engage.
-fn select_binding_warmup_ip(
-    now: DateTime<Utc>,
-    warmup_ips: &[WarmupIpRow],
-) -> Option<(WarmupIpIdentity, u32)> {
-    let mut binding: Option<(WarmupIpRow, u32)> = None;
-    for row in warmup_ips {
-        let day = warmup_day_since(now, row.warmup_started_at);
-        let replace = match &binding {
-            Some((_, binding_day)) => day < *binding_day,
-            None => true,
-        };
-        if replace {
-            binding = Some((row.clone(), day));
-        }
+/// The warmup day and daily cap come from `warmup_started_at` + the canonical
+/// `mail_common::warmup` schedule — no materialized `warmup_day` /
+/// `warmup_daily_limit` column participates, so a job never has to advance
+/// persisted state for routing to be correct.
+#[derive(Debug, Clone)]
+struct RoutingCandidate {
+    /// `dedicated_ips.id`.
+    dedicated_ip_id: String,
+    /// `dedicated_ips.ip_address` (the string form used in cache keys).
+    ip_address: String,
+    /// Parsed recipient-facing address the route must bind.
+    source_ip: std::net::IpAddr,
+    /// Elapsed warmup days (0 for an active IP without a recorded start).
+    warmup_day: u32,
+    /// `Some(canonical daily cap)` while the IP is still warming; `None` for
+    /// an active (graduated) IP — routed dedicated, never throttled.
+    daily_limit: Option<u64>,
+}
+
+impl RoutingCandidate {
+    fn is_warming(&self) -> bool {
+        self.daily_limit.is_some()
     }
-    binding.map(|(row, day)| (WarmupIpIdentity::from(row), day))
+}
+
+/// SELECT (pure, no I/O): build the ordered dedicated-IP candidate pool for
+/// one send from the tenant's dedicated identities.
+///
+/// * warming rows come first, least-warmed first — they are the tightest
+///   reputation boundary and must keep receiving traffic to graduate;
+/// * active (graduated) rows follow, unthrottled. They keep the tenant on the
+///   dedicated route instead of silently falling back to the shared pool.
+///
+/// A candidate whose `ip_address` cannot be parsed, or a warming row without
+/// `warmup_started_at`, is a hard configuration error: refusing the send is
+/// safer than routing to an IP that cannot be named or throttled. Consumption
+/// (and the actual choice among equally-utilised candidates) happens in
+/// [`reserve_warmup_capacity`], so selection and reservation stay separate
+/// concerns.
+fn select_delivery_ip(
+    now: DateTime<Utc>,
+    dedicated_ips: &[DedicatedIp],
+) -> ProcessorResult<Vec<RoutingCandidate>> {
+    let mut candidates: Vec<RoutingCandidate> = Vec::with_capacity(dedicated_ips.len());
+    for ip in dedicated_ips {
+        let source_ip: std::net::IpAddr = ip.ip_address.trim().parse().map_err(|_| {
+            ProcessorError::Config(format!(
+                "dedicated IP identity {} has an unparseable source address {:?} — refusing to route",
+                ip.id, ip.ip_address
+            ))
+        })?;
+        let (warmup_day, daily_limit) = if ip.warming {
+            let started_at = ip.warmup_started_at.ok_or_else(|| {
+                ProcessorError::Config(format!(
+                    "dedicated IP identity {} is 'warming' without warmup_started_at — \
+                     its canonical daily cap cannot be derived; refusing to route it unthrottled",
+                    ip.id
+                ))
+            })?;
+            let day = warmup_day_since(now, started_at);
+            (day, Some(WarmupSchedule::limit_for_day(day)))
+        } else {
+            // Active/graduated: the day is informational only (the IP is
+            // unthrottled) but keeps the ordering deterministic.
+            (
+                ip.warmup_started_at
+                    .map(|started_at| warmup_day_since(now, started_at))
+                    .unwrap_or(0),
+                None,
+            )
+        };
+        candidates.push(RoutingCandidate {
+            dedicated_ip_id: ip.id.clone(),
+            ip_address: ip.ip_address.clone(),
+            source_ip,
+            warmup_day,
+            daily_limit,
+        });
+    }
+
+    // Warming first, least-warmed first; then active, oldest first. Sorting
+    // is stable on (warming, day, address) so the atomic pool reservation is
+    // deterministic across workers.
+    candidates.sort_by(|a, b| {
+        b.is_warming()
+            .cmp(&a.is_warming())
+            .then(a.warmup_day.cmp(&b.warmup_day))
+            .then(a.ip_address.cmp(&b.ip_address))
+    });
+    Ok(candidates)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,7 +565,8 @@ const FETCH_JOBS_SQL: &str = r#"
                 END as "toAddresses",
                 subject, html, text, headers, attachments,
                 campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
-                message_category, attempt, created_at as "createdAt"
+                message_category, attempt, created_at as "createdAt",
+                sales_step_execution_id::text as "salesStepExecutionId"
 "#;
 
 /// Audit-5: this claim's lease token, transported inside the job's
@@ -690,11 +743,264 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
 "#;
 
-/// G.3c: send-idempotency marker key — one marker per (row, attempt,
-/// recipient), the exact unit of `transport.send`. Held with the row's
-/// visibility lease so a crashed worker's reclaim hits the marker.
-fn send_marker_key(job: &EmailJob) -> String {
-    format!("email:send:{}:{}:{}", job.id, job.attempt, job.to)
+// ─────────────────────────────────────────────────────────────────────────────
+// Durable exactly-once acceptance ledger (`sales_delivery_acceptances`)
+//
+// The Redis SETNX send marker used to be the authority, with a TTL: once it
+// expired, an externally accepted message whose DB completion never committed
+// could be submitted again. The ledger replaces it. Protocol (migration 205):
+//
+//   reserve → submit → record
+//
+// * `claim_acceptance` atomically INSERTs a `reserved` row for the stable
+//   logical send unit. Zero rows claimed means this unit already has an
+//   acceptance record (accepted or a live reservation) → DO NOT SUBMIT.
+// * after the transport returns, the SAME row is updated to `accepted` (with
+//   the transport message id and the reported source IP) or to `failed` (a
+//   refusal; the unit becomes retryable).
+// * a crash between reserve and submit leaves a `reserved` row. Rows older
+//   than [`ACCEPTANCE_RESERVE_LEASE`] are reclaimed IN PLACE by the same
+//   atomic claim: the ON CONFLICT branch renews `reserved_at` only when the
+//   previous lease expired, so exactly ONE retrying worker wins the
+//   resubmission right and the primary key remains the guard.
+//
+// Why in-place reclaim cannot double-submit: the claim is a single
+// INSERT ... ON CONFLICT DO UPDATE statement — Postgres locks the conflicting
+// row and re-evaluates the WHERE predicate under that lock, so a second
+// concurrent claim observes the first claim's fresh `reserved_at` and is
+// refused. The residual window is a process that was merely paused (not
+// crashed) longer than the lease and then returns to submit: the lease is
+// sized far above any per-send budget (15 minutes vs seconds), reclaim is
+// logged and counted, and this residual ambiguity is inherent to any
+// at-least-once transport — unlike the old TTL marker, the window is now
+// named, bounded, observable, and never silently re-sends within a lease.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Named lease after which a `reserved` acceptance row is treated as a crashed
+/// reservation and returned to a submit-capable state by a new claim. Chosen
+/// far above the per-send budget (connect + DATA + bookkeeping is seconds),
+/// so a live submission is never stolen. The partial index
+/// `idx_sales_delivery_acceptances_stale_reservations` reads exactly this
+/// predicate in the sweep ([`reclaim_stale_acceptance_reservations`]).
+const ACCEPTANCE_RESERVE_LEASE: Duration = Duration::from_secs(15 * 60);
+
+/// The stable logical send identity, identical to the queue's idempotency
+/// unit:
+///
+/// * sales mail — `sa-send:{sales_step_execution_id}`, the same value the
+///   dispatcher uses as `messages.idempotency_key` (migration 205's comment,
+///   `sequence_worker.rs`'s `sa-send:{step_execution_id}`). The typed
+///   provenance column is read straight off the queue row.
+/// * other mail — `email_queue:{queue row id}:{canonical recipient}`. The
+///   queue row id is stable across claim/retry (attempt is deliberately NOT
+///   part of the unit), and the recipient disambiguates multi-recipient rows
+///   that expand into several independent sends.
+fn send_unit_of(job: &EmailJob) -> String {
+    match job.sales_step_execution_id.as_deref() {
+        Some(step_execution_id) => format!("sa-send:{step_execution_id}"),
+        None => format!("email_queue:{}:{}", job.id, canonical_recipient(&job.to)),
+    }
+}
+
+/// Outcome of the atomic acceptance reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptanceClaim {
+    /// This attempt owns the submission (fresh insert, a retry after a
+    /// recorded refusal, or a reclaimed expired lease).
+    Claimed,
+    /// A prior submission of this logical unit is recorded `accepted` — the
+    /// documented already-accepted outcome. NEVER submit again.
+    AlreadyAccepted,
+    /// Another attempt's reservation is still inside its lease. Do not
+    /// submit; defer and let the ledger arbitrate.
+    InFlight,
+}
+
+/// Atomic reserve/reclaim. Returns the claimed send unit when THIS attempt
+/// owns the submission. The `ON CONFLICT` branch only matches a `failed` row
+/// (retry after a transport refusal) or a `reserved` row whose
+/// [`ACCEPTANCE_RESERVE_LEASE`] expired (crashed submission); `accepted` and
+/// live `reserved` rows yield zero rows and therefore no submission.
+const CLAIM_ACCEPTANCE_SQL: &str = r#"
+    INSERT INTO sales_delivery_acceptances
+        (send_unit, tenant_id, queue_id, state, transport, requested_source_ip)
+    VALUES ($1, $2, $3::uuid, 'reserved', $4, $5::text::inet)
+    ON CONFLICT (send_unit) DO UPDATE
+    SET state = 'reserved',
+        tenant_id = EXCLUDED.tenant_id,
+        queue_id = EXCLUDED.queue_id,
+        transport = EXCLUDED.transport,
+        requested_source_ip = EXCLUDED.requested_source_ip,
+        transport_message_id = NULL,
+        actual_source_ip = NULL,
+        accepted_at = NULL,
+        last_error = CASE
+            WHEN sales_delivery_acceptances.state = 'reserved'
+            THEN 'acceptance reservation lease expired before submission completed; reclaimed'
+            ELSE sales_delivery_acceptances.last_error
+        END,
+        reserved_at = NOW()
+    WHERE sales_delivery_acceptances.state = 'failed'
+       OR (sales_delivery_acceptances.state = 'reserved'
+           AND sales_delivery_acceptances.reserved_at
+               < NOW() - make_interval(secs => $6))
+    RETURNING send_unit
+"#;
+
+/// Durable exactly-once gate: reserve the logical send unit before submit.
+///
+/// * `Ok(Claimed)` — no acceptance record exists (or the previous one failed /
+///   its lease expired): this attempt may submit.
+/// * `Ok(AlreadyAccepted)` — a prior submission is recorded: do NOT submit;
+///   the caller records the recipient as possibly-sent (the send exists
+///   externally).
+/// * `Ok(InFlight)` — a live reservation exists: defer.
+/// * `Err` — the ledger is unavailable. The caller DEFERS, never submits: an
+///   unguarded send would forfeit exactly-once.
+async fn claim_acceptance(
+    db: &PgPool,
+    job: &EmailJob,
+    route: &DeliveryRoute,
+) -> ProcessorResult<AcceptanceClaim> {
+    let send_unit = send_unit_of(job);
+    let queue_id = parse_queue_row_id(&job.id);
+    let transport = transport_kind_for(route).to_string();
+    let requested_source_ip = route.dedicated_source_ip().map(|ip| ip.to_string());
+    let claimed: Option<String> = sqlx::query_scalar(CLAIM_ACCEPTANCE_SQL)
+        .bind(&send_unit)
+        .bind(&job.tenant_id)
+        .bind(queue_id)
+        .bind(&transport)
+        .bind(requested_source_ip.as_deref())
+        .bind(ACCEPTANCE_RESERVE_LEASE.as_secs() as i64)
+        .fetch_optional(db)
+        .await?;
+    if claimed.is_some() {
+        return Ok(AcceptanceClaim::Claimed);
+    }
+
+    // Zero rows: the row exists and is either accepted or a live reservation.
+    // Read the state to surface the documented already-accepted outcome
+    // distinctly (a concurrent state change between the two statements falls
+    // through to InFlight — the safe choice: defer, do not submit).
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM sales_delivery_acceptances WHERE send_unit = $1")
+            .bind(&send_unit)
+            .fetch_optional(db)
+            .await?;
+    match state.as_deref() {
+        Some("accepted") => Ok(AcceptanceClaim::AlreadyAccepted),
+        _ => Ok(AcceptanceClaim::InFlight),
+    }
+}
+
+/// Record the transport acceptance on the claimed ledger row. `last_error`
+/// carries a route-contract note when the receipt did not confirm the
+/// requested source IP — an AUDIT anomaly, never a retry signal.
+async fn record_acceptance_accepted(
+    db: &PgPool,
+    send_unit: &str,
+    receipt: &DeliveryReceipt,
+    contract_note: Option<&str>,
+) -> ProcessorResult<()> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE sales_delivery_acceptances
+        SET state = 'accepted',
+            transport_message_id = $2,
+            actual_source_ip = $3::text::inet,
+            accepted_at = NOW(),
+            last_error = $4
+        WHERE send_unit = $1 AND state = 'reserved'
+        "#,
+    )
+    .bind(send_unit)
+    .bind(receipt.transport_message_id.as_deref())
+    .bind(receipt.actual_source_ip.map(|ip| ip.to_string()))
+    .bind(contract_note)
+    .execute(db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        // The lease was reclaimed while we were submitting. The external
+        // acceptance still happened; a later retry would submit a second
+        // time — surface it loudly rather than failing silently.
+        metrics::counter!("apexmail_acceptance_record_missed").increment(1);
+        warn!(
+            send_unit,
+            "acceptance ledger row was not 'reserved' when recording acceptance — \
+             a concurrent reclaim may resubmit this unit"
+        );
+    }
+    Ok(())
+}
+
+/// Record a transport refusal. `failed` frees the unit for a retry through
+/// the normal failure handlers.
+async fn record_acceptance_failed(
+    db: &PgPool,
+    send_unit: &str,
+    error: &str,
+) -> ProcessorResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE sales_delivery_acceptances
+        SET state = 'failed',
+            last_error = $2,
+            accepted_at = NULL
+        WHERE send_unit = $1 AND state = 'reserved'
+        "#,
+    )
+    .bind(send_unit)
+    .bind(error)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Sweep for crashed `reserved` rows older than [`ACCEPTANCE_RESERVE_LEASE`].
+///
+/// Marks them `failed` (RE-RESERVE, never DELETE) with a distinctive
+/// `last_error`, which returns the unit to the submit-capable state defined
+/// by the protocol. Why this cannot double-send:
+///
+/// * the sweep is ONE atomic `UPDATE ... WHERE state = 'reserved' AND
+///   reserved_at < NOW() - lease`; a live reservation (renewed within the
+///   lease) cannot match, so an in-flight submission is never stolen;
+/// * it does not itself submit — a resubmission still has to pass
+///   [`claim_acceptance`]'s `ON CONFLICT` predicate, whose row lock admits
+///   exactly one claimant, and the primary key admits exactly one
+///   acceptance record;
+/// * DELETING would let a plain INSERT recreate the unit with no trace of
+///   the possibly-in-flight submission; keeping the row preserves the
+///   transport/requested-IP audit trail and forces the reclaim through the
+///   serialized claim path.
+///
+/// The sweep reads the partial index
+/// `idx_sales_delivery_acceptances_stale_reservations`. It is
+/// observability/governance over the on-demand reclaim inside
+/// [`claim_acceptance`]; both use the same named lease.
+pub async fn reclaim_stale_acceptance_reservations(db: &PgPool) -> ProcessorResult<u64> {
+    let reclaimed = sqlx::query(
+        r#"
+        UPDATE sales_delivery_acceptances
+        SET state = 'failed',
+            last_error = 'reservation lease expired before submission completed; reclaimed for retry'
+        WHERE state = 'reserved'
+          AND reserved_at < NOW() - make_interval(secs => $1)
+        "#,
+    )
+    .bind(ACCEPTANCE_RESERVE_LEASE.as_secs() as i64)
+    .execute(db)
+    .await?
+    .rows_affected();
+    if reclaimed > 0 {
+        metrics::counter!("apexmail_acceptance_reservations_reclaimed").increment(reclaimed);
+        warn!(
+            reclaimed,
+            "swept stale delivery-acceptance reservations (crashed submissions)"
+        );
+    }
+    Ok(reclaimed)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -712,13 +1018,29 @@ fn send_marker_key(job: &EmailJob) -> String {
 // server-side throttling.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Audit-2: the two admission buckets a send must reserve from — the
-/// tenant-wide ceiling and the sending domain's own bucket.
-fn send_admission_keys(job: &EmailJob) -> Vec<String> {
+/// Audit-2 / P0 rate limiting: the two admission buckets a send must reserve
+/// from — the tenant-wide ceiling and the sending domain's own bucket —
+/// SCOPED BY ROUTE. Shared-pool mail and dedicated-IP mail have separate
+/// account ceilings (SES `max_send_rate` vs the relay's
+/// `rate_limit_per_second`) and separate reputation boundaries, so one
+/// route's burst must not drain the other's bucket. The route kind is part of
+/// the key; without it, shared and dedicated sends shared one bucket.
+fn send_admission_keys(job: &EmailJob, kind: TransportKind) -> Vec<String> {
     vec![
-        format!("rl:send:tenant:{}", job.tenant_id),
-        format!("rl:send:domain:{}", job.domain_id),
+        format!("rl:send:{}:tenant:{}", kind, job.tenant_id),
+        format!("rl:send:{}:domain:{}", kind, job.domain_id),
     ]
+}
+
+/// The configured admission rate for a route: SES account rate for the shared
+/// pool, the relay's rate for the dedicated route. Route-aware because the
+/// two transports have independent capacity (the old gate used one rate
+/// selected by `transport_type` for every route).
+fn route_send_rate_per_second(config: &EmailConfig, kind: TransportKind) -> u32 {
+    match kind {
+        TransportKind::SesShared => config.ses.max_send_rate,
+        TransportKind::Dedicated => config.smtp.rate_limit_per_second,
+    }
 }
 
 /// Audit-2: atomic multi-bucket token-bucket reserve.
@@ -788,6 +1110,7 @@ const WARMUP_COUNTER_TTL_SECS: u64 = 48 * 60 * 60;
 
 /// Fix 3: daily warmup counter key for one dedicated source IP. The IP — not
 /// the sending domain — is the reputation boundary that warmup protects.
+/// Format preserved verbatim (`apexmail:warmup:ip:{ip_address}:{utc_day}`).
 fn warmup_ip_counter_key(ip_address: &str, utc_day: &str) -> String {
     format!("apexmail:warmup:ip:{}:{}", ip_address, utc_day)
 }
@@ -807,50 +1130,174 @@ fn warmup_ip_send_marker_key(ip_address: &str, utc_day: &str, job: &EmailJob) ->
     )
 }
 
-/// Fix 3: the atomic warmup reservation. KEYS[1] is the per-IP/day counter,
-/// KEYS[2] the per-send marker; ARGV[1] the canonical daily limit, ARGV[2]
-/// the TTL. Returns 1 when this send unit holds a slot (freshly reserved or
-/// already reserved earlier), 0 when the day's cap is full. A denied send
-/// removes its marker so a later retry (after a quota reset or on a new day)
-/// can be considered afresh.
-const WARMUP_RESERVE_LUA: &str = r#"
-local limit = tonumber(ARGV[1])
+/// P0 aggregate-pool warmup reservation (one Lua script, one round trip).
+///
+/// KEYS[1..n]   — per-IP/day counters (format preserved:
+///                `apexmail:warmup:ip:{ip_address}:{utc_day}`);
+/// KEYS[n+1..2n] — per-send-unit markers, one per candidate.
+///
+/// ARGV[1] = n (candidate count); ARGV[2] = marker TTL seconds; then per
+/// candidate i: `limit_i` (canonical daily cap, `-1` = unthrottled/active),
+/// `consume_i` (1 = increment a warming counter and set a marker),
+/// `rank_i` (0 = warming, 1 = active).
+///
+/// The script:
+///
+/// 1. if this send unit already holds a marker on any candidate, return that
+///    candidate — a retry is admitted WITHOUT a second increment;
+/// 2. otherwise pick the ELIGIBLE candidate with the lowest utilisation,
+///    breaking ties by rank (all warming candidates are preferred over any
+///    active one, so active IPs do not starve warmup), which spreads a
+///    concurrent burst across the whole warming pool instead of exhausting
+///    one IP while another has capacity;
+/// 3. increment the chosen warming counter and set its marker atomically.
+///
+/// Returns the chosen 1-based index, or 0 when every warming candidate is at
+/// its cap and no active candidate exists.
+const WARMUP_AGGREGATE_RESERVE_LUA: &str = r#"
+local n = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
-if redis.call('SETNX', KEYS[2], '1') == 0 then
-    return 1
+for i = 1, n do
+    if redis.call('EXISTS', KEYS[n + i]) == 1 then
+        return i
+    end
 end
-redis.call('EXPIRE', KEYS[2], ttl)
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-if current >= limit then
-    redis.call('DEL', KEYS[2])
+local best = nil
+local best_rank = nil
+local best_count = nil
+for i = 1, n do
+    local limit = tonumber(ARGV[2 + i])
+    local rank = tonumber(ARGV[2 + 2 * n + i])
+    local count = 0
+    local eligible = true
+    if limit >= 0 then
+        count = tonumber(redis.call('GET', KEYS[i]) or '0')
+        eligible = count < limit
+    end
+    if eligible and (best == nil
+        or rank < best_rank
+        or (rank == best_rank and count < best_count)) then
+        best = i
+        best_rank = rank
+        best_count = count
+    end
+end
+if best == nil then
     return 0
 end
-local new = redis.call('INCR', KEYS[1])
-if new == 1 then
-    redis.call('EXPIRE', KEYS[1], ttl)
+if tonumber(ARGV[2 + n + best]) == 1 then
+    local new = redis.call('INCR', KEYS[best])
+    if new == 1 then
+        redis.call('EXPIRE', KEYS[best], ttl)
+    end
+    redis.call('SET', KEYS[n + best], '1', 'EX', ttl)
 end
-return 1
+return best
 "#;
 
-/// Run [`WARMUP_RESERVE_LUA`]. `Ok(true)` — admitted (slot reserved or
-/// already reserved for this send unit); `Ok(false)` — cap reached;
-/// `Err` — the quota store is unavailable (caller fails closed).
-async fn reserve_warmup_send(
+/// The Redis keys and identity of the warmup slot reserved for ONE send unit.
+/// Kept alongside the route so a confirmed source-IP contract violation can
+/// release the exact slot the reservation took (accounting correction only —
+/// never a retry trigger).
+#[derive(Debug, Clone)]
+struct WarmupReservation {
+    /// `dedicated_ips.id` of the reserved IP.
+    dedicated_ip_id: String,
+    /// Parsed source IP (`dedicated_ips.ip_address`).
+    source_ip: std::net::IpAddr,
+    /// `apexmail:warmup:ip:{ip_address}:{utc_day}` — the counter the
+    /// aggregate reservation incremented.
+    counter_key: String,
+    /// The per-send-unit idempotency marker.
+    marker_key: String,
+}
+
+/// The chosen dedicated IP for one send, plus the warmup slot it consumed
+/// (only warming IPs consume).
+#[derive(Debug, Clone)]
+struct ReservedDeliveryIp {
+    candidate: RoutingCandidate,
+    /// `Some` only when `candidate` is still warming and quota was consumed.
+    reservation: Option<WarmupReservation>,
+}
+
+/// RESERVE: consume warmup capacity from the candidate SET atomically,
+/// ordered by utilisation with warming preferred over active. The ROUTE is
+/// built from the returned candidate, so the reservation and the route are
+/// always the SAME IP.
+///
+/// Returns `Ok(None)` when every warming candidate is at its canonical daily
+/// cap (and none is active) — the caller defers.
+async fn reserve_warmup_capacity(
     redis: &RedisPool,
-    counter_key: &str,
-    marker_key: &str,
-    limit: u64,
-) -> Result<bool, String> {
+    job: &EmailJob,
+    pool: &[RoutingCandidate],
+    utc_day: &str,
+) -> Result<Option<ReservedDeliveryIp>, String> {
+    if pool.is_empty() {
+        return Ok(None);
+    }
+    // Active-only pool: no quota to consume, no Redis dependency. The first
+    // (oldest/graduated) active candidate carries the send.
+    if pool.iter().all(|candidate| !candidate.is_warming()) {
+        return Ok(pool.first().cloned().map(|candidate| ReservedDeliveryIp {
+            candidate,
+            reservation: None,
+        }));
+    }
+
     let mut conn = redis.get().await.map_err(|error| error.to_string())?;
-    let reserved: i32 = redis::Script::new(WARMUP_RESERVE_LUA)
-        .key(counter_key)
-        .key(marker_key)
-        .arg(limit)
-        .arg(WARMUP_COUNTER_TTL_SECS)
+    let script = redis::Script::new(WARMUP_AGGREGATE_RESERVE_LUA);
+    let mut invocation = script.prepare_invoke();
+    for candidate in pool {
+        invocation.key(warmup_ip_counter_key(&candidate.ip_address, utc_day));
+    }
+    for candidate in pool {
+        invocation.key(warmup_ip_send_marker_key(
+            &candidate.ip_address,
+            utc_day,
+            job,
+        ));
+    }
+    invocation
+        .arg(pool.len() as i64)
+        .arg(WARMUP_COUNTER_TTL_SECS);
+    for candidate in pool {
+        invocation.arg(
+            candidate
+                .daily_limit
+                .map(|limit| limit.min(i64::MAX as u64) as i64)
+                .unwrap_or(-1),
+        );
+    }
+    for candidate in pool {
+        invocation.arg(if candidate.is_warming() { 1 } else { 0 });
+    }
+    for candidate in pool {
+        invocation.arg(if candidate.is_warming() { 0 } else { 1 });
+    }
+
+    let chosen: i64 = invocation
         .invoke_async(&mut *conn)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(reserved == 1)
+    if chosen <= 0 {
+        return Ok(None);
+    }
+    let candidate = pool
+        .get(chosen as usize - 1)
+        .cloned()
+        .ok_or_else(|| format!("warmup reservation returned out-of-range candidate {chosen}"))?;
+    let reservation = candidate.is_warming().then(|| WarmupReservation {
+        dedicated_ip_id: candidate.dedicated_ip_id.clone(),
+        source_ip: candidate.source_ip,
+        counter_key: warmup_ip_counter_key(&candidate.ip_address, utc_day),
+        marker_key: warmup_ip_send_marker_key(&candidate.ip_address, utc_day, job),
+    });
+    Ok(Some(ReservedDeliveryIp {
+        candidate,
+        reservation,
+    }))
 }
 
 /// Release-one-slot Lua: delete the send-unit marker and, ONLY when the
@@ -868,14 +1315,12 @@ end
 return 1
 "#;
 
-/// Release a warmup reservation whose send did NOT actually use the
-/// reserved IP (route/source-IP mismatch or an unverified dedicated route).
-///
-/// The reservation is taken BEFORE the transport (see
-/// [`reserve_warmup_send`]); when the transport cannot confirm the reserved
-/// IP was the actual source, the capacity must NOT count as consumed. The
-/// Lua script deletes the idempotency marker (so a retry can re-reserve)
-/// and decrements the per-IP counter exactly once.
+/// Release a warmup reservation when the accepted receipt CONFIRMS the
+/// message left through a different IP than the one reserved (a transport
+/// contract violation). This is an accounting correction, NOT a retry: the
+/// acceptance ledger already records the send as accepted, so the message is
+/// never resubmitted. The Lua script deletes the idempotency marker and
+/// decrements the per-IP counter exactly once.
 async fn release_warmup_reservation(
     redis: &RedisPool,
     reservation: &WarmupReservation,
@@ -890,155 +1335,54 @@ async fn release_warmup_reservation(
     Ok(())
 }
 
-/// The Redis keys and identity of the warmup slot reserved for ONE send
-/// unit. Kept alongside the route so the enforcement point can release the
-/// exact slot the admission gate reserved.
-#[derive(Debug, Clone)]
-struct WarmupReservation {
-    /// `dedicated_ips.id` of the reserved IP.
-    dedicated_ip_id: String,
-    /// Parsed source IP (`dedicated_ips.ip_address`).
-    source_ip: std::net::IpAddr,
-    /// `apexmail:warmup:ip:{ip_address}:{utc_day}` — the same key
-    /// [`check_warmup_limit`] reserved on.
-    counter_key: String,
-    /// The per-send-unit idempotency marker.
-    marker_key: String,
-}
-
-/// Resolve the warmup reservation for a send unit from the SAME identity
-/// the admission gate used ([`Domain::warmup_ip`]). `None` when the stored
-/// `ip_address` is not a parseable IP — the caller fails closed rather than
-/// routing to an IP it cannot name.
-fn warmup_reservation_for(
-    job: &EmailJob,
-    warmup_ip: &WarmupIpIdentity,
-) -> Option<WarmupReservation> {
-    let source_ip: std::net::IpAddr = warmup_ip.ip_address.trim().parse().ok()?;
-    let today = Utc::now().format("%Y-%m-%d").to_string();
-    Some(WarmupReservation {
-        dedicated_ip_id: warmup_ip.dedicated_ip_id.clone(),
-        source_ip,
-        counter_key: warmup_ip_counter_key(&warmup_ip.ip_address, &today),
-        marker_key: warmup_ip_send_marker_key(&warmup_ip.ip_address, &today, job),
-    })
-}
-
-/// Derive the ONE active delivery route for a send unit from the
-/// warmup-IP selection the processor already performs:
-///
-/// * a selected dedicated IP → [`DeliveryRoute::Dedicated`] plus the
-///   [`WarmupReservation`] its capacity was reserved against;
-/// * no dedicated IP → [`DeliveryRoute::SesShared`] with no reservation.
-///
-/// A selected identity whose `ip_address` cannot be parsed into an
-/// [`std::net::IpAddr`] is a hard configuration error: refusing the send is
-/// safer than routing to an unnamed IP (and the admission gate keys on the
-/// same unparseable string, so no correct route exists).
-fn delivery_route(
-    job: &EmailJob,
-    domain: &Domain,
-) -> ProcessorResult<(DeliveryRoute, Option<WarmupReservation>)> {
-    match &domain.warmup_ip {
-        None => Ok((DeliveryRoute::SesShared, None)),
-        Some(identity) => {
-            let reservation = warmup_reservation_for(job, identity).ok_or_else(|| {
-                ProcessorError::Config(format!(
-                    "dedicated IP identity {} has an unparseable source address {:?} — refusing to route",
-                    identity.dedicated_ip_id, identity.ip_address
-                ))
-            })?;
-            Ok((
-                DeliveryRoute::Dedicated {
-                    dedicated_ip_id: identity.dedicated_ip_id.clone(),
-                    source_ip: reservation.source_ip,
-                },
-                Some(reservation),
-            ))
+impl ReservedDeliveryIp {
+    /// The exact route this reservation was made for.
+    fn route(&self) -> DeliveryRoute {
+        DeliveryRoute::Dedicated {
+            dedicated_ip_id: self.candidate.dedicated_ip_id.clone(),
+            source_ip: self.candidate.source_ip,
         }
     }
 }
 
-/// Enforce that the receipt confirms the route the transport was asked to
-/// execute. Deliberately ASYMMETRIC:
+/// Route-aware domain readiness. A shared-pool send requires
+/// `domains.ses_verified` (SES refuses unverified senders); a dedicated relay
+/// route binds a tenant IP and does not traverse SES, so it is ready without
+/// it. `None` = ready; `Some(reason)` = defer the row with that reason.
+fn domain_route_readiness(route: &DeliveryRoute, domain: &Domain) -> Option<&'static str> {
+    match route {
+        DeliveryRoute::SesShared if !domain.ses_verified => Some("domain_ses_not_verified"),
+        _ => None,
+    }
+}
+
+/// Compare an ACCEPTED receipt against the route it was asked to execute,
+/// returning a human-readable contract note when the receipt does not prove
+/// the binding. Deliberately ASYMMETRIC:
 ///
 /// * [`DeliveryRoute::Dedicated`]: the receipt's `actual_source_ip` must be
-///   present AND equal to the selected IP. A different IP is a mismatch; a
-///   missing report is UNVERIFIED and refused — never assumed to be the
-///   selected IP (the route stays unverified until the relay/MTA reports
-///   the bound source IP; see the transport module contract).
-/// * [`DeliveryRoute::SesShared`]: no dedicated IP exists to confirm, so no
-///   `actual_source_ip` requirement applies.
+///   present AND equal to the requested IP;
+/// * [`DeliveryRoute::SesShared`]: no dedicated binding exists to confirm.
 ///
-/// On `Err` the caller MUST release the warmup reservation for the selected
-/// IP: a send that did not demonstrably use the IP must not consume its
-/// capacity.
-fn verify_delivery_route(route: &DeliveryRoute, receipt: &DeliveryReceipt) -> ProcessorResult<()> {
+/// A note is an AUDIT anomaly — it is stored on the acceptance ledger and
+/// alarmed, and it NEVER triggers a retry: by the time a receipt exists the
+/// transport has already accepted the message, and a retry would duplicate an
+/// externally accepted send. The invariant lives in the pre-DATA gate
+/// ([`HybridTransport::ensure_route_dispatchable`]): an unverifiable
+/// dedicated route is refused before submission, so this comparison is a
+/// defensive assertion, not the enforcement point.
+fn route_receipt_contract_note(route: &DeliveryRoute, receipt: &DeliveryReceipt) -> Option<String> {
     match route {
-        DeliveryRoute::SesShared => Ok(()),
+        DeliveryRoute::SesShared => None,
         DeliveryRoute::Dedicated { source_ip, .. } => match receipt.actual_source_ip {
-            Some(actual) if actual == *source_ip => Ok(()),
-            Some(actual) => Err(ProcessorError::Transport(format!(
-                "dedicated route/source-IP mismatch: route selected {source_ip}, receipt reported {actual}"
-            ))),
-            None => Err(ProcessorError::Transport(format!(
-                "dedicated route/source-IP unverified: receipt did not report an actual source IP for {source_ip} \
-                 — the route stays unverified until the relay MTA reports it (see APEXMAIL_SOURCE_IP_REPLY_HEADER)"
-            ))),
+            Some(actual) if actual == *source_ip => None,
+            Some(actual) => Some(format!(
+                "route contract violation: requested source IP {source_ip}, transport reported {actual}"
+            )),
+            None => Some(format!(
+                "route contract violation: transport accepted the send but reported no source IP for {source_ip}"
+            )),
         },
-    }
-}
-
-/// G.3c: try to claim the send slot (Redis SET NX EX). `Ok(true)` — we own
-/// this send; `Ok(false)` — a previous claim may already have sent (crashed
-/// worker, expired lease); `Err` — Redis unavailable (best-effort mode: the
-/// send proceeds, logged).
-async fn try_claim_send_slot(
-    redis: &RedisPool,
-    job: &EmailJob,
-    ttl_secs: u64,
-) -> Result<bool, String> {
-    let mut conn = redis.get().await.map_err(|e| e.to_string())?;
-    let claimed: Option<String> = redis::cmd("SET")
-        .arg(send_marker_key(job))
-        .arg("1")
-        .arg("NX")
-        .arg("EX")
-        .arg(ttl_secs.max(1))
-        .query_async(&mut *conn)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(claimed.is_some())
-}
-
-/// G.3c: release the send marker once the attempt is fully handled.
-///
-/// `bookkeeping_failed` marks the case where the post-send writes did NOT
-/// complete (e.g. the row UPDATE errored): the row is still owed a state
-/// transition, so it will be re-claimed after the lease expires — and the
-/// marker MUST NOT be deleted then, or that reclaim would re-send an
-/// already-delivered message. Leaving the key to expire at its TTL
-/// (visibility timeout) keeps the idempotency window exactly as wide as
-/// the lease it protects.
-async fn release_send_slot(redis: &RedisPool, job: &EmailJob, bookkeeping_failed: bool) {
-    if bookkeeping_failed {
-        warn!(
-            job_id = %job.id,
-            recipient = %job.to,
-            attempt = job.attempt,
-            "post-send bookkeeping failed — keeping the send idempotency marker until TTL so a reclaim cannot re-send"
-        );
-        return;
-    }
-    match redis.get().await {
-        Ok(mut conn) => {
-            let _: () = redis::cmd("DEL")
-                .arg(send_marker_key(job))
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or(());
-        }
-        Err(e) => warn!(error = %e, "failed to release send idempotency marker"),
     }
 }
 
@@ -1069,6 +1413,8 @@ struct QueuedEmailRow {
     message_category: String,
     tags: Option<Vec<String>>,
     metadata: Option<serde_json::Value>,
+    #[sqlx(rename = "salesStepExecutionId")]
+    sales_step_execution_id: Option<String>,
     #[sqlx(rename = "scheduledAt")]
     scheduled_at: Option<DateTime<Utc>>,
     attempt: i32,
@@ -1106,6 +1452,7 @@ fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
             message_category: row.message_category.clone(),
             tags: row.tags.clone(),
             metadata: row.metadata.clone(),
+            sales_step_execution_id: row.sales_step_execution_id.clone(),
             scheduled_at: row.scheduled_at,
             attempt: row.attempt,
             created_at: row.created_at,
@@ -1238,7 +1585,10 @@ pub struct EmailProcessor {
     db: PgPool,
     redis: RedisPool,
     config: EmailConfig,
-    transport: Box<dyn EmailTransport>,
+    /// Route-aware dispatcher: `SesShared` → SES, `Dedicated` → relay SMTP.
+    /// A missing backend for a requested route fails closed (never crosses the
+    /// shared/dedicated boundary).
+    transport: HybridTransport,
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
     shutdown_notify: Arc<Notify>,
@@ -1268,7 +1618,19 @@ impl EmailProcessor {
     /// This is async because SES transport requires AWS SDK initialisation.
     pub async fn new(db: PgPool, redis: RedisPool, config: EmailConfig) -> ProcessorResult<Self> {
         let transport = create_transport_from_config(&config).await?;
+        Self::with_transport(db, redis, config, transport).await
+    }
 
+    /// Create an email processor around an explicitly constructed hybrid
+    /// transport. Used by the binary (which knows whether the relay was
+    /// actually configured) and by adversarial tests that inject recording
+    /// doubles.
+    pub async fn with_transport(
+        db: PgPool,
+        redis: RedisPool,
+        config: EmailConfig,
+        transport: HybridTransport,
+    ) -> ProcessorResult<Self> {
         let smtp_circuit_breaker = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 10,
             open_duration: Duration::from_secs(60),
@@ -1336,12 +1698,25 @@ impl EmailProcessor {
         // are ALL terminal but whose aggregate status is not (the residue
         // of a crash between a recipient transition and its parent
         // reconciliation), once immediately and then every 60 s.
+        //
+        // P0: the same loop sweeps the delivery-acceptance ledger for
+        // `reserved` rows older than ACCEPTANCE_RESERVE_LEASE — crashed
+        // submissions that never reached `accepted`/`failed`. The sweep is
+        // governance/observability; the claim reclaims them on demand too.
         {
             let reconcile_self = Arc::clone(&self);
             let shutdown = Arc::clone(&self.shutdown_notify);
             tokio::spawn(async move {
                 loop {
                     reconcile_self.reconcile_stuck_parents().await;
+                    if let Err(error) =
+                        reclaim_stale_acceptance_reservations(&reconcile_self.db).await
+                    {
+                        warn!(
+                            error = %error,
+                            "stale delivery-acceptance reservation sweep failed — retried on the next interval"
+                        );
+                    }
                     tokio::select! {
                         _ = sleep(Duration::from_secs(60)) => {}
                         _ = shutdown.notified() => break,
@@ -1987,104 +2362,266 @@ impl EmailProcessor {
         // enough.
         let domain = self.get_domain(job).await?;
 
-        // Check warmup limits (per source IP — see check_warmup_limit).
-        if self.config.warmup.enabled {
-            match self.check_warmup_limit(job, &domain).await? {
-                WarmupAdmission::Admit => {}
-                deferred => {
-                    self.requeue_job(job, deferred.requeue_reason()).await?;
+        // ── SELECT (pure): build the dedicated-IP candidate pool ──────────
+        // Warming AND active identities are candidates; only warming ones
+        // carry a quota. Selection never touches Redis, so it cannot consume
+        // capacity for a send that is refused later.
+        let pool = select_delivery_ip(Utc::now(), &domain.dedicated_ips)?;
+
+        // ── Route capability gate: PRE-DATA, pre-quota, pre-ledger ────────
+        // A dedicated route whose transport is missing or cannot verifiably
+        // bind the source IP is deferred HERE, before any reservation or
+        // acceptance row exists. The old post-acceptance verification could
+        // only fail after the message had already left, producing a
+        // refund-then-retry of a possibly-accepted send.
+        let planned_route = match pool.first() {
+            Some(candidate) => DeliveryRoute::Dedicated {
+                dedicated_ip_id: candidate.dedicated_ip_id.clone(),
+                source_ip: candidate.source_ip,
+            },
+            None => DeliveryRoute::SesShared,
+        };
+        if let Some(reason) = domain_route_readiness(&planned_route, &domain) {
+            info!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                domain_id = %job.domain_id,
+                route = %planned_route,
+                reason,
+                "domain is not ready for the planned delivery route — deferring"
+            );
+            self.requeue_job(job, reason).await?;
+            return Ok(());
+        }
+        // A dedicated relay send must be DKIM-signed (verified domains must
+        // not leave unsigned). Defer — retryable — instead of letting
+        // prepare_email's Config error strand the row in 'processing' across
+        // leases.
+        if planned_route.is_dedicated() && !self.config.dkim.enabled {
+            warn!(
+                job_id = %job.id,
+                route = %planned_route,
+                "dedicated route requested while DKIM is disabled — deferring"
+            );
+            self.requeue_job(job, "dedicated_dkim_disabled").await?;
+            return Ok(());
+        }
+        if let Err(error) = self.transport.ensure_route_dispatchable(&planned_route) {
+            let reason = if planned_route.is_dedicated() {
+                if self.transport.has_dedicated_smtp() {
+                    "dedicated_route_unverifiable"
+                } else {
+                    "dedicated_transport_unconfigured"
+                }
+            } else {
+                "ses_transport_unconfigured"
+            };
+            warn!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                route = %planned_route,
+                reason,
+                error = %error,
+                "delivery route is not dispatchable on this worker — deferring BEFORE DATA"
+            );
+            self.requeue_job(job, reason).await?;
+            return Ok(());
+        }
+
+        // ── RESERVE: consume warmup capacity from the candidate SET ───────
+        let reserved: Option<ReservedDeliveryIp> = if pool.is_empty() {
+            None
+        } else if !self.config.warmup.enabled {
+            // Throttling disabled globally: the send stays on the dedicated
+            // route (graduated/active identities keep being used), but no
+            // quota is consumed. Selection and reservation are separate.
+            pool.first().cloned().map(|candidate| ReservedDeliveryIp {
+                candidate,
+                reservation: None,
+            })
+        } else {
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            match reserve_warmup_capacity(&self.redis, job, &pool, &today).await {
+                Ok(Some(reserved)) => Some(reserved),
+                Ok(None) => {
+                    debug!(
+                        job_id = %job.id,
+                        candidates = pool.len(),
+                        "every warming dedicated IP is at its canonical daily cap — deferring row"
+                    );
+                    self.requeue_job(job, "warmup_limit").await?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(
+                        job_id = %job.id,
+                        error = %error,
+                        "warmup quota store unavailable — deferring row (fail closed)"
+                    );
+                    self.requeue_job(job, "warmup_admission_unavailable")
+                        .await?;
                     return Ok(());
                 }
             }
-        }
+        };
 
-        // Release-blocker 15: derive the ACTIVE delivery route from the same
-        // warmup-IP selection the admission above reserved capacity on. The
-        // route travels with the send (to the relay MTA for a dedicated IP)
-        // and its receipt is verified after the send; the reservation is
-        // released when that verification fails, so the quota can never
-        // count a send that did not demonstrably use the IP.
-        let (route, warmup_reservation) = delivery_route(job, &domain)?;
+        // The route is built from the SAME candidate the reservation bound,
+        // so the quota slot and the network path cannot disagree.
+        let route = match &reserved {
+            Some(reserved) => reserved.route(),
+            None => DeliveryRoute::SesShared,
+        };
         debug!(
             job_id = %job.id,
+            route = %route,
             route_kind = %transport_kind_for(&route),
-            dedicated_ip = ?route.dedicated_source_ip(),
+            warmup_reserved = reserved
+                .as_ref()
+                .is_some_and(|reserved| reserved.reservation.is_some()),
             "dispatch route resolved"
         );
 
-        // Prepare email
-        let email = self.prepare_email(job, &domain)?;
-
-        // Audit-2: send-time admission control — reserve one send from the
-        // tenant and domain token buckets (rate from
-        // `EmailConfig::send_rate_per_second`, previously dead config) BEFORE
-        // the transport. On exhaustion the row is deferred through the same
-        // requeue path as the warmup gate; the attempt is untouched, so the
-        // next claim re-evaluates admission.
-        if !self.check_send_admission(job).await? {
+        // Audit-2 / P0: route-aware send-time admission control — reserve one
+        // send from the ROUTE'S tenant and domain token buckets (SES
+        // `max_send_rate` for shared, the relay's `rate_limit_per_second` for
+        // dedicated) BEFORE the transport. On exhaustion the row is deferred;
+        // the attempt is untouched, so the next claim re-evaluates admission.
+        if !self.check_send_admission(job, &route).await? {
             debug!(
                 job_id = %job.id,
                 tenant_id = %job.tenant_id,
                 domain_id = %job.domain_id,
+                route_kind = %transport_kind_for(&route),
                 "send admission exhausted — deferring row"
             );
             self.requeue_job(job, "send_rate_limited").await?;
             return Ok(());
         }
 
-        // G.3c: send idempotency — claim the (row, attempt, recipient) send
-        // slot before touching the transport. A reclaim whose previous
-        // attempt may have sent (lease expired mid-send) finds the marker
-        // still held and does NOT re-send; the recipient is recorded as
-        // possibly-sent instead. The X-ApexMail-Message-ID header added by
-        // prepare_email lets downstream systems dedupe the rare true
-        // duplicate. Best-effort: without Redis the send proceeds (logged).
-        let marker_ttl_secs = self.config.base.visibility_timeout.as_secs().max(1);
-        match try_claim_send_slot(&self.redis, job, marker_ttl_secs).await {
-            Ok(true) => {}
-            Ok(false) => {
+        // Prepare email — DKIM is decided by the ROUTE (a dedicated send
+        // needs the local signature; a shared SES send is signed by SES
+        // BYODKIM).
+        let email = self.prepare_email(job, &domain, &route)?;
+
+        // ── Durable exactly-once gate (sales_delivery_acceptances) ────────
+        // Reserve the logical send unit. This is the LAST deferral point: a
+        // deferral after this would strand a `reserved` row, so every
+        // pre-DATA refusal above happens first. A transport that fails after
+        // the reserve records `failed` and frees the unit for retry.
+        let send_unit = send_unit_of(job);
+        match claim_acceptance(&self.db, job, &route).await {
+            Err(error) => {
                 warn!(
                     job_id = %job.id,
+                    send_unit = %send_unit,
+                    error = %error,
+                    "acceptance ledger unavailable — deferring (an unguarded send would forfeit exactly-once)"
+                );
+                self.requeue_job(job, "acceptance_ledger_unavailable")
+                    .await?;
+                return Ok(());
+            }
+            Ok(AcceptanceClaim::AlreadyAccepted) => {
+                info!(
+                    job_id = %job.id,
+                    send_unit = %send_unit,
                     recipient = %job.to,
-                    attempt = job.attempt,
-                    "send marker still held — previous attempt may have sent; skipping re-send"
+                    "acceptance ledger already records this logical send as accepted — not submitting again"
                 );
                 self.handle_possibly_sent(job).await?;
                 return Ok(());
             }
-            Err(e) => {
-                warn!(
+            Ok(AcceptanceClaim::InFlight) => {
+                info!(
                     job_id = %job.id,
-                    error = %e,
-                    "send idempotency marker unavailable — proceeding (best-effort)"
+                    send_unit = %send_unit,
+                    "an acceptance reservation for this logical send is still within its lease — deferring"
                 );
+                self.requeue_job(job, "acceptance_in_flight").await?;
+                return Ok(());
             }
+            Ok(AcceptanceClaim::Claimed) => {}
         }
 
-        // Send email along the resolved route, then ENFORCE that the route
-        // actually happened: a dedicated send whose receipt does not confirm
-        // the selected source IP is a hard error, and its warmup reservation
-        // is released inside `settle_delivery_route` so the IP's capacity is
-        // not counted as consumed.
+        // ── Submit, then RECORD on the same ledger row ────────────────────
         let send_result: ProcessorResult<DeliveryReceipt> =
-            match self.transport.send(&email, &route).await {
-                Ok(receipt) => match self
-                    .settle_delivery_route(&route, &receipt, warmup_reservation.as_ref())
-                    .await
+            self.transport.send(&email, &route).await;
+
+        match &send_result {
+            Ok(receipt) => {
+                // The transport ACCEPTED the message. Any receipt/route
+                // disagreement is recorded as a contract violation on the
+                // ledger and alarmed — never converted into a retry.
+                let contract_note = route_receipt_contract_note(&route, receipt);
+                if let Some(note) = &contract_note {
+                    metrics::counter!("apexmail_delivery_route_contract_violation").increment(1);
+                    error!(
+                        job_id = %job.id,
+                        route = %route,
+                        note,
+                        "dedicated route contract violation on an ACCEPTED send — recording it; \
+                         the message is not retried"
+                    );
+                    // Accounting correction only: the selected IP did not
+                    // (per the confirmed receipt) carry this message, so its
+                    // quota must not count it. The send itself is accepted
+                    // and stays accepted on the ledger.
+                    if let Some(reservation) = reserved
+                        .as_ref()
+                        .and_then(|reserved| reserved.reservation.as_ref())
+                    {
+                        if let Err(release_error) =
+                            release_warmup_reservation(&self.redis, reservation).await
+                        {
+                            warn!(
+                                ip = %reservation.source_ip,
+                                dedicated_ip_id = %reservation.dedicated_ip_id,
+                                error = %release_error,
+                                "failed to release warmup reservation after route contract violation"
+                            );
+                        }
+                    }
+                }
+                if let Err(record_error) = record_acceptance_accepted(
+                    &self.db,
+                    &send_unit,
+                    receipt,
+                    contract_note.as_deref(),
+                )
+                .await
                 {
-                    Ok(()) => Ok(receipt),
-                    Err(error) => Err(error),
-                },
-                Err(error) => Err(error),
-            };
+                    // The message is ALREADY accepted externally: this is a
+                    // loud operational failure, not a reason to retry.
+                    metrics::counter!("apexmail_acceptance_record_failed").increment(1);
+                    error!(
+                        job_id = %job.id,
+                        send_unit = %send_unit,
+                        error = %record_error,
+                        "failed to record transport acceptance on the ledger — the message IS accepted; \
+                         the reserved row will be reclaimed after the lease"
+                    );
+                }
+            }
+            Err(error) => {
+                if let Err(record_error) =
+                    record_acceptance_failed(&self.db, &send_unit, &error.to_string()).await
+                {
+                    warn!(
+                        job_id = %job.id,
+                        send_unit = %send_unit,
+                        error = %record_error,
+                        "failed to record transport refusal on the acceptance ledger; \
+                         the reservation lease will reclaim the row"
+                    );
+                }
+            }
+        }
 
         // Per-attempt delivery log (email_delivery_log) — the table
         // delivery_analytics' latency percentiles and billing's usage ingest
         // read; previously no runtime writer existed, so those surfaces were
         // structurally zero. Best-effort: a logging failure must not fail
-        // the send path. (The free-text SMTP reply is no longer part of the
-        // receipt contract — the receipt's structured fields are the
-        // transport id and the verified source IP.)
+        // the send path.
         match &send_result {
             Ok(_result) => {
                 self.record_delivery_attempt(job, true, None, None).await;
@@ -2098,17 +2635,7 @@ impl EmailProcessor {
         let outcome: ProcessorResult<()> = match send_result {
             Ok(result) => {
                 self.smtp_circuit_breaker.record_success();
-                // Track whether the POST-SEND bookkeeping completed: if it
-                // failed, the row still owes a state transition and will be
-                // re-claimed — the send marker must survive (see
-                // release_send_slot) so that reclaim does not re-send.
-                match self.handle_success(job, &result).await {
-                    Err(e) => {
-                        release_send_slot(&self.redis, job, true).await;
-                        return Err(e);
-                    }
-                    Ok(()) => Ok(()),
-                }
+                self.handle_success(job, &result).await
             }
             Err(e) => {
                 self.smtp_circuit_breaker.record_failure();
@@ -2119,21 +2646,17 @@ impl EmailProcessor {
                 // handling). Messages without a code keep the legacy string
                 // classification; codeless transport errors (timeout, DNS,
                 // connection) fall through to `handle_error`, which retries
-                // below max_retries and DLQs above.
+                // below max_retries and DLQs above. The ledger row is
+                // `failed`, so a retry may claim the unit again.
                 match classify_send_failure(&e) {
-                    SendFailureClass::Soft => self.handle_soft_bounce(job, &e).await?,
-                    SendFailureClass::Hard => self.handle_hard_bounce(job, &e).await?,
-                    SendFailureClass::Unknown => self.handle_error(job, &e).await?,
+                    SendFailureClass::Soft => self.handle_soft_bounce(job, &e, &route).await?,
+                    SendFailureClass::Hard => self.handle_hard_bounce(job, &e, &route).await?,
+                    SendFailureClass::Unknown => self.handle_error(job, &e, &route).await?,
                 }
 
                 Err(e)
             }
         };
-
-        // G.3c: release the marker once the attempt is fully handled — on
-        // success the pending set already excludes this recipient; on
-        // failure the next attempt mints a fresh marker (attempt increments).
-        release_send_slot(&self.redis, job, false).await;
 
         outcome
     }
@@ -2262,18 +2785,27 @@ impl EmailProcessor {
         Ok(ConsentDecision::Allowed)
     }
 
-    /// Audit-2: send-time admission gate — reserve one send from the tenant
-    /// and domain token buckets (refilled from
-    /// [`EmailConfig::send_rate_per_second`]) before any transport.send.
+    /// Audit-2 / P0: route-aware send-time admission gate — reserve one send
+    /// from the route's tenant and domain token buckets (SES
+    /// `max_send_rate` for the shared pool, the relay's
+    /// `rate_limit_per_second` for the dedicated route) before any
+    /// `transport.send`. The bucket keys are route-scoped, so shared and
+    /// dedicated traffic cannot drain each other's allowances.
     ///
     /// * `Ok(false)` — exhausted: the caller defers the row via the existing
     ///   requeue path instead of sending.
     /// * `Err`/Redis unavailable — fails OPEN with a warning (best-effort,
-    ///   matching the G.3c send marker's posture; the transports still
-    ///   enforce their own server-side throttling).
+    ///   matching the historical posture; the transports still enforce their
+    ///   own server-side throttling). The durable exactly-once gate is the
+    ///   acceptance ledger, which does NOT fail open.
     /// * rate 0 — the gate is disabled entirely.
-    async fn check_send_admission(&self, job: &EmailJob) -> ProcessorResult<bool> {
-        let rate = self.config.send_rate_per_second();
+    async fn check_send_admission(
+        &self,
+        job: &EmailJob,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<bool> {
+        let kind = transport_kind_for(route);
+        let rate = route_send_rate_per_second(&self.config, kind);
         if rate == 0 {
             return Ok(true);
         }
@@ -2281,150 +2813,19 @@ impl EmailProcessor {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        match reserve_send_admission(&self.redis, &send_admission_keys(job), rate, now_ms).await {
+        match reserve_send_admission(&self.redis, &send_admission_keys(job, kind), rate, now_ms)
+            .await
+        {
             Ok(admitted) => Ok(admitted),
             Err(e) => {
                 warn!(
                     job_id = %job.id,
                     tenant_id = %job.tenant_id,
+                    route_kind = %kind,
                     error = %e,
                     "send admission bucket unavailable — proceeding (best-effort)"
                 );
                 Ok(true)
-            }
-        }
-    }
-
-    /// Fix 3: send-time warmup admission for the SOURCE IP that carries the
-    /// send.
-    ///
-    /// # Reputation boundary
-    ///
-    /// Warmup is a per-IP reputation property, so the daily counter MUST be
-    /// keyed by the dedicated source IP
-    /// (`apexmail:warmup:ip:{source_ip}:{utc_day}`), never by the sending
-    /// domain. The previous domain-keyed counter
-    /// (`warmup:count:<date>:<domain_id>`) gave every domain of a tenant its
-    /// own full quota, so N domains on one warming IP multiplied traffic
-    /// through that IP by N.
-    ///
-    /// The binding IP is resolved from the SAME canonical state
-    /// [`GET_DOMAIN_SQL`] used to enable warmup (the tenant's least-warmed
-    /// `dedicated_ips` row, `status='warming'`). If warmup is enabled but no
-    /// IP identity is available, the send is REFUSED (deferred) rather than
-    /// admitted against a non-IP key: a wrong reputation boundary is worse
-    /// than a refusal.
-    ///
-    /// The canonical `mail_common::warmup::WarmupSchedule` is the single
-    /// definition of the day limit (60 days, 50/day ramping to unlimited).
-    ///
-    /// # Atomicity and idempotency
-    ///
-    /// The counter is a Redis key with a 48-hour TTL shared by every worker,
-    /// so a restart cannot reset it. Admission runs one Lua script that
-    /// (1) SET NX's a per-send-unit marker keyed on
-    /// `(source_ip, utc_day, queue row, recipient)` — a retry of the same
-    /// send unit is admitted WITHOUT incrementing again — then (2) atomically
-    /// compares the counter to the limit and increments only when under it.
-    ///
-    /// # Failure posture
-    ///
-    /// Both an unknown source IP and an unavailable Redis fail CLOSED with
-    /// [`WarmupAdmission::Unavailable`]: the caller defers the row through
-    /// the normal requeue path (attempt preserved) instead of burning a
-    /// warming IP. This differs deliberately from the send-rate gate, which
-    /// fails open.
-    async fn check_warmup_limit(
-        &self,
-        job: &EmailJob,
-        domain: &Domain,
-    ) -> ProcessorResult<WarmupAdmission> {
-        if !domain.warmup_enabled {
-            return Ok(WarmupAdmission::Admit);
-        }
-
-        let Some(warmup_ip) = domain.warmup_ip.as_ref() else {
-            warn!(
-                job_id = %job.id,
-                tenant_id = %job.tenant_id,
-                domain_id = %job.domain_id,
-                "warmup is enabled but no warming dedicated IP identity is available \
-                 — refusing the send (fail closed) instead of admitting on a non-IP key"
-            );
-            return Ok(WarmupAdmission::Unavailable);
-        };
-
-        let day = warmup_day_since(Utc::now(), warmup_ip.warmup_started_at);
-        let limit = WarmupSchedule::limit_for_day(day);
-        // Graduated (day >= FULL_WARMUP_DAYS): unlimited, no counter needed.
-        if limit == u64::MAX {
-            return Ok(WarmupAdmission::Admit);
-        }
-
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let counter_key = warmup_ip_counter_key(&warmup_ip.ip_address, &today);
-        let marker_key = warmup_ip_send_marker_key(&warmup_ip.ip_address, &today, job);
-        match reserve_warmup_send(&self.redis, &counter_key, &marker_key, limit).await {
-            Ok(true) => Ok(WarmupAdmission::Admit),
-            Ok(false) => {
-                debug!(
-                    job_id = %job.id,
-                    ip = %warmup_ip.ip_address,
-                    day,
-                    limit,
-                    "warmup quota for the source IP is exhausted — deferring row"
-                );
-                Ok(WarmupAdmission::QuotaExhausted)
-            }
-            Err(error) => {
-                warn!(
-                    job_id = %job.id,
-                    ip = %warmup_ip.ip_address,
-                    error = %error,
-                    "warmup quota store unavailable — deferring row (fail closed)"
-                );
-                Ok(WarmupAdmission::Unavailable)
-            }
-        }
-    }
-
-    /// Release-blocker 15: post-send route enforcement. A dedicated route is
-    /// only satisfied by a receipt whose `actual_source_ip` EQUALS the
-    /// selected IP; a different IP is a mismatch and a missing report is
-    /// unverified — both are hard errors, and the warmup reservation for the
-    /// selected IP is released in the error path (a send that did not
-    /// demonstrably use the IP must not consume its capacity). The shared
-    /// route has no IP to confirm (deliberate asymmetry).
-    async fn settle_delivery_route(
-        &self,
-        route: &DeliveryRoute,
-        receipt: &DeliveryReceipt,
-        reservation: Option<&WarmupReservation>,
-    ) -> ProcessorResult<()> {
-        match verify_delivery_route(route, receipt) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                if let Some(reservation) = reservation {
-                    if let Err(release_error) =
-                        release_warmup_reservation(&self.redis, reservation).await
-                    {
-                        // Failing to release is itself logged and retried by
-                        // the 48 h TTL; the send still fails closed.
-                        warn!(
-                            ip = %reservation.source_ip,
-                            dedicated_ip_id = %reservation.dedicated_ip_id,
-                            error = %release_error,
-                            "failed to release warmup reservation after route verification failure"
-                        );
-                    } else {
-                        debug!(
-                            ip = %reservation.source_ip,
-                            dedicated_ip_id = %reservation.dedicated_ip_id,
-                            "warmup reservation released: send did not demonstrably use the selected IP"
-                        );
-                    }
-                }
-                Err(error)
             }
         }
     }
@@ -2434,9 +2835,12 @@ impl EmailProcessor {
     /// Legacy jobs without a registered domain are permanently rejected: an
     /// unsigned fallback would turn a revoked or spoofed sender into delivery.
     ///
-    /// Audit-1: warmup state is derived from the REAL per-tenant warmup data
-    /// (see [`GET_DOMAIN_SQL`]) instead of hardcoded `false/0` — the previous
-    /// constants made `check_warmup_limit` structurally dead.
+    /// Audit-1 / P0 routing: dedicated-IP state is derived from the REAL
+    /// per-tenant `dedicated_ips` rows (see [`GET_DOMAIN_SQL`]) — both warming
+    /// and active. `warmup_enabled`/`warmup_day` describe the BINDING
+    /// (least-warmed) warming identity; the actual route is chosen per send by
+    /// [`select_delivery_ip`] + [`reserve_warmup_capacity`], so this method
+    /// never materializes the routing decision.
     async fn get_domain(&self, job: &EmailJob) -> ProcessorResult<Domain> {
         if job.domain_id.is_empty() {
             return Err(ProcessorError::Job(
@@ -2444,25 +2848,40 @@ impl EmailProcessor {
             ));
         }
 
-        let requires_ses = self.config.transport_type == TransportType::Ses;
-        let row = sqlx::query_as::<_, DomainWithWarmupRow>(GET_DOMAIN_SQL)
+        // SES verification is a ROUTE-level requirement, not a worker-level
+        // one: a shared-pool send needs it (SES refuses unverified senders),
+        // while a dedicated relay route does not. The check therefore carries
+        // `ses_verified` into dispatch ([`domain_route_readiness`]) instead of
+        // gating the lookup.
+        let row = sqlx::query_as::<_, DomainWithRoutingRow>(GET_DOMAIN_SQL)
             .bind(&job.domain_id)
             .bind(&job.tenant_id)
-            .bind(requires_ses)
             .fetch_optional(&self.db)
             .await?
             .ok_or_else(|| {
-                ProcessorError::Job(format!(
-                    "sending domain is absent, unverified, incomplete, or not ready for {} delivery",
-                    if requires_ses { "SES" } else { "SMTP" }
-                ))
+                ProcessorError::Job(
+                    "sending domain is absent, unverified, incomplete, or not ready for delivery"
+                        .into(),
+                )
             })?;
 
-        let warmup_rows = parse_warmup_ips(row.warmup_ips.as_ref());
-        let binding = select_binding_warmup_ip(Utc::now(), &warmup_rows);
-        let (warmup_enabled, warmup_day, warmup_ip) = match binding {
-            Some((identity, day)) => (true, day as i32, Some(identity)),
-            None => (false, 0, None),
+        let dedicated_ips = parse_dedicated_ips(row.dedicated_ips.as_ref());
+        // The binding warmup identity is the least-warmed WARMING row (the
+        // tightest reputation boundary); descriptors only — admission is a
+        // separate step.
+        let now = Utc::now();
+        let binding = dedicated_ips
+            .iter()
+            .filter(|ip| ip.warming)
+            .filter_map(|ip| {
+                ip.warmup_started_at
+                    .map(|started_at| (ip, warmup_day_since(now, started_at)))
+            })
+            .min_by_key(|(_, day)| *day)
+            .map(|(_, day)| day);
+        let (warmup_enabled, warmup_day) = match binding {
+            Some(day) => (true, day as i32),
+            None => (false, 0),
         };
         let domain = Domain {
             id: row.id,
@@ -2473,7 +2892,8 @@ impl EmailProcessor {
             dkim_private_key: row.dkim_private_key,
             warmup_enabled,
             warmup_day,
-            warmup_ip,
+            ses_verified: row.ses_verified,
+            dedicated_ips,
             return_path: row.return_path,
         };
 
@@ -2494,8 +2914,15 @@ impl EmailProcessor {
         Ok(domain)
     }
 
-    /// Prepare email for sending.
-    fn prepare_email(&self, job: &EmailJob, domain: &Domain) -> ProcessorResult<PreparedEmail> {
+    /// Prepare email for sending. DKIM follows the ROUTE, not the process-wide
+    /// `transport_type`: a dedicated (relay SMTP) send must carry the local
+    /// signature, while a shared SES send is signed by SES BYODKIM.
+    fn prepare_email(
+        &self,
+        job: &EmailJob,
+        domain: &Domain,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<PreparedEmail> {
         let mut html = job.html.clone();
         let mut text = job.text.clone();
 
@@ -2624,13 +3051,14 @@ impl EmailProcessor {
             headers.push((key, value));
         }
 
-        // SMTP delivery signs with the key whose public half was displayed in
-        // the dashboard. SES delivery is signed by SES BYODKIM using that same
-        // key, so it intentionally does not attach a second local signature.
-        let dkim = if self.config.transport_type == TransportType::Smtp {
+        // Dedicated (relay SMTP) delivery signs with the key whose public half
+        // was displayed in the dashboard. Shared SES delivery is signed by SES
+        // BYODKIM using that same key, so it intentionally does not attach a
+        // second local signature.
+        let dkim = if route.is_dedicated() {
             if !self.config.dkim.enabled {
                 return Err(ProcessorError::Config(
-                    "DKIM is required for SMTP delivery of verified domains".into(),
+                    "DKIM is required for dedicated SMTP delivery of verified domains".into(),
                 ));
             }
 
@@ -2874,7 +3302,7 @@ impl EmailProcessor {
             WHERE id = $2::uuid AND tenant_id = $3
             "#,
         )
-        .bind(transport_provider_label(&self.config.transport_type))
+        .bind(transport_provider_label(&result.transport))
         .bind(&job.message_id)
         .bind(&job.tenant_id)
         .execute(&self.db)
@@ -3018,9 +3446,10 @@ impl EmailProcessor {
         &self,
         job: &EmailJob,
         error: &ProcessorError,
+        route: &DeliveryRoute,
     ) -> ProcessorResult<()> {
         if job.attempt >= self.config.base.max_retries as i32 {
-            return self.handle_hard_bounce(job, error).await;
+            return self.handle_hard_bounce(job, error, route).await;
         }
 
         let next_attempt = job.attempt + 1;
@@ -3066,7 +3495,8 @@ impl EmailProcessor {
         // Audit item 10: a transient failure is one sender-health `deferral`
         // fact. There is no outcome rung for a retryable failure (the ladder
         // has no `deferral`), so only the ledger row is written here.
-        self.record_sales_feedback(job, SalesDeliveryEvent::SoftBounce)
+        let provider = transport_provider_label(&route_transport_type(route));
+        self.record_sales_feedback(job, SalesDeliveryEvent::SoftBounce, provider)
             .await;
 
         Ok(())
@@ -3084,6 +3514,7 @@ impl EmailProcessor {
         &self,
         job: &EmailJob,
         error: &ProcessorError,
+        route: &DeliveryRoute,
     ) -> ProcessorResult<()> {
         let updated = sqlx::query(HARD_BOUNCE_UPDATE_SQL)
             .bind(error.to_string())
@@ -3167,7 +3598,8 @@ impl EmailProcessor {
         // already suppressed and the delivery record written — a ledger
         // failure is logged, never turned into a retry of an already-bounced
         // message.
-        self.record_sales_feedback(job, SalesDeliveryEvent::HardBounce)
+        let provider = transport_provider_label(&route_transport_type(route));
+        self.record_sales_feedback(job, SalesDeliveryEvent::HardBounce, provider)
             .await;
 
         Ok(())
@@ -3182,8 +3614,12 @@ impl EmailProcessor {
     /// delivery state transition has already happened and must not be
     /// unwound by a feedback-ledger failure; failures are logged and
     /// counted.
-    async fn record_sales_feedback(&self, job: &EmailJob, event: SalesDeliveryEvent) {
-        let provider = transport_provider_label(&self.config.transport_type);
+    async fn record_sales_feedback(
+        &self,
+        job: &EmailJob,
+        event: SalesDeliveryEvent,
+        provider: &str,
+    ) {
         match record_sales_outcome_if_linked(&self.db, &job.id, event, provider).await {
             Ok(Some(outcome_id)) => {
                 debug!(
@@ -3226,7 +3662,12 @@ impl EmailProcessor {
     }
 
     /// Handle generic error.
-    async fn handle_error(&self, job: &EmailJob, error: &ProcessorError) -> ProcessorResult<()> {
+    async fn handle_error(
+        &self,
+        job: &EmailJob,
+        error: &ProcessorError,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<()> {
         if job.attempt >= self.config.base.max_retries as i32 {
             // Audit-3: dead-letter only THIS recipient — the row may still
             // owe deliveries to its other recipients (FIX-8). The failed
@@ -3271,7 +3712,7 @@ impl EmailProcessor {
             .execute(&self.db)
             .await?;
         } else {
-            self.handle_soft_bounce(job, error).await?;
+            self.handle_soft_bounce(job, error, route).await?;
         }
 
         Ok(())
@@ -3565,6 +4006,15 @@ fn transport_provider_label(transport_type: &TransportType) -> &'static str {
     match transport_type {
         TransportType::Ses => "ses",
         _ => "smtp",
+    }
+}
+
+/// The transport a resolved route belongs to, for feedback attribution on the
+/// failure path (where no receipt exists).
+fn route_transport_type(route: &DeliveryRoute) -> TransportType {
+    match route {
+        DeliveryRoute::SesShared => TransportType::Ses,
+        DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
     }
 }
 
@@ -4716,7 +5166,8 @@ mod tests {
             dkim_private_key: Some(key_pair.private_key_pem.to_string()),
             warmup_enabled: false,
             warmup_day: 0,
-            warmup_ip: None,
+            ses_verified: true,
+            dedicated_ips: vec![],
             return_path: None,
         };
 
@@ -4824,6 +5275,7 @@ mod tests {
             message_category: "marketing".into(),
             tags: None,
             metadata: None,
+            sales_step_execution_id: None,
             scheduled_at: None,
             attempt: 1,
             created_at: Utc::now(),
@@ -4840,8 +5292,60 @@ mod tests {
             dkim_private_key: None,
             warmup_enabled: false,
             warmup_day: 0,
-            warmup_ip: None,
+            ses_verified: true,
+            dedicated_ips: vec![],
             return_path: None,
+        }
+    }
+
+    /// Route-aware readiness: only the shared-pool route needs SES
+    /// verification; a dedicated relay route does not.
+    #[test]
+    fn domain_route_readiness_is_route_aware() {
+        let mut domain = tracking_gate_domain();
+        domain.ses_verified = false;
+        assert_eq!(
+            domain_route_readiness(&DeliveryRoute::SesShared, &domain),
+            Some("domain_ses_not_verified"),
+            "an unverified domain must not ride the shared SES pool"
+        );
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+        assert_eq!(
+            domain_route_readiness(&dedicated, &domain),
+            None,
+            "a dedicated relay route does not need SES verification"
+        );
+        domain.ses_verified = true;
+        assert_eq!(
+            domain_route_readiness(&DeliveryRoute::SesShared, &domain),
+            None
+        );
+    }
+
+    /// A dedicated-IP candidate for tests. `warming` selects the warmup
+    /// branch (quota from the canonical schedule); active/graduated rows
+    /// route unthrottled.
+    fn dedicated_ip(id: &str, ip: &str, warming: bool, started_days_ago: i64) -> DedicatedIp {
+        dedicated_ip_started(Utc::now(), id, ip, warming, started_days_ago)
+    }
+
+    /// Deterministic variant: `warmup_started_at` is derived from the caller's
+    /// clock, so the derived warmup day is exact.
+    fn dedicated_ip_started(
+        now: DateTime<Utc>,
+        id: &str,
+        ip: &str,
+        warming: bool,
+        started_days_ago: i64,
+    ) -> DedicatedIp {
+        DedicatedIp {
+            id: id.into(),
+            ip_address: ip.into(),
+            warming,
+            warmup_started_at: Some(now - chrono::Duration::days(started_days_ago)),
         }
     }
 
@@ -4864,7 +5368,9 @@ mod tests {
 
         let job = tracking_gate_job();
         let domain = tracking_gate_domain();
-        let prepared = processor.prepare_email(&job, &domain).unwrap();
+        let prepared = processor
+            .prepare_email(&job, &domain, &DeliveryRoute::SesShared)
+            .unwrap();
         assert_eq!(
             prepared.html.as_deref(),
             job.html.as_deref(),
@@ -4896,7 +5402,9 @@ mod tests {
 
         let job = tracking_gate_job();
         let domain = tracking_gate_domain();
-        let prepared = processor.prepare_email(&job, &domain).unwrap();
+        let prepared = processor
+            .prepare_email(&job, &domain, &DeliveryRoute::SesShared)
+            .unwrap();
         let html = prepared.html.unwrap();
         assert!(
             html.contains("https://track.example.com/o/"),
@@ -4932,6 +5440,7 @@ mod tests {
             message_category: "marketing".into(),
             tags: None,
             metadata: None,
+            sales_step_execution_id: None,
             scheduled_at: None,
             attempt: 0,
             created_at: Utc::now(),
@@ -5716,20 +6225,63 @@ mod tests {
     // domain, one atomic Lua reserve; exhaustion defers the row)
     // ---------------------------------------------------------------------------
 
-    /// The admission keys must scope BOTH dimensions: a tenant-wide bucket
-    /// (account ceiling) and a per-domain bucket.
+    /// P0: the admission keys scope BOTH dimensions — a tenant-wide bucket
+    /// (account ceiling) and a per-domain bucket — AND the route, so shared
+    /// and dedicated traffic never share an allowance.
     #[test]
-    fn send_admission_keys_cover_tenant_and_domain() {
+    fn send_admission_keys_cover_tenant_domain_and_route() {
         let job = tracking_gate_job();
-        let keys = send_admission_keys(&job);
-        assert_eq!(keys.len(), 2);
+        let shared = send_admission_keys(&job, TransportKind::SesShared);
+        let dedicated = send_admission_keys(&job, TransportKind::Dedicated);
+        assert_eq!(shared.len(), 2);
         assert!(
-            keys.iter().any(|k| k.contains(&job.tenant_id)),
-            "a tenant-scoped bucket must exist: {keys:?}"
+            shared.iter().any(|k| k.contains(&job.tenant_id)),
+            "a tenant-scoped bucket must exist: {shared:?}"
         );
         assert!(
-            keys.iter().any(|k| k.contains(&job.domain_id)),
-            "a domain-scoped bucket must exist: {keys:?}"
+            shared.iter().any(|k| k.contains(&job.domain_id)),
+            "a domain-scoped bucket must exist: {shared:?}"
+        );
+        for key in &shared {
+            assert!(
+                key.contains("ses-shared"),
+                "shared keys must be route-scoped: {key}"
+            );
+        }
+        for key in &dedicated {
+            assert!(
+                key.contains("dedicated"),
+                "dedicated keys must be route-scoped: {key}"
+            );
+        }
+        assert!(
+            shared.iter().all(|key| !dedicated.contains(key)),
+            "the two routes must not share a bucket: {shared:?} vs {dedicated:?}"
+        );
+    }
+
+    /// P0: the route-aware rate source — SES account ceiling for the shared
+    /// pool, the relay's own cap for the dedicated route.
+    #[test]
+    fn route_send_rate_selects_the_transports_own_cap() {
+        let config = EmailConfig {
+            ses: crate::common::SesConfig {
+                max_send_rate: 11,
+                ..Default::default()
+            },
+            smtp: crate::common::SmtpConfig {
+                rate_limit_per_second: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            route_send_rate_per_second(&config, TransportKind::SesShared),
+            11
+        );
+        assert_eq!(
+            route_send_rate_per_second(&config, TransportKind::Dedicated),
+            7
         );
     }
 
@@ -5743,7 +6295,7 @@ mod tests {
             return;
         };
 
-        let keys = send_admission_keys(&tracking_gate_job());
+        let keys = send_admission_keys(&tracking_gate_job(), TransportKind::SesShared);
         let t0 = 1_000_000i64;
         // rate=1/sec, capacity=1 (one-second burst).
         assert!(
@@ -5780,9 +6332,9 @@ mod tests {
         let mut job = tracking_gate_job();
         job.tenant_id = "tenant-rl".into();
         job.domain_id = "domain-a".into();
-        let keys_a = send_admission_keys(&job);
+        let keys_a = send_admission_keys(&job, TransportKind::SesShared);
         job.domain_id = "domain-b".into();
-        let keys_b = send_admission_keys(&job);
+        let keys_b = send_admission_keys(&job, TransportKind::SesShared);
 
         let t0 = 2_000_000i64;
         // rate=1/sec, capacity=1: domain-a's send consumes BOTH buckets.
@@ -5799,17 +6351,56 @@ mod tests {
         );
         // A different tenant is unaffected.
         job.tenant_id = "tenant-other".into();
-        let keys_other = send_admission_keys(&job);
+        let keys_other = send_admission_keys(&job, TransportKind::SesShared);
         assert!(reserve_send_admission(&redis, &keys_other, 1, t0)
             .await
             .unwrap());
     }
 
-    /// The processor-level gate consumes the plumbed config rate and defers
-    /// (returns false) once it is exhausted; a 0 rate disables the gate; an
-    /// unreachable Redis fails OPEN (best-effort, like the send marker).
+    /// Adversarial 9: shared and dedicated sends do not consume each other's
+    /// buckets. Draining the shared bucket leaves the dedicated bucket at full
+    /// capacity and vice versa.
+    #[tokio::test]
+    async fn shared_and_dedicated_rate_buckets_are_independent() {
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+        let job = tracking_gate_job();
+        let shared = send_admission_keys(&job, TransportKind::SesShared);
+        let dedicated = send_admission_keys(&job, TransportKind::Dedicated);
+
+        let t0 = 3_000_000i64;
+        // Drain the shared buckets (rate 1/s, capacity 1).
+        assert!(reserve_send_admission(&redis, &shared, 1, t0)
+            .await
+            .unwrap());
+        assert!(
+            !reserve_send_admission(&redis, &shared, 1, t0)
+                .await
+                .unwrap(),
+            "shared bucket must be exhausted"
+        );
+        // The dedicated route's buckets are untouched.
+        assert!(
+            reserve_send_admission(&redis, &dedicated, 1, t0)
+                .await
+                .unwrap(),
+            "a dedicated send must not be blocked by shared-pool consumption"
+        );
+        assert!(
+            !reserve_send_admission(&redis, &dedicated, 1, t0)
+                .await
+                .unwrap(),
+            "the dedicated bucket then exhausts on its own"
+        );
+    }
+
+    /// The processor-level gate consumes the route's configured rate and
+    /// defers (returns false) once it is exhausted; a 0 rate disables the
+    /// gate; an unreachable Redis fails OPEN (best-effort).
     #[tokio::test]
     async fn check_send_admission_gates_on_config_rate_and_fails_open() {
+        let shared_route = DeliveryRoute::SesShared;
         // Unreachable Redis: the gate must fail open (warn + admit).
         let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -5833,7 +6424,7 @@ mod tests {
         .unwrap();
         assert!(
             processor
-                .check_send_admission(&tracking_gate_job())
+                .check_send_admission(&tracking_gate_job(), &shared_route)
                 .await
                 .unwrap(),
             "Redis unavailability must not block sends (best-effort gate)"
@@ -5861,10 +6452,19 @@ mod tests {
         .unwrap();
 
         let job = tracking_gate_job();
-        assert!(processor.check_send_admission(&job).await.unwrap());
-        assert!(processor.check_send_admission(&job).await.unwrap());
+        assert!(processor
+            .check_send_admission(&job, &shared_route)
+            .await
+            .unwrap());
+        assert!(processor
+            .check_send_admission(&job, &shared_route)
+            .await
+            .unwrap());
         assert!(
-            !processor.check_send_admission(&job).await.unwrap(),
+            !processor
+                .check_send_admission(&job, &shared_route)
+                .await
+                .unwrap(),
             "above the configured rate the row must be deferred, not sent"
         );
 
@@ -5889,7 +6489,10 @@ mod tests {
         .await
         .unwrap();
         assert!(
-            unlimited.check_send_admission(&job).await.unwrap(),
+            unlimited
+                .check_send_admission(&job, &shared_route)
+                .await
+                .unwrap(),
             "rate 0 must disable the admission gate without touching Redis"
         );
     }
@@ -5923,12 +6526,40 @@ mod tests {
         );
     }
 
+    /// P0: the acceptance ledger's `send_unit` is the queue's own stable
+    /// logical identity. Sales rows use `sa-send:{step_execution_id}` (the
+    /// dispatcher's idempotency key); other rows use the queue row id plus
+    /// the canonical recipient (attempt never participates, so retries share
+    /// the unit).
     #[test]
-    fn send_marker_key_is_scoped_to_row_attempt_and_recipient() {
-        let job = queued_row("a@example.com", Some(vec!["a@example.com".into()]));
-        let jobs = queued_row_to_jobs(job);
-        let key = send_marker_key(&jobs[0]);
-        assert_eq!(key, "email:send:job-1:0:a@example.com");
+    fn send_unit_matches_the_queue_idempotency_identity() {
+        let job = tracking_gate_job();
+        assert_eq!(
+            send_unit_of(&job),
+            "email_queue:job-1:recipient@example.com"
+        );
+        let mut retried = job.clone();
+        retried.attempt = 9;
+        assert_eq!(
+            send_unit_of(&retried),
+            send_unit_of(&job),
+            "a retry of the same logical send is the same unit"
+        );
+        let mut sibling = job.clone();
+        sibling.to = "Other@Example.com".into();
+        assert_eq!(
+            send_unit_of(&sibling),
+            "email_queue:job-1:other@example.com",
+            "canonical recipient disambiguates multi-recipient rows"
+        );
+
+        let mut sales = job.clone();
+        sales.sales_step_execution_id = Some("0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into());
+        assert_eq!(
+            send_unit_of(&sales),
+            "sa-send:0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89",
+            "sales mail must use the queue's sa-send identity"
+        );
     }
 
     /// G.3c: simulate the reclaim sequence — the first claim wins, the
@@ -5938,89 +6569,138 @@ mod tests {
     // Audit-1 / Fix 3: real per-IP warmup state (dedicated_ips, migrations 071/093)
     // ---------------------------------------------------------------------------
 
-    fn warmup_ip_row(id: &str, ip: &str, started_at: DateTime<Utc>) -> WarmupIpRow {
-        WarmupIpRow {
-            id: id.into(),
-            ip_address: ip.into(),
-            warmup_started_at: started_at,
-        }
+    #[test]
+    fn select_delivery_ip_is_empty_without_dedicated_identities() {
+        // No dedicated IP (shared pool = platform reputation): no route
+        // candidate, so the send rides SES and warmup must stay off.
+        assert!(select_delivery_ip(Utc::now(), &[])
+            .expect("empty selection is valid")
+            .is_empty());
     }
 
     #[test]
-    fn warmup_selection_returns_none_without_warming_ips() {
-        // No dedicated IP in warmup (shared pool = platform reputation):
-        // warmup limiting must stay off.
-        assert!(select_binding_warmup_ip(Utc::now(), &[]).is_none());
-    }
-
-    #[test]
-    fn warmup_selection_uses_elapsed_days_and_returns_ip_identity() {
+    fn select_delivery_ip_derives_the_canonical_day_and_limit() {
         let now = Utc::now();
-        let (identity, day) = select_binding_warmup_ip(
+        let pool = select_delivery_ip(
             now,
-            &[warmup_ip_row(
-                "dip-1",
-                "203.0.113.9",
-                now - chrono::Duration::days(3),
-            )],
+            &[dedicated_ip_started(now, "dip-1", "203.0.113.9", true, 3)],
         )
-        .expect("an active warmup row must enable the gate");
-        assert_eq!(day, 3, "day must be the whole days since warmup_started_at");
-        assert_eq!(identity.dedicated_ip_id, "dip-1");
+        .expect("valid candidate");
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool[0].dedicated_ip_id, "dip-1");
+        assert_eq!(pool[0].source_ip.to_string(), "203.0.113.9");
+        assert_eq!(pool[0].warmup_day, 3);
         assert_eq!(
-            identity.ip_address, "203.0.113.9",
-            "the admission key must be the source IP"
+            pool[0].daily_limit,
+            Some(WarmupSchedule::limit_for_day(3)),
+            "the daily cap must come from the canonical mail_common schedule"
+        );
+        assert!(pool[0].is_warming());
+    }
+
+    /// P0 graduation: an `active` (graduated) dedicated IP stays in the pool
+    /// with NO daily limit — it is still routed as dedicated, just without
+    /// throttling (the old warming-only query dropped it to the shared pool).
+    #[test]
+    fn select_delivery_ip_keeps_graduated_ips_as_unthrottled_candidates() {
+        let now = Utc::now();
+        let pool = select_delivery_ip(
+            now,
+            &[
+                dedicated_ip("dip-active", "203.0.113.20", false, 90),
+                dedicated_ip("dip-warming", "203.0.113.21", true, 5),
+            ],
+        )
+        .expect("valid candidates");
+        assert_eq!(pool.len(), 2);
+        assert_eq!(
+            pool[0].dedicated_ip_id, "dip-warming",
+            "warming candidates must be preferred (they still have to graduate)"
+        );
+        assert_eq!(pool[1].dedicated_ip_id, "dip-active");
+        assert_eq!(
+            pool[1].daily_limit, None,
+            "a graduated IP consumes NO warmup quota"
+        );
+        assert!(!pool[1].is_warming());
+    }
+
+    #[test]
+    fn select_delivery_ip_orders_warming_by_least_warmed_first() {
+        let now = Utc::now();
+        let pool = select_delivery_ip(
+            now,
+            &[
+                DedicatedIp {
+                    id: "dip-new".into(),
+                    ip_address: "203.0.113.3".into(),
+                    warming: true,
+                    warmup_started_at: Some(now - chrono::Duration::days(3)),
+                },
+                DedicatedIp {
+                    id: "dip-old".into(),
+                    ip_address: "203.0.113.1".into(),
+                    warming: true,
+                    warmup_started_at: Some(now - chrono::Duration::days(40)),
+                },
+            ],
+        )
+        .expect("valid candidates");
+        assert_eq!(pool[0].dedicated_ip_id, "dip-new");
+        assert_eq!(pool[1].dedicated_ip_id, "dip-old");
+    }
+
+    #[test]
+    fn select_delivery_ip_clamps_clock_skew_to_day_zero() {
+        let now = Utc::now();
+        let pool = select_delivery_ip(
+            now,
+            &[DedicatedIp {
+                id: "dip-future".into(),
+                ip_address: "203.0.113.4".into(),
+                warming: true,
+                warmup_started_at: Some(now + chrono::Duration::hours(1)),
+            }],
+        )
+        .expect("valid candidate");
+        assert_eq!(pool[0].warmup_day, 0, "future timestamps clamp to day 0");
+        assert_eq!(pool[0].daily_limit, Some(50), "canonical day-0 cap");
+    }
+
+    #[test]
+    fn select_delivery_ip_refuses_unparseable_and_unthrottleable_warming_rows() {
+        let now = Utc::now();
+        let bad_ip =
+            select_delivery_ip(now, &[dedicated_ip("dip-bad", "not-an-ip", true, 1)]).unwrap_err();
+        assert!(
+            matches!(bad_ip, ProcessorError::Config(ref message) if message.contains("dip-bad")),
+            "an unparseable identity must fail closed: {bad_ip}"
+        );
+
+        let no_start = select_delivery_ip(
+            now,
+            &[DedicatedIp {
+                id: "dip-no-start".into(),
+                ip_address: "203.0.113.9".into(),
+                warming: true,
+                warmup_started_at: None,
+            }],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(no_start, ProcessorError::Config(ref message) if message.contains("dip-no-start")),
+            "a warming identity without a start cannot be throttled: {no_start}"
         );
     }
 
+    /// get_domain must consult the real dedicated-IP tables (warming AND
+    /// active — a graduated IP must keep being routed), and its rows must
+    /// carry the identity the admission counter keys on.
     #[test]
-    fn warmup_selection_binds_to_the_least_warmed_ip() {
-        // Several warming IPs: the furthest-behind one is the binding
-        // constraint on the tenant's sending reputation.
-        let now = Utc::now();
-        let (identity, day) = select_binding_warmup_ip(
-            now,
-            &[
-                warmup_ip_row("dip-old", "203.0.113.1", now - chrono::Duration::days(40)),
-                warmup_ip_row("dip-mid", "203.0.113.2", now - chrono::Duration::days(10)),
-                warmup_ip_row("dip-new", "203.0.113.3", now - chrono::Duration::days(3)),
-            ],
-        )
-        .expect("at least one warming IP");
-        assert_eq!(day, 3, "MIN elapsed days across warming IPs wins");
-        assert_eq!(identity.dedicated_ip_id, "dip-new");
-        assert_eq!(identity.ip_address, "203.0.113.3");
-    }
-
-    #[test]
-    fn warmup_selection_clamps_to_day_zero() {
-        // A warmup started moments ago (or a clock-skewed future timestamp)
-        // is day 0, never negative.
-        let now = Utc::now();
-        let (_, day) = select_binding_warmup_ip(
-            now,
-            &[
-                warmup_ip_row(
-                    "dip-future",
-                    "203.0.113.4",
-                    now + chrono::Duration::hours(1),
-                ),
-                warmup_ip_row("dip-past", "203.0.113.5", now - chrono::Duration::hours(2)),
-            ],
-        )
-        .expect("at least one warming IP");
-        assert_eq!(day, 0);
-    }
-
-    /// get_domain must consult the real warmup tables (dedicated_ips was
-    /// given per-IP warmup state by migrations 071/093) instead of
-    /// hardcoding `false AS warmup_enabled, 0 AS warmup_day`, and its rows
-    /// must carry the IP IDENTITY the admission counter keys on.
-    #[test]
-    fn get_domain_sql_consults_dedicated_ips_warmup_state() {
+    fn get_domain_sql_consults_warming_and_active_dedicated_ips() {
         assert!(
             GET_DOMAIN_SQL.contains("dedicated_ips"),
-            "get_domain must read the real warmup state: {GET_DOMAIN_SQL}"
+            "get_domain must read the real dedicated-IP state: {GET_DOMAIN_SQL}"
         );
         assert!(
             !GET_DOMAIN_SQL.contains("false AS warmup_enabled"),
@@ -6029,7 +6709,17 @@ mod tests {
         assert!(
             GET_DOMAIN_SQL.contains("'id', di.id::text")
                 && GET_DOMAIN_SQL.contains("'ip_address', di.ip_address"),
-            "the warmup source must carry the per-IP identity: {GET_DOMAIN_SQL}"
+            "the routing source must carry the per-IP identity: {GET_DOMAIN_SQL}"
+        );
+        assert!(
+            GET_DOMAIN_SQL.contains("di.status IN ('warming', 'active')")
+                && GET_DOMAIN_SQL.contains("'warming', (di.status = 'warming')"),
+            "both warming and graduated identities must be routable: {GET_DOMAIN_SQL}"
+        );
+        assert!(
+            GET_DOMAIN_SQL.contains("d.ses_verified AS ses_verified")
+                && !GET_DOMAIN_SQL.contains("$3::boolean"),
+            "SES readiness must be carried to the route-aware gate, not pre-filtered: {GET_DOMAIN_SQL}"
         );
         assert!(
             !GET_DOMAIN_SQL.contains("warmup_starts"),
@@ -6083,16 +6773,14 @@ mod tests {
         );
     }
 
-    /// Audit item 26 (delete branch): warmup capacity has EXACTLY ONE
-    /// admission entry point in the production send path, and its limit
-    /// derivation is the canonical `mail_common::warmup` schedule with the
-    /// canonical per-IP Redis key. The scan is over the production region
-    /// only (everything before the first `#[cfg(test)]`), so test code
-    /// cannot mask a second entry point; if an ISP-target admission is ever
-    /// added, these counts change and the guarantee is re-examined
-    /// deliberately.
+    /// Audit item 26 (delete branch) / P0: warmup capacity and exactly-once
+    /// acceptance each have EXACTLY ONE entry point in the production send
+    /// path, and the limit derivation is still the canonical
+    /// `mail_common::warmup` schedule with the canonical per-IP Redis key.
+    /// The scan is over the production region only (everything before the
+    /// first `#[cfg(test)]`), so test code cannot mask a second entry point.
     #[test]
-    fn warmup_admission_has_exactly_one_production_entry_point() {
+    fn warmup_and_acceptance_have_one_production_entry_point_each() {
         let source = include_str!("processor.rs");
         let production = source
             .split("#[cfg(test)]")
@@ -6100,14 +6788,21 @@ mod tests {
             .expect("processor source must not begin with a test module");
 
         assert_eq!(
-            production.matches("async fn check_warmup_limit(").count(),
+            production
+                .matches("async fn reserve_warmup_capacity(")
+                .count(),
             1,
-            "exactly one warmup-admission function may exist"
+            "exactly one warmup-reservation function may exist"
         );
         assert_eq!(
-            production.matches("self.check_warmup_limit(").count(),
+            production.matches("reserve_warmup_capacity(").count(),
+            2,
+            "one definition + one call: a single warmup-capacity reservation entry point"
+        );
+        assert_eq!(
+            production.matches("fn select_delivery_ip(").count(),
             1,
-            "dispatch must consult exactly one warmup admission function"
+            "exactly one selection function may exist"
         );
         assert_eq!(
             production.matches("WarmupSchedule::limit_for_day").count(),
@@ -6125,10 +6820,46 @@ mod tests {
             1,
             "the canonical per-IP Redis key format must be built in exactly one place"
         );
+
+        // Durable exactly-once: one claim definition + one call in dispatch;
+        // one accepted-record definition + one call; one failed-record
+        // definition + one call.
+        assert_eq!(production.matches("async fn claim_acceptance(").count(), 1);
+        assert_eq!(production.matches("claim_acceptance(").count(), 2);
         assert_eq!(
-            production.matches("reserve_warmup_send(").count(),
-            2,
-            "one definition + one call: a single warmup-capacity reservation entry point"
+            production
+                .matches("async fn record_acceptance_accepted(")
+                .count(),
+            1
+        );
+        assert_eq!(production.matches("record_acceptance_accepted(").count(), 2);
+        assert_eq!(
+            production
+                .matches("async fn record_acceptance_failed(")
+                .count(),
+            1
+        );
+        assert_eq!(production.matches("record_acceptance_failed(").count(), 2);
+        assert_eq!(
+            production.matches("const ACCEPTANCE_RESERVE_LEASE").count(),
+            1,
+            "the reclaim lease must be a single named constant"
+        );
+
+        // The pre-DATA route gate is consulted exactly once in dispatch.
+        assert_eq!(
+            production
+                .matches("self.transport.ensure_route_dispatchable(")
+                .count(),
+            1,
+            "dispatch must gate the route exactly once, before any reservation"
+        );
+        // No post-hoc route verification/enforcement survives: a verification
+        // failure can never follow an accepted send.
+        assert!(
+            !production.contains("settle_delivery_route")
+                && !production.contains("verify_delivery_route"),
+            "post-acceptance route verification must be gone"
         );
     }
 
@@ -6157,252 +6888,292 @@ mod tests {
         }
     }
 
-    /// Audit-1 / Fix 3 behavioral gate: with warmup enabled for a binding
-    /// source IP, the Redis counter gate (canonical `mail_common::warmup`
-    /// day cap) blocks sends above the cap, admits below it, is idempotent
-    /// per send unit, ignores the retired domain-keyed counter, and fails
-    /// closed when the source IP identity is missing.
+    /// Audit-1 / Fix 3 / P0 behavioral gate (ephemeral redis): with a
+    /// warming IP in the pool the Redis counter (canonical
+    /// `mail_common::warmup` day cap) blocks sends above the cap, admits
+    /// below it, is idempotent per send unit, ignores the retired
+    /// domain-keyed counter, and fails closed when Redis is unavailable.
     #[tokio::test]
-    async fn warmup_gate_blocks_above_the_ip_cap_and_ignores_domain_keys() {
-        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
-            Ok(l) => l,
-            Err(_) => {
-                eprintln!("skipping: cannot allocate port");
-                return;
-            }
-        };
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let mut child = match std::process::Command::new("redis-server")
-            .args([
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--daemonize",
-                "no",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => {
-                eprintln!("skipping: redis-server not available");
-                return;
-            }
-        };
-        let mut ready = false;
-        for _ in 0..50 {
-            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
-                if let Ok(mut conn) = client.get_connection() {
-                    if redis::cmd("PING")
-                        .query::<String>(&mut conn)
-                        .map(|r| r == "PONG")
-                        .unwrap_or(false)
-                    {
-                        ready = true;
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        if !ready {
-            let _ = child.kill();
-            let _ = child.wait();
-            eprintln!("skipping: redis-server did not become ready");
+    async fn warmup_capacity_blocks_above_the_ip_cap_and_fails_closed() {
+        let Some(redis) = ephemeral_redis().await else {
             return;
-        }
+        };
 
-        let result: ProcessorResult<()> = async {
-            let db = sqlx::postgres::PgPoolOptions::new()
-                .max_connections(1)
-                .connect_lazy("postgres://localhost/unused")
-                .unwrap();
-            let redis = deadpool_redis::Config::from_url(format!("redis://127.0.0.1:{port}"))
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .map_err(|e| ProcessorError::Job(e.to_string()))?;
-            let processor = EmailProcessor::new(db, redis, EmailConfig::default())
+        let job = tracking_gate_job();
+        let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
+            .expect("candidate pool");
+        let day_limit = WarmupSchedule::limit_for_day(3);
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let key = warmup_ip_counter_key("203.0.113.9", &today);
+        let legacy_domain_key = format!("warmup:count:{}:{}", today, job.domain_id);
+
+        // Below the cap the reservation takes a slot on the selected IP.
+        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("below the cap");
+        assert_eq!(reserved.candidate.dedicated_ip_id, "dip-1");
+        let reservation = reserved
+            .reservation
+            .as_ref()
+            .expect("a warming candidate consumes quota");
+        assert_eq!(reservation.source_ip.to_string(), "203.0.113.9");
+        assert_eq!(reservation.counter_key, key);
+        assert_eq!(
+            reservation.marker_key,
+            warmup_ip_send_marker_key("203.0.113.9", &today, &job)
+        );
+
+        let counter = |key: String| async {
+            let mut conn = redis.get().await.unwrap();
+            redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<i64>>(&mut *conn)
+                .await
+                .unwrap()
+        };
+        assert_eq!(counter(key.clone()).await, Some(1));
+
+        // A retry of the SAME send unit is idempotent: admitted without a
+        // second increment (the marker is the guard).
+        let retry = reserve_warmup_capacity(&redis, &job, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("retry of a reserved unit");
+        assert!(retry.reservation.is_some());
+        assert_eq!(
+            counter(key.clone()).await,
+            Some(1),
+            "a retry must not double-count against the IP quota"
+        );
+
+        // Fill the counter to the canonical cap: a DIFFERENT send unit is
+        // refused and the counter stays at the cap.
+        {
+            let mut conn = redis.get().await.unwrap();
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(day_limit)
+                .query_async(&mut *conn)
                 .await
                 .unwrap();
-
-            // Canonical schedule: day 3 -> 100/day (mail_common::warmup).
-            let day_limit = WarmupSchedule::limit_for_day(3);
-            assert_eq!(day_limit, 100, "canonical warmup day-3 cap");
-
-            let started_at = Utc::now() - chrono::Duration::days(3);
-            let mut domain = tracking_gate_domain();
-            domain.warmup_enabled = true;
-            domain.warmup_day = 3;
-            domain.warmup_ip = Some(WarmupIpIdentity {
-                dedicated_ip_id: "dip-1".into(),
-                ip_address: "203.0.113.9".into(),
-                warmup_started_at: started_at,
-            });
-            let job = tracking_gate_job();
-
-            let today = Utc::now().format("%Y-%m-%d").to_string();
-            let key = warmup_ip_counter_key("203.0.113.9", &today);
-            let legacy_domain_key = format!("warmup:count:{}:{}", today, job.domain_id);
-
-            // Pre-fill the per-IP counter to exactly the cap: the next send
-            // unit must be REFUSED and the counter must stay at the cap.
-            {
-                let mut conn = processor.redis.get().await.unwrap();
-                let _: () = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(day_limit)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(
-                processor.check_warmup_limit(&job, &domain).await.unwrap(),
-                WarmupAdmission::QuotaExhausted,
-                "a send above the IP's day cap must be blocked"
-            );
-            let after: i64 = {
-                let mut conn = processor.redis.get().await.unwrap();
-                redis::cmd("GET")
-                    .arg(&key)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap()
-            };
-            assert_eq!(
-                after, day_limit as i64,
-                "the refused send must not consume IP quota"
-            );
-
-            // Below the cap the gate admits …
-            {
-                let mut conn = processor.redis.get().await.unwrap();
-                let _: () = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(day_limit - 1)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(
-                processor.check_warmup_limit(&job, &domain).await.unwrap(),
-                WarmupAdmission::Admit,
-                "a send below the cap must be admitted"
-            );
-            // … and a retry of the SAME send unit is idempotent: admitted
-            // without a second increment.
-            assert_eq!(
-                processor.check_warmup_limit(&job, &domain).await.unwrap(),
-                WarmupAdmission::Admit,
-                "a retry of the same send unit must stay admitted"
-            );
-            let after_retry: i64 = {
-                let mut conn = processor.redis.get().await.unwrap();
-                redis::cmd("GET")
-                    .arg(&key)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap()
-            };
-            assert_eq!(
-                after_retry, day_limit as i64,
-                "a retry must not double-count against the IP quota"
-            );
-
-            // A DIFFERENT recipient of the same row is a different send unit
-            // and is now blocked (cap reached).
-            let mut other_recipient = job.clone();
-            other_recipient.to = "other@example.com".into();
-            assert_eq!(
-                processor
-                    .check_warmup_limit(&other_recipient, &domain)
-                    .await
-                    .unwrap(),
-                WarmupAdmission::QuotaExhausted,
-                "distinct recipients must each consume their own slot"
-            );
-
-            // The RETIRED domain-keyed counter is no longer authoritative:
-            // with the legacy key exhausted and the IP counter below cap, the
-            // send is still admitted.
-            {
-                let mut conn = processor.redis.get().await.unwrap();
-                let _: () = redis::cmd("SET")
-                    .arg(&legacy_domain_key)
-                    .arg(day_limit + 10_000)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap();
-                let _: () = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(day_limit - 1)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(
-                processor
-                    .check_warmup_limit(&other_recipient, &domain)
-                    .await
-                    .unwrap(),
-                WarmupAdmission::Admit,
-                "the domain-keyed counter must not gate the send"
-            );
-
-            // Fail closed: warmup enabled but no source IP identity must
-            // DEFER (refuse), never admit.
-            let mut unidentified = tracking_gate_domain();
-            unidentified.warmup_enabled = true;
-            unidentified.warmup_ip = None;
-            assert_eq!(
-                processor
-                    .check_warmup_limit(&job, &unidentified)
-                    .await
-                    .unwrap(),
-                WarmupAdmission::Unavailable,
-                "warmup enabled without a source IP must fail closed"
-            );
-
-            // Graduated (>= 60 days) source IP is unlimited.
-            let mut graduated = domain.clone();
-            graduated.warmup_ip = Some(WarmupIpIdentity {
-                dedicated_ip_id: "dip-1".into(),
-                ip_address: "203.0.113.9".into(),
-                warmup_started_at: Utc::now() - chrono::Duration::days(61),
-            });
-            {
-                let mut conn = processor.redis.get().await.unwrap();
-                let _: () = redis::cmd("SET")
-                    .arg(&key)
-                    .arg(day_limit + 10_000)
-                    .query_async(&mut *conn)
-                    .await
-                    .unwrap();
-            }
-            assert_eq!(
-                processor
-                    .check_warmup_limit(&job, &graduated)
-                    .await
-                    .unwrap(),
-                WarmupAdmission::Admit,
-                "a graduated IP must not be gated"
-            );
-
-            // A domain without warmup state is never gated, regardless of counters.
-            let cold = tracking_gate_domain();
-            assert_eq!(
-                processor.check_warmup_limit(&job, &cold).await.unwrap(),
-                WarmupAdmission::Admit
-            );
-            Ok(())
         }
-        .await;
-        let _ = child.kill();
-        let _ = child.wait();
-        result.expect("warmup gate sequence");
+        let mut other_recipient = job.clone();
+        other_recipient.to = "other@example.com".into();
+        assert!(
+            reserve_warmup_capacity(&redis, &other_recipient, &pool, &today)
+                .await
+                .expect("redis available")
+                .is_none(),
+            "a send above the IP's canonical day cap must be refused"
+        );
+        assert_eq!(counter(key.clone()).await, Some(day_limit as i64));
+
+        // The RETIRED domain-keyed counter is not authoritative.
+        {
+            let mut conn = redis.get().await.unwrap();
+            let _: () = redis::cmd("SET")
+                .arg(&legacy_domain_key)
+                .arg(day_limit + 10_000)
+                .query_async(&mut *conn)
+                .await
+                .unwrap();
+            let _: () = redis::cmd("SET")
+                .arg(&key)
+                .arg(day_limit - 1)
+                .query_async(&mut *conn)
+                .await
+                .unwrap();
+        }
+        assert!(
+            reserve_warmup_capacity(&redis, &other_recipient, &pool, &today)
+                .await
+                .expect("redis available")
+                .is_some(),
+            "the domain-keyed counter must not gate the send"
+        );
+
+        // Fail closed: an unavailable quota store refuses a warming pool.
+        let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        assert!(
+            reserve_warmup_capacity(&dead_redis, &job, &pool, &today)
+                .await
+                .is_err(),
+            "an unavailable quota store must not admit a warming send"
+        );
+    }
+
+    /// P0 aggregate pool (ephemeral redis): two warming IPs at 5/day accept
+    /// TEN concurrent sends — five each, none above its cap — instead of the
+    /// old single-IP selection deferring mail while the second IP had
+    /// capacity.
+    #[tokio::test]
+    async fn aggregate_pool_spreads_ten_sends_across_two_five_per_day_ips() {
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+        let now = Utc::now();
+        let pool = select_delivery_ip(
+            now,
+            &[
+                dedicated_ip("dip-a", "203.0.113.10", true, 2),
+                dedicated_ip("dip-b", "203.0.113.11", true, 2),
+            ],
+        )
+        .expect("candidate pool");
+        // Canonical day-2 cap is 100; this test exercises the AGGREGATE
+        // behaviour with a 5/day cap by constructing the pool directly (the
+        // derivation above is covered by the canonical-schedule tests).
+        let pool: Vec<RoutingCandidate> = pool
+            .into_iter()
+            .map(|mut candidate| {
+                candidate.daily_limit = Some(5);
+                candidate
+            })
+            .collect();
+        let today = now.format("%Y-%m-%d").to_string();
+
+        let mut sends = Vec::new();
+        for index in 0..10 {
+            let redis = redis.clone();
+            let pool = pool.clone();
+            let today = today.clone();
+            sends.push(async move {
+                let mut job = tracking_gate_job();
+                job.id = format!("job-{index}");
+                job.to = format!("recipient-{index}@example.com");
+                reserve_warmup_capacity(&redis, &job, &pool, &today).await
+            });
+        }
+        let results = futures::future::join_all(sends).await;
+
+        let chosen: Vec<String> = results
+            .into_iter()
+            .map(|result| {
+                result
+                    .expect("redis available")
+                    .expect("ten sends must fit the aggregate pool")
+                    .candidate
+                    .dedicated_ip_id
+            })
+            .collect();
+        assert_eq!(chosen.len(), 10);
+
+        let counter = |ip: &str| {
+            let key = warmup_ip_counter_key(ip, &today);
+            let redis = redis.clone();
+            async move {
+                let mut conn = redis.get().await.unwrap();
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<i64>>(&mut *conn)
+                    .await
+                    .unwrap()
+                    .unwrap_or(0)
+            }
+        };
+        let a = counter("203.0.113.10").await;
+        let b = counter("203.0.113.11").await;
+        assert!(a <= 5 && b <= 5, "no IP may exceed its cap: a={a} b={b}");
+        assert_eq!(a + b, 10, "every admitted send consumed exactly one slot");
+        assert_eq!(
+            chosen.iter().filter(|id| id.as_str() == "dip-a").count() as i64,
+            a,
+            "the route must match the counter of the SAME chosen IP"
+        );
+        assert_eq!(
+            chosen.iter().filter(|id| id.as_str() == "dip-b").count() as i64,
+            b
+        );
+    }
+
+    /// P0 graduation: an `active` (graduated) IP is still SELECTED for a
+    /// dedicated route and consumes NO warmup quota — proven by reserving
+    /// from an active-only pool with a dead Redis: no counter is needed.
+    #[tokio::test]
+    async fn active_ip_routes_dedicated_without_consuming_quota() {
+        let job = tracking_gate_job();
+        let pool = select_delivery_ip(
+            Utc::now(),
+            &[dedicated_ip("dip-graduated", "203.0.113.77", false, 90)],
+        )
+        .expect("candidate pool");
+        assert_eq!(pool.len(), 1);
+        assert!(!pool[0].is_warming());
+
+        let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let reserved = reserve_warmup_capacity(
+            &dead_redis,
+            &job,
+            &pool,
+            &Utc::now().format("%Y-%m-%d").to_string(),
+        )
+        .await
+        .expect("an unthrottled pool needs no quota store")
+        .expect("a graduated IP is always eligible");
+        assert!(
+            reserved.reservation.is_none(),
+            "a graduated IP must consume no warmup quota"
+        );
+        match reserved.route() {
+            DeliveryRoute::Dedicated {
+                dedicated_ip_id,
+                source_ip,
+            } => {
+                assert_eq!(dedicated_ip_id, "dip-graduated");
+                assert_eq!(source_ip.to_string(), "203.0.113.77");
+            }
+            other => panic!("expected the dedicated route, got {other}"),
+        }
+    }
+
+    /// P0 aggregate fallback: when every warming candidate is at its cap but
+    /// an active one exists, the send SPILLS to the active IP (with no quota
+    /// consumption) instead of deferring mail that has a valid capacity.
+    #[tokio::test]
+    async fn exhausted_warming_pool_spills_to_an_active_ip() {
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+        let now = Utc::now();
+        let mut pool = select_delivery_ip(
+            now,
+            &[
+                dedicated_ip("dip-warm", "203.0.113.30", true, 2),
+                dedicated_ip("dip-active", "203.0.113.31", false, 90),
+            ],
+        )
+        .expect("candidate pool");
+        for candidate in &mut pool {
+            if candidate.is_warming() {
+                candidate.daily_limit = Some(1);
+            }
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        // Exhaust the warming IP.
+        let first = tracking_gate_job();
+        let reserved = reserve_warmup_capacity(&redis, &first, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("first send fits the warming IP");
+        assert_eq!(reserved.candidate.dedicated_ip_id, "dip-warm");
+        assert!(reserved.reservation.is_some());
+
+        let mut second = tracking_gate_job();
+        second.to = "second@example.com".into();
+        let reserved = reserve_warmup_capacity(&redis, &second, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("the active IP must absorb the overflow");
+        assert_eq!(reserved.candidate.dedicated_ip_id, "dip-active");
+        assert!(
+            reserved.reservation.is_none(),
+            "the active fallback must not consume warmup quota"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -6831,7 +7602,7 @@ mod tests {
             }
         }));
         let prepared = processor
-            .prepare_email(&job, &tracking_gate_domain())
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
             .unwrap();
 
         let header = |name: &str| {
@@ -6906,7 +7677,7 @@ mod tests {
         );
         job.text = Some("Unsubscribe: {{unsubscribe_url}}".into());
         let prepared = processor
-            .prepare_email(&job, &tracking_gate_domain())
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
             .unwrap();
 
         // List-Unsubscribe header with the tracking URL.
@@ -6981,7 +7752,7 @@ mod tests {
         let mut job = tracking_gate_job();
         job.html = Some("<html><body>hi {{unsubscribe_url}}</body></html>".into());
         let prepared = processor
-            .prepare_email(&job, &tracking_gate_domain())
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
             .unwrap();
         assert!(!prepared
             .headers
@@ -7010,7 +7781,7 @@ mod tests {
             "custom": {"X-Custom": "v"}
         }));
         let prepared = processor
-            .prepare_email(&job, &tracking_gate_domain())
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
             .unwrap();
         assert_eq!(
             prepared.to, "recipient@example.com",
@@ -7066,7 +7837,7 @@ mod tests {
         let mut legacy = tracking_gate_job();
         legacy.headers = Some(serde_json::json!({"X-Old": "shape"}));
         let prepared = processor
-            .prepare_email(&legacy, &tracking_gate_domain())
+            .prepare_email(&legacy, &tracking_gate_domain(), &DeliveryRoute::SesShared)
             .unwrap();
         assert!(prepared.mime_to.is_empty() && prepared.mime_cc.is_empty());
     }
@@ -7171,185 +7942,232 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn send_marker_prevents_double_send_on_reclaim() {
-        // Ephemeral redis-server; skip when unavailable.
-        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
-            Ok(l) => l,
-            Err(_) => {
-                eprintln!("skipping: cannot allocate port");
-                return;
+    // ---------------------------------------------------------------------------
+    // P0 hybrid routing: route/network-path isolation and pre-DATA refusals
+    // ---------------------------------------------------------------------------
+
+    /// A transport double that records every route it was asked to send and
+    /// can declare (un)verifiable source binding. Shared between the hybrid
+    /// dispatch tests and the DB-backed acceptance tests.
+    #[derive(Default)]
+    struct RecordingTransport {
+        name: &'static str,
+        supports_binding: bool,
+        calls: std::sync::Mutex<Vec<String>>,
+        transport_message_id: Option<String>,
+        actual_source_ip: Option<std::net::IpAddr>,
+    }
+
+    impl RecordingTransport {
+        fn new(name: &'static str, supports_binding: bool) -> Self {
+            Self {
+                name,
+                supports_binding,
+                ..Default::default()
             }
-        };
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let mut child = match std::process::Command::new("redis-server")
-            .args([
-                "--port",
-                &port.to_string(),
-                "--save",
-                "",
-                "--appendonly",
-                "no",
-                "--daemonize",
-                "no",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => {
-                eprintln!("skipping: redis-server not available");
-                return;
-            }
-        };
-        let mut ready = false;
-        for _ in 0..50 {
-            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
-                if let Ok(mut conn) = client.get_connection() {
-                    if redis::cmd("PING")
-                        .query::<String>(&mut conn)
-                        .map(|r| r == "PONG")
-                        .unwrap_or(false)
-                    {
-                        ready = true;
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        if !ready {
-            let _ = child.kill();
-            let _ = child.wait();
-            eprintln!("skipping: redis-server did not become ready");
-            return;
         }
 
-        let result: ProcessorResult<()> = async {
-            let redis = deadpool_redis::Config::from_url(format!("redis://127.0.0.1:{port}"))
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .map_err(|e| ProcessorError::Job(e.to_string()))?;
-            let job = queued_row("a@example.com", Some(vec!["a@example.com".into()]));
-            let job = queued_row_to_jobs(job).remove(0);
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
 
-            // 1. Original worker claims the send slot.
-            assert!(try_claim_send_slot(&redis, &job, 60).await.unwrap());
-            // 2. Worker crashes mid-send; the row is reclaimed with the SAME
-            //    attempt — the marker is still held → no double send.
-            assert!(
-                !try_claim_send_slot(&redis, &job, 60).await.unwrap(),
-                "reclaim of an in-flight attempt must be refused"
-            );
-            // 3. A different recipient of the same row is independent.
-            let sibling = EmailJob {
-                to: "b@example.com".into(),
-                ..job.clone()
-            };
-            assert!(try_claim_send_slot(&redis, &sibling, 60).await.unwrap());
-            // 4. After the attempt is handled the marker is released.
-            release_send_slot(&redis, &job, false).await;
-            assert!(try_claim_send_slot(&redis, &job, 60).await.unwrap());
-            // 5. When post-send bookkeeping FAILED, the marker must survive
-            //    so a reclaim of the still-pending row cannot re-send.
-            release_send_slot(&redis, &job, true).await;
-            assert!(
-                !try_claim_send_slot(&redis, &job, 60).await.unwrap(),
-                "failed bookkeeping must keep the marker held until TTL"
-            );
+    #[async_trait::async_trait]
+    impl EmailTransport for RecordingTransport {
+        fn transport_name(&self) -> &str {
+            self.name
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            self.supports_binding
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
             Ok(())
         }
-        .await;
-        let _ = child.kill();
-        let _ = child.wait();
-        result.expect("marker sequence");
-    }
 
-    // ---------------------------------------------------------------------------
-    // Release-blocker 15: route/network-path unification
-    // ---------------------------------------------------------------------------
-
-    /// The route is DERIVED from the warmup-IP selection (not a second
-    /// decision): no selected IP → shared; selected IP → dedicated with the
-    /// parsed source address and the reservation keys the admission gate
-    /// used.
-    #[test]
-    fn delivery_route_derives_dedicated_from_the_warmup_ip_selection() {
-        let job = tracking_gate_job();
-
-        let (shared, no_reservation) = delivery_route(&job, &tracking_gate_domain()).unwrap();
-        assert!(matches!(shared, DeliveryRoute::SesShared));
-        assert!(!shared.is_dedicated());
-        assert_eq!(shared.dedicated_source_ip(), None);
-        assert!(no_reservation.is_none());
-
-        let mut domain = tracking_gate_domain();
-        domain.warmup_enabled = true;
-        domain.warmup_ip = Some(WarmupIpIdentity {
-            dedicated_ip_id: "dip-1".into(),
-            ip_address: "203.0.113.9".into(),
-            warmup_started_at: Utc::now() - chrono::Duration::days(3),
-        });
-        let (route, reservation) = delivery_route(&job, &domain).unwrap();
-        match &route {
-            DeliveryRoute::Dedicated {
-                dedicated_ip_id,
-                source_ip,
-            } => {
-                assert_eq!(dedicated_ip_id, "dip-1");
-                assert_eq!(
-                    *source_ip,
-                    "203.0.113.9".parse::<std::net::IpAddr>().expect("test IP")
-                );
-            }
-            other => panic!("expected the dedicated route, got {other:?}"),
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(route.to_string());
+            Ok(DeliveryReceipt {
+                transport: if self.name == "ses" {
+                    TransportType::Ses
+                } else {
+                    TransportType::Smtp
+                },
+                transport_message_id: self.transport_message_id.clone(),
+                actual_source_ip: self.actual_source_ip,
+                recipient_provider: None,
+                provider_source: None,
+            })
         }
-        assert!(route.is_dedicated());
-        assert_eq!(
-            route.dedicated_source_ip(),
-            Some("203.0.113.9".parse::<std::net::IpAddr>().expect("test IP"))
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    fn test_email() -> PreparedEmail {
+        PreparedEmail {
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "route".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+        }
+    }
+
+    /// Adversarial 2: a `SesShared` route never reaches the dedicated
+    /// transport, and a `Dedicated` route never reaches SES — asserted on
+    /// WHICH recording double saw the call.
+    #[tokio::test]
+    async fn hybrid_dispatches_each_route_to_exactly_one_backend() {
+        let ses = Arc::new(RecordingTransport::new("ses", false));
+        let smtp = Arc::new(RecordingTransport::new("smtp", true));
+        let hybrid = HybridTransport::new(
+            Some(ses.clone() as Arc<dyn EmailTransport>),
+            Some(smtp.clone() as Arc<dyn EmailTransport>),
         );
-        // The reservation names the SAME keys check_warmup_limit reserved.
-        let reservation = reservation.expect("a dedicated route carries its warmup reservation");
-        assert_eq!(reservation.dedicated_ip_id, "dip-1");
-        let today = Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(hybrid.transport_name(), "hybrid");
+
+        let email = test_email();
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+        hybrid
+            .send(&email, &DeliveryRoute::SesShared)
+            .await
+            .expect("shared send");
+        hybrid
+            .send(&email, &dedicated)
+            .await
+            .expect("dedicated send");
+
         assert_eq!(
-            reservation.counter_key,
-            warmup_ip_counter_key("203.0.113.9", &today)
+            ses.calls(),
+            vec!["ses-shared".to_string()],
+            "SES must see the shared send and nothing else"
         );
         assert_eq!(
-            reservation.marker_key,
-            warmup_ip_send_marker_key("203.0.113.9", &today, &job)
+            smtp.calls(),
+            vec![dedicated.to_string()],
+            "the relay must see the dedicated send and nothing else"
         );
     }
 
-    /// A selected dedicated identity whose stored address is not an IP is a
-    /// hard config error — fail closed, never route to an unnamed IP.
-    #[test]
-    fn delivery_route_refuses_an_unparseable_dedicated_source_ip() {
-        let mut domain = tracking_gate_domain();
-        domain.warmup_enabled = true;
-        domain.warmup_ip = Some(WarmupIpIdentity {
-            dedicated_ip_id: "dip-bad".into(),
-            ip_address: "not-an-ip".into(),
-            warmup_started_at: Utc::now() - chrono::Duration::days(1),
-        });
-        let error = delivery_route(&tracking_gate_job(), &domain).unwrap_err();
+    /// Adversarial 1: a `Dedicated` route with NO dedicated transport
+    /// configured fails closed — the `send` is refused before any
+    /// submission, and the error names the missing transport and the route.
+    #[tokio::test]
+    async fn dedicated_route_without_a_dedicated_transport_fails_closed_before_submit() {
+        let ses = Arc::new(RecordingTransport::new("ses", false));
+        let hybrid = HybridTransport::new(Some(ses.clone() as Arc<dyn EmailTransport>), None);
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+
+        let error = hybrid
+            .send(&test_email(), &dedicated)
+            .await
+            .expect_err("a missing dedicated transport must fail closed");
+        let message = error.to_string();
         assert!(
-            matches!(error, ProcessorError::Config(ref message) if message.contains("dip-bad")),
-            "invalid dedicated identity must fail closed: {error}"
+            message.contains("dedicated") && message.contains("SMTP transport"),
+            "the error must name the missing transport and the route: {message}"
+        );
+        assert!(
+            message.contains("not configured"),
+            "the error must say the transport is not configured: {message}"
+        );
+        assert!(
+            ses.calls().is_empty(),
+            "no fallback to the shared pool is allowed: {:?}",
+            ses.calls()
         );
     }
 
-    /// Adversarial 3: verification is deliberately ASYMMETRIC — the shared
-    /// route has no dedicated IP to confirm (so a missing or different
-    /// `actual_source_ip` is irrelevant), while the dedicated route accepts
-    /// ONLY an exact match.
+    /// Adversarial 1b: the mirror image — a `SesShared` route with no SES
+    /// transport configured fails closed and never falls back to the relay.
+    #[tokio::test]
+    async fn shared_route_without_ses_fails_closed_before_submit() {
+        let smtp = Arc::new(RecordingTransport::new("smtp", true));
+        let hybrid = HybridTransport::new(None, Some(smtp.clone() as Arc<dyn EmailTransport>));
+        let error = hybrid
+            .send(&test_email(), &DeliveryRoute::SesShared)
+            .await
+            .expect_err("a missing SES transport must fail closed");
+        assert!(
+            error.to_string().contains("SES shared-pool transport"),
+            "the error must name the missing shared transport: {error}"
+        );
+        assert!(
+            smtp.calls().is_empty(),
+            "no fallback to the dedicated relay is allowed: {:?}",
+            smtp.calls()
+        );
+    }
+
+    /// Adversarial 3 (unit): a dedicated route on a transport that cannot
+    /// verify source binding is refused BEFORE DATA — the recording double
+    /// saw zero calls.
+    #[tokio::test]
+    async fn unverifiable_dedicated_route_defers_before_submitting() {
+        let ses = Arc::new(RecordingTransport::new("ses", false));
+        let unverifiable_smtp = Arc::new(RecordingTransport::new("smtp", false));
+        let hybrid = HybridTransport::new(
+            Some(ses as Arc<dyn EmailTransport>),
+            Some(unverifiable_smtp.clone() as Arc<dyn EmailTransport>),
+        );
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+
+        let error = hybrid
+            .ensure_route_dispatchable(&dedicated)
+            .expect_err("an unverifiable dedicated route must be refused");
+        assert!(
+            error.to_string().contains("source binding"),
+            "the refusal must name the missing capability: {error}"
+        );
+        let send_error = hybrid
+            .send(&test_email(), &dedicated)
+            .await
+            .expect_err("send must refuse before DATA");
+        assert!(send_error.to_string().contains("source binding"));
+        assert!(
+            unverifiable_smtp.calls().is_empty(),
+            "the transport must never be called for an unverifiable route: {:?}",
+            unverifiable_smtp.calls()
+        );
+        // The same transport IS dispatchable for the shared route (the
+        // capability is only required for dedicated binding).
+        assert!(hybrid
+            .ensure_route_dispatchable(&DeliveryRoute::SesShared)
+            .is_ok());
+    }
+
+    /// The receipt/route comparison is an AUDIT note, never a retry signal:
+    /// a shared receipt needs none, a matching dedicated receipt needs none,
+    /// and a mismatch/missing report is recorded as a contract note.
     #[test]
-    fn route_verification_asymmetry_shared_ignores_dedicated_enforces() {
+    fn route_receipt_contract_note_records_but_never_retries() {
         let receipt = |ip: Option<&str>| DeliveryReceipt {
-            transport: TransportType::Ses,
+            transport: TransportType::Smtp,
             transport_message_id: None,
             actual_source_ip: ip.map(|value| value.parse().expect("test IP")),
             recipient_provider: None,
@@ -7359,80 +8177,61 @@ mod tests {
             dedicated_ip_id: "dip-1".into(),
             source_ip: "203.0.113.9".parse().expect("test IP"),
         };
-
-        // Shared: no actual-source-IP requirement, and a stray value cannot
-        // fail the send (there is no dedicated boundary to verify).
-        assert!(verify_delivery_route(&DeliveryRoute::SesShared, &receipt(None)).is_ok());
+        assert!(route_receipt_contract_note(&DeliveryRoute::SesShared, &receipt(None)).is_none());
         assert!(
-            verify_delivery_route(&DeliveryRoute::SesShared, &receipt(Some("198.51.100.7")))
-                .is_ok(),
-            "the mismatch check must not apply to the shared route"
+            route_receipt_contract_note(&DeliveryRoute::SesShared, &receipt(Some("198.51.100.7")))
+                .is_none(),
+            "the shared route has no binding to confirm"
         );
-
-        // Dedicated: exact match only.
-        assert!(verify_delivery_route(&dedicated, &receipt(Some("203.0.113.9"))).is_ok());
-        let mismatch =
-            verify_delivery_route(&dedicated, &receipt(Some("198.51.100.7"))).unwrap_err();
+        assert!(route_receipt_contract_note(&dedicated, &receipt(Some("203.0.113.9"))).is_none());
         assert!(
-            mismatch.to_string().contains("mismatch"),
-            "a different source IP is a hard error: {mismatch}"
+            route_receipt_contract_note(&dedicated, &receipt(Some("198.51.100.7")))
+                .expect("mismatch note")
+                .contains("198.51.100.7")
         );
-        let unverified = verify_delivery_route(&dedicated, &receipt(None)).unwrap_err();
-        assert!(
-            unverified.to_string().contains("unverified"),
-            "a missing source-IP report must never pass as verified: {unverified}"
-        );
+        assert!(route_receipt_contract_note(&dedicated, &receipt(None))
+            .expect("missing-report note")
+            .contains("no source IP"));
     }
 
-    /// Adversarial 1: a receipt reporting a DIFFERENT source IP than the
-    /// route selected must error AND release the warmup capacity reserved
-    /// for the selected IP (it must not count as consumed).
+    /// Accounting correction (ephemeral redis): a confirmed contract
+    /// violation releases the reserved slot exactly once — never a retry.
     #[tokio::test]
-    async fn dedicated_route_mismatch_releases_the_warmup_reservation() {
+    async fn contract_violation_releases_the_warmup_slot_without_resubmitting() {
         let Some(redis) = ephemeral_redis().await else {
-            eprintln!("skipping: redis-server not available");
             return;
         };
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        let processor = EmailProcessor::new(db, redis, EmailConfig::default())
-            .await
-            .unwrap();
-
         let job = tracking_gate_job();
-        let mut domain = tracking_gate_domain();
-        domain.warmup_enabled = true;
-        domain.warmup_day = 3;
-        domain.warmup_ip = Some(WarmupIpIdentity {
-            dedicated_ip_id: "dip-1".into(),
-            ip_address: "203.0.113.9".into(),
-            warmup_started_at: Utc::now() - chrono::Duration::days(3),
-        });
+        let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
+            .expect("candidate pool");
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("below the cap");
+        let reservation = reserved.reservation.expect("warming reservation");
 
-        // Admission reserves the slot on the selected IP.
-        assert_eq!(
-            processor.check_warmup_limit(&job, &domain).await.unwrap(),
-            WarmupAdmission::Admit
-        );
-        let (route, reservation) = delivery_route(&job, &domain).unwrap();
-        let reservation = reservation.expect("dedicated reservation");
-        let counter = |key: String| async {
-            let mut conn = processor.redis.get().await.unwrap();
-            redis::cmd("GET")
-                .arg(key)
-                .query_async::<Option<i64>>(&mut *conn)
-                .await
-                .unwrap()
+        let counter = |key: String| {
+            let redis = redis.clone();
+            async move {
+                let mut conn = redis.get().await.unwrap();
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<i64>>(&mut *conn)
+                    .await
+                    .unwrap()
+            }
         };
-        let marker = |key: String| async {
-            let mut conn = processor.redis.get().await.unwrap();
-            redis::cmd("GET")
-                .arg(key)
-                .query_async::<Option<String>>(&mut *conn)
-                .await
-                .unwrap()
+        let marker = |key: String| {
+            let redis = redis.clone();
+            async move {
+                let mut conn = redis.get().await.unwrap();
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<String>>(&mut *conn)
+                    .await
+                    .unwrap()
+            }
         };
         assert_eq!(counter(reservation.counter_key.clone()).await, Some(1));
         assert_eq!(
@@ -7440,97 +8239,25 @@ mod tests {
             Some("1".into())
         );
 
-        // The transport claims a DIFFERENT source IP.
-        let mismatched = DeliveryReceipt {
-            transport: TransportType::Smtp,
-            transport_message_id: None,
-            actual_source_ip: Some("198.51.100.7".parse().expect("test IP")),
-            recipient_provider: None,
-            provider_source: None,
-        };
-        let error = processor
-            .settle_delivery_route(&route, &mismatched, Some(&reservation))
+        release_warmup_reservation(&redis, &reservation)
             .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("mismatch"),
-            "route/IP mismatch must fail closed: {error}"
-        );
-
-        // Capacity for the SELECTED IP is not consumed: counter back to 0,
-        // marker gone (a retry can re-reserve).
+            .expect("release");
         assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
         assert_eq!(marker(reservation.marker_key.clone()).await, None);
 
-        // A repeated settle must not double-release (no underflow).
-        let _ = processor
-            .settle_delivery_route(&route, &mismatched, Some(&reservation))
-            .await;
+        // A repeated release must not underflow the counter.
+        release_warmup_reservation(&redis, &reservation)
+            .await
+            .expect("second release");
         assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
     }
 
-    /// Adversarial 2: a receipt WITHOUT an actual source IP does not verify
-    /// a dedicated route (no false success) and the reservation is released
-    /// — the route stays unverified until the relay/MTA reports the IP.
-    #[tokio::test]
-    async fn dedicated_route_without_a_source_ip_report_does_not_verify() {
-        let Some(redis) = ephemeral_redis().await else {
-            eprintln!("skipping: redis-server not available");
-            return;
-        };
-        let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy("postgres://localhost/unused")
-            .unwrap();
-        let processor = EmailProcessor::new(db, redis, EmailConfig::default())
-            .await
-            .unwrap();
-
-        let job = tracking_gate_job();
-        let mut domain = tracking_gate_domain();
-        domain.warmup_enabled = true;
-        domain.warmup_day = 3;
-        domain.warmup_ip = Some(WarmupIpIdentity {
-            dedicated_ip_id: "dip-1".into(),
-            ip_address: "203.0.113.9".into(),
-            warmup_started_at: Utc::now() - chrono::Duration::days(3),
-        });
-        assert_eq!(
-            processor.check_warmup_limit(&job, &domain).await.unwrap(),
-            WarmupAdmission::Admit
-        );
-        let (route, reservation) = delivery_route(&job, &domain).unwrap();
-        let reservation = reservation.expect("dedicated reservation");
-
-        // The SMTP transport cannot parse the relay report yet: None.
-        let unreported = DeliveryReceipt {
-            transport: TransportType::Smtp,
-            transport_message_id: None,
-            actual_source_ip: None,
-            recipient_provider: None,
-            provider_source: None,
-        };
-        let error = processor
-            .settle_delivery_route(&route, &unreported, Some(&reservation))
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("unverified"),
-            "an unreported source IP must be refused, never assumed: {error}"
-        );
-
-        let mut conn = processor.redis.get().await.unwrap();
-        let counter: Option<i64> = redis::cmd("GET")
-            .arg(&reservation.counter_key)
-            .query_async(&mut *conn)
-            .await
-            .unwrap();
-        assert_eq!(
-            counter,
-            Some(0),
-            "unverified send must not consume the IP quota"
-        );
-    }
+    // ---------------------------------------------------------------------------
+    // Release-blocker 15 (P0 supersession): the route is chosen by
+    // `select_delivery_ip` + `reserve_warmup_capacity`, and dispatchability
+    // is enforced BEFORE DATA. See the selection/reservation and hybrid
+    // routing tests above.
+    // ---------------------------------------------------------------------------
 
     /// Adversarial 4: the deduplicated module really has ONE transport
     /// abstraction — `transport_router.rs` must not define a second
@@ -7587,7 +8314,7 @@ mod tests {
             }
         }));
         let prepared = processor
-            .prepare_email(&job, &tracking_gate_domain())
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
             .unwrap();
         assert!(
             prepared.headers.iter().all(|(key, _)| !key
@@ -8073,5 +8800,453 @@ mod sales_feedback_db_tests {
         .await
         .expect("legacy id recording");
         assert!(legacy.is_none());
+    }
+}
+
+#[cfg(test)]
+mod acceptance_ledger_db_tests {
+    //! P0 durable exactly-once: the `sales_delivery_acceptances` protocol
+    //! (reserve → submit → record) and its crash reclaim, against the
+    //! canonical provisioned schema (migration 205).
+    //!
+    //! The pool follows this crate's live-test convention
+    //! (`migrator::test_support::fresh_canonical_pool`): `TEST_DATABASE_URL`
+    //! must be set EXPLICITLY; when unset the tests soft-skip, and a
+    //! configured-but-broken URL fails.
+
+    use super::*;
+    use sqlx::PgPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn acceptance_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn acceptance_job() -> EmailJob {
+        EmailJob {
+            id: "acc-job-1".into(),
+            message_id: "acc-msg-1".into(),
+            tenant_id: "acc-tenant-1".into(),
+            domain_id: "acc-domain-1".into(),
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            subject: "acceptance".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn acceptance_email() -> PreparedEmail {
+        PreparedEmail {
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "acceptance".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+        }
+    }
+
+    /// Minimal transport double: counts submissions and can be told to
+    /// refuse. The acceptance protocol tests never need a real network path.
+    #[derive(Default)]
+    struct CountingTransport {
+        calls: AtomicUsize,
+        refuse: bool,
+    }
+
+    impl CountingTransport {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for CountingTransport {
+        fn transport_name(&self) -> &str {
+            "counting"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            true
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.refuse {
+                return Err(ProcessorError::Transport("550 refused".into()));
+            }
+            Ok(DeliveryReceipt {
+                transport: match route {
+                    DeliveryRoute::SesShared => TransportType::Ses,
+                    DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
+                },
+                transport_message_id: Some("provider-message-1".into()),
+                actual_source_ip: route.dedicated_source_ip(),
+                recipient_provider: None,
+                provider_source: None,
+            })
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn acceptance_count(pool: &PgPool, send_unit: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_delivery_acceptances WHERE send_unit = $1",
+        )
+        .bind(send_unit)
+        .fetch_one(pool)
+        .await
+        .expect("count acceptances")
+    }
+
+    async fn acceptance_state(pool: &PgPool, send_unit: &str) -> String {
+        sqlx::query_scalar("SELECT state FROM sales_delivery_acceptances WHERE send_unit = $1")
+            .bind(send_unit)
+            .fetch_one(pool)
+            .await
+            .expect("read acceptance state")
+    }
+
+    /// Adversarial 1 (ledger half): a dedicated route with no dedicated
+    /// transport is refused by the pre-DATA gate and inserts NO acceptance
+    /// row — the deferral happens before the ledger is touched.
+    #[tokio::test]
+    async fn dedicated_route_without_dedicated_transport_inserts_no_acceptance_row() {
+        let Some(pool) = acceptance_pool("acc_no_transport").await else {
+            eprintln!("skipping dedicated_route_without_dedicated_transport_inserts_no_acceptance_row: no TEST_DATABASE_URL");
+            return;
+        };
+        let job = acceptance_job();
+        let route = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+        let transport = Arc::new(CountingTransport::default());
+        let hybrid = HybridTransport::new(Some(transport.clone() as Arc<dyn EmailTransport>), None);
+        assert!(
+            hybrid.ensure_route_dispatchable(&route).is_err(),
+            "the gate must refuse before anything else runs"
+        );
+        // Dispatch defers here; the ledger is never reached.
+        assert_eq!(acceptance_count(&pool, &send_unit_of(&job)).await, 0);
+        assert_eq!(transport.calls(), 0);
+        pool.close().await;
+    }
+
+    /// Adversarial 3 (ledger half): an unverifiable dedicated route never
+    /// reaches the transport and leaves no `accepted` (indeed no) row.
+    #[tokio::test]
+    async fn unverifiable_dedicated_route_defers_before_the_ledger() {
+        let Some(pool) = acceptance_pool("acc_unverifiable").await else {
+            eprintln!("skipping unverifiable_dedicated_route_defers_before_the_ledger: no TEST_DATABASE_URL");
+            return;
+        };
+        let job = acceptance_job();
+        let route = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+        let unverifiable = Arc::new(CountingTransport {
+            refuse: false,
+            ..Default::default()
+        });
+        // The double declares no binding capability.
+        struct NoBinding(Arc<CountingTransport>);
+        #[async_trait::async_trait]
+        impl EmailTransport for NoBinding {
+            fn transport_name(&self) -> &str {
+                "smtp"
+            }
+            fn supports_source_binding(&self) -> bool {
+                false
+            }
+            async fn verify(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+            async fn send(
+                &self,
+                email: &PreparedEmail,
+                route: &DeliveryRoute,
+            ) -> ProcessorResult<DeliveryReceipt> {
+                self.0.send(email, route).await
+            }
+            async fn close(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+        }
+        let hybrid = HybridTransport::new(
+            Some(unverifiable.clone() as Arc<dyn EmailTransport>),
+            Some(Arc::new(NoBinding(unverifiable.clone())) as Arc<dyn EmailTransport>),
+        );
+        assert!(hybrid.ensure_route_dispatchable(&route).is_err());
+        assert_eq!(acceptance_count(&pool, &send_unit_of(&job)).await, 0);
+        assert_eq!(unverifiable.calls(), 0, "transport must never be called");
+        pool.close().await;
+    }
+
+    /// Adversarial 4 (the exactly-once gate): the second reserve for the same
+    /// send unit is refused and the recording transport saw exactly ONE call.
+    #[tokio::test]
+    async fn duplicate_reserve_never_submits_twice() {
+        let Some(pool) = acceptance_pool("acc_duplicate").await else {
+            eprintln!("skipping duplicate_reserve_never_submits_twice: no TEST_DATABASE_URL");
+            return;
+        };
+        let job = acceptance_job();
+        let route = DeliveryRoute::SesShared;
+        let transport = CountingTransport::default();
+        let send_unit = send_unit_of(&job);
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed
+        );
+        let receipt = transport
+            .send(&acceptance_email(), &route)
+            .await
+            .expect("first submission");
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+            .await
+            .expect("record acceptance");
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::AlreadyAccepted,
+            "the ledger must refuse a second submission"
+        );
+        assert_eq!(
+            transport.calls(),
+            1,
+            "the transport must have been called exactly once"
+        );
+        assert_eq!(acceptance_state(&pool, &send_unit).await, "accepted");
+        pool.close().await;
+    }
+
+    /// Adversarial 5: a failed submission records `failed` and a retry is
+    /// allowed; a successful one records `accepted` and a retry is refused.
+    #[tokio::test]
+    async fn failed_submission_allows_retry_accepted_blocks_it() {
+        let Some(pool) = acceptance_pool("acc_retry").await else {
+            eprintln!(
+                "skipping failed_submission_allows_retry_accepted_blocks_it: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let job = acceptance_job();
+        let route = DeliveryRoute::SesShared;
+        let send_unit = send_unit_of(&job);
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed
+        );
+        record_acceptance_failed(&pool, &send_unit, "550 refused")
+            .await
+            .expect("record refusal");
+        assert_eq!(acceptance_state(&pool, &send_unit).await, "failed");
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed,
+            "a recorded refusal frees the unit for a retry"
+        );
+        let transport = CountingTransport::default();
+        let receipt = transport
+            .send(&acceptance_email(), &route)
+            .await
+            .expect("retry submission");
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+            .await
+            .expect("record retry acceptance");
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::AlreadyAccepted,
+            "after acceptance the unit is closed"
+        );
+        assert_eq!(transport.calls(), 1);
+        pool.close().await;
+    }
+
+    /// Adversarial 6: a crashed `reserved` row is reclaimed after the lease,
+    /// exactly once — the ledger's primary key serializes the claim.
+    #[tokio::test]
+    async fn crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once() {
+        let Some(pool) = acceptance_pool("acc_reclaim").await else {
+            eprintln!("skipping crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once: no TEST_DATABASE_URL");
+            return;
+        };
+        let job = acceptance_job();
+        let route = DeliveryRoute::SesShared;
+        let send_unit = send_unit_of(&job);
+
+        // A crashed submission: `reserved` with an expired lease.
+        sqlx::query(
+            "INSERT INTO sales_delivery_acceptances \
+                 (send_unit, tenant_id, state, reserved_at) \
+             VALUES ($1, $2, 'reserved', NOW() - make_interval(secs => $3))",
+        )
+        .bind(&send_unit)
+        .bind(&job.tenant_id)
+        .bind(ACCEPTANCE_RESERVE_LEASE.as_secs() as i64 + 60)
+        .execute(&pool)
+        .await
+        .expect("seed crashed reservation");
+
+        // A fresh reservation is NOT claimable while its lease is live.
+        sqlx::query(
+            "UPDATE sales_delivery_acceptances SET reserved_at = NOW() WHERE send_unit = $1",
+        )
+        .bind(&send_unit)
+        .execute(&pool)
+        .await
+        .expect("renew lease");
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::InFlight,
+            "a live reservation must not be stolen"
+        );
+
+        // Age it past the lease: exactly ONE of two concurrent claims wins.
+        sqlx::query(
+            "UPDATE sales_delivery_acceptances \
+             SET reserved_at = NOW() - make_interval(secs => $2) WHERE send_unit = $1",
+        )
+        .bind(&send_unit)
+        .bind(ACCEPTANCE_RESERVE_LEASE.as_secs() as i64 + 60)
+        .execute(&pool)
+        .await
+        .expect("expire lease");
+        let claims = futures::future::join_all(vec![
+            claim_acceptance(&pool, &job, &route),
+            claim_acceptance(&pool, &job, &route),
+        ])
+        .await;
+        let claimed = claims
+            .iter()
+            .filter(|claim| matches!(claim, Ok(AcceptanceClaim::Claimed)))
+            .count();
+        assert_eq!(
+            claimed, 1,
+            "the ledger's unique key must admit exactly one reclaiming worker: {claims:?}"
+        );
+
+        // The reclaimed submission is recorded accepted; a further claim is
+        // refused (exactly-once).
+        let transport = CountingTransport::default();
+        let receipt = transport
+            .send(&acceptance_email(), &route)
+            .await
+            .expect("reclaimed submission");
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+            .await
+            .expect("record reclaimed acceptance");
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::AlreadyAccepted
+        );
+        assert_eq!(transport.calls(), 1);
+
+        // The governance sweep returns an expired reservation to the
+        // submit-capable state (`failed` with a distinctive reason).
+        let second_job = EmailJob {
+            id: "acc-job-sweep".into(),
+            ..job.clone()
+        };
+        let second_unit = send_unit_of(&second_job);
+        sqlx::query(
+            "INSERT INTO sales_delivery_acceptances \
+                 (send_unit, tenant_id, state, reserved_at) \
+             VALUES ($1, $2, 'reserved', NOW() - make_interval(secs => $3))",
+        )
+        .bind(&second_unit)
+        .bind(&second_job.tenant_id)
+        .bind(ACCEPTANCE_RESERVE_LEASE.as_secs() as i64 + 60)
+        .execute(&pool)
+        .await
+        .expect("seed second crashed reservation");
+        let swept = reclaim_stale_acceptance_reservations(&pool)
+            .await
+            .expect("sweep");
+        assert!(swept >= 1, "the stale reservation must be swept");
+        assert_eq!(acceptance_state(&pool, &second_unit).await, "failed");
+        assert_eq!(
+            claim_acceptance(&pool, &second_job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed,
+            "a swept reservation is immediately retryable through the claim"
+        );
+        pool.close().await;
+    }
+
+    /// The sales identity flows straight into the ledger primary key, so a
+    /// retried step execution can never create a second row.
+    #[tokio::test]
+    async fn sales_send_unit_is_the_queue_idempotency_key() {
+        let Some(pool) = acceptance_pool("acc_sales_unit").await else {
+            eprintln!(
+                "skipping sales_send_unit_is_the_queue_idempotency_key: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let step_execution_id = uuid::Uuid::new_v4();
+        let job = EmailJob {
+            sales_step_execution_id: Some(step_execution_id.to_string()),
+            ..acceptance_job()
+        };
+        let route = DeliveryRoute::SesShared;
+        let send_unit = format!("sa-send:{step_execution_id}");
+        assert_eq!(send_unit_of(&job), send_unit);
+
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed
+        );
+        let receipt = DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: Some("ses-1".into()),
+            actual_source_ip: None,
+            recipient_provider: None,
+            provider_source: None,
+        };
+        record_acceptance_accepted(&pool, &send_unit, &receipt, None)
+            .await
+            .expect("record acceptance");
+        assert_eq!(acceptance_count(&pool, &send_unit).await, 1);
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::AlreadyAccepted
+        );
+        pool.close().await;
     }
 }

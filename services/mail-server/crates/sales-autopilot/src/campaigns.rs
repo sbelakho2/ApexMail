@@ -1702,7 +1702,7 @@ mod tests {
     /// exactly ONE compatibility sequence and enrolls exactly ONCE, and the
     /// enqueue goes through the durable `sales_actions` queue — never into
     /// `email_queue` directly.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[ignore = "KNOWN DEFECT (coordination/reservation workstream, unfinished): this gate errors instead of admitting or refusing when sales_contacts.account_id is NULL, and a query in its call path decodes a NULL into a non-Option column. Assertions are NOT weakened; enable once the call path is NULL-safe."]
     #[tokio::test]
     async fn campaign_start_materializes_one_sequence_and_never_duplicates_enrollment() {
         let Some(pool) =
@@ -1854,7 +1854,7 @@ mod tests {
     /// Live DB (canonical schema): a legacy recipient whose address normalizes
     /// to an existing canonical contact point reuses that contact (and its
     /// verification provenance) instead of creating a second contact.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[ignore = "KNOWN DEFECT (coordination/reservation workstream, unfinished): this gate errors instead of admitting or refusing when sales_contacts.account_id is NULL, and a query in its call path decodes a NULL into a non-Option column. Assertions are NOT weakened; enable once the call path is NULL-safe."]
     #[tokio::test]
     async fn campaign_start_reuses_existing_contact_point_and_contact() {
         let Some(pool) =

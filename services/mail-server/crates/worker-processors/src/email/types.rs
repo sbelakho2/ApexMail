@@ -33,6 +33,19 @@ pub struct EmailJob {
     pub message_category: String,
     pub tags: Option<Vec<String>>,
     pub metadata: Option<JsonValue>,
+    /// The stable logical send identity the SALES queue uses
+    /// (`messages.idempotency_key = 'sa-send:{step_execution_id}'`, migration
+    /// 200 / `sales_step_executions.id`). `email_queue.sales_step_execution_id`
+    /// (migration 202) is the typed provenance column; when present the
+    /// acceptance ledger's `send_unit` is `sa-send:{id}`, so a retry of the
+    /// same logical send can never submit twice. Non-sales rows fall back to
+    /// the queue row id plus recipient (`email_queue:{id}:{recipient}`).
+    ///
+    /// `serde(default)` keeps deserialization of pre-migration payloads
+    /// working (the field is only ever read from a queue row).
+    #[serde(default)]
+    #[sqlx(rename = "salesStepExecutionId")]
+    pub sales_step_execution_id: Option<String>,
     #[sqlx(rename = "scheduledAt")]
     pub scheduled_at: Option<DateTime<Utc>>,
     pub attempt: i32,
@@ -161,24 +174,35 @@ pub struct Domain {
     pub dkim_private_key: Option<String>,
     pub warmup_enabled: bool,
     pub warmup_day: i32,
-    /// The dedicated source IP whose reputation bounds warmup admission for
-    /// this send (the tenant's least-warmed `dedicated_ips` row). `None` when
-    /// warmup is disabled (shared pool) — see `WarmupIpIdentity`.
-    pub warmup_ip: Option<WarmupIpIdentity>,
+    /// `domains.ses_verified` — required for a [`DeliveryRoute::SesShared`]
+    /// send (SES refuses unverified senders) and deliberately NOT required
+    /// for a dedicated relay route, which binds a tenant IP and does not
+    /// traverse SES.
+    pub ses_verified: bool,
+    /// The tenant's dedicated-IP routing candidates, ordered by preference
+    /// (warming first, least-warmed first; active/graduated after). `empty`
+    /// means the domain rides the shared pool — see `DedicatedIp`.
+    pub dedicated_ips: Vec<DedicatedIp>,
     pub return_path: Option<String>,
 }
 
-/// The canonical identity of the dedicated IP that carries the warmup
-/// reputation boundary for a tenant send. Warmup admission is keyed on the
-/// `ip_address` (the reputation boundary is the IP, not the domain).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WarmupIpIdentity {
+/// One dedicated-IP row eligible for routing: `dedicated_ips.status` in
+/// (`warming`, `active`). The routing decision (and the warmup quota) is
+/// keyed on the IP, not the sending domain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DedicatedIp {
     /// `dedicated_ips.id` — the row that owns the warmup state.
-    pub dedicated_ip_id: String,
+    pub id: String,
     /// Source IP address (`dedicated_ips.ip_address`).
     pub ip_address: String,
+    /// True while the row is still warming (`dedicated_ips.status =
+    /// 'warming'`): the canonical daily cap is derived from
+    /// `warmup_started_at` and `mail_common::warmup`. False for a graduated
+    /// (`active`) row — it keeps being routed as dedicated WITHOUT warmup
+    /// throttling.
+    pub warming: bool,
     /// Canonical warmup start (`dedicated_ips.warmup_started_at`).
-    pub warmup_started_at: DateTime<Utc>,
+    pub warmup_started_at: Option<DateTime<Utc>>,
 }
 
 /// Suppression entry.
@@ -272,15 +296,31 @@ impl DeliveryRoute {
     }
 }
 
+impl std::fmt::Display for DeliveryRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SesShared => write!(f, "ses-shared"),
+            Self::Dedicated {
+                dedicated_ip_id,
+                source_ip,
+            } => write!(f, "dedicated({dedicated_ip_id} @ {source_ip})"),
+        }
+    }
+}
+
 /// What a transport actually did for one [`DeliveryRoute`].
 ///
 /// `actual_source_ip` is the ONLY evidence that a dedicated route was
 /// really used: the transport must report the source address the recipient
-/// would observe. `None` means "not reported" — NEVER "assumed the selected
-/// IP": the processor treats a dedicated route with `None` as unverified
-/// (hard error, warmup capacity released), because counting an unverified
-/// send against a warming IP's quota is exactly the defect this contract
-/// removes.
+/// would observe. `None` means "not reported".
+///
+/// The processor refuses to SUBMIT a dedicated route on a transport that does
+/// not declare `supports_source_binding()` (pre-DATA refusal), so by the time
+/// a receipt exists the transport contractually knows the bound source IP.
+/// A receipt that disagrees with the route is recorded on the acceptance
+/// ledger as a contract violation (with a loud alarm) but NEVER turned into a
+/// retry: the message may already be externally accepted, and retrying after
+/// acceptance is the duplicate risk this contract exists to remove.
 #[derive(Debug, Clone)]
 pub struct DeliveryReceipt {
     /// Which transport carried the message.

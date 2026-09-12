@@ -551,6 +551,7 @@ mod tests {
             message_category: "marketing".to_string(),
             tags: None,
             metadata: None,
+            sales_step_execution_id: None,
             scheduled_at: None,
             attempt: 1,
             created_at: chrono::Utc::now(),

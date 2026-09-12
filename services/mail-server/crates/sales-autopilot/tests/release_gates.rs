@@ -269,6 +269,14 @@ fn allowed_policy_input(seq: &common::SequenceFixture) -> ContactPolicyInputOwne
         consent_status: None,
         soft_opt_in: false,
         legitimate_interest_assessed: true,
+        // TEST_JURISDICTION is deliberately outside the EU/EEA, where the
+        // policy row (not the §103¹ subscriber classification) is the
+        // authority; the fixture still declares the fail-closed default.
+        subscriber_type: sales_autopilot::legal_policy::SubscriberType::Unknown,
+        consent_evidence_id: None,
+        existing_customer: false,
+        similar_product_basis: false,
+        collection_opt_out_offered_at: None,
     }
 }
 
