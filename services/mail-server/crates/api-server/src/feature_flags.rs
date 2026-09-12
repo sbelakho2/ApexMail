@@ -16,9 +16,17 @@
 //!
 //! # Failure semantics
 //!
-//! * A non-boolean override **fails closed**: it is logged at `warn` and the
-//!   caller's `default` is returned. A string `"true"`, an object, or a
-//!   number never enables a flag.
+//! * A non-boolean override is **ignored, not interpreted**: it is logged at
+//!   `warn` and evaluation falls through to the global row exactly as if the
+//!   override did not exist. The chosen behaviour is (b) from the audit
+//!   finding, and the reason is that the global row is the authoritative
+//!   configured state while a tenant override is a narrow exception: an
+//!   invalid exception must not erase a global disable *or* silently disable
+//!   a globally-enabled capability (option (a), absolute `false`, would do
+//!   the latter). The invariant this guarantees: a malformed override can
+//!   never turn a global `false` into `true` through the caller's `default`.
+//!   A string `"true"`, an object, or a number never enables a flag that the
+//!   global row disables.
 //! * Database errors are returned as [`ApiError`] — flag evaluation failing
 //!   must be visible, not silently reinterpreted as "disabled" or "enabled".
 //!
@@ -84,7 +92,8 @@ impl FeatureFlagService {
     /// Evaluate a flag for one tenant.
     ///
     /// Precedence: tenant override → global `feature_flags.enabled` → the
-    /// caller's `default`.
+    /// caller's `default`. A non-boolean override is ignored (logged) and the
+    /// global row answers instead — see the module docs for why.
     pub async fn enabled(
         &self,
         tenant_id: &str,
@@ -108,14 +117,20 @@ impl FeatureFlagService {
             // `false` override must beat a globally enabled flag.
             Some(serde_json::Value::Bool(value)) => value,
             Some(other) => {
-                // Fail closed: never coerce a string/object/number into true.
+                // Ignore the malformed override and evaluate the global row
+                // exactly as if the override did not exist. Falling back to
+                // the caller's `default` here would let a malformed override
+                // turn `global = false` into `true` for a caller that passes
+                // `default = true` (AI chat does exactly that) — the
+                // adversarial case the audit found.
                 tracing::warn!(
                     tenant_id = %tenant_id,
                     flag = %flag,
                     value = %other,
-                    "feature flag override is not a JSON boolean; failing closed to the default"
+                    "feature flag override is not a JSON boolean; ignoring it and falling \
+                     through to the global row"
                 );
-                default
+                global_enabled.unwrap_or(default)
             }
             None => global_enabled.unwrap_or(default),
         };
@@ -277,17 +292,16 @@ mod tests {
         cleanup(&pool, flag).await;
     }
 
-    /// Adversarial 7: a non-boolean override does not enable the flag, fails
-    /// closed to the default, and is logged.
+    /// Adversarial 7: a non-boolean override is IGNORED (the chosen failure
+    /// behaviour) and is logged at warn.
     #[tokio::test]
-    async fn non_boolean_override_fails_closed_and_logs() {
+    async fn non_boolean_override_is_ignored_and_logged() {
         let Some(pool) = crate::test_db::canonical_pool("feature_flag_bad_override").await else {
             return;
         };
         let flag = "test_bad_override_flag";
-        // Global says enabled; the override is the only reason it could be
-        // disabled, and it is invalid — the default must win, not the global
-        // row and certainly not the malformed value.
+        // Global says enabled; the malformed override is ignored, so the
+        // global row still answers (not the caller's `false` default).
         upsert_global_flag(&pool, flag, true).await;
         upsert_override(
             &pool,
@@ -313,8 +327,8 @@ mod tests {
         drop(guard);
 
         assert!(
-            !result,
-            "a string override must NOT enable the flag (fail closed to the default)"
+            result,
+            "an ignored override must fall through to the global row (true)"
         );
         let events = captured.lock().expect("captured events").clone();
         assert!(
@@ -324,7 +338,7 @@ mod tests {
             "the invalid override must be logged at warn: {events:?}"
         );
 
-        // Objects and numbers are equally non-boolean.
+        // Objects and numbers are equally non-boolean and equally ignored.
         upsert_override(
             &pool,
             "tenant-bad-override",
@@ -333,14 +347,63 @@ mod tests {
         )
         .await;
         service.invalidate(flag);
-        assert!(!service
+        assert!(service
             .enabled("tenant-bad-override", flag, false)
             .await
             .unwrap());
         upsert_override(&pool, "tenant-bad-override", flag, serde_json::json!(1)).await;
         service.invalidate(flag);
-        assert!(!service
+        assert!(service
             .enabled("tenant-bad-override", flag, false)
+            .await
+            .unwrap());
+
+        cleanup(&pool, flag).await;
+    }
+
+    /// The exact adversarial case from the finding: a globally-disabled flag
+    /// must stay disabled even when the tenant override is malformed and the
+    /// caller passes `default = true` (AI chat's default). The malformed
+    /// override is ignored and the global `false` wins.
+    #[tokio::test]
+    async fn malformed_override_cannot_enable_a_globally_disabled_flag() {
+        let Some(pool) = crate::test_db::canonical_pool("feature_flag_adversarial").await else {
+            return;
+        };
+        let flag = "test_malformed_override_flag";
+        upsert_global_flag(&pool, flag, false).await;
+
+        let service = FeatureFlagService::new(pool.clone());
+
+        // Every non-boolean JSON shape, with the caller default deliberately
+        // `true` — the old fallback returned `default` here and enabled the
+        // globally-disabled flag.
+        for malformed in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(0),
+            serde_json::json!({"enabled": true}),
+            serde_json::json!(["true"]),
+            serde_json::Value::Null,
+        ] {
+            upsert_override(&pool, "tenant-adversarial", flag, malformed.clone()).await;
+            service.invalidate(flag);
+            assert!(
+                !service
+                    .enabled("tenant-adversarial", flag, true)
+                    .await
+                    .unwrap(),
+                "malformed override {malformed} must not enable a globally-disabled flag \
+                 through the caller's true default"
+            );
+        }
+
+        // Sanity: a real boolean override still works in both directions on
+        // the same disabled global row.
+        upsert_override(&pool, "tenant-adversarial", flag, serde_json::json!(true)).await;
+        service.invalidate(flag);
+        assert!(service
+            .enabled("tenant-adversarial", flag, true)
             .await
             .unwrap());
 

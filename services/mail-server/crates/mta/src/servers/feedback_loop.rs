@@ -1,11 +1,14 @@
 //! Feedback Loop (FBL) server – processes ARF complaint reports from ISPs.
 //!
-//! Verifies the source IP via reverse DNS against a known list of ISP FBL senders,
-//! parses ARF feedback reports, updates sender reputation, and manages suppression.
+//! Verifies the source IP against the provider-specific [`FblRegistry`]
+//! (provider → expected rDNS patterns / source networks → validation method →
+//! effective version), parses ARF feedback reports, updates sender reputation,
+//! and manages suppression. Only traffic whose source matches a registered
+//! provider's expectations is authoritative; unregistered or mismatched
+//! complaints are RECORDED but never suppress.
 
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -22,7 +25,11 @@ use tracing::{debug, error, info, warn};
 use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
-use super::bounce::{append_data_line, try_admit_connection, ConnGuard, MAX_RCPT_PER_TRANSACTION};
+use super::bounce::{
+    append_data_line, sanitize_observation_value, try_admit_connection, ConnGuard,
+    MAX_RCPT_PER_TRANSACTION,
+};
+use super::fbl_registry::{FblAuthority, FblRegistry, FblValidationMethod};
 use super::util::{
     is_mail_from_arg, is_rcpt_to_arg, is_strict_end_of_data, line_content_bytes, line_lossy,
     log_session_summary, log_smtp_reject, metric_message, read_line_capped, split_verb,
@@ -83,43 +90,33 @@ pub struct ComplaintInfo {
     pub authentication_results: Option<String>,
 }
 
-/// Well‑known FBL sender domains (Google, Yahoo, Microsoft, AOL, etc.).
-const TRUSTED_FBL_SENDERS: &[&str] = &[
-    "google.com",
-    "gmail.com",
-    "yahoo.com",
-    "yahoo.net",
-    "yahoodns.net",
-    "microsoft.com",
-    "outlook.com",
-    "hotmail.com",
-    "aol.com",
-    "comcast.net",
-    "cox.net",
-    "att.net",
-    "verizon.net",
-    "mail.ru",
-    "yandex.net",
-    "returnpath.net",
-    "validity.com",
-];
+/// Well‑known FBL sender domains are now registry rows
+/// (`fbl_provider_registry`, seeded from the pre-existing
+/// `TRUSTED_FBL_SENDERS` list) — see [`super::fbl_registry`]. Trust is no
+/// longer a compile-time suffix list: only a provider entry matching the
+/// source's rDNS AND its registered expectations can authorize suppression.
 
-/// Outcome of the FBL source rDNS/FCrDNS verification for one client IP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Outcome of the FBL source verification for one client IP.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FblSourceCheck {
-    /// PTR matches a trusted FBL sender domain and forward-confirms.
-    Trusted,
-    /// Determinate negative: no PTR, no trusted-domain match, or the FCrDNS
-    /// forward lookup does not return the original IP.
-    Untrusted,
+    /// Registered provider matched, evaluable validation method, source IP
+    /// within the registered networks, and FCrDNS confirmed.
+    Authoritative {
+        provider: String,
+        method: FblValidationMethod,
+    },
+    /// Determinate negative: unregistered PTR, registered-expectation
+    /// mismatch, or FCrDNS failure. The complaint may be recorded as a
+    /// non-authoritative observation but must NEVER suppress.
+    NonAuthoritative { reason: String },
     /// The resolver itself failed transiently — callers tempfail (451) and
     /// the outcome is never cached.
     Transient,
 }
 
 /// Only DETERMINATE outcomes belong in the rDNS cache: a transient resolver
-/// failure cached as `Untrusted` dropped every complaint from that sender
-/// for a full cache TTL during a DNS blip.
+/// failure cached as `NonAuthoritative` dropped every complaint from that
+/// sender for a full cache TTL during a DNS blip.
 fn fbl_source_cacheable(check: &FblSourceCheck) -> bool {
     !matches!(check, FblSourceCheck::Transient)
 }
@@ -130,7 +127,9 @@ pub struct FeedbackLoopServer {
     pool: PgPool,
     redis: deadpool_redis::Pool,
     hostname: String,
-    trusted_domains: HashSet<String>,
+    /// Provider registry. Starts from the compiled seeds; the binary
+    /// replaces it with the DB rows at startup.
+    registry: RwLock<FblRegistry>,
     /// #149:Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
     rdns_cache: Cache<IpAddr, FblSourceCheck>,
     /// Active connections per IP — enforces `max_connections_per_ip`.
@@ -144,19 +143,13 @@ impl FeedbackLoopServer {
         pool: PgPool,
         redis: deadpool_redis::Pool,
         hostname: String,
-        extra_trusted: &[String],
     ) -> Self {
-        let mut trusted: HashSet<String> =
-            TRUSTED_FBL_SENDERS.iter().map(|s| s.to_string()).collect();
-        for d in extra_trusted {
-            trusted.insert(d.clone());
-        }
         Self {
             config,
             pool,
             redis,
             hostname,
-            trusted_domains: trusted,
+            registry: RwLock::new(FblRegistry::compiled_seeds()),
             // #149:Bounded cache with TTL prevents unbounded memory growth
             rdns_cache: Cache::builder()
                 .max_capacity(10_000)
@@ -164,6 +157,42 @@ impl FeedbackLoopServer {
                 .build(),
             connections: Arc::new(DashMap::new()),
             shutdown: Arc::new(Notify::new()),
+        }
+    }
+
+    /// Replace the registry (tests, or an explicit operator-supplied set).
+    pub fn set_registry(&self, registry: FblRegistry) {
+        *self.registry.write().unwrap_or_else(|e| e.into_inner()) = registry;
+    }
+
+    /// Load the provider registry from `fbl_provider_registry`.
+    ///
+    /// On a missing/empty table or a query failure the compiled seeds stay in
+    /// place (they are byte-identical to the migration seed rows), so a DB
+    /// blip cannot silently downgrade every provider to non-authoritative.
+    /// Returns the number of providers loaded (0 when the fallback kept the
+    /// seeds).
+    pub async fn load_registry_from_db(&self, pool: &PgPool) -> anyhow::Result<usize> {
+        match FblRegistry::load_from_db(pool).await {
+            Ok(registry) if !registry.is_empty() => {
+                let count = registry.providers().len();
+                self.set_registry(registry);
+                Ok(count)
+            }
+            Ok(_) => {
+                warn!(
+                    "fbl_provider_registry is empty — using the compiled seed providers; \
+                     configure the registry to add source networks/validation methods"
+                );
+                Ok(0)
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to load fbl_provider_registry — using the compiled seed providers"
+                );
+                Err(error)
+            }
         }
     }
 
@@ -238,34 +267,28 @@ impl FeedbackLoopServer {
             ip,
         };
 
-        // Verify source via rDNS. A TRANSIENT resolver failure tempfails
-        // (451) and is never cached: caching it as "untrusted" for a full
-        // cache TTL dropped every complaint from that sender during a DNS
-        // blip.
-        match self.verify_fbl_source(ip).await {
-            FblSourceCheck::Trusted => {}
-            FblSourceCheck::Untrusted => {
-                let mut s = BufStream::new(socket);
-                log_smtp_reject("fbl", ip, &session_id, "554 5.7.1 Unverified FBL source");
-                let _ = write_reply(
-                    &mut s,
-                    "fbl",
-                    ip,
-                    &session_id,
-                    "554 5.7.1 Unverified FBL source\r\n",
-                )
-                .await;
-                log_session_summary(
-                    "fbl",
-                    ip,
-                    &session_id,
-                    false,
-                    false,
-                    0,
-                    started.elapsed().as_millis(),
-                    "unverified_source",
+        // Verify source against the provider registry. A TRANSIENT resolver
+        // failure tempfails (451) and is never cached. A determinate negative
+        // (unregistered/mismatched source) does NOT reject the session: the
+        // report is accepted so it can be RECORDED, but the session is
+        // marked non-authoritative and can never suppress.
+        let authority = match self.verify_fbl_source(ip).await {
+            FblSourceCheck::Authoritative { provider, method } => {
+                debug!(
+                    ip = %ip,
+                    provider = %provider,
+                    method = method.as_str(),
+                    "FBL source is authoritative"
                 );
-                return;
+                Some(provider)
+            }
+            FblSourceCheck::NonAuthoritative { reason } => {
+                info!(
+                    ip = %ip,
+                    reason = %reason,
+                    "FBL source is not authoritative: complaint will be recorded without suppression"
+                );
+                None
             }
             FblSourceCheck::Transient => {
                 let mut s = BufStream::new(socket);
@@ -295,7 +318,7 @@ impl FeedbackLoopServer {
                 );
                 return;
             }
-        }
+        };
 
         let mut stream = BufStream::new(socket);
         let greeting = format!("220 {} FBL Processor\r\n", self.hostname);
@@ -560,7 +583,10 @@ impl FeedbackLoopServer {
                 } else if too_large {
                     reject_reply!("552 5.3.4 Message size exceeds fixed maximum message size\r\n");
                 } else if terminated {
-                    match self.process_complaint(ip, &message).await {
+                    match self
+                        .process_complaint(ip, authority.as_deref(), &message)
+                        .await
+                    {
                         Ok(id) => {
                             let _ =
                                 write_line(&mut stream, &format!("250 2.0.0 Ok id={id}\r\n")).await;
@@ -635,57 +661,78 @@ impl FeedbackLoopServer {
         // Reverse DNS lookup
         let result = match resolver.reverse_lookup(ip).await {
             Ok(lookup) => {
-                let mut matched_hostname: Option<String> = None;
                 // trust-dns 0.26 removed typed lookup iteration; extract the
                 // PTR names from the raw answer records.
-                for hostname_str in
-                    lookup
-                        .answers()
-                        .iter()
-                        .filter_map(|record| match &record.data {
-                            trust_dns_resolver::proto::rr::RData::PTR(ptr) => {
-                                Some(ptr.0.to_string())
-                            }
-                            _ => None,
-                        })
-                {
-                    let hostname = hostname_str.trim_end_matches('.').to_lowercase();
-                    if self
-                        .trusted_domains
-                        .iter()
-                        .any(|domain| hostname_matches_trusted(&hostname, domain))
-                    {
-                        matched_hostname = Some(hostname);
-                        break;
-                    }
-                }
+                let ptr_hostnames: Vec<String> = lookup
+                    .answers()
+                    .iter()
+                    .filter_map(|record| match &record.data {
+                        trust_dns_resolver::proto::rr::RData::PTR(ptr) => {
+                            Some(ptr.0.to_string().trim_end_matches('.').to_lowercase())
+                        }
+                        _ => None,
+                    })
+                    .collect();
 
-                // #146:Forward-Confirmed reverse DNS (FCrDNS) – verify the PTR
-                // hostname resolves back to the original IP to prevent PTR spoofing
-                if let Some(ref hostname) = matched_hostname {
-                    match resolver.lookup_ip(hostname.as_str()).await {
-                        Ok(forward) => {
-                            let confirmed = forward.iter().any(|addr| addr == ip);
-                            if !confirmed {
-                                debug!(ip = %ip, hostname = %hostname, "FCrDNS failed: forward lookup doesn't match IP");
-                            }
-                            if confirmed {
-                                FblSourceCheck::Trusted
-                            } else {
-                                FblSourceCheck::Untrusted
-                            }
-                        }
-                        // A failing FORWARD lookup is as transient as a
-                        // failing PTR lookup — tempfail, never a permanent
-                        // untrusted verdict.
-                        Err(e) => {
-                            debug!(ip = %ip, hostname = %hostname, error = %e, "FCrDNS forward lookup failed");
-                            FblSourceCheck::Transient
+                // Registry decision: provider + registered expectations. An
+                // unregistered or mismatched source is a determinate negative
+                // (recorded, never suppression authority).
+                let authority = self
+                    .registry
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .authorize(ip, &ptr_hostnames);
+
+                match authority {
+                    FblAuthority::Unregistered => {
+                        debug!(ip = %ip, "rDNS PTR matches no registered FBL provider");
+                        FblSourceCheck::NonAuthoritative {
+                            reason: "unregistered_source".into(),
                         }
                     }
-                } else {
-                    debug!(ip = %ip, "rDNS lookup didn't match trusted FBL senders");
-                    FblSourceCheck::Untrusted
+                    FblAuthority::Mismatched { provider, reason } => {
+                        debug!(
+                            ip = %ip,
+                            provider = ?provider,
+                            reason = reason,
+                            "FBL source matched a provider but failed its registered expectation"
+                        );
+                        FblSourceCheck::NonAuthoritative {
+                            reason: match provider {
+                                Some(provider) => format!("{reason} (provider={provider})"),
+                                None => reason.to_string(),
+                            },
+                        }
+                    }
+                    FblAuthority::Candidate {
+                        provider,
+                        method,
+                        matched_hostname,
+                    } => {
+                        // #146:Forward-Confirmed reverse DNS (FCrDNS) – verify
+                        // the PTR hostname resolves back to the original IP to
+                        // prevent PTR spoofing.
+                        match resolver.lookup_ip(matched_hostname.as_str()).await {
+                            Ok(forward) => {
+                                let confirmed = forward.iter().any(|addr| addr == ip);
+                                if !confirmed {
+                                    debug!(ip = %ip, hostname = %matched_hostname, "FCrDNS failed: forward lookup doesn't match IP");
+                                    FblSourceCheck::NonAuthoritative {
+                                        reason: "fcrdns_mismatch".into(),
+                                    }
+                                } else {
+                                    FblSourceCheck::Authoritative { provider, method }
+                                }
+                            }
+                            // A failing FORWARD lookup is as transient as a
+                            // failing PTR lookup — tempfail, never a permanent
+                            // non-authoritative verdict.
+                            Err(e) => {
+                                debug!(ip = %ip, hostname = %matched_hostname, error = %e, "FCrDNS forward lookup failed");
+                                FblSourceCheck::Transient
+                            }
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -699,7 +746,7 @@ impl FeedbackLoopServer {
         // for a full TTL.
         match result {
             cacheable if fbl_source_cacheable(&cacheable) => {
-                self.rdns_cache.insert(ip, cacheable);
+                self.rdns_cache.insert(ip, cacheable.clone());
                 cacheable
             }
             transient => transient,
@@ -708,10 +755,23 @@ impl FeedbackLoopServer {
 
     // ── complaint processing ───────────────────────────────────────────────────
 
-    async fn process_complaint(&self, source_ip: IpAddr, raw: &[u8]) -> anyhow::Result<String> {
+    /// Record and process one ARF complaint.
+    ///
+    /// `authoritative_provider` is `Some(provider)` only when the session's
+    /// source passed the registry + FCrDNS verification. Non-authoritative
+    /// complaints are still RECORDED (rows carry `authoritative = FALSE` and
+    /// NULL natural keys so they can never occupy the dedupe slot of a real
+    /// complaint) but never suppress and never move reputation.
+    async fn process_complaint(
+        &self,
+        source_ip: IpAddr,
+        authoritative_provider: Option<&str>,
+        raw: &[u8],
+    ) -> anyhow::Result<String> {
         // complaint_events.id is a UUID column (migration 093) — bind the
         // Uuid itself, not its String form.
         let complaint_id = Uuid::new_v4();
+        let authoritative = authoritative_provider.is_some();
 
         // O-1.5:Reject oversized ARF payloads (also enforced while reading).
         if raw.len() > self.config.max_arf_size {
@@ -732,7 +792,9 @@ impl FeedbackLoopServer {
         // Parse ARF report
         let complaint = parse_arf_report(&message);
 
-        // Match to original message
+        // Match to original message. The ARF fields are attacker-writable
+        // unless the source is authoritative, so they are only used as the
+        // dedupe/suppression linkage in the authoritative branch.
         let original_id = complaint.original_message_id.clone();
 
         // complaint_events.arrival_date is TIMESTAMPTZ (migration 093) — the
@@ -748,28 +810,49 @@ impl FeedbackLoopServer {
             })
             .map(|dt| dt.with_timezone(&chrono::Utc));
 
+        let (record_message_id, record_recipient, observation_detail) = if authoritative {
+            (
+                original_id.clone(),
+                complaint.original_recipient.clone(),
+                None,
+            )
+        } else {
+            (
+                None,
+                None,
+                Some(format!(
+                    "non-authoritative source {}; claimed message_id={}",
+                    source_ip,
+                    sanitize_observation_value(original_id.as_deref().unwrap_or(""))
+                )),
+            )
+        };
+
         // Record complaint event. The unique index on
         // (source_ip, original_message_id, original_recipient) makes retries
-        // and replays idempotent: only a freshly inserted row may run side
-        // effects (M55).
+        // and replays idempotent for authoritative reports (M55).
         let inserted = sqlx::query(
             r#"INSERT INTO complaint_events (
                 id, original_message_id, original_recipient,
                 feedback_type, source_ip, reporting_mta,
-                user_agent, arrival_date, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                user_agent, arrival_date, authoritative, provider,
+                observation_detail, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
             ON CONFLICT (source_ip, original_message_id, original_recipient)
             WHERE original_message_id IS NOT NULL AND original_recipient IS NOT NULL
             DO NOTHING"#,
         )
         .bind(complaint_id)
-        .bind(&original_id)
-        .bind(&complaint.original_recipient)
+        .bind(&record_message_id)
+        .bind(&record_recipient)
         .bind(&complaint.feedback_type)
         .bind(source_ip.to_string())
         .bind(&complaint.reporting_mta)
         .bind(&complaint.user_agent)
         .bind(arrival_date)
+        .bind(authoritative)
+        .bind(authoritative_provider)
+        .bind(&observation_detail)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -777,18 +860,30 @@ impl FeedbackLoopServer {
 
         if !inserted {
             debug!(
-                msg_id = ?original_id,
+                msg_id = ?record_message_id,
                 dedup_key = ?complaint_dedup_key(&complaint, source_ip),
                 "Duplicate complaint event, skipping side effects"
             );
             return Ok(complaint_id.to_string());
         }
 
+        // Non-authoritative: RECORDED only. No suppression, no reputation,
+        // no webhook — those are all trust-bearing side effects.
+        if !authoritative {
+            warn!(
+                complaint_id = %complaint_id,
+                source_ip = %source_ip,
+                "Non-authoritative complaint recorded (no suppression, no reputation)"
+            );
+            metric_message("fbl", "observed_non_authoritative");
+            return Ok(complaint_id.to_string());
+        }
+
         // Only act on complaints referencing a message this system sent:
         // resolve the tenant before touching suppression. The FBL source is
-        // rDNS-verified, so reputation counting and webhooks still run for
+        // authoritative, so reputation counting and webhooks still run for
         // unknown messages (e.g. pruned from email_queue) — only the
-        // suppression is gated on verification.
+        // suppression is gated on the queue lookup.
         let suppression_target: Option<(String, String)> = match original_id.as_deref() {
             Some(mid) => match self.lookup_sent_message(mid).await? {
                 None => {
@@ -826,16 +921,18 @@ impl FeedbackLoopServer {
             }
         }
 
-        // Update sender reputation (only for freshly inserted complaints)
+        // Update sender reputation (only for authoritative complaints)
         self.update_sender_reputation(&complaint).await?;
 
-        // Queue webhook
+        // Queue webhook (authoritative only)
         let payload = serde_json::json!({
             "event": "complaint",
             "complaint_id": complaint_id,
             "original_message_id": original_id,
             "feedback_type": complaint.feedback_type,
             "recipient": complaint.original_recipient,
+            "authoritative": true,
+            "provider": authoritative_provider,
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
@@ -852,6 +949,7 @@ impl FeedbackLoopServer {
         info!(
             complaint_id = %complaint_id,
             msg_id = ?original_id,
+            provider = ?authoritative_provider,
             feedback_type = %complaint.feedback_type,
             "Complaint processed"
         );
@@ -1080,16 +1178,6 @@ impl FeedbackLoopServer {
 
 // ── ARF parsing ────────────────────────────────────────────────────────────────
 
-/// Strict trusted-domain match for FBL sources (H16).
-///
-/// A PTR hostname is only trusted when it equals the domain or lives in a
-/// real subdomain of it. A bare suffix match (`evil-google.com` ending in
-/// `google.com`) is rejected — an attacker can register such names and
-/// control their own PTR + A records.
-fn hostname_matches_trusted(hostname: &str, domain: &str) -> bool {
-    hostname == domain || hostname.ends_with(&format!(".{domain}"))
-}
-
 /// Natural key used to deduplicate complaint reports (M55).
 ///
 /// Only reports carrying both an original message id and an original
@@ -1186,12 +1274,17 @@ mod tests {
     #[test]
     fn transient_fbl_source_outcomes_are_not_cacheable() {
         // A resolver outage (PTR or forward lookup failure) must never be
-        // cached as an Untrusted verdict: for a full cache TTL that dropped
-        // every complaint from the affected sender. Only determinate
+        // cached as a non-authoritative verdict: for a full cache TTL that
+        // dropped every complaint from the affected sender. Only determinate
         // outcomes may enter the rDNS cache.
         assert!(!fbl_source_cacheable(&FblSourceCheck::Transient));
-        assert!(fbl_source_cacheable(&FblSourceCheck::Trusted));
-        assert!(fbl_source_cacheable(&FblSourceCheck::Untrusted));
+        assert!(fbl_source_cacheable(&FblSourceCheck::Authoritative {
+            provider: "google".into(),
+            method: FblValidationMethod::RdnsFcrcdns,
+        }));
+        assert!(fbl_source_cacheable(&FblSourceCheck::NonAuthoritative {
+            reason: "unregistered_source".into(),
+        }));
     }
 
     #[test]
@@ -1261,36 +1354,70 @@ Original-Message-ID: <original@example.com>\r\n";
     }
 
     #[test]
-    fn test_trusted_fbl_senders() {
-        assert!(TRUSTED_FBL_SENDERS.contains(&"google.com"));
-        assert!(TRUSTED_FBL_SENDERS.contains(&"microsoft.com"));
-        assert!(TRUSTED_FBL_SENDERS.contains(&"yahoo.com"));
+    fn registry_authority_requires_a_registered_provider_and_network() {
+        // Registry-level proof of the suppression predicate: provider-a
+        // registers the loopback range, provider-b registers a different
+        // range and must not authorize a loopback complaint.
+        use crate::servers::fbl_registry::{FblAuthority, FblProvider, FblRegistry, IpNet};
+
+        fn provider(name: &str, domains: &[&str], networks: &[&str]) -> FblProvider {
+            FblProvider {
+                provider: name.into(),
+                rdns_patterns: domains.iter().map(|d| d.to_string()).collect(),
+                source_networks: networks.iter().filter_map(|n| IpNet::parse(n)).collect(),
+                validation_method: FblValidationMethod::RdnsFcrcdns,
+                effective_version: 1,
+                enabled: true,
+            }
+        }
+
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let ptr = vec!["mx.fbl.test".to_string()];
+
+        let expected = FblRegistry::new(vec![provider(
+            "expected-provider",
+            &["fbl.test"],
+            &["127.0.0.0/8"],
+        )]);
+        assert!(
+            expected.authorize(loopback, &ptr).is_candidate(),
+            "a registered provider with a matching source network is authoritative"
+        );
+
+        let unexpected = FblRegistry::new(vec![provider(
+            "unexpected-provider",
+            &["fbl.test"],
+            &["10.0.0.0/8"],
+        )]);
+        assert_eq!(
+            unexpected.authorize(loopback, &ptr),
+            FblAuthority::Mismatched {
+                provider: Some("unexpected-provider".into()),
+                reason: "source_network_mismatch",
+            },
+            "an unexpected source network must NOT be authoritative"
+        );
+        assert!(!unexpected.authorize(loopback, &ptr).is_candidate());
+
+        let unregistered = FblRegistry::new(vec![provider(
+            "expected-provider",
+            &["fbl.test"],
+            &["127.0.0.0/8"],
+        )]);
+        assert_eq!(
+            unregistered.authorize(loopback, &["mx.unknown.test".into()]),
+            FblAuthority::Unregistered,
+            "an unregistered source must NOT be authoritative"
+        );
     }
 
-    #[test]
-    fn test_hostname_matches_trusted_domain_exact() {
-        assert!(hostname_matches_trusted("google.com", "google.com"));
-    }
-
-    #[test]
-    fn test_hostname_matches_trusted_subdomain() {
-        assert!(hostname_matches_trusted("mx.google.com", "google.com"));
-        assert!(hostname_matches_trusted(
-            "outbound.mail.microsoft.com",
-            "microsoft.com"
-        ));
-    }
-
-    #[test]
-    fn test_hostname_matches_trusted_rejects_suffix_spoof() {
-        assert!(!hostname_matches_trusted("evil-google.com", "google.com"));
-        assert!(!hostname_matches_trusted("notgoogle.com", "google.com"));
-        assert!(!hostname_matches_trusted(
-            "google.com.evil.com",
-            "google.com"
-        ));
-        assert!(!hostname_matches_trusted("google.com.", "google.com"));
-        assert!(!hostname_matches_trusted("", "google.com"));
+    #[tokio::test]
+    async fn fbl_server_defaults_to_compiled_seed_registry() {
+        let server = test_fbl_server(true);
+        let registry = server.registry.read().unwrap();
+        assert!(!registry.is_empty());
+        assert!(registry.providers().iter().any(|p| p.provider == "google"));
+        assert_eq!(server.config.max_arf_size, 1024 * 1024);
     }
 
     #[test]
@@ -1366,12 +1493,16 @@ Original-Message-ID: <original@example.com>\r\n";
             pool,
             redis,
             "fbl.test".into(),
-            &[],
         ));
         let verdict = if rdns_ok {
-            FblSourceCheck::Trusted
+            FblSourceCheck::Authoritative {
+                provider: "google".into(),
+                method: FblValidationMethod::RdnsFcrcdns,
+            }
         } else {
-            FblSourceCheck::Untrusted
+            FblSourceCheck::NonAuthoritative {
+                reason: "source_network_mismatch (provider=test)".into(),
+            }
         };
         server.rdns_cache.insert(LOOPBACK, verdict);
         server
@@ -1404,9 +1535,11 @@ Original-Message-ID: <original@example.com>\r\n";
     }
 
     #[tokio::test]
-    async fn fbl_unverified_source_replies_554_5_7_1() {
-        // Cached rDNS verdict = false: the greeting rejection is immediate
-        // and deterministic (no live DNS in unit tests).
+    async fn fbl_non_authoritative_source_is_accepted_for_recording() {
+        // A determinate non-authoritative verdict (unregistered/mismatched
+        // source) does NOT reject the session: the complaint must still be
+        // RECORDED (it simply never suppresses). Cached verdict = false keeps
+        // the test deterministic with no live DNS.
         let server = test_fbl_server(false);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1417,12 +1550,17 @@ Original-Message-ID: <original@example.com>\r\n";
         });
 
         let tcp = TcpStream::connect(addr).await.unwrap();
-        let (reader, _writer) = tcp.into_split();
+        let (reader, mut writer) = tcp.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        assert_eq!(
-            fbl_read_reply(&mut reader).await,
-            "554 5.7.1 Unverified FBL source\r\n"
+        // Greeting is the normal 220 — no 554 rejection any more.
+        assert!(
+            fbl_read_reply(&mut reader).await.starts_with("220"),
+            "non-authoritative sources are accepted so their reports can be recorded"
         );
+        writer.write_all(b"EHLO client.example\r\n").await.unwrap();
+        assert!(fbl_read_full_reply(&mut reader).await.starts_with("250"));
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert!(fbl_read_reply(&mut reader).await.starts_with("221"));
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
             .expect("session task must finish")
@@ -1616,9 +1754,14 @@ Original-Message-ID: <original@example.com>\r\n";
             pool,
             redis,
             "fbl.test".into(),
-            &[],
         ));
-        small.rdns_cache.insert(LOOPBACK, FblSourceCheck::Trusted);
+        small.rdns_cache.insert(
+            LOOPBACK,
+            FblSourceCheck::Authoritative {
+                provider: "google".into(),
+                method: FblValidationMethod::RdnsFcrcdns,
+            },
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

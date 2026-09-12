@@ -5,6 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use billing_entitlements::FeatureKey;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -90,12 +91,23 @@ pub struct ListTemplatesQuery {
 
 // ─── Handlers ──────────────────────────────────────────────────
 
+/// Template customization requires the `custom_templates` entitlement
+/// (403 Forbidden otherwise). Applied to every mutating template handler so
+/// create/update/duplicate/rollback cannot be used to bypass the gate.
+async fn require_template_write(state: &AppState, tenant_id: &str) -> Result<(), ApiError> {
+    crate::entitlements::require_feature(state, tenant_id, FeatureKey::CustomTemplates)
+        .await
+        .map(|_| ())
+}
+
 async fn create_template(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<CreateTemplateRequest>,
 ) -> Result<(StatusCode, Json<TemplateResponse>), ApiError> {
     require_scopes(&auth, &["templates:write"])?;
+
+    require_template_write(&state, &auth.tenant_id).await?;
 
     if body.name.is_empty() || body.subject.is_empty() || body.html_body.is_empty() {
         return Err(ApiError::Validation(vec![
@@ -191,6 +203,8 @@ async fn update_template(
     Json(body): Json<UpdateTemplateRequest>,
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
+
+    require_template_write(&state, &auth.tenant_id).await?;
 
     let existing = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
@@ -439,6 +453,8 @@ async fn duplicate_template(
 ) -> Result<(StatusCode, Json<TemplateResponse>), ApiError> {
     require_scopes(&auth, &["templates:write"])?;
 
+    require_template_write(&state, &auth.tenant_id).await?;
+
     // Fetch original
     let original = fetch_template(&state, &auth.tenant_id, id.clone()).await?;
 
@@ -476,6 +492,8 @@ async fn rollback_template(
     Json(body): Json<RollbackRequest>,
 ) -> Result<Json<TemplateResponse>, ApiError> {
     require_scopes(&auth, &["templates:write"])?;
+
+    require_template_write(&state, &auth.tenant_id).await?;
 
     // Restore from template_versions (snapshots are written on every save —
     // see snapshot_template_version; L-1).

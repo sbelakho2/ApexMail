@@ -112,9 +112,7 @@ use sales_autopilot::dispatcher::{
 };
 use sales_autopilot::outcome_projector::{OutcomeProjector, ProjectorConfig};
 use sales_autopilot::sender_pool;
-use sales_autopilot::types::{
-    DecisionAction, Enforcement, OpportunityScore, SalesError, SenderPool,
-};
+use sales_autopilot::types::{DecisionAction, Enforcement, OpportunityScore, SenderPool};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -295,7 +293,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// 1. `enrollments::start_outreach` (the `/enrollments` command) — rejected
 ///    with the `legal_policy` reason;
 /// 2. `CampaignManager::start_campaign_with_outreach` (the legacy
-///    `/campaigns/:id/start` route) — refused before any enrollment;
+///    `/campaigns/:id/start` route) — the prohibited contact is rejected by
+///    the per-contact canonical gate and the campaign is NOT activated
+///    (zero accepted parks it in `verification_pending`);
 /// 3. the durable worker (`SequenceStepHandler`) over a queued step action —
 ///    the decision engine refuses and records the denial.
 ///
@@ -341,7 +341,9 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
         &sales_autopilot::enrollments::StartOutreachRequest {
             sequence_id: seq.sequence_id,
             contact_ids: vec![seq.contact_id],
-            autonomy_policy_id: seq.policy_id,
+            // Deprecated rolling-deploy field: the machine resolves the policy
+            // per contact. A contradicting value would still be stale_policy.
+            autonomy_policy_id: Some(seq.policy_id),
             experiment_id: None,
         },
     )
@@ -378,19 +380,43 @@ async fn gate_01_prohibited_contact_is_refused_by_every_route_and_by_the_worker(
         .add_recipients(&tenant_id, campaign.id, vec![prohibited_email.clone()])
         .await
         .expect("add the prohibited recipient");
-    let started = manager
+    // Per-contact legal resolution: the prohibited contact is rejected by the
+    // canonical gate (`legal_policy`), and the campaign is NOT activated — it
+    // parks in verification_pending because zero contacts were accepted.
+    let (started, outreach) = manager
         .start_campaign_with_outreach(&tenant_id, campaign.id)
-        .await;
-    match started {
-        Err(SalesError::PolicyDenied(reason)) => assert!(
-            reason.contains("'XR'"),
-            "the legacy route must refuse the prohibited jurisdiction, got: {reason}"
-        ),
-        Ok((_, outreach)) => panic!(
-            "the legacy campaign route must refuse before enrollment, got outreach {outreach:?}"
-        ),
-        Err(other) => panic!("expected PolicyDenied from the legacy route, got {other:?}"),
-    }
+        .await
+        .expect("the start itself succeeds; the legal gate rejects the contact");
+    assert_eq!(
+        started.status,
+        sales_autopilot::types::CampaignStatus::Draft,
+        "a campaign with no enrollable recipient must not become active"
+    );
+    let outreach = outreach.expect("recipients exist");
+    assert_eq!(
+        outreach.accepted, 0,
+        "a prohibited contact cannot be enrolled"
+    );
+    assert_eq!(outreach.rejected, 1);
+    assert_eq!(
+        outreach
+            .rejection_reasons
+            .get(sales_autopilot::enrollments::rejection_reason::LEGAL_POLICY),
+        Some(&1),
+        "the legacy route must name the legal gate: {:?}",
+        outreach.rejection_reasons
+    );
+    let start_state: Option<String> =
+        sqlx::query_scalar("SELECT start_state FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .fetch_one(&db)
+            .await
+            .expect("read the durable start state");
+    assert_eq!(
+        start_state.as_deref(),
+        Some("verification_pending"),
+        "the campaign must be parked, never active, with a durable reason"
+    );
 
     // Neither route may have left a queued action behind.
     let queued_actions: i64 =

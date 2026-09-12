@@ -1,5 +1,5 @@
-//! Growth analytics endpoint — new signups, activation rate, active-tenant
-//! activity, trial conversion, and customer lifecycle metrics.
+//! Growth analytics endpoint — new signups, activation milestones,
+//! active-tenant activity, trial conversion, and customer lifecycle metrics.
 //!
 //! All values come from real database queries against tenants, users, messages,
 //! events, subscriptions, and stripe_subscriptions tables.
@@ -9,6 +9,28 @@
 //! so DAU/WAU/MAU would be a lie. "Activation" and time-to-first-send are
 //! derived from the actual successful-send lifecycle (`events.event_type =
 //! 'sent'`), not from message rows or current status.
+//!
+//! Cohort semantics (audit fix):
+//!
+//! * **Churn is a starting cohort.** The churn denominator is the set of
+//!   subscriptions that existed at the period start and had not already been
+//!   canceled before it. Churn counts only those cohort members who cancel
+//!   inside the window, so churn ≤ cohort by construction: the rate cannot
+//!   exceed 100% and retained (`cohort − churn`) cannot go negative. Current
+//!   active customers and new customers are separate populations/flow, never
+//!   subtracted from each other.
+//! * **Activation is reported as MILESTONES, not a funnel.** Domain
+//!   verification, DKIM configuration and the first successful send are
+//!   independent capabilities (a tenant can send through the shared pool
+//!   before verifying a domain), so a later milestone may legitimately exceed
+//!   an earlier one. The API field is `activationMilestones`; nothing is
+//!   presented as nested funnel stages.
+//! * **Trial conversion uses ELIGIBLE trials.** The denominator is trials
+//!   that have ENDED (`trial_end < NOW()`), never all trials started — an
+//!   ongoing trial has not had the chance to convert and must not
+//!   right-censor the rate. Time-to-paid uses the earliest actual paid
+//!   invoice at/after `trial_end` when billing data links one; `trial_end`
+//!   is the documented fallback (see [`TRIAL_PAYMENT_TIME_METHOD`]).
 //!
 //! Failure semantics (audit item 20):
 //!
@@ -38,7 +60,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_growth_analytics))
         .route("/signups", get(get_signup_timeline))
-        .route("/activation", get(get_activation_funnel))
+        .route("/activation", get(get_activation_milestones))
         .route("/engagement", get(get_engagement_metrics))
 }
 
@@ -108,13 +130,20 @@ pub struct ActivationStats {
     /// has sent yet — never-sent is explicitly distinct from zero elapsed
     /// time (F79).
     pub avg_time_to_first_send_hours: Option<f64>,
-    pub activation_funnel: Vec<ActivationFunnelStage>,
+    /// Independent activation MILESTONES — not nested funnel stages. Each
+    /// milestone is measured against the same signup population and a later
+    /// milestone may exceed an earlier one (the capabilities are independent:
+    /// shared-pool sending needs neither domain verification nor DKIM).
+    pub activation_milestones: Vec<ActivationMilestone>,
 }
 
+/// One independent activation milestone. Deliberately named `milestone`
+/// rather than funnel `stage`: the counts are not nested cohorts, and no
+/// ordering invariant is claimed between them.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ActivationFunnelStage {
-    pub stage: String,
+pub struct ActivationMilestone {
+    pub milestone: String,
     pub count: i64,
     /// Display percentage (0-100) of the signup population. `None` when the
     /// signup denominator is zero — absent, not `0`.
@@ -150,13 +179,26 @@ pub struct EngagementMetrics {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrialConversionStats {
+    /// Every trial BEGUN in the window, including trials still running. This
+    /// is a flow counter; it is deliberately NOT the conversion denominator.
     pub trials_started: i64,
+    /// Trials that had already ENDED (`trial_end < NOW()`) in the window.
+    /// This is the conversion denominator: ongoing trials have not had the
+    /// chance to convert and must not right-censor the rate.
+    pub trials_eligible: i64,
+    /// Eligible trials that converted (subscription still paying after the
+    /// trial ended).
     pub trials_converted: i64,
-    /// Fraction in `0.0..=1.0`; `None` when no trials started in the window.
+    /// Fraction in `0.0..=1.0` of ELIGIBLE (ended) trials that converted;
+    /// `None` when no trial ended in the window — absent, not `0`.
     pub conversion_rate: Option<f64>,
     /// `Available(None)` = no converted trial exists (undefined, not zero);
     /// `Unavailable` = the aggregate could not be read.
     pub avg_trial_to_paid_days: MetricState<Option<f64>>,
+    /// How time-to-paid obtains its activation timestamp (actual paid
+    /// invoice where billing data links one, otherwise the documented
+    /// `trial_end` fallback).
+    pub payment_time_method: String,
     pub conversion_by_plan: Vec<TrialPlanConversion>,
 }
 
@@ -164,21 +206,42 @@ pub struct TrialConversionStats {
 #[serde(rename_all = "camelCase")]
 pub struct TrialPlanConversion {
     pub plan: String,
+    /// Trials begun in the window for this plan (includes ongoing trials).
     pub trials: i64,
+    /// Trials for this plan that have ENDED in the window (the denominator).
+    pub eligible: i64,
     pub converted: i64,
-    /// Fraction in `0.0..=1.0`; `None` when this plan has no trials.
+    /// Fraction in `0.0..=1.0` of ELIGIBLE trials; `None` when this plan has
+    /// no ended trial.
     pub rate: Option<f64>,
 }
 
+/// Customer lifecycle over a fixed 30-day window.
+///
+/// The churn rate is computed over the STARTING COHORT — subscriptions that
+/// existed at the period start and had not already been canceled — not over
+/// the current active count. New customers are a separate flow and are never
+/// subtracted; retained = cohort − churn, so neither can go out of bounds.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomerLifecycle {
+    /// Gross new subscriptions created in the window (incomplete checkouts
+    /// excluded). A separate acquisition FLOW: new customers are not part of
+    /// the starting cohort and never enter the churn arithmetic.
     pub new_customers_30d: i64,
+    /// Current snapshot of paying customers (status active/trialing/past_due).
     pub active_customers: i64,
+    /// The churn denominator: customers whose subscription existed at the
+    /// period start and was not already canceled before it.
+    pub cohort_customers_at_period_start: i64,
+    /// Cohort members who canceled INSIDE the window. Always a subset of
+    /// `cohort_customers_at_period_start` — churn can never exceed the cohort.
     pub churned_customers_30d: i64,
-    /// Fraction in `0.0..=1.0`; `None` when there are no active customers —
-    /// absent, not `0`.
+    /// `churned / cohort`, a fraction in `0.0..=1.0`; `None` when the
+    /// starting cohort is empty — absent, not `0`.
     pub churn_rate_30d: Option<f64>,
+    /// `cohort − churned`, never negative (the numerator is a subset of the
+    /// denominator by construction).
     pub retained_customers_30d: i64,
     /// `1 - churn_rate`, `None` whenever the churn rate is absent.
     pub retention_rate_30d: Option<f64>,
@@ -364,25 +427,35 @@ fn activation_rate_of(part: i64, whole: i64) -> Option<f64> {
     (whole > 0).then(|| part as f64 / whole as f64)
 }
 
-fn activation_funnel(counts: &ActivationCounts) -> Vec<ActivationFunnelStage> {
+/// Independent activation MILESTONES, not nested funnel stages.
+///
+/// Domain verified, DKIM configured and first email sent are counted
+/// independently against the same signup population. They are genuinely
+/// independent capabilities — a tenant can send through the platform's
+/// shared pool without verifying a domain or configuring DKIM — so a later
+/// milestone can exceed an earlier one and none of the counts may be
+/// presented as a successive stage of a funnel. (Nested cohort CTEs were
+/// considered and rejected: forcing containment would fabricate a dependency
+/// between milestones that the product does not have.)
+fn activation_milestones(counts: &ActivationCounts) -> Vec<ActivationMilestone> {
     vec![
-        ActivationFunnelStage {
-            stage: "Signed up".into(),
+        ActivationMilestone {
+            milestone: "Signed up".into(),
             count: counts.total_tenants,
             percentage: Some(100.0),
         },
-        ActivationFunnelStage {
-            stage: "Domain verified".into(),
+        ActivationMilestone {
+            milestone: "Domain verified".into(),
             count: counts.domain_verified,
             percentage: percentage_of(counts.domain_verified, counts.total_tenants),
         },
-        ActivationFunnelStage {
-            stage: "DKIM configured".into(),
+        ActivationMilestone {
+            milestone: "DKIM configured".into(),
             count: counts.dkim_configured,
             percentage: percentage_of(counts.dkim_configured, counts.total_tenants),
         },
-        ActivationFunnelStage {
-            stage: "First email sent".into(),
+        ActivationMilestone {
+            milestone: "First email sent".into(),
             count: counts.email_sent,
             percentage: percentage_of(counts.email_sent, counts.total_tenants),
         },
@@ -475,9 +548,19 @@ async fn engagement_metrics(db: &PgPool) -> Result<EngagementMetrics, ApiError> 
 // ─── Trial conversion ──────────────────────────────────────────────────
 
 /// Trials started in the window — a trial is a stripe_subscriptions row
-/// with a non-NULL trial_end.
+/// with a non-NULL trial_end. Includes trials still running (`trial_end >=
+/// NOW()`): this is the flow counter, NOT the conversion denominator.
 const TRIALS_STARTED_SQL: &str = "SELECT COUNT(*)::bigint FROM stripe_subscriptions
          WHERE trial_end IS NOT NULL
+           AND created_at >= NOW() - $1::interval";
+
+/// ELIGIBLE trials — the conversion denominator. A trial is eligible once
+/// it has ENDED (`trial_end < NOW()`): only ended trials have had the
+/// opportunity to convert, so an ongoing trial must not right-censor the
+/// rate. The numerator is filtered from this same population.
+const TRIALS_ELIGIBLE_SQL: &str = "SELECT COUNT(*)::bigint FROM stripe_subscriptions
+         WHERE trial_end IS NOT NULL
+           AND trial_end < NOW()
            AND created_at >= NOW() - $1::interval";
 
 /// Converted trials — the trial period ended (trial_end < NOW()) and the
@@ -491,17 +574,36 @@ const TRIALS_CONVERTED_SQL: &str = "SELECT COUNT(*)::bigint FROM stripe_subscrip
            AND status IN ('active', 'past_due')
            AND created_at >= NOW() - $1::interval";
 
-/// Mean trial-to-paid duration over converted trials. Payment for a
-/// converted trial begins at trial_end, so time-to-paid is
-/// trial_end - created_at. `Available(None)` when there are no converted
-/// trials; `Unavailable` when the aggregate cannot be read.
-const AVG_TRIAL_TO_PAID_SQL: &str =
-    "SELECT AVG(EXTRACT(EPOCH FROM (trial_end - created_at)) / 86400)
-         FROM stripe_subscriptions
-         WHERE trial_end IS NOT NULL
-           AND trial_end < NOW()
-           AND status IN ('active', 'past_due')
-           AND created_at >= NOW() - $1::interval";
+/// How time-to-paid obtains its activation timestamp. The earliest PAID
+/// invoice at/after `trial_end` is the actual payment time when the billing
+/// data links one; otherwise `trial_end` (the Stripe billing-period start
+/// that the subscription carries) is the documented fallback. The fallback
+/// can understate true time-to-payment if payment was collected late, so it
+/// is returned to clients as [`TrialConversionStats::payment_time_method`].
+const TRIAL_PAYMENT_TIME_METHOD: &str = "actual paid-invoice time at/after trial_end when billing data links one; otherwise trial_end as a documented fallback (may understate late-collected payments)";
+
+/// Mean trial-to-paid duration over converted trials. Activation time is
+/// the earliest `invoices.paid_at` at/after `trial_end` for the tenant (one
+/// subscription per tenant — `uq_stripe_subscriptions_tenant`), falling
+/// back to `trial_end` only when no paid invoice links one. `Available(None)`
+/// when there are no converted trials; `Unavailable` when the aggregate
+/// cannot be read.
+const AVG_TRIAL_TO_PAID_SQL: &str = r#"
+    SELECT AVG(EXTRACT(EPOCH FROM (COALESCE(paid.first_paid_at, s.trial_end) - s.created_at)) / 86400)::double precision
+    FROM stripe_subscriptions s
+    LEFT JOIN LATERAL (
+        SELECT MIN(i.paid_at) AS first_paid_at
+        FROM invoices i
+        WHERE i.tenant_id = s.tenant_id
+          AND i.status = 'paid'
+          AND i.paid_at IS NOT NULL
+          AND i.paid_at >= s.trial_end
+    ) paid ON TRUE
+    WHERE s.trial_end IS NOT NULL
+      AND s.trial_end < NOW()
+      AND s.status IN ('active', 'past_due')
+      AND s.created_at >= NOW() - $1::interval
+"#;
 
 async fn avg_trial_to_paid_days(db: &PgPool, interval: &str) -> MetricState<Option<f64>> {
     match sqlx::query_scalar::<_, Option<f64>>(AVG_TRIAL_TO_PAID_SQL)
@@ -532,19 +634,25 @@ async fn trial_conversion_stats(
         .fetch_one(db)
         .await?;
 
+    let trials_eligible = sqlx::query_scalar::<_, i64>(TRIALS_ELIGIBLE_SQL)
+        .bind(interval)
+        .fetch_one(db)
+        .await?;
+
     let trials_converted = sqlx::query_scalar::<_, i64>(TRIALS_CONVERTED_SQL)
         .bind(interval)
         .fetch_one(db)
         .await?;
 
     // Trial conversion by plan (subscription plan, falling back to the
-    // tenant's current plan)
-    let trial_by_plan: Vec<TrialPlanConversion> = sqlx::query_as::<_, (String, i64, i64)>(
+    // tenant's current plan). Eligibility is the same ended-trial
+    // population used for the headline rate.
+    let trial_by_plan: Vec<TrialPlanConversion> = sqlx::query_as::<_, (String, i64, i64, i64)>(
         "SELECT COALESCE(NULLIF(s.plan, ''), NULLIF(t.plan, ''), 'free'),
                 COUNT(*)::bigint,
+                COUNT(*) FILTER (WHERE s.trial_end < NOW())::bigint,
                 COUNT(*) FILTER (
-                    WHERE s.trial_end IS NOT NULL
-                      AND s.trial_end < NOW()
+                    WHERE s.trial_end < NOW()
                       AND s.status IN ('active', 'past_due')
                 )::bigint
          FROM stripe_subscriptions s
@@ -557,19 +665,22 @@ async fn trial_conversion_stats(
     .fetch_all(db)
     .await?
     .into_iter()
-    .map(|(plan, trials, converted)| TrialPlanConversion {
-        rate: (trials > 0).then(|| converted as f64 / trials as f64),
+    .map(|(plan, trials, eligible, converted)| TrialPlanConversion {
+        rate: activation_rate_of(converted, eligible),
         plan,
         trials,
+        eligible,
         converted,
     })
     .collect();
 
     Ok(TrialConversionStats {
         trials_started,
+        trials_eligible,
         trials_converted,
-        conversion_rate: activation_rate_of(trials_converted, trials_started),
+        conversion_rate: activation_rate_of(trials_converted, trials_eligible),
         avg_trial_to_paid_days: avg_trial_to_paid_days(db, interval).await,
+        payment_time_method: TRIAL_PAYMENT_TIME_METHOD.into(),
         conversion_by_plan: trial_by_plan,
     })
 }
@@ -587,26 +698,62 @@ async fn active_customer_count(db: &PgPool) -> Result<i64, ApiError> {
     .await?)
 }
 
-/// New customers in the last 30 days. Required — a failure propagates.
+/// New customers in the last 30 days: a separate acquisition FLOW, not part
+/// of the churn denominator. Counts subscriptions created in the window
+/// regardless of their current status — a customer who joins and cancels
+/// inside the same window is still new (and is deliberately NOT counted as
+/// churn, because they were not in the starting cohort). Incomplete
+/// checkouts (Stripe `incomplete` / `incomplete_expired`) are not customers.
+/// Required — a failure propagates.
 async fn new_customer_count_30d(db: &PgPool) -> Result<i64, ApiError> {
     Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM stripe_subscriptions
-         WHERE status IN ('active', 'trialing', 'past_due')
-           AND created_at >= NOW() - INTERVAL '30 days'",
+        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM stripe_subscriptions
+         WHERE created_at >= NOW() - INTERVAL '30 days'
+           AND COALESCE(status, '') NOT IN ('incomplete', 'incomplete_expired')",
     )
     .fetch_one(db)
     .await?)
 }
 
-/// Churned customers in the last 30 days. Required — a failure propagates.
-async fn churned_customer_count_30d(db: &PgPool) -> Result<i64, ApiError> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT tenant_id)::bigint FROM stripe_subscriptions
-         WHERE status = 'canceled'
-           AND COALESCE(canceled_at, updated_at) >= NOW() - INTERVAL '30 days'",
+/// The churn cohort and its in-window cancellations, in ONE query so both
+/// counts come from the same snapshot:
+///
+/// * cohort = subscriptions that existed at the period start (`created_at <
+///   start`) and had not already been canceled before it;
+/// * churned = cohort members whose cancellation falls inside the window.
+///
+/// The churn condition is evaluated inside the cohort CTE, so the numerator
+/// is a subset of the denominator by construction. Returns
+/// `(cohort_size, churned)`.
+const COHORT_CHURN_SQL: &str = r#"
+    WITH period AS (SELECT NOW() - INTERVAL '30 days' AS start_at),
+    cohort AS (
+        SELECT s.tenant_id,
+               BOOL_OR(
+                   s.status = 'canceled'
+                   AND COALESCE(s.canceled_at, s.updated_at) >= p.start_at
+               ) AS churned_in_window
+        FROM stripe_subscriptions s
+        CROSS JOIN period p
+        WHERE s.created_at < p.start_at
+          AND COALESCE(
+                s.canceled_at,
+                CASE WHEN s.status = 'canceled' THEN s.updated_at END,
+                'infinity'::timestamptz
+              ) >= p.start_at
+        GROUP BY s.tenant_id
     )
-    .fetch_one(db)
-    .await?)
+    SELECT COUNT(*)::bigint AS cohort_size,
+           COUNT(*) FILTER (WHERE churned_in_window)::bigint AS churned
+    FROM cohort
+"#;
+
+/// `(cohort at period start, cohort members canceled in the window)`.
+/// Required — a failure propagates.
+async fn cohort_churn_counts_30d(db: &PgPool) -> Result<(i64, i64), ApiError> {
+    Ok(sqlx::query_as::<_, (i64, i64)>(COHORT_CHURN_SQL)
+        .fetch_one(db)
+        .await?)
 }
 
 /// Avg customer lifetime from real subscription ages (active/paying only).
@@ -636,17 +783,24 @@ async fn avg_customer_lifetime_days(db: &PgPool) -> MetricState<Option<f64>> {
 async fn customer_lifecycle(db: &PgPool) -> Result<CustomerLifecycle, ApiError> {
     let new_customers_30d = new_customer_count_30d(db).await?;
     let active_customers = active_customer_count(db).await?;
-    let churned_customers_30d = churned_customer_count_30d(db).await?;
+    let (cohort_customers_at_period_start, churned_customers_30d) =
+        cohort_churn_counts_30d(db).await?;
 
+    // The numerator is filtered to members of the starting cohort, so
+    // churn_rate <= 1.0 and retained >= 0 hold structurally; saturating_sub
+    // is a belt-and-braces guard, not a clamp of a reachable negative.
     let churn_rate_30d =
-        (active_customers > 0).then(|| churned_customers_30d as f64 / active_customers as f64);
+        activation_rate_of(churned_customers_30d, cohort_customers_at_period_start);
+    let retained_customers_30d =
+        cohort_customers_at_period_start.saturating_sub(churned_customers_30d);
 
     Ok(CustomerLifecycle {
         new_customers_30d,
         active_customers,
+        cohort_customers_at_period_start,
         churned_customers_30d,
         churn_rate_30d,
-        retained_customers_30d: active_customers - churned_customers_30d,
+        retained_customers_30d,
         retention_rate_30d: churn_rate_30d.map(|rate| 1.0 - rate),
         avg_customer_lifetime_days: avg_customer_lifetime_days(db).await,
     })
@@ -709,7 +863,7 @@ async fn get_growth_analytics(
             total_activated: activation.email_sent,
             activation_rate: activation_rate_of(activation.email_sent, activation.total_tenants),
             avg_time_to_first_send_hours: avg_time_to_first_send,
-            activation_funnel: activation_funnel(&activation),
+            activation_milestones: activation_milestones(&activation),
         },
         engagement: engagement_metrics(db).await?,
         trial_conversion: trial_conversion_stats(db, &interval).await?,
@@ -732,7 +886,7 @@ async fn get_signup_timeline(
     ))
 }
 
-async fn get_activation_funnel(
+async fn get_activation_milestones(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<GrowthQuery>,
@@ -750,7 +904,7 @@ async fn get_activation_funnel(
         total_activated: counts.email_sent,
         activation_rate: activation_rate_of(counts.email_sent, counts.total_tenants),
         avg_time_to_first_send_hours: avg,
-        activation_funnel: activation_funnel(&counts),
+        activation_milestones: activation_milestones(&counts),
     }))
 }
 
@@ -781,20 +935,54 @@ mod tests {
         assert_eq!(parse_period_days("1y"), 365);
     }
 
+    /// The API reports independent MILESTONES, not funnel stages: the
+    /// counts are not nested and a later milestone may exceed an earlier
+    /// one (shared-pool sending requires neither domain verification nor
+    /// DKIM). No ordering invariant may be claimed or enforced.
     #[test]
-    fn activation_funnel_stages_ordered() {
+    fn activation_milestones_are_independent_not_nested() {
         let counts = ActivationCounts {
             total_tenants: 100,
-            domain_verified: 80,
-            dkim_configured: 60,
-            email_sent: 50,
+            domain_verified: 40,
+            dkim_configured: 70,
+            email_sent: 90,
         };
-        let stages = activation_funnel(&counts);
-        assert_eq!(stages.len(), 4);
-        assert!(stages[0].count >= stages[1].count);
-        assert!(stages[1].count >= stages[2].count);
-        assert!(stages[2].count >= stages[3].count);
-        assert_eq!(stages[0].percentage, Some(100.0));
+        let milestones = activation_milestones(&counts);
+        assert_eq!(milestones.len(), 4);
+        assert_eq!(milestones[0].count, 100);
+        assert_eq!(milestones[1].count, 40);
+        assert_eq!(
+            milestones[2].count, 70,
+            "later milestone may exceed earlier"
+        );
+        assert_eq!(
+            milestones[3].count, 90,
+            "later milestone may exceed earlier"
+        );
+        assert_eq!(milestones[0].percentage, Some(100.0));
+        assert_eq!(milestones[3].percentage, Some(90.0));
+    }
+
+    /// The serialized surface must say `activationMilestones`/`milestone`
+    /// and must not resurrect funnel-stage vocabulary.
+    #[test]
+    fn activation_fields_are_named_milestones_not_funnel() {
+        let stats = ActivationStats {
+            total_activated: 1,
+            activation_rate: Some(0.5),
+            avg_time_to_first_send_hours: Some(2.0),
+            activation_milestones: activation_milestones(&ActivationCounts {
+                total_tenants: 2,
+                domain_verified: 1,
+                dkim_configured: 1,
+                email_sent: 1,
+            }),
+        };
+        let json = serde_json::to_string(&stats).expect("serialize activation stats");
+        assert!(json.contains("activationMilestones"));
+        assert!(json.contains("\"milestone\""));
+        assert!(!json.contains("activationFunnel"));
+        assert!(!json.contains("\"stage\""));
     }
 
     /// A zero signup population yields an ABSENT percentage/rate (`None`),
@@ -807,10 +995,10 @@ mod tests {
             dkim_configured: 0,
             email_sent: 0,
         };
-        let stages = activation_funnel(&counts);
-        assert_eq!(stages[0].percentage, Some(100.0));
-        for stage in &stages[1..] {
-            assert_eq!(stage.percentage, None, "stage {stage:?}");
+        let milestones = activation_milestones(&counts);
+        assert_eq!(milestones[0].percentage, Some(100.0));
+        for milestone in &milestones[1..] {
+            assert_eq!(milestone.percentage, None, "milestone {milestone:?}");
         }
         assert_eq!(percentage_of(1, 0), None);
         assert_eq!(activation_rate_of(1, 0), None);
@@ -868,6 +1056,7 @@ mod tests {
         // stripe_subscriptions and use trial_end period semantics.
         for sql in [
             TRIALS_STARTED_SQL,
+            TRIALS_ELIGIBLE_SQL,
             TRIALS_CONVERTED_SQL,
             AVG_TRIAL_TO_PAID_SQL,
         ] {
@@ -875,6 +1064,19 @@ mod tests {
             assert!(sql.contains("trial_end IS NOT NULL"));
             assert!(!sql.contains("FROM subscriptions\n"));
         }
+    }
+
+    /// The conversion denominator is ENDED trials only: the eligible count
+    /// requires `trial_end < NOW()`, so an ongoing trial is never included.
+    #[test]
+    fn trial_denominator_is_ended_trials_only() {
+        assert!(TRIALS_ELIGIBLE_SQL.contains("trial_end < NOW()"));
+        // Started trials deliberately do NOT filter on trial_end: they are
+        // the flow counter that includes ongoing trials.
+        assert!(!TRIALS_STARTED_SQL.contains("trial_end < NOW()"));
+        // The converted numerator is a subset of the eligible denominator.
+        assert!(TRIALS_CONVERTED_SQL.contains("trial_end < NOW()"));
+        assert!(TRIALS_CONVERTED_SQL.contains("status IN ('active', 'past_due')"));
     }
 
     #[test]
@@ -886,12 +1088,89 @@ mod tests {
         assert!(TRIALS_CONVERTED_SQL.contains("status IN ('active', 'past_due')"));
     }
 
+    /// Time-to-paid prefers the ACTUAL paid-invoice time at/after trial_end
+    /// and only falls back to trial_end (documented caveat returned to
+    /// clients). No hardcoded duration constant.
     #[test]
-    fn avg_trial_to_paid_is_derived_not_constant() {
-        // Must be computed from trial_end - created_at, and there must be no
-        // hardcoded 14.0-day constant anywhere in the SQL.
-        assert!(AVG_TRIAL_TO_PAID_SQL.contains("trial_end - created_at"));
+    fn avg_trial_to_paid_prefers_actual_payment_with_documented_fallback() {
+        assert!(
+            AVG_TRIAL_TO_PAID_SQL.contains("i.paid_at >= s.trial_end"),
+            "actual payment must be at/after the trial end"
+        );
+        assert!(AVG_TRIAL_TO_PAID_SQL.contains("i.status = 'paid'"));
+        assert!(
+            AVG_TRIAL_TO_PAID_SQL.contains("COALESCE(paid.first_paid_at, s.trial_end)"),
+            "trial_end must be the explicit fallback, not the primary source"
+        );
         assert!(!AVG_TRIAL_TO_PAID_SQL.contains("14"));
+        assert!(TRIAL_PAYMENT_TIME_METHOD.contains("fallback"));
+    }
+
+    // ── Churn cohort (audit fix) ────────────────────────────────────────
+
+    /// A previous period mixed incompatible populations: churn was
+    /// `canceled-in-window / current-active` and retained was
+    /// `current-active − canceled-in-window`. A tenant that canceled inside
+    /// the window but signed up inside it too (or was counted as canceled
+    /// while no longer current-active) made retained NEGATIVE and churn
+    /// EXCEED 100%. The cohort formula cannot.
+    #[test]
+    fn old_mixed_population_churn_could_go_negative_new_cohort_cannot() {
+        // Observed counts: 1 currently-active customer, 2 cancellations in
+        // the window (one of them a same-window signup), cohort at period
+        // start = 2. Of the 2 cancellations only ONE is a cohort member; the
+        // same-window signup is the separate new-customer flow.
+        let current_active = 1_i64;
+        let canceled_in_window = 2_i64;
+        let cohort_at_start = 2_i64;
+        let cohort_churned = 1_i64;
+        let new_customers = 1_i64;
+
+        // OLD (wrong) math — reproduced here as the regression witness.
+        let old_rate = canceled_in_window as f64 / current_active as f64;
+        let old_retained = current_active - canceled_in_window;
+        assert!(old_rate > 1.0, "old churn exceeded 100%: {old_rate}");
+        assert!(
+            old_retained < 0,
+            "old retained went negative: {old_retained}"
+        );
+
+        // NEW math: churn is counted inside the starting cohort; new
+        // customers are a separate flow and never enter the subtraction.
+        let rate = activation_rate_of(cohort_churned, cohort_at_start).expect("non-empty cohort");
+        let retained = cohort_at_start.saturating_sub(cohort_churned);
+        assert!(rate <= 1.0, "cohort churn can never exceed 100%: {rate}");
+        assert!(
+            retained >= 0,
+            "cohort retained can never be negative: {retained}"
+        );
+        assert_eq!(rate, 0.5);
+        assert_eq!(retained, 1);
+        assert_eq!(new_customers, 1, "new customers are a separate flow");
+    }
+
+    /// The SQL counts churn INSIDE the cohort CTE, so the numerator is a
+    /// subset of the denominator by construction (not by clamping).
+    #[test]
+    fn churn_sql_counts_members_of_the_starting_cohort_only() {
+        assert!(COHORT_CHURN_SQL.contains("WITH period AS"));
+        assert!(COHORT_CHURN_SQL.contains("cohort AS"));
+        assert!(
+            COHORT_CHURN_SQL.contains("FROM stripe_subscriptions s")
+                && COHORT_CHURN_SQL.contains("CROSS JOIN period p"),
+            "cohort membership must read real subscriptions at period start"
+        );
+        // Membership: existed at start and not already canceled before it.
+        assert!(COHORT_CHURN_SQL.contains("s.created_at < p.start_at"));
+        assert!(COHORT_CHURN_SQL.contains("'infinity'::timestamptz"));
+        // Churn: counted on cohort rows, joined later against the cohort.
+        let churn_select = COHORT_CHURN_SQL
+            .split("SELECT COUNT(*)::bigint AS cohort_size")
+            .nth(1)
+            .expect("aggregation over the cohort");
+        assert!(churn_select.contains("FROM cohort"));
+        // The old current-active denominator must not appear anywhere.
+        assert!(!COHORT_CHURN_SQL.contains("status IN ('active', 'trialing', 'past_due')"));
     }
 
     // ── F79: corrected first-send aggregate ────────────────────────────
@@ -1035,10 +1314,10 @@ mod tests {
             "a failed new-customers query must be an error"
         );
 
-        let churned = churned_customer_count_30d(&pool).await;
+        let churned = cohort_churn_counts_30d(&pool).await;
         assert!(
             churned.is_err(),
-            "a failed churned-customers query must be an error"
+            "a failed cohort/churn query must be an error"
         );
 
         let lifecycle = customer_lifecycle(&pool).await;
@@ -1082,6 +1361,243 @@ mod tests {
 
         let avg_active = avg_active_days_per_tenant_30d(&pool).await;
         assert_eq!(avg_active, MetricState::Available(None));
+
+        pool.close().await;
+    }
+
+    /// The audit's exact scenario, against the canonical schema: a customer
+    /// who signed up and canceled INSIDE the window, plus a pre-window
+    /// cancellation. The old math (cancellations-in-window over CURRENT
+    /// active, retained = active − cancellations) produced >100% churn and
+    /// negative retention; the cohort math cannot.
+    #[tokio::test]
+    async fn churn_cohort_excludes_new_customers_and_stays_bounded() {
+        let Some(pool) = crate::test_db::canonical_pool("growth_churn_cohort").await else {
+            eprintln!(
+                "skipping churn_cohort_excludes_new_customers_and_stays_bounded: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = |name: &str| format!("t{}{name}", &suffix[..6]);
+
+        let seed = |id: String,
+                    label: &'static str,
+                    created_days: i64,
+                    status: &'static str,
+                    canceled_days: Option<i64>| {
+            let pool = pool.clone();
+            let sub_id = format!("sub-{id}");
+            async move {
+                sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+                    .bind(&id)
+                    .bind(label)
+                    .execute(&pool)
+                    .await
+                    .expect("seed tenant");
+                sqlx::query(
+                    "INSERT INTO stripe_subscriptions
+                         (tenant_id, stripe_subscription_id, plan, status, created_at, canceled_at)
+                     VALUES ($1, $2, 'starter', $3,
+                             NOW() - make_interval(days => $4::int),
+                             CASE WHEN $5::int IS NULL THEN NULL
+                                  ELSE NOW() - make_interval(days => $5::int) END)",
+                )
+                .bind(&id)
+                .bind(&sub_id)
+                .bind(status)
+                .bind(created_days)
+                .bind(canceled_days)
+                .execute(&pool)
+                .await
+                .expect("seed subscription");
+            }
+        };
+
+        // Cohort + churn: existed at period start, canceled inside window.
+        seed(tenant("a"), "cohort-churned", 60, "canceled", Some(5)).await;
+        // Cohort + retained: existed at period start, still active.
+        seed(tenant("b"), "cohort-retained", 60, "active", None).await;
+        // New customer that canceled inside the window: a separate flow. The
+        // OLD math counted this cancellation against the current-active
+        // population; the cohort math excludes it from both cohort and churn.
+        seed(tenant("c"), "new-churn", 3, "canceled", Some(1)).await;
+        // Canceled BEFORE the period start: neither cohort nor churn.
+        seed(tenant("d"), "old-churn", 90, "canceled", Some(40)).await;
+
+        let (cohort, churned) = cohort_churn_counts_30d(&pool).await.expect("cohort counts");
+        assert_eq!(cohort, 2, "only pre-start, not-yet-canceled subscriptions");
+        assert_eq!(churned, 1, "only the cohort member canceled in-window");
+        assert!(
+            churned <= cohort,
+            "numerator is a subset of the denominator"
+        );
+
+        let lifecycle = customer_lifecycle(&pool).await.expect("lifecycle");
+        assert_eq!(lifecycle.cohort_customers_at_period_start, 2);
+        assert_eq!(lifecycle.churned_customers_30d, 1);
+        assert_eq!(lifecycle.retained_customers_30d, 1);
+        assert_eq!(lifecycle.churn_rate_30d, Some(0.5));
+        assert_eq!(lifecycle.retention_rate_30d, Some(0.5));
+        assert!(
+            lifecycle.churn_rate_30d.expect("rate") <= 1.0,
+            "cohort churn can never exceed 100%"
+        );
+        assert!(lifecycle.retained_customers_30d >= 0);
+        assert_eq!(
+            lifecycle.new_customers_30d, 1,
+            "the in-window canceled signup is reported in the new-customer flow"
+        );
+        // The current snapshot stays a snapshot (only the still-active row).
+        assert_eq!(lifecycle.active_customers, 1);
+
+        // Regression witness: the OLD formula on these same rows produced a
+        // 200% churn rate and −1 retained customers.
+        let old_churned_in_window = 2_i64; // rows a + c
+        let old_rate = old_churned_in_window as f64 / lifecycle.active_customers as f64;
+        let old_retained = lifecycle.active_customers - old_churned_in_window;
+        assert!(old_rate > 1.0, "old formula churn was {old_rate}");
+        assert!(old_retained < 0, "old formula retained was {old_retained}");
+
+        pool.close().await;
+    }
+
+    /// Trial conversion denominator = trials that have ENDED. An ONGOING
+    /// trial is excluded; a long-ended unconverted trial is included; the
+    /// rate can no longer be right-censored by trials still running. Also
+    /// proves time-to-paid prefers actual paid-invoice time over the
+    /// documented trial_end fallback.
+    #[tokio::test]
+    async fn trial_conversion_denominator_is_ended_trials_only() {
+        let Some(pool) = crate::test_db::canonical_pool("growth_trial_eligible").await else {
+            eprintln!(
+                "skipping trial_conversion_denominator_is_ended_trials_only: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = |name: &str| format!("t{}{name}", &suffix[..6]);
+
+        let seed_trial = |id: String,
+                          label: &'static str,
+                          created_days: i64,
+                          trial_end_days: i64,
+                          status: &'static str| {
+            let pool = pool.clone();
+            let sub_id = format!("sub-{id}");
+            async move {
+                sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+                    .bind(&id)
+                    .bind(label)
+                    .execute(&pool)
+                    .await
+                    .expect("seed tenant");
+                sqlx::query(
+                    "INSERT INTO stripe_subscriptions
+                         (tenant_id, stripe_subscription_id, plan, status, created_at, trial_end)
+                     VALUES ($1, $2, 'starter', $3,
+                             NOW() - make_interval(days => $4::int),
+                             NOW() - make_interval(days => $5::int))",
+                )
+                .bind(&id)
+                .bind(&sub_id)
+                .bind(status)
+                .bind(created_days)
+                .bind(trial_end_days)
+                .execute(&pool)
+                .await
+                .expect("seed trial");
+            }
+        };
+
+        // Long-ended, never converted: MUST be in the denominator.
+        seed_trial(tenant("a"), "ended-unconverted", 40, 26, "trialing").await;
+        // Ongoing trial: started, MUST NOT be in the denominator.
+        seed_trial(tenant("b"), "ongoing", 10, -5, "trialing").await;
+        // Ended and converted, with actual payment 3 days ago (17d to paid).
+        let converted_with_invoice = tenant("c");
+        seed_trial(
+            converted_with_invoice.clone(),
+            "converted-paid",
+            20,
+            6,
+            "active",
+        )
+        .await;
+        // Ended and converted, no post-trial invoice: documented fallback to
+        // trial_end (10d to paid). The pre-trial setup invoice must NOT be
+        // mistaken for the conversion payment.
+        let converted_with_fallback = tenant("d");
+        seed_trial(
+            converted_with_fallback.clone(),
+            "converted-fallback",
+            15,
+            5,
+            "active",
+        )
+        .await;
+
+        for (tenant_id, paid_days_ago) in [
+            (converted_with_invoice, 3_i64),
+            (converted_with_fallback, 12_i64), // paid BEFORE trial_end → ignored
+        ] {
+            sqlx::query(
+                "INSERT INTO invoices (tenant_id, stripe_invoice_id, status, amount, currency, paid_at)
+                 VALUES ($1, $2, 'paid', 1000, 'EUR', NOW() - make_interval(days => $3::int))",
+            )
+            .bind(&tenant_id)
+            .bind(format!("inv-{tenant_id}"))
+            .bind(paid_days_ago)
+            .execute(&pool)
+            .await
+            .expect("seed paid invoice");
+        }
+
+        let stats = trial_conversion_stats(&pool, "90 days")
+            .await
+            .expect("trial conversion stats");
+        assert_eq!(
+            stats.trials_started, 4,
+            "flow counter includes the ongoing trial"
+        );
+        assert_eq!(
+            stats.trials_eligible, 3,
+            "only ended trials are eligible: ongoing excluded, long-ended unconverted included"
+        );
+        assert_eq!(stats.trials_converted, 2);
+        let rate = stats
+            .conversion_rate
+            .expect("eligible denominator is non-empty");
+        assert!(
+            (rate - 2.0 / 3.0).abs() < 1e-9,
+            "converted/eligible = 2/3, got {rate}"
+        );
+        assert!(
+            (rate - 0.5).abs() > 1e-9,
+            "the old started-trials denominator would give 2/4 = 0.5 — right-censored"
+        );
+
+        // The actual payment for tenant c is 17 days after signup; tenant d
+        // falls back to trial_end = 10 days after signup. Mean = 13.5.
+        match stats.avg_trial_to_paid_days {
+            MetricState::Available(Some(days)) => assert!(
+                (days - 13.5).abs() < 0.01,
+                "expected actual-payment 17d and fallback 10d → 13.5d, got {days}"
+            ),
+            other => panic!("expected an available average, got {other:?}"),
+        }
+        assert!(stats.payment_time_method.contains("fallback"));
+        assert!(
+            (stats
+                .conversion_by_plan
+                .iter()
+                .map(|p| p.eligible)
+                .sum::<i64>())
+                >= stats.trials_eligible,
+            "per-plan eligibility must use the same ended-trial population"
+        );
 
         pool.close().await;
     }

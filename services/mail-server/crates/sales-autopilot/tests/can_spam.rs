@@ -221,7 +221,7 @@ async fn opted_out_recipient_is_refused_at_enrollment_and_at_send_time() {
         &StartOutreachRequest {
             sequence_id: pending.sequence_id,
             contact_ids: vec![pending.contact_id],
-            autonomy_policy_id: pending.policy_id,
+            autonomy_policy_id: Some(pending.policy_id),
             experiment_id: None,
         },
     )

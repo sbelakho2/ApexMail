@@ -9,5 +9,7 @@ pub mod config;
 pub mod gmail_annotations;
 pub mod postmaster;
 pub mod servers;
+pub mod supervision;
+pub mod tls;
 
 pub use config::MtaConfig;

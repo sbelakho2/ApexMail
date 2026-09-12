@@ -7,6 +7,8 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use billing_entitlements::EntitlementSnapshot;
+
 use crate::types::{Plan, PlanFeatures, QuotaLimit, RateLimitTier, SupportLevel};
 
 /// Static seed data for default plans.
@@ -39,6 +41,12 @@ pub struct PlanUpsertInput {
 }
 
 /// All default plans shipped with ApexMail.
+///
+/// Capabilities classified `NotYetImplemented` in
+/// `billing-entitlements::PLAN_FEATURE_CLASSIFICATION` are deliberately NOT
+/// seeded: the audit found `time_travel_debugging` (and other flags) sold as
+/// pricing metadata with no runtime implementation, which this catalog no
+/// longer does. Re-add a flag only together with its runtime gate.
 ///
 /// 2026-09-08 pricing review: the Free tier moved from 30,000/mo to
 /// 3,000/mo — 30k/month forever gave away a meaningful production
@@ -114,7 +122,6 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 advanced_analytics: true,
                 send_time_optimization: true,
                 data_export: true,
-                custom_tracking_domain: true,
                 custom_templates: true,
                 max_sending_domains: 25,
                 max_retention_days: 60,
@@ -138,15 +145,10 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 dedicated_ip_count: 1,
                 api_access: true,
                 webhooks_enabled: true,
-                audit_logs: true,
                 advanced_analytics: true,
                 send_time_optimization: true,
-                ab_testing: true,
-                time_travel_debugging: true,
                 data_export: true,
-                custom_tracking_domain: true,
                 custom_templates: true,
-                custom_retention: true,
                 max_sending_domains: 100,
                 max_retention_days: 90,
                 max_team_members: 25,
@@ -173,23 +175,15 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 dedicated_ip_count: 1,
                 max_sending_domains: -1,
                 sso_enabled: true,
-                audit_logs: true,
                 api_access: true,
                 webhooks_enabled: true,
                 inbound_email: true,
                 advanced_analytics: true,
                 send_time_optimization: true,
-                ab_testing: true,
-                time_travel_debugging: true,
                 data_export: true,
-                custom_tracking_domain: true,
                 custom_templates: true,
-                template_approval_workflow: true,
-                custom_retention: true,
                 max_retention_days: 365,
                 max_team_members: 50,
-                subaccounts: true,
-                max_subaccounts: 10,
                 dedicated_csm: true,
                 priority_onboarding: true,
                 sla_guarantee: true,
@@ -216,24 +210,16 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 dedicated_ip_count: 3,
                 max_sending_domains: -1,
                 sso_enabled: true,
-                audit_logs: true,
                 api_access: true,
                 webhooks_enabled: true,
                 inbound_email: true,
                 advanced_analytics: true,
                 send_time_optimization: true,
-                ab_testing: true,
-                time_travel_debugging: true,
                 data_export: true,
-                custom_tracking_domain: true,
                 custom_templates: true,
-                template_approval_workflow: true,
                 white_label: true,
-                custom_retention: true,
                 max_retention_days: 730,
                 max_team_members: -1,
-                subaccounts: true,
-                max_subaccounts: 100,
                 dedicated_csm: true,
                 priority_onboarding: true,
                 sla_guarantee: true,
@@ -353,7 +339,7 @@ const SEED_PLAN_UPSERT_SQL: &str = r#"
             features, stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
-            gen_random_uuid(), $1, $2, $3,
+            'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
             $4, $5, $6, $7,
             $8, NULL, NULL, true, $9, $10, $10
         )
@@ -418,7 +404,7 @@ pub async fn upsert_plan_input(
             features, stripe_price_id_monthly, stripe_price_id_yearly,
             is_active, sort_order, created_at, updated_at
         ) VALUES (
-            gen_random_uuid(), $1, $2, $3,
+            'pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, $2, $3,
             $4, $5, $6, $7,
             $8, $11, $12, true, $9, $10, $10
         )
@@ -593,6 +579,97 @@ pub async fn get_quota_for_tenant(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Entitlements (runtime feature/capacity gates)
+// ---------------------------------------------------------------------------
+
+/// Resolve a tenant's [`EntitlementSnapshot`] — the authorization input for
+/// every gated customer handler.
+///
+/// Resolution order mirrors [`get_quota_for_tenant`] exactly (Fix I2):
+///
+/// 1. effective plan: active, unexpired `plan_overrides` row wins over
+///    `tenants.plan`; a missing `plans` row falls back to the builtin seed
+///    for that plan name;
+/// 2. `plans.features` (JSONB) deserialized as `PlanFeatures`;
+/// 3. tenant `feature_flag_overrides` rows whose `flag_key` names a
+///    `FeatureKey`, latest row per key, JSON booleans only — anything else
+///    fails closed to the plan value (same rule as `FeatureFlagService`).
+///
+/// `Ok(None)` means the tenant does not exist.
+pub async fn get_entitlement_snapshot(
+    pool: &PgPool,
+    tenant_id: &str,
+) -> Result<Option<EntitlementSnapshot>, sqlx::Error> {
+    let row: Option<TenantEntitlementRow> = sqlx::query_as(
+        r#"
+        SELECT
+            t.id    as tenant_id,
+            COALESCE(po.plan, t.plan) as plan_name,
+            p.features
+        FROM tenants t
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
+        WHERE t.id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else { return Ok(None) };
+
+    let fallback = builtin_plan_seed(Some(&row.plan_name));
+    let features: PlanFeatures = row
+        .features
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| fallback.features.clone());
+
+    let mut snapshot = entitlement_snapshot_for_features(&row.tenant_id, &row.plan_name, &features);
+
+    // Tenant overrides are the runtime escape hatch (admin feature flags).
+    // Latest row per key, JSON booleans only; unknown/non-runtime keys are
+    // ignored by `apply_override`.
+    let overrides: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (flag_key) flag_key, value
+        FROM feature_flag_overrides
+        WHERE tenant_id = $1
+        ORDER BY flag_key, created_at DESC
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await?;
+    for (flag_key, value) in overrides {
+        snapshot.apply_override(&flag_key, &value);
+    }
+
+    Ok(Some(snapshot))
+}
+
+/// Build a snapshot from an already-resolved plan (no database access).
+///
+/// Shared with [`get_entitlement_snapshot`] so the override-aware path and
+/// tests/callers that already hold a `PlanFeatures` cannot drift.
+pub fn entitlement_snapshot_for_features(
+    tenant_id: &str,
+    plan_name: &str,
+    features: &PlanFeatures,
+) -> EntitlementSnapshot {
+    let features_json = serde_json::to_value(features).unwrap_or_else(|error| {
+        // PlanFeatures is a plain struct of bools/i32/an enum — serialization
+        // cannot fail. Fail closed to an empty object (deny-all) if it ever
+        // does, rather than granting by accident.
+        tracing::error!(error = %error, tenant_id, "PlanFeatures serialization failed; denying all entitlements");
+        serde_json::Value::Object(serde_json::Map::new())
+    });
+    EntitlementSnapshot::from_plan_features_json(tenant_id, plan_name, &features_json)
+}
+
 /// Default overage price per email in millicents
 /// (`€0.40 / 1 000 emails = 0.04 cents = 40 millicents`). Kept as a constant
 /// so the legacy two-argument [`calculate_overage_cost`] wrapper and
@@ -639,7 +716,9 @@ pub fn calculate_overage_cost_with_rate(
 
 #[derive(sqlx::FromRow)]
 struct PlanRow {
-    id: Uuid,
+    /// `plans.id` is VARCHAR(26) (26-char generated id), not a UUID column —
+    /// decoding it as `Uuid` fails with a type mismatch.
+    id: String,
     name: String,
     display_name: String,
     description: String,
@@ -688,6 +767,15 @@ struct TenantPlanRow {
     plan_name: String,
     email_limit: Option<i64>,
     api_call_limit: Option<i64>,
+    features: Option<serde_json::Value>,
+}
+
+/// Effective plan + raw features for entitlement resolution (the override
+/// join mirrors [`TenantPlanRow`]).
+#[derive(sqlx::FromRow)]
+struct TenantEntitlementRow {
+    tenant_id: String,
+    plan_name: String,
     features: Option<serde_json::Value>,
 }
 
@@ -766,9 +854,12 @@ mod tests {
         assert!(pro_features.send_time_optimization);
         assert!(!pro_features.ab_testing);
         assert!(growth_features.send_time_optimization);
-        assert!(growth_features.ab_testing);
+        // A/B testing is NotYetImplemented (no experiment-creation handler in
+        // api-server) and is therefore not seeded on any plan. Re-enable this
+        // assertion only together with the runtime gate.
+        assert!(!growth_features.ab_testing);
         assert!(enterprise_features.send_time_optimization);
-        assert!(enterprise_features.ab_testing);
+        assert!(!enterprise_features.ab_testing);
     }
 
     #[test]
@@ -899,7 +990,7 @@ mod tests {
             .as_ref()
             .map(|f| f.send_time_optimization)
             .unwrap_or(false));
-        assert!(ent_features.as_ref().map(|f| f.ab_testing).unwrap_or(false));
+        assert!(!ent_features.as_ref().map(|f| f.ab_testing).unwrap_or(true));
         assert!(ent_features
             .as_ref()
             .map(|f| f.private_cloud)
@@ -912,5 +1003,120 @@ mod tests {
                 .unwrap_or(SupportLevel::Community),
             SupportLevel::Dedicated
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Runtime entitlements: resolution + seed honesty.
+    // ------------------------------------------------------------------
+
+    /// The runtime coverage check: every field `PlanFeatures` actually
+    /// serializes must have a classification entry. A new field added to the
+    /// struct without a classification fails here even before the Python
+    /// release gate runs.
+    #[test]
+    fn classification_covers_every_serialized_plan_features_field() {
+        let value = serde_json::to_value(PlanFeatures::default()).expect("PlanFeatures serializes");
+        let object = value.as_object().expect("PlanFeatures is a JSON object");
+        assert_eq!(
+            object.len(),
+            billing_entitlements::PLAN_FEATURE_CLASSIFICATION.len(),
+            "classification table must have exactly one entry per PlanFeatures field"
+        );
+        for field in object.keys() {
+            assert!(
+                billing_entitlements::classification_for_field(field).is_some(),
+                "PlanFeatures field `{field}` has no classification — add it to \
+                 billing-entitlements/src/classify.rs and gate the handler (or remove the field)"
+            );
+        }
+        // And the table must not reference fields that no longer exist.
+        for entry in billing_entitlements::PLAN_FEATURE_CLASSIFICATION {
+            assert!(
+                object.contains_key(entry.field),
+                "classification entry `{}` has no matching PlanFeatures field",
+                entry.field
+            );
+        }
+    }
+
+    /// No builtin seed may advertise a capability classified
+    /// `NotYetImplemented`: that is exactly the "customers buy pricing
+    /// metadata" failure the classification exists to prevent.
+    #[test]
+    fn seeds_never_advertise_not_yet_implemented_features() {
+        use billing_entitlements::{FeatureClass, Gate, PLAN_FEATURE_CLASSIFICATION};
+        let plans = default_plans();
+        for entry in PLAN_FEATURE_CLASSIFICATION {
+            if entry.class != FeatureClass::NotYetImplemented {
+                continue;
+            }
+            if let Gate::Feature(_) = entry.gate {
+                for plan in &plans {
+                    let value = serde_json::to_value(&plan.features).expect("serializes");
+                    assert_ne!(
+                        value.get(entry.field).and_then(|v| v.as_bool()),
+                        Some(true),
+                        "plan `{}` seeds NotYetImplemented capability `{}`",
+                        plan.name,
+                        entry.field
+                    );
+                }
+            }
+        }
+        // The one unimplemented capacity that was previously sold.
+        for plan in &plans {
+            assert_eq!(
+                plan.features.max_subaccounts, 0,
+                "plan `{}` seeds an unimplemented subaccount capacity",
+                plan.name
+            );
+        }
+    }
+
+    /// Resolution parity: the snapshot comes from the same effective plan
+    /// the quota path resolves (admin override wins), so it must honour the
+    /// override join and only read producer-backed override rows.
+    #[test]
+    fn entitlement_resolution_mirrors_the_quota_override_rules() {
+        let source = include_str!("plans.rs");
+        let sql_start = source
+            .find("SELECT\n            t.id    as tenant_id,\n            COALESCE(po.plan, t.plan) as plan_name,\n            p.features")
+            .expect("entitlement SQL present");
+        let sql = &source[sql_start..];
+        for clause in [
+            "plan_overrides po",
+            "po.active = true",
+            "po.expires_at > NOW()",
+            "COALESCE(po.plan, t.plan)",
+            "feature_flag_overrides",
+            "DISTINCT ON (flag_key)",
+            "ORDER BY flag_key, created_at DESC",
+        ] {
+            assert!(
+                sql.contains(clause),
+                "entitlement resolution must mirror clause `{clause}`"
+            );
+        }
+    }
+
+    #[test]
+    fn entitlement_snapshot_for_features_grants_only_runtime_fields() {
+        use billing_entitlements::{CapacityKey, FeatureKey};
+        let plans = default_plans();
+        let growth = plans.iter().find(|p| p.name == "growth").unwrap();
+        let snapshot = entitlement_snapshot_for_features("tenant-1", "growth", &growth.features);
+
+        assert!(snapshot.require_feature(FeatureKey::Webhooks).is_ok());
+        assert!(snapshot
+            .require_feature(FeatureKey::SendTimeOptimization)
+            .is_ok());
+        assert!(snapshot.require_feature(FeatureKey::Sso).is_err());
+        assert_eq!(snapshot.capacity(CapacityKey::TeamMembers), 25);
+        assert!(snapshot
+            .require_capacity(CapacityKey::TeamMembers, 25)
+            .is_ok());
+        assert!(snapshot
+            .require_capacity(CapacityKey::TeamMembers, 26)
+            .is_err());
     }
 }

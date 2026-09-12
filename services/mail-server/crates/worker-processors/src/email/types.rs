@@ -213,6 +213,22 @@ pub struct Suppression {
     pub created_at: DateTime<Utc>,
 }
 
+/// VERP v2 binding material for one send unit.
+///
+/// The v2 token is HMAC-bound to (queue/send id, tenant, recipient, expiry);
+/// the recipient is the envelope destination (`PreparedEmail::to`) and this
+/// struct carries the two identities only the authenticated job context
+/// knows. It is populated from the persisted `EmailJob`, never from caller
+/// input, so a caller cannot mint a bounce address for another tenant's
+/// message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerpBinding {
+    /// `email_queue.id` — the queue row the bounce is attributed to.
+    pub queue_id: String,
+    /// `email_queue.tenant_id` — the owning tenant.
+    pub tenant_id: String,
+}
+
 /// Prepared email ready for sending.
 #[derive(Debug, Clone)]
 pub struct PreparedEmail {
@@ -233,6 +249,10 @@ pub struct PreparedEmail {
     pub headers: Vec<(String, String)>,
     pub attachments: Vec<Attachment>,
     pub dkim: Option<DkimConfig>,
+    /// VERP v2 binding (see [`VerpBinding`]); `None` for legacy/prepared
+    /// emails without authenticated queue context, which get no VERP
+    /// Return-Path (never the unsigned v1 grammar).
+    pub verp: Option<VerpBinding>,
 }
 
 /// Email attachment.

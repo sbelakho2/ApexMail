@@ -5,6 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use billing_entitlements::FeatureKey;
 use chrono::{DateTime, Utc};
 use mail_common::{is_localhost, is_private_or_reserved_host};
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,22 @@ fn localhost_webhooks_allowed() -> bool {
     std::env::var(ALLOW_LOCALHOST_WEBHOOKS_ENV).is_ok_and(|value| value == "true")
 }
 
+/// Consuming inbound mail through the shared webhook pipeline requires the
+/// `inbound_email` entitlement. Raw MX/SMTP acceptance is deliberately NOT
+/// gated: inbound acceptance must remain available for mail that the
+/// platform is authoritative for; this gate covers the customer-facing
+/// consumption surface (the `inbound` event subscription).
+async fn require_inbound_event_entitlement(
+    state: &AppState,
+    tenant_id: &str,
+    events: &[String],
+) -> Result<(), ApiError> {
+    if events.iter().any(|event| event.trim() == "inbound") {
+        crate::entitlements::require_feature(state, tenant_id, FeatureKey::InboundEmail).await?;
+    }
+    Ok(())
+}
+
 /// Validate webhook URL format and security requirements (parameterised for
 /// testability — [`validate_webhook_url`] reads the env override).
 ///
@@ -278,6 +295,12 @@ async fn create_webhook(
 ) -> Result<(StatusCode, Json<WebhookResponse>), ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
 
+    // Entitlement gate (403 for a plan without `webhooks_enabled`).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::Webhooks).await?;
+    // Consuming inbound mail through webhooks additionally requires
+    // `inbound_email`; raw SMTP acceptance is deliberately never gated.
+    require_inbound_event_entitlement(&state, &auth.tenant_id, &body.events).await?;
+
     let mut errors = Vec::new();
 
     if body.url.is_empty() {
@@ -377,6 +400,12 @@ async fn update_webhook(
     Json(body): Json<UpdateWebhookRequest>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     require_scopes(&auth, &["webhooks:write"])?;
+
+    // Entitlement gate (403 for a plan without `webhooks_enabled`).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::Webhooks).await?;
+    if let Some(ref new_events) = body.events {
+        require_inbound_event_entitlement(&state, &auth.tenant_id, new_events).await?;
+    }
 
     // Validate new URL if provided
     if let Some(ref new_url) = body.url {

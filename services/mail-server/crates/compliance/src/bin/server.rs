@@ -19,6 +19,17 @@
 //!   `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USER`,
 //!   `CLICKHOUSE_PASSWORD`) — off unless enabled.
 //!
+//! ## Schema ownership
+//!
+//! The compliance service owns NO runtime DDL. Every table it reads/writes is
+//! created by numbered migrations (`services/mail-server/migrations`),
+//! applied by the `migrator` deploy gate before this binary starts. Startup
+//! therefore works with a DML-only database role; the release test
+//! `compliance_boots_and_processes_with_dml_only_role`
+//! (`crates/compliance/tests/gdpr_governance_release_tests.rs`) proves it.
+//! Startup writes are limited to idempotent DML seeds (SOC2 catalog, GDPR
+//! governance registry / retention classes).
+//!
 //! Cron jobs (all idempotent, retried on the next tick on failure):
 //! 1. DSR queue processing + stuck-entry recovery — every 30s
 //! 2. Secret auto-rotation — every 60min
@@ -29,30 +40,19 @@
 //! 7. DSR verification-outbox flush — every 60s
 
 use clap::Parser;
-use deadpool_redis::{Config as RedisConfig, Runtime};
 use observability_service::otlp_exporter::{
     init_otlp_tracing, is_otlp_enabled, OtlpConfig, TracingGuard,
 };
-use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::time::{interval, Duration};
 use tracing::{error, info};
 
-use compliance::audit_logger::AuditLogger;
-use compliance::breach_notification::BreachNotifier;
+use compliance::bootstrap::build_state;
 use compliance::config::ComplianceConfig;
-use compliance::content_scanner::ContentScanner;
-use compliance::dsar_rate_limit::DsarRateLimiter;
 use compliance::dsr_outbox_flush::DsrOutboxFlusher;
-use compliance::gdpr_automation::GdprAutomation;
-use compliance::hipaa::HipaaService;
-use compliance::retention_sweep::RetentionSweeper;
-use compliance::risk_scoring::RiskScoringEngine;
-use compliance::routes::{create_router, AppState};
-use compliance::secret_manager::SecretManager;
-use compliance::soc2::Soc2Service;
-use compliance::trust_portal::TrustPortalService;
+use compliance::routes::create_router;
+use compliance::routes::AppState;
 
 #[derive(Parser)]
 #[command(name = "compliance-server")]
@@ -93,114 +93,16 @@ async fn main() -> anyhow::Result<()> {
     let config = ComplianceConfig::from_env();
     let port = cli.port.unwrap_or(config.port);
 
-    // Database pool
-    let db = PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .idle_timeout(std::time::Duration::from_secs(300))
-        .max_lifetime(std::time::Duration::from_secs(1800))
-        .connect(&config.database_url)
-        .await?;
-
-    info!("Connected to database");
-
-    // Redis pool
-    let redis_cfg = RedisConfig::from_url(&config.redis_url);
-    let redis = redis_cfg.create_pool(Some(Runtime::Tokio1))?;
-
-    info!("Redis pool created");
-
-    // Build services
-    let risk_engine = RiskScoringEngine::new(db.clone(), config.clone());
-    let content_scanner = ContentScanner::new(db.clone(), config.content.clone());
-    // Shared behind an Arc so the breach notifier participates in the same
-    // audit hash-chain state as the rest of the service.
-    let audit_logger = Arc::new(AuditLogger::new(db.clone(), config.audit.clone()));
-    // F12/F3: load the per-chain hash heads (live table + archive) BEFORE
-    // any append. Without this the first append after a restart built on
-    // previous_hash = NULL and silently forked the chain — and a fully
-    // archived chain forked on EVERY restart.
-    if let Err(e) = audit_logger.initialize().await {
-        // Not fatal: an empty/missing table legitimately yields no heads.
-        // Anything else is logged loudly — appends still work, but the
-        // operator should investigate before the chain drifts.
-        error!("Audit logger initialization failed (chain heads not preloaded): {e}");
-    } else {
-        info!("Audit hash-chain heads loaded");
-    }
-    let secret_manager =
-        SecretManager::new(db.clone(), config.secrets.clone()).map_err(|e| anyhow::anyhow!(e))?;
-    let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone());
-    let soc2 = Soc2Service::new(db.clone());
-    let hipaa = HipaaService::new(db.clone(), config.auth_token.as_bytes().to_vec());
-    let trust = TrustPortalService::new(db.clone());
-    let breach = BreachNotifier::new(
-        db.clone(),
-        audit_logger.clone(),
-        config.breach_notification_emails.clone(),
-        config.audit.signing_key.clone().into_bytes(),
+    // One shared construction path with the DML-only release test: connect,
+    // build every service, run idempotent DML seeds. No runtime DDL.
+    let (state, seeds) = build_state(&config).await.map_err(|e| anyhow::anyhow!(e))?;
+    info!(
+        soc2_controls = seeds.soc2_controls,
+        governance_activities = seeds.governance_activities,
+        retention_classes = seeds.retention_classes,
+        awaiting_legal_input = seeds.awaiting_legal_input,
+        "Compliance services bootstrapped"
     );
-    // H-6: retention sweep — enforces the RET-001..023 registry durations
-    // for the stores this crate owns and writes a retention_report row per run.
-    let retention_sweeper = RetentionSweeper::new(
-        db.clone(),
-        config.gdpr.export_expiration_days,
-        config.gdpr.request_expiration_days,
-        config.audit.retention_days,
-    );
-
-    // Seed SOC2 control catalog (idempotent — uses INSERT ... ON CONFLICT).
-    if let Err(e) = soc2.seed_default_controls().await {
-        error!("Failed to seed SOC2 controls: {e}");
-    } else {
-        info!("SOC2 control catalog seeded");
-    }
-
-    // Ensure crate-owned tables exist (idempotent DDL; the compliance crate
-    // owns no numbered migration files).
-    if let Err(e) = gdpr.apply_outbox_migration().await {
-        error!("Failed to ensure dsr_verification_outbox: {e}");
-    } else {
-        info!("dsr_verification_outbox ensured");
-    }
-    if let Err(e) = breach.apply_migration().await {
-        error!("Failed to ensure breach_reports: {e}");
-    } else {
-        info!("breach_reports ensured");
-    }
-    if let Err(e) = retention_sweeper.apply_migration().await {
-        error!("Failed to ensure retention_report: {e}");
-    } else {
-        info!("retention_report ensured");
-    }
-
-    let http_client = reqwest::Client::builder()
-        .pool_max_idle_per_host(32)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("Failed to build HTTP client");
-
-    // SEC-15: Build DSAR rate limiter (Redis-backed with in-memory fallback)
-    let dsar_rate_limiter =
-        DsarRateLimiter::new(config.dsar_rate_limit.clone(), Some(redis.clone()));
-
-    let state = Arc::new(AppState {
-        risk_engine,
-        content_scanner,
-        audit_logger,
-        secret_manager,
-        gdpr,
-        soc2,
-        hipaa,
-        trust,
-        breach,
-        config: config.clone(),
-        db: db.clone(),
-        redis: redis.clone(),
-        http_client,
-        dsar_rate_limiter,
-        retention_sweeper,
-    });
 
     // Build router with middleware
     let cors = if config.cors_origin == "*" {
@@ -229,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     let cron_state = state.clone();
     // D: DSR verification-outbox flush — queues pending tokens as real mail
     // through the platform's system-email path (email_queue).
-    let outbox_flusher = DsrOutboxFlusher::new(db.clone(), config.gdpr.clone());
+    let outbox_flusher = DsrOutboxFlusher::new(state.db.clone(), config.gdpr.clone());
     let cron_handle = tokio::spawn(async move {
         run_cron_jobs(cron_state, outbox_flusher).await;
     });
@@ -245,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Shutting down...");
     cron_handle.abort();
-    db.close().await;
+    state.db.close().await;
 
     Ok(())
 }
@@ -375,8 +277,9 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
                     _ = sweep_ticker.tick() => {
                         // H-6: enforce the RET-001..023 registry durations for
                         // the stores this crate owns (event tables, gdpr_exports,
-                        // audit_logs via archive(), dsr outbox) and persist a
-                        // retention_report row making the policy observable.
+                        // audit_logs via archive(), dsr outbox), advance the
+                        // legally-restricted archive through expiry → deletion,
+                        // and persist a retention_report row.
                         match state.retention_sweeper.run_sweep(&state.audit_logger).await {
                             Ok(report) => {
                                 let deleted: i64 =
@@ -392,6 +295,9 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
                                     exports = report.gdpr_exports_deleted,
                                     outbox_purged = report.dsr_outbox_purged,
                                     audit_archived = report.audit_logs_archived,
+                                    archive_expired = report.archive_expired,
+                                    archive_deleted = report.archive_deleted,
+                                    archive_sources_deleted = report.archive_source_records_deleted,
                                     "Retention sweep completed — retention_report row written"
                                 );
                             }

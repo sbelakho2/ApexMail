@@ -35,6 +35,8 @@ pub struct MtaConfig {
     #[serde(default)]
     pub submission: SubmissionConfig,
     #[serde(default)]
+    pub verp: VerpConfig,
+    #[serde(default)]
     pub metrics: MetricsConfig,
     #[serde(default = "default_health_port")]
     pub health_port: u16,
@@ -262,6 +264,32 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
+/// VERP v2 authentication settings.
+///
+/// The bounce server verifies v2 tokens by recomputing an HMAC over
+/// (queue/send id, tenant, recipient, expiry); the same secret must be
+/// configured in the worker that mints the tokens (`VERP_HMAC_SECRET`).
+/// In production a missing/short secret is a STARTUP FAILURE whenever the
+/// bounce listener is enabled — without it, v2 bounces cannot be verified
+/// and the platform would silently stop honouring hard bounces. In
+/// development the listener still starts, but v2 verification stays
+/// disabled and every bounce is a non-authoritative observation (never a
+/// suppression), which the binary logs loudly at startup.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VerpConfig {
+    /// Whether v2 tokens are accepted (and, in the worker, minted).
+    #[serde(default = "default_true")]
+    pub v2_enabled: bool,
+    /// Shared HMAC secret (`VERP_HMAC_SECRET`, >= 32 bytes). Never
+    /// serialized into config dumps or logs.
+    #[serde(default, skip_serializing)]
+    pub hmac_secret: Option<String>,
+    /// Record v1 (unsigned) bounce addresses as observations. v1 can never
+    /// authorize suppression regardless of this flag.
+    #[serde(default = "default_true")]
+    pub record_v1_observations: bool,
+}
+
 // ── defaults ───────────────────────────────────────────────────────────────────
 
 impl Default for MtaConfig {
@@ -281,6 +309,7 @@ impl Default for MtaConfig {
             bounce: BounceConfig::default(),
             feedback: FeedbackConfig::default(),
             submission: SubmissionConfig::default(),
+            verp: VerpConfig::default(),
             dkim: DkimConfig::default(),
             spf: SpfConfig::default(),
             dmarc: DmarcConfig::default(),
@@ -424,6 +453,14 @@ impl_default!(
         port: default_metrics_port()
     }
 );
+impl_default!(
+    VerpConfig,
+    Self {
+        v2_enabled: true,
+        hmac_secret: None,
+        record_v1_observations: true,
+    }
+);
 
 fn default_env() -> String {
     "development".into()
@@ -517,6 +554,15 @@ fn default_max_msgs_per_ip_per_hour() -> u32 {
 }
 
 impl MtaConfig {
+    /// True when this configuration decides production-only fail-fast rules
+    /// (`NODE_ENV=production`, with `prod` accepted as the common alias).
+    pub fn is_production(&self) -> bool {
+        matches!(
+            self.node_env.trim().to_ascii_lowercase().as_str(),
+            "production" | "prod"
+        )
+    }
+
     /// Load configuration from environment variables.
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
@@ -614,6 +660,13 @@ impl MtaConfig {
                 selector: std::env::var("DKIM_SELECTOR").unwrap_or_else(|_| default_selector()),
                 default_key_path: std::env::var("DKIM_KEY_PATH").ok(),
                 key_directory: std::env::var("DKIM_KEY_DIR").ok(),
+            },
+            verp: VerpConfig {
+                v2_enabled: parse_bool_env("VERP_V2_ENABLED", true),
+                hmac_secret: std::env::var("VERP_HMAC_SECRET")
+                    .ok()
+                    .filter(|secret| !secret.trim().is_empty()),
+                record_v1_observations: parse_bool_env("VERP_RECORD_V1_OBSERVATIONS", true),
             },
             spf: SpfConfig {
                 strict_mode: parse_bool_env("SPF_STRICT_MODE", false),
@@ -791,6 +844,66 @@ impl MtaConfig {
             }
         }
 
+        // --- Production submission TLS fail-fast ---
+        // Port 25 may stay opportunistic STARTTLS, but submission accepts
+        // AUTH and therefore must never run without a usable certificate in
+        // production. Certificate parseability/expiry is checked by the
+        // binary at startup (x509); here the configuration must at least
+        // name the certificate and key.
+        if self.is_production() && self.submission.enabled {
+            if !self.inbound.tls.enabled {
+                errors.push(
+                    "production with submission enabled requires TLS_ENABLED=true (submission \
+                     accepts AUTH and must offer STARTTLS with a valid certificate)"
+                        .into(),
+                );
+            }
+            if self
+                .inbound
+                .tls
+                .cert_path
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                errors.push("production with submission enabled requires TLS_CERT_PATH".into());
+            }
+            if self
+                .inbound
+                .tls
+                .key_path
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                errors.push("production with submission enabled requires TLS_KEY_PATH".into());
+            }
+        }
+
+        // --- VERP v2 authentication ---
+        // The v2 bounce token is verified by recomputing an HMAC; without a
+        // strong shared secret the bounce listener cannot authenticate a
+        // single suppression. In production that is a startup failure (the
+        // platform would silently stop honouring hard bounces); elsewhere it
+        // is logged by the binary and every bounce stays an observation.
+        match self.verp.hmac_secret.as_deref() {
+            Some(secret) => {
+                if secret.trim().len() < apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN {
+                    errors.push(format!(
+                        "verp.hmac_secret (VERP_HMAC_SECRET) must be at least {} bytes",
+                        apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN
+                    ));
+                }
+            }
+            None if self.is_production() && self.bounce.enabled && self.verp.v2_enabled => {
+                errors.push(
+                    "production with the bounce listener enabled requires VERP_HMAC_SECRET \
+                     (>= 32 bytes, identical to the worker's): v2 bounce tokens cannot be \
+                     authenticated without it"
+                        .into(),
+                );
+            }
+            None => {}
+        }
+
         // --- required non-empty strings ---
         if self.database.connection_string.is_empty() {
             errors.push("database.connection_string must not be empty".into());
@@ -911,5 +1024,60 @@ mod tests {
             serde_json::from_str("{\"require_fcrdns\": true, \"arc_seal\": true}").unwrap();
         assert!(opted_in.require_fcrdns);
         assert!(opted_in.arc_seal);
+    }
+
+    #[test]
+    fn production_requires_verp_secret_with_bounce_enabled() {
+        let mut config = MtaConfig::default();
+        config.node_env = "production".into();
+        config.verp.hmac_secret = None;
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("VERP_HMAC_SECRET"),
+            "production must refuse a bounce listener without the v2 secret: {error}"
+        );
+
+        config.verp.hmac_secret = Some("s".repeat(32));
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            !error.contains("VERP_HMAC_SECRET"),
+            "a 32-byte secret satisfies the requirement: {error}"
+        );
+    }
+
+    #[test]
+    fn short_verp_secret_is_rejected_everywhere() {
+        let mut config = MtaConfig::default();
+        config.verp.hmac_secret = Some("too-short".into());
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("verp.hmac_secret"), "{error}");
+    }
+
+    #[test]
+    fn development_without_verp_secret_still_validates() {
+        // Dev hosts keep booting; the binary logs a loud warning and every
+        // bounce stays a non-authoritative observation.
+        let config = MtaConfig::default();
+        assert_eq!(config.node_env, "development");
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn production_submission_requires_tls_material() {
+        let mut config = MtaConfig::default();
+        config.node_env = "production".into();
+        config.verp.hmac_secret = Some("s".repeat(32));
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("TLS_ENABLED=true"),
+            "production submission without TLS must fail: {error}"
+        );
+        assert!(error.contains("TLS_CERT_PATH"), "{error}");
+
+        config.inbound.tls.enabled = true;
+        config.inbound.tls.cert_path = Some("/etc/apexmail/fullchain.pem".into());
+        config.inbound.tls.key_path = Some("/etc/apexmail/privkey.pem".into());
+        assert!(config.validate().is_ok(), "{:?}", config.validate());
     }
 }

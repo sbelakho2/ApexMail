@@ -55,7 +55,68 @@ CREATE TABLE IF NOT EXISTS data_subject_requests (
     processed_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ NOT NULL,
-    result JSONB
+    result JSONB,
+    -- Migration 213 statutory clock.
+    received_at TIMESTAMPTZ,
+    identity_verified_at TIMESTAMPTZ,
+    statutory_due_at TIMESTAMPTZ,
+    extension_due_at TIMESTAMPTZ,
+    extension_reason TEXT,
+    extension_notified_at TIMESTAMPTZ,
+    CONSTRAINT dsr_extension_requires_justification CHECK (
+        extension_due_at IS NULL
+        OR (extension_reason IS NOT NULL AND length(btrim(extension_reason)) > 0
+            AND extension_notified_at IS NOT NULL)
+    )
+);
+-- Migration 213: the DSR verification outbox (previously runtime-created).
+CREATE TABLE IF NOT EXISTS dsr_verification_outbox (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    verification_token TEXT NOT NULL,
+    verify_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at TIMESTAMPTZ
+);
+-- Migration 214: retention classes; erasure resolves the statutory class.
+CREATE TABLE IF NOT EXISTS retention_classes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    statutory BOOLEAN NOT NULL DEFAULT FALSE,
+    minimum_days INTEGER NOT NULL CHECK (minimum_days >= 0),
+    maximum_days INTEGER,
+    retention_days INTEGER NOT NULL CHECK (retention_days >= 0),
+    legal_basis_reference TEXT,
+    jurisdiction VARCHAR(10),
+    customer_selectable BOOLEAN NOT NULL DEFAULT FALSE,
+    registry_category_id TEXT,
+    review_status VARCHAR(30) NOT NULL DEFAULT 'legal_input_required',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Migration 213: legally-restricted archive.
+CREATE TABLE IF NOT EXISTS legal_retention_archive (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    subject_email_hash TEXT NOT NULL,
+    source_table TEXT NOT NULL,
+    source_record_id TEXT NOT NULL,
+    retention_class_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    state VARCHAR(30) NOT NULL DEFAULT 'legally_restricted',
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    statutory_expiry_at TIMESTAMPTZ NOT NULL,
+    statutory_expired_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    disclosure JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_table, source_record_id)
 );
 CREATE TABLE IF NOT EXISTS gdpr_exports (
     id TEXT PRIMARY KEY,
@@ -166,6 +227,10 @@ CREATE TABLE IF NOT EXISTS invoices (
     tenant_id TEXT NOT NULL,
     amount BIGINT NOT NULL DEFAULT 0,
     billing_address TEXT,
+    -- Canonical (052/056/076) accounting column the legal archive needs to
+    -- compute the seven-year statutory expiry: issued_at.
+    issued_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -206,7 +271,29 @@ CREATE TABLE IF NOT EXISTS data_subject_requests (
     processed_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ NOT NULL,
-    result JSONB
+    result JSONB,
+    received_at TIMESTAMPTZ,
+    identity_verified_at TIMESTAMPTZ,
+    statutory_due_at TIMESTAMPTZ,
+    extension_due_at TIMESTAMPTZ,
+    extension_reason TEXT,
+    extension_notified_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS retention_classes (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    statutory BOOLEAN NOT NULL DEFAULT FALSE,
+    minimum_days INTEGER NOT NULL CHECK (minimum_days >= 0),
+    maximum_days INTEGER,
+    retention_days INTEGER NOT NULL CHECK (retention_days >= 0),
+    legal_basis_reference TEXT,
+    jurisdiction VARCHAR(10),
+    customer_selectable BOOLEAN NOT NULL DEFAULT FALSE,
+    registry_category_id TEXT,
+    review_status VARCHAR(30) NOT NULL DEFAULT 'legal_input_required',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS events_backing (
     id TEXT PRIMARY KEY,
@@ -695,6 +782,12 @@ async fn erasure_missing_table_is_reported_as_skipped() {
         completed_at: None,
         expires_at: chrono::Utc::now(),
         result: None,
+        received_at: Some(chrono::Utc::now()),
+        identity_verified_at: None,
+        statutory_due_at: Some(chrono::Utc::now() + chrono::Duration::days(30)),
+        extension_due_at: None,
+        extension_reason: None,
+        extension_notified_at: None,
     };
 
     let gdpr = automation(pool.clone());
@@ -1715,6 +1808,31 @@ CREATE TABLE IF NOT EXISTS tenants (
 );
 CREATE INDEX IF NOT EXISTS idx_tenants_legal_hold ON tenants (id) WHERE legal_hold;
 -- F4: the enterprise zero-retention contract flag (migration 092).
+-- Migration 213: the per-run retention report (previously runtime-created).
+CREATE TABLE IF NOT EXISTS retention_report (
+    id TEXT PRIMARY KEY,
+    ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    plan_tier TEXT NOT NULL DEFAULT 'default',
+    report JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS legal_retention_archive (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    subject_email_hash TEXT NOT NULL,
+    source_table TEXT NOT NULL,
+    source_record_id TEXT NOT NULL,
+    retention_class_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    state VARCHAR(30) NOT NULL DEFAULT 'legally_restricted',
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    statutory_expiry_at TIMESTAMPTZ NOT NULL,
+    statutory_expired_at TIMESTAMPTZ,
+    deleted_at TIMESTAMPTZ,
+    disclosure JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_table, source_record_id)
+);
 CREATE TABLE IF NOT EXISTS ent_compliance_configs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id VARCHAR(26) NOT NULL UNIQUE,
@@ -1850,7 +1968,6 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     }
 
     let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 0);
-    sweeper.apply_migration().await.expect("report table");
     let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
 
     // Expired rows for tenant_a deleted; tenant_b (legal hold) retained;
@@ -2012,7 +2129,6 @@ async fn retention_sweep_honors_per_tenant_retention_and_zero_retention() {
     );
     audit.initialize().await.expect("audit init");
     let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 365);
-    sweeper.apply_migration().await.expect("report table");
     let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
 
     let events = report
@@ -2185,7 +2301,6 @@ async fn retention_sweep_reports_missing_stores() {
     audit.initialize().await.expect("audit init");
 
     let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 365);
-    sweeper.apply_migration().await.expect("report table");
     let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
 
     let messages = report
@@ -2223,7 +2338,6 @@ async fn dsr_submit_writes_verification_outbox() {
         return;
     };
     let gdpr = automation(pool.clone());
-    gdpr.apply_outbox_migration().await.expect("outbox table");
 
     let tenant = unique_tenant();
     let subject = format!("outbox-{}@x.com", Uuid::new_v4().simple());
@@ -2387,7 +2501,6 @@ async fn dsr_outbox_flush_queues_system_email_and_marks_sent() {
         return;
     };
     let gdpr = automation(pool.clone());
-    gdpr.apply_outbox_migration().await.expect("outbox table");
     let domain_id = seed_system_domain(&pool).await;
 
     let tenant = unique_tenant();
@@ -2483,7 +2596,6 @@ async fn dsr_outbox_flush_retries_then_caps_attempts() {
         return;
     };
     let gdpr = automation(pool.clone());
-    gdpr.apply_outbox_migration().await.expect("outbox table");
 
     let tenant = unique_tenant();
     let emails: Vec<String> = (0..3)
@@ -2572,99 +2684,14 @@ async fn dsr_outbox_flush_retries_then_caps_attempts() {
     assert_eq!(queue_rows, 0, "nothing was ever queued");
 }
 
-// ── B: breach notification workflow ────────────────────────────────────────
+// ── B: breach notification state machine ───────────────────────────────────
 
-/// The breach workflow records reports with GDPR 72h / HIPAA 60-day
-/// deadlines, audits each transition, and signs the notification document.
-#[tokio::test]
-async fn breach_workflow_tracks_lifecycle_and_deadlines() {
-    let Some(pool) = test_pool("breach", MAIN_SCHEMA).await else {
-        return;
-    };
-    let audit = std::sync::Arc::new(compliance::audit_logger::AuditLogger::new(
-        pool.clone(),
-        AuditConfig {
-            retention_days: 365,
-            hash_chain_enabled: true,
-            signing_key: "breach-audit-key-0123456789abcdef".into(),
-        },
-    ));
-    audit.initialize().await.expect("audit init");
-    let notifier = compliance::breach_notification::BreachNotifier::new(
-        pool.clone(),
-        audit.clone(),
-        vec!["dpo@example.com".into()],
-        b"breach-test-signing-key".to_vec(),
-    );
-    notifier.apply_migration().await.expect("breach table");
-
-    let tenant = short_tenant();
-    let report = notifier
-        .report_breach(
-            compliance::breach_notification::BreachReportInput {
-                tenant_id: tenant.clone(),
-                affected_records: 1500,
-                data_types: vec!["email".into(), "name".into()],
-                description: "Unauthorized access to mailing list database".into(),
-                severity: "HIGH".into(),
-            },
-            "db-test",
-        )
-        .await
-        .expect("breach reported");
-
-    assert_eq!(report.status, "active");
-    assert_eq!(report.severity, "high", "severity is normalized");
-    let discovered = report.discovered_at;
-    let gdpr_deadline = report.gdpr_deadline.expect("gdpr deadline");
-    let hipaa_deadline = report.hipaa_deadline.expect("hipaa deadline");
-    assert_eq!(
-        (gdpr_deadline - discovered).num_hours(),
-        72,
-        "GDPR deadline is 72h after discovery"
-    );
-    assert_eq!(
-        (hipaa_deadline - discovered).num_days(),
-        60,
-        "HIPAA deadline is 60 days after discovery"
-    );
-    let doc = report
-        .notification_document
-        .as_ref()
-        .expect("signed notification document stored");
-    assert!(doc.get("signature").is_some(), "document is signed");
-    assert_eq!(doc["severity"], "high");
-
-    // Lifecycle transitions are audited and reflected in status.
-    let notified = notifier.notify_dpa(&report.id, "db-test").await.unwrap();
-    assert_eq!(notified.status, "notified_dpa");
-    assert!(notified.dpa_notified_at.is_some());
-
-    let subjects = notifier
-        .notify_subjects(&report.id, "db-test")
-        .await
-        .unwrap();
-    assert_eq!(subjects.status, "notified_subjects");
-    assert!(subjects.subjects_notified_at.is_some());
-
-    let resolved = notifier.resolve(&report.id, "db-test").await.unwrap();
-    assert_eq!(resolved.status, "resolved");
-    assert!(resolved.resolved_at.is_some());
-
-    // The audit trail records the report and every transition.
-    let audit_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE resource_id = $1")
-            .bind(&report.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(audit_rows, 4, "report + dpa + subjects + resolve audited");
-
-    // Tenant listing finds the report.
-    let listed = notifier.list_for_tenant(&tenant, None).await.unwrap();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].id, report.id);
-}
+/// The breach workflow moved to the canonical-schema release tests
+/// (`tests/gdpr_governance_release_tests.rs`): the state machine
+/// (detected → triage → notifiable → authority_queued → authority_submitted →
+/// authority_acknowledged), the mandatory receipt gate and the Art. 34
+/// subject-notification outbox are exercised there against the REAL migration
+/// chain, not a hand-written subset.
 
 // ── F82: invoice identity via the immutable billing snapshot ───────────────
 
@@ -2809,6 +2836,12 @@ async fn invoice_erasure_redacts_only_the_subject_snapshot() {
         completed_at: None,
         expires_at: chrono::Utc::now(),
         result: None,
+        received_at: Some(chrono::Utc::now()),
+        identity_verified_at: None,
+        statutory_due_at: Some(chrono::Utc::now() + chrono::Duration::days(30)),
+        extension_due_at: None,
+        extension_reason: None,
+        extension_notified_at: None,
     };
     let result = gdpr
         .erase_store(

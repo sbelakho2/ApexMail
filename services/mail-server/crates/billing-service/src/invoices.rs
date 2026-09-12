@@ -62,8 +62,120 @@ pub const BILLING_ADDRESS_SNAPSHOT_VERSION: u32 = 1;
 /// Calculate the VAT rate and amount for a given subtotal, customer country
 /// and optional VAT number.
 ///
-/// Delegates to [`billing_common::vat_rates::calculate_vat`].
+/// Delegates to [`billing_common::vat_rates::calculate_vat`]. Reverse charge
+/// is NOT authorised by this wrapper (it carries no evidence) — use
+/// [`calculate_vat_for_invoice`] / `calculate_vat_with_evidence` when
+/// authoritative VIES evidence is available.
 pub use billing_common::vat_rates::calculate_vat;
+
+use billing_common::vat_rates::{self, VatValidationEvidence};
+
+/// Load the newest authoritative VAT evidence for a tenant's VAT number.
+///
+/// Returns `None` when there is no evidence row (or the evidence cannot be
+/// authoritative) — callers then charge the normal destination rate, because
+/// structural validity is not evidence. A database error (e.g. the table is
+/// absent mid-upgrade) also degrades to `None` (fail closed to normal VAT)
+/// with a warning, never to a silent zero-rate.
+pub async fn load_vat_evidence_for_tenant(
+    pool: &PgPool,
+    tenant_id: &str,
+    vat_number: &str,
+) -> Option<VatValidationEvidence> {
+    load_vat_evidence_in(pool, tenant_id, vat_number).await
+}
+
+/// Executor-generic variant of [`load_vat_evidence_for_tenant`] for callers
+/// inside a transaction.
+pub async fn load_vat_evidence_in<'e, E>(
+    executor: E,
+    tenant_id: &str,
+    vat_number: &str,
+) -> Option<VatValidationEvidence>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let row: Result<
+        Option<(
+            Uuid,
+            String,
+            String,
+            String,
+            bool,
+            Option<chrono::NaiveDate>,
+            Option<chrono::NaiveDate>,
+            Option<String>,
+        )>,
+        sqlx::Error,
+    > = sqlx::query_as(
+        r#"
+        SELECT id, vat_number, country, source, valid, valid_from, valid_until, outage_state
+        FROM vat_validation_evidence
+        WHERE (tenant_id = $1 OR customer_id = $1)
+          AND UPPER(REPLACE(vat_number, ' ', '')) = UPPER(REPLACE($2, ' ', ''))
+        ORDER BY requested_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(vat_number)
+    .fetch_optional(executor)
+    .await;
+
+    match row {
+        Ok(Some((
+            id,
+            vat_number,
+            country,
+            source,
+            valid,
+            valid_from,
+            valid_until,
+            outage_state,
+        ))) => VatValidationEvidence::from_authority_row(
+            Some(id),
+            vat_number,
+            country,
+            &source,
+            valid,
+            valid_from,
+            valid_until,
+            outage_state,
+        ),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                error = %error,
+                "VAT evidence lookup failed — charging normal VAT (fail closed)"
+            );
+            None
+        }
+    }
+}
+
+/// The invoice writer's VAT computation: reverse charge only against
+/// authoritative, in-force VIES evidence for the invoice's tax-point date.
+/// Returns the rate and amount together with the evidence id to snapshot.
+pub fn calculate_vat_for_invoice(
+    subtotal: i64,
+    country: &str,
+    vat_number: Option<&str>,
+    evidence: Option<&VatValidationEvidence>,
+    at: chrono::NaiveDate,
+) -> (f64, i64, Option<Uuid>) {
+    let (rate, amount) =
+        vat_rates::calculate_vat_with_evidence(subtotal, country, vat_number, evidence, at);
+    let authorised = vat_number.map_or(false, |vat| {
+        vat_rates::reverse_charge_authorised(country, vat, evidence, at)
+    });
+    let evidence_id = if authorised {
+        evidence.and_then(|evidence| evidence.id)
+    } else {
+        None
+    };
+    (rate, amount, evidence_id)
+}
 
 /// Generate the next invoice number in `YYYY-NNNNNN` format.
 pub async fn generate_invoice_number(pool: &PgPool) -> Result<String, InvoiceError> {
@@ -291,7 +403,25 @@ pub async fn create_invoice_in_tx(
         line_amounts.push(amount);
     }
     let subtotal: i64 = line_amounts.iter().sum();
-    let (vat_rate, _) = calculate_vat(subtotal, &country, addr.vat_number.as_deref());
+    // Reverse charge (0 %) requires authoritative VIES evidence for this VAT
+    // number; a merely structural number charges the destination rate. The
+    // evidence row id is snapshotted onto the invoice.
+    let vat_evidence = match addr
+        .vat_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|vat| !vat.is_empty())
+    {
+        Some(vat) => load_vat_evidence_in(&mut **tx, &input.tenant_id, vat).await,
+        None => None,
+    };
+    let (vat_rate, _, vat_evidence_id) = calculate_vat_for_invoice(
+        subtotal,
+        &country,
+        addr.vat_number.as_deref(),
+        vat_evidence.as_ref(),
+        Utc::now().date_naive(),
+    );
     let vat_allocations = allocate_vat_across_lines(&line_amounts, vat_rate);
 
     let mut line_items = Vec::with_capacity(input.line_items.len());
@@ -345,14 +475,14 @@ pub async fn create_invoice_in_tx(
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
             billing_country, vat_rate, overage_period, billing_address,
-            billing_registry_code,
+            billing_registry_code, vat_evidence_id,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
             $5, $8, $6, $7, $8, $9,
             $10, $11, $12, $13,
             $14, $15, $16, $17,
-            $18,
+            $18, $19,
             $10, $10
         )
         "#,
@@ -375,9 +505,32 @@ pub async fn create_invoice_in_tx(
     .bind(input.overage_period)
     .bind(address_snapshot)
     .bind(addr.registry_code)
+    .bind(vat_evidence_id)
     .execute(&mut **tx)
     .await
     .map_err(InvoiceError::Db)?;
+
+    // Recognition ledger (migration 218): the general scheme recognises the
+    // supply in the invoice's issue period; cash-accounting tenants
+    // recognise on payment (or the third-month fallback) and deliberately
+    // get no entry yet. KMD aggregates this ledger.
+    crate::vat_recognition::materialize_invoice_recognition(
+        tx,
+        &crate::vat_recognition::InvoiceRecognitionInput {
+            invoice_id: id,
+            tenant_id: input.tenant_id.clone(),
+            currency: currency.clone(),
+            subtotal_cents: subtotal,
+            vat_rate,
+            vat_cents: vat_total,
+            issued_at: now,
+            paid_at: None,
+            billing_country: Some(country.to_uppercase()),
+        },
+        now,
+    )
+    .await
+    .map_err(InvoiceError::Recognition)?;
 
     Ok(Invoice {
         id,
@@ -856,6 +1009,8 @@ pub enum InvoiceError {
     NoBillingAddress,
     #[error("PDF generation error: {0}")]
     PdfGeneration(String),
+    #[error("VAT recognition error: {0}")]
+    Recognition(String),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 }
@@ -1097,10 +1252,35 @@ mod tests {
     }
 
     #[test]
-    fn vat_eu_b2b_reverse_charge() {
+    fn vat_eu_b2b_reverse_charge_requires_evidence() {
+        // No VIES evidence: a well-formed DE VAT number charges the
+        // destination rate (structurally valid is not evidence).
         let (rate, amt) = calculate_vat(10_000, "DE", Some("DE123456789"));
+        assert_eq!(rate, 19.0);
+        assert_eq!(amt, 1_900);
+
+        // With valid, in-force evidence the same invoice reverse-charges,
+        // and the writer returns the evidence id to snapshot.
+        let evidence = VatValidationEvidence {
+            id: Some(Uuid::new_v4()),
+            vat_number: "DE123456789".into(),
+            country: "DE".into(),
+            source: vat_rates::VatValidationSource::Vies,
+            outcome: vat_rates::VatValidationOutcome::Valid,
+            valid_from: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            valid_until: None,
+            outage_state: None,
+        };
+        let (rate, amount, evidence_id) = calculate_vat_for_invoice(
+            10_000,
+            "DE",
+            Some("DE123456789"),
+            Some(&evidence),
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
+        );
         assert_eq!(rate, 0.0);
-        assert_eq!(amt, 0);
+        assert_eq!(amount, 0);
+        assert_eq!(evidence_id, evidence.id);
     }
 
     #[test]

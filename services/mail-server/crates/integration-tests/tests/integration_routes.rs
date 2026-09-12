@@ -597,7 +597,12 @@ mod billing {
         let ent = plans.iter().find(|p| p.name == "enterprise").unwrap();
         assert!(ent.features.sso_enabled);
         assert!(ent.features.dedicated_ip);
-        assert!(ent.features.audit_logs);
+        // audit_logs is NotYetImplemented (no customer audit access surface)
+        // and is no longer seeded on any plan — see
+        // billing-entitlements::PLAN_FEATURE_CLASSIFICATION.
+        assert!(!ent.features.audit_logs);
+        assert!(ent.features.send_time_optimization);
+        assert!(ent.features.advanced_analytics);
     }
 
     #[test]

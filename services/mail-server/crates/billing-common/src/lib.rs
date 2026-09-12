@@ -16,3 +16,4 @@ pub mod cost_throttle;
 pub mod csv;
 pub mod proration;
 pub mod vat_rates;
+pub mod vat_recognition;

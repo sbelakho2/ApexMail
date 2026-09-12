@@ -7,14 +7,28 @@
 //! extrapolations of observed successful sends, and anomalies are threshold
 //! comparisons. Output fields are labelled `heuristic*` accordingly.
 //!
+//! **Fixed horizons — there is deliberately NO `window` parameter.** Earlier
+//! versions accepted `?window=` and then ignored it, which made the parameter
+//! cosmetic. Every endpoint here is defined on fixed, documented horizons
+//! ([`FIXED_HORIZONS`], also returned as `fixedHorizons` on the aggregate
+//! response):
+//!
+//! * "today" (current UTC day) and the last 7 / 14 / 30 days for volume,
+//!   queue depth and churn-risk signals;
+//! * the last 90 days for the long volume trend;
+//! * the last 30 days as the bounce baseline, compared against the last 24h.
+//!
+//! A requested `?window=` is simply not part of the API; clients must not
+//! expect it to change any number.
+//!
 //! Volume metrics count DISTINCT messages with a successful `sent` event
 //! (event-occurrence timestamps) — never `messages.created_at`, which counts
 //! mail that may never have left the queue.
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -28,16 +42,11 @@ pub fn router() -> Router<AppState> {
         .route("/anomalies", get(get_anomalies))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PredictiveQuery {
-    #[serde(default = "default_window")]
-    pub window: String,
-}
-
-fn default_window() -> String {
-    "90d".into()
-}
+/// The fixed horizons every endpoint in this module uses. Exposed in the
+/// aggregate response as `fixedHorizons`; there is no client-selectable
+/// window (the old `?window=` was parsed and then ignored — cosmetic).
+pub const FIXED_HORIZONS: &str =
+    "fixed horizons: today, last 7/14/30 days, last 90 days (trend), 30-day bounce baseline vs last 24h; no window parameter";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +57,8 @@ pub struct PredictiveAnalyticsResponse {
     pub forecast: VolumeForecast,
     /// How to read every number in this response (heuristic provenance).
     pub method: String,
+    /// The fixed horizons this response is computed on (no client window).
+    pub fixed_horizons: String,
     pub generated_at: String,
 }
 
@@ -158,17 +169,6 @@ struct InactiveTenantRow {
 struct VolumeRow {
     date: String,
     volume: i64,
-}
-
-fn parse_window_days(window: &str) -> i64 {
-    match window {
-        "30d" => 30,
-        "60d" => 60,
-        "90d" => 90,
-        "180d" => 180,
-        "365d" | "1y" => 365,
-        _ => 90,
-    }
 }
 
 /// Default sending-pipeline queue capacity: the backlog depth at which the
@@ -332,13 +332,10 @@ async fn event_bounce_rate(db: &sqlx::PgPool, window_hours: i32, exclude_last_ho
 async fn get_predictive_analytics(
     State(state): State<AppState>,
     auth: AuthUser,
-    Query(params): Query<PredictiveQuery>,
 ) -> Result<Json<PredictiveAnalyticsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
     let db = &state.db;
-    let window = parse_window_days(&params.window);
-    let _interval = format!("{window} days");
     let now = chrono::Utc::now();
 
     // ─── Churn Risk ─────────────────────────────────────────────────────
@@ -619,6 +616,7 @@ async fn get_predictive_analytics(
         anomalies,
         forecast,
         method: HEURISTIC_METHOD.into(),
+        fixed_horizons: FIXED_HORIZONS.into(),
         generated_at: gen_at,
     }))
 }
@@ -732,7 +730,6 @@ async fn get_churn_risk(
 async fn get_capacity_planning(
     State(state): State<AppState>,
     auth: AuthUser,
-    Query(_params): Query<PredictiveQuery>,
 ) -> Result<Json<CapacityPlanning>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
@@ -937,9 +934,56 @@ mod tests {
         assert_eq!(classify_risk(5, false, 0.0), "low");
     }
 
+    /// There is NO client-selectable window: the old `window` query parameter
+    /// was parsed and then ignored by every major calculation (purely
+    /// cosmetic). The fixed horizons are a documented constant and are
+    /// returned in the response, so clients can see exactly what they get.
     #[test]
-    fn parse_window_days_defaults() {
-        assert_eq!(parse_window_days("unknown"), 90);
+    fn fixed_horizons_are_documented_and_not_client_selectable() {
+        for horizon in ["today", "7", "14", "30", "90"] {
+            assert!(
+                FIXED_HORIZONS.contains(horizon),
+                "fixed horizons must document {horizon}: {FIXED_HORIZONS}"
+            );
+        }
+        assert!(FIXED_HORIZONS.contains("no window parameter"));
+        // The response carries the same string (field is `fixedHorizons`).
+        let response = PredictiveAnalyticsResponse {
+            churn_risk: ChurnRiskDashboard {
+                at_risk_tenants: 0,
+                high_risk_count: 0,
+                medium_risk_count: 0,
+                heuristic_churn_risk_share: 0.0,
+                top_risk_signals: Vec::new(),
+                at_risk_tenants_list: Vec::new(),
+            },
+            capacity: CapacityPlanning {
+                current_daily_volume: 0,
+                current_monthly_volume: 0,
+                volume_trend_30d: Vec::new(),
+                volume_trend_90d: Vec::new(),
+                heuristic_projected_30d_volume: 0,
+                heuristic_projected_90d_volume: 0,
+                weekly_growth_rate: 0.0,
+                capacity_utilization: 0.0,
+                days_until_capacity_limit: None,
+            },
+            anomalies: Vec::new(),
+            forecast: VolumeForecast {
+                current_volume: 0,
+                heuristic_next_week: 0,
+                heuristic_next_month: 0,
+                heuristic_next_quarter: 0,
+                variability_band: "unestimated".into(),
+                method: HEURISTIC_METHOD.into(),
+            },
+            method: HEURISTIC_METHOD.into(),
+            fixed_horizons: FIXED_HORIZONS.into(),
+            generated_at: "1970-01-01T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&response).expect("serialize predictive response");
+        assert!(json.contains("fixedHorizons"));
+        assert!(!json.contains("\"window\""));
     }
 
     #[test]

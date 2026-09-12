@@ -616,6 +616,24 @@ pub struct DataSubjectRequest {
     pub completed_at: Option<DateTime<Utc>>,
     pub expires_at: DateTime<Utc>,
     pub result: Option<serde_json::Value>,
+    /// When the request was RECEIVED — the GDPR Art. 12(3) clock start.
+    #[serde(default)]
+    pub received_at: Option<DateTime<Utc>>,
+    /// When the requester's identity was verified. Its own recorded event;
+    /// verification never restarts the response clock.
+    #[serde(default)]
+    pub identity_verified_at: Option<DateTime<Utc>>,
+    /// Persisted statutory deadline: `received_at` + one calendar month.
+    #[serde(default)]
+    pub statutory_due_at: Option<DateTime<Utc>>,
+    /// Extended deadline (statutory + up to two further months, Art. 12(3)),
+    /// present only with a reason and a notification timestamp.
+    #[serde(default)]
+    pub extension_due_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub extension_reason: Option<String>,
+    #[serde(default)]
+    pub extension_notified_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -634,6 +652,11 @@ pub struct DataSubjectRequestResult {
     /// True when the result requires human follow-up (rectification review).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review_required: bool,
+    /// Erasure disclosure (Art. 17 + statutory retention): records the
+    /// erasure did NOT delete, each with its source, reason, retention class
+    /// and `retain_until`. Present on erasure results; `None` elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_disclosure: Option<serde_json::Value>,
 }
 
 /// API response for submitting a data-subject request.
@@ -650,6 +673,10 @@ pub struct DataSubjectRequestResponse {
     pub status: RequestStatus,
     pub requested_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// When the request was received (Art. 12(3) clock start).
+    pub received_at: Option<DateTime<Utc>>,
+    /// Persisted statutory deadline: receipt + one calendar month.
+    pub statutory_due_at: Option<DateTime<Utc>>,
     /// Instructions the caller must convey to the data subject.
     pub verification: serde_json::Value,
     /// Whether the verification token was delivered out-of-band by this
@@ -854,6 +881,12 @@ mod tests {
             completed_at: None,
             expires_at: Utc::now(),
             result: None,
+            received_at: Some(Utc::now()),
+            identity_verified_at: None,
+            statutory_due_at: Some(Utc::now()),
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert!(
@@ -873,6 +906,8 @@ mod tests {
             status: RequestStatus::PendingVerification,
             requested_at: Utc::now(),
             expires_at: Utc::now(),
+            received_at: Some(Utc::now()),
+            statutory_due_at: Some(Utc::now()),
             verification: serde_json::json!({"method": "manual"}),
             token_delivered: false,
         };

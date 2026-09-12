@@ -1946,6 +1946,11 @@ async fn apply_wallet_credit(state: &AppState, invoice: &Invoice) -> Result<i64,
         .await
         .map_err(|error| format!("wallet transaction commit failed: {error}"))?;
 
+    // Statutory ledger: post the wallet settlement (Dr wallet liability,
+    // Cr AR) from the allocation that just committed. Idempotent on the
+    // allocation's unique operation id.
+    crate::accounting_postings::post_payment_allocation(&state.db, &operation_id).await;
+
     let _ = lock;
     Ok(applied_cents)
 }
@@ -1999,6 +2004,11 @@ async fn finalize_collection(
             requested_status = status,
             "usage invoice collection: invoice no longer draft — status left untouched"
         );
+    } else {
+        // Statutory ledger: the invoice just left draft, so post its
+        // finalization entry (Dr AR, Cr revenue, Cr output VAT) in this
+        // same transaction. Idempotent on the invoice source identity.
+        crate::accounting_postings::post_invoice_issued_in(&mut tx, invoice.id).await;
     }
 
     sqlx::query(

@@ -1,0 +1,57 @@
+[package]
+name = "outbound-mta"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Recipient-facing outbound MTA: durable queueing, MX resolution, retry/TLS/source-IP policy, DSNs, idempotent acceptance"
+
+[lib]
+name = "outbound_mta"
+path = "src/lib.rs"
+
+[[bin]]
+name = "outbound-mta"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates (reuse only: MX lookup helpers + the canonical warmup schedule)
+apexmail-dns-resolver = { path = "../dns-resolver" }
+mail-common = { path = "../mail-common" }
+
+# Async runtime
+tokio.workspace = true
+async-trait.workspace = true
+
+# Database (durable queue / acceptance ledger)
+sqlx.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Logging & Observability
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# TLS
+rustls.workspace = true
+# NOTE: tokio-rustls's default `aws_lc_rs` feature is active here; the
+# workspace `rustls` pin adds `ring`, leaving two crypto providers in the
+# graph. `crate::tls::client_config` therefore installs the ring provider
+# explicitly before the first ClientConfig::builder() call.
+tokio-rustls.workspace = true
+webpki-roots = "0.26"
+
+# HTTP (health endpoint)
+axum.workspace = true
+
+# Utils
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "macros"] }

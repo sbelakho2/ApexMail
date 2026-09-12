@@ -400,9 +400,11 @@ New dedicated IPs follow a 45-day warmup schedule:
 | 8-14 | 1,000-2,500 | Increase gradually |
 | 15-28 | 5,000-10,000 | Watch for blocks |
 | 29-44 | 25,000-50,000 | Approach normal volume |
-| 45+ | Unlimited | Full production |
+| 45-54 | 75,000-100,000 | Ramps continue |
+| 55-59 | 250,000 | Final ramp days |
+| 60+ | Unlimited | Full production |
 
-During warmup, excess traffic overflows to SES shared sending automatically. No manual configuration needed.
+During warmup, sends that exceed the IP's daily cap are deferred to the next UTC day; they do NOT overflow to SES shared sending. No manual configuration needed.
 
 ---
 

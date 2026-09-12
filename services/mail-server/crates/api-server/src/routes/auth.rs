@@ -1972,6 +1972,16 @@ async fn login(
     // accounts is rate-limited identically to normal accounts; only the
     // policy disclosure moves after verification.
     if tenant_sso_enforced(&state.db, &user.tenant_id).await? {
+        // Entitlement gate: honouring SSO enforcement hands the tenant the
+        // SSO capability, so the plan must include `sso_enabled`. A tenant
+        // whose configuration enforces SSO without the entitlement is
+        // refused (403) instead of silently receiving an unbought feature.
+        crate::entitlements::require_feature(
+            &state,
+            &user.tenant_id,
+            billing_entitlements::FeatureKey::Sso,
+        )
+        .await?;
         tracing::info!(
             tenant_id = %user.tenant_id,
             "password login rejected: tenant enforces SSO"

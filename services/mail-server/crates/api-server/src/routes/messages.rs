@@ -9,11 +9,14 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use billing_service::types::MeterEventType;
+use billing_service::send_admission::{
+    self, AdmissionMeter, PostgresAdmissionBackend, SendAdmission, SendAdmissionError,
+    SendAdmissionRequest, SendAdmissionService,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -901,13 +904,12 @@ fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
         }
     }
 
-    // F55: the category is SERVER-OWNED — validated and normalized here,
-    // never persisted raw.
+    // F55: the category is SERVER-OWNED — validated and normalized through
+    // the SAME shared helper the SMTP submission admission uses, never
+    // persisted raw.
     if let Some(category) = body.category.as_deref() {
-        if apexmail_lib::email_headers::message_category::validate(category).is_none() {
-            errors.push(format!(
-                "category must be 1–100 characters of letters, digits, '-', '_' or spaces (received '{category}')"
-            ));
+        if send_admission::normalize_category(Some(category)).is_err() {
+            errors.push(invalid_category_message(category));
         }
     }
 
@@ -970,13 +972,13 @@ fn queue_priority_of(body: &SendMessageRequest) -> i32 {
         .unwrap_or(QUEUE_PRIORITY_DEFAULT)
 }
 
-/// F55: the normalized server-owned category for the insert (validated
-/// beforehand; defaults to `marketing`).
-fn message_category_of(body: &SendMessageRequest) -> String {
-    body.category
-        .as_deref()
-        .and_then(apexmail_lib::email_headers::message_category::validate)
-        .unwrap_or_else(|| apexmail_lib::email_headers::message_category::MARKETING.to_string())
+/// F55: the endpoint's category validation message. The value itself is
+/// normalized by the shared admission service (`send_admission::
+/// normalize_category`), which is also what the SMTP submission path calls.
+fn invalid_category_message(raw: &str) -> String {
+    format!(
+        "category must be 1–100 characters of letters, digits, '-', '_' or spaces (received '{raw}')"
+    )
 }
 
 /// F48: one parsed mailbox in the queue row's MIME header map — the structured
@@ -1467,21 +1469,14 @@ async fn suppressed_recipients(
     }
 
     let recipient_list: Vec<String> = recipient_set.into_iter().collect();
-    let mut suppressed: Vec<String> = sqlx::query_scalar(
-        "SELECT LOWER(email) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = ANY($2)",
-    )
-    .bind(tenant_id)
-    .bind(&recipient_list)
-    .fetch_all(db)
-    .await
-    .map_err(|error| {
-        tracing::error!(error = %error, tenant_id = %tenant_id, "suppression lookup failed");
-        ApiError::Internal("suppression lookup error".into())
-    })?;
-
-    suppressed.sort();
-    suppressed.dedup();
-    Ok(suppressed)
+    // THE canonical lookup lives in the shared admission module so the REST
+    // validation path and the SMTP admission gate can never drift.
+    send_admission::suppressed_recipients_in_db(db, tenant_id, &recipient_list)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %tenant_id, "suppression lookup failed");
+            ApiError::Internal("suppression lookup error".into())
+        })
 }
 
 async fn insert_message_and_queue(
@@ -1492,6 +1487,10 @@ async fn insert_message_and_queue(
     metadata: &Option<serde_json::Value>,
     idempotency_key: Option<&str>,
     domain_id: Option<String>,
+    // F55: the admission-validated, server-owned category. It is a required
+    // input (never computed here) so the queue row can never silently fall
+    // back to the `message_category` schema default.
+    message_category: &str,
 ) -> Result<Option<PersistedMessage>, sqlx::Error> {
     let message_id = Uuid::new_v4().to_string();
     let created_at = Utc::now();
@@ -1506,7 +1505,6 @@ async fn insert_message_and_queue(
     let mime_headers = mime_headers_for(body, parsed).unwrap_or(serde_json::json!({}));
     let queue_attachments = queue_attachments_of(body);
     let queue_priority = queue_priority_of(body);
-    let message_category = message_category_of(body);
     let reply_to = body.reply_to.as_deref().filter(|r| !r.is_empty());
     let envelope_from = parsed.from.addr_spec.clone();
     let envelope_recipients = parsed_delivery_recipients(parsed);
@@ -1558,8 +1556,9 @@ async fn insert_message_and_queue(
     // structured display-name mailbox arrays (F48).
     .bind(&mime_headers)
     .bind(&queue_attachments)
-    // F55: the validated server-owned category (migration 187).
-    .bind(&message_category)
+    // F55: the validated server-owned category (migration 187), supplied by
+    // the admission service — never a schema default.
+    .bind(message_category)
     .execute(&mut **tx)
     .await?;
 
@@ -1643,7 +1642,7 @@ async fn insert_message_and_queue(
                 .bind(reply_to)
                 .bind(&mime_headers)
                 .bind(&queue_attachments)
-                .bind(&message_category);
+                .bind(message_category);
         }
         q.execute(&mut **tx).await?;
     }
@@ -1815,24 +1814,28 @@ async fn send_message(
             ])
         })?;
 
-    // Admission-time quota gate: meter one unit per delivery recipient
-    // (to + cc + bcc), not one per message — each recipient becomes its own
-    // email_queue row that is delivered (and billed) separately. The Lua
-    // check-and-increment in record_with_quota_check is atomic for the whole
-    // quantity, so an insufficient quota rejects the entire request with 403
-    // before anything is queued and without partially consuming quota (F1).
+    // Admission-time quota gate (extracted into the shared
+    // `SendAdmissionService` so the SMTP submission path reserves the same
+    // EmailsSent quota through the same code): meter one unit per delivery
+    // recipient (to + cc + bcc), not one per message — each recipient
+    // becomes its own email_queue row that is delivered (and billed)
+    // separately. The Lua check-and-increment in record_with_quota_check is
+    // atomic for the whole quantity, so an insufficient quota rejects the
+    // entire request with 403 before anything is queued and without
+    // partially consuming quota (F1).
     //
     // F22: the usage event id is DERIVED from (tenant, idempotency key), so
     // a concurrent duplicate send records the SAME metering event — the
     // billing layer de-duplicates on it and the quota is reserved exactly
     // once. The reservation carries the inserted/duplicate outcome so only
     // a real insert is ever compensated.
-    let usage_event_id = quota_usage_event_id(&auth.tenant_id, idempotency_key.as_deref(), None);
     let quota_reservation = reserve_email_quota(
         &state,
         &auth.tenant_id,
         quota_quantity_for_request(&body),
-        usage_event_id,
+        idempotency_key.as_deref(),
+        None,
+        body.category.as_deref(),
     )
     .await?;
 
@@ -1848,6 +1851,7 @@ async fn send_message(
         &metadata,
         idempotency_key.as_deref(),
         Some(domain_id),
+        quota_reservation.category(),
     )
     .await
     {
@@ -1961,6 +1965,9 @@ async fn send_message(
         tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to commit message delivery");
         return Err(ApiError::Internal("database error".into()));
     }
+
+    // The enqueue committed: the reservation stands.
+    quota_reservation.commit();
 
     record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
 
@@ -2228,12 +2235,13 @@ async fn send_batch(
         // F22: the usage event id is derived from (tenant, batch key, item
         // index), so a concurrent duplicate batch can never reserve item
         // quota twice — the billing layer de-duplicates on the event id.
-        let usage_event_id = quota_usage_event_id(&auth.tenant_id, batch_key.as_deref(), Some(i));
         let quota_reservation = match reserve_email_quota(
             &state,
             &auth.tenant_id,
             quota_quantity_for_request(msg),
-            usage_event_id,
+            batch_key.as_deref(),
+            Some(i),
+            msg.category.as_deref(),
         )
         .await
         {
@@ -2284,6 +2292,7 @@ async fn send_batch(
             &item_metadata,
             None,
             domain_id,
+            quota_reservation.category(),
         )
         .await
         {
@@ -2396,6 +2405,12 @@ async fn send_batch(
             tracing::error!(error = %error, "failed to commit batch transaction");
             record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
             return Err(ApiError::Internal("database error".into()));
+        }
+
+        // The batch enqueue committed: every per-item reservation stands
+        // (duplicates included, whose commit is a no-op log).
+        for reservation in committed_quota_reservations {
+            reservation.commit();
         }
 
         // Mirror the single-send path: a committed delivery resets the
@@ -2769,19 +2784,53 @@ async fn validate_send_with_domain_cache(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct QuotaReservation {
-    event_id: Uuid,
-    recorded_at: DateTime<Utc>,
-    /// Number of metered units this reservation holds. Every delivery
-    /// recipient (to + cc + bcc) becomes its own email_queue row that is
-    /// delivered separately, so quota must be metered per recipient, not per
-    /// message (F1).
-    quantity: i64,
-    /// F22: true when the billing layer recognized the usage event id as
-    /// already recorded — this request reserved NOTHING and must not be
-    /// compensated (the winner of the race owns the event).
-    duplicate: bool,
+/// The shared admission handle (quota reservation + validated category +
+/// allowed recipients) returned by [`send_admission::SendAdmissionService`].
+/// Named for the REST call sites' historical role: a reserved quota that must
+/// be committed after a successful enqueue or rolled back on failure.
+type QuotaReservation = SendAdmission;
+
+/// Exact error contract of the send endpoints' quota refusal, preserved
+/// verbatim from the inlined reservation logic.
+const QUOTA_EXCEEDED_MESSAGE: &str = "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling";
+/// Exact error contract for a metering-infrastructure outage, preserved
+/// verbatim from the inlined reservation logic.
+const METERING_UNAVAILABLE_MESSAGE: &str = "billing quota enforcement is temporarily unavailable";
+
+/// Build the shared admission service over this server's pools. The backend
+/// is `Arc`-wrapped, so the construction is cheap.
+fn send_admission_service(state: &AppState) -> SendAdmissionService {
+    SendAdmissionService::new(Arc::new(PostgresAdmissionBackend::new(
+        state.db.clone(),
+        state.redis.clone(),
+    )))
+}
+
+/// Map an admission refusal onto the endpoint's existing error contract
+/// (same status codes, same messages as the inlined logic this replaced).
+fn map_send_admission_error(error: SendAdmissionError) -> ApiError {
+    match error {
+        SendAdmissionError::InvalidCategory { raw } => {
+            ApiError::Validation(vec![invalid_category_message(&raw)])
+        }
+        SendAdmissionError::Suppressed(recipients) => ApiError::Validation(
+            recipients
+                .into_iter()
+                .map(|email| format!("recipient is suppressed: {email}"))
+                .collect(),
+        ),
+        SendAdmissionError::QuotaExceeded => {
+            ApiError::Forbidden(QUOTA_EXCEEDED_MESSAGE.to_string())
+        }
+        SendAdmissionError::MeteringUnavailable(error) => {
+            tracing::error!(error = %error, "quota reservation failed");
+            ApiError::ServiceUnavailable(METERING_UNAVAILABLE_MESSAGE.to_string())
+        }
+        SendAdmissionError::SuppressionUnavailable(error) => {
+            tracing::error!(error = %error, "suppression lookup failed");
+            ApiError::Internal("suppression lookup error".into())
+        }
+    }
 }
 
 /// Metered quantity for a send request: the number of delivery recipients.
@@ -2791,76 +2840,30 @@ fn quota_quantity_for_request(body: &SendMessageRequest) -> i64 {
     delivery_recipients(body).len() as i64
 }
 
-/// F22: stable logical usage ID for a send's quota reservation.
-///
-/// With an idempotency key the id is derived deterministically from
-/// (tenant, key[, batch item index]), so concurrent duplicate sends — or a
-/// retry whose Redis accelerator state was lost — record the SAME metering
-/// event. `record_with_quota_check` de-duplicates on the event id and
-/// reports `duplicate: true`, making a double reservation impossible.
-/// Without a key the reservation keeps a random id (no replay identity to
-/// bind to). UUID v5 is not compiled into the workspace `uuid` features;
-/// the first 16 SHA-256 bytes of the namespace string serve the same
-/// purpose (deterministic, collision-free in practice).
-fn quota_usage_event_id(
-    tenant_id: &str,
-    idempotency_key: Option<&str>,
-    item: Option<usize>,
-) -> Uuid {
-    match idempotency_key {
-        Some(key) => {
-            let namespace = match item {
-                Some(index) => format!("apexmail:usage:{tenant_id}:batch:{key}:{index}"),
-                None => format!("apexmail:usage:{tenant_id}:send:{key}"),
-            };
-            let digest = Sha256::digest(namespace.as_bytes());
-            Uuid::from_slice(&digest[..16])
-                .expect("the first 16 SHA-256 bytes are always a valid UUID")
-        }
-        None => Uuid::new_v4(),
-    }
-}
-
+/// REST adapter over the ONE shared [`SendAdmissionService`] (finding P0):
+/// both REST sends and authenticated SMTP submission reserve the same
+/// `EmailsSent` quota, under the same tenant/plan, with the same
+/// idempotency-derived usage identity, before queueing. The validated,
+/// server-owned `category` is returned on the handle and written to the
+/// queue row.
 async fn reserve_email_quota(
     state: &AppState,
     tenant_id: &str,
     quantity: i64,
-    usage_event_id: Uuid,
+    idempotency_key: Option<&str>,
+    idempotency_item: Option<usize>,
+    category: Option<&str>,
 ) -> Result<QuotaReservation, ApiError> {
-    let reservation = QuotaReservation {
-        event_id: usage_event_id,
-        recorded_at: Utc::now(),
-        quantity,
-        duplicate: false,
-    };
-
-    let quota = billing_service::usage::record_with_quota_check(
-        &state.db,
-        &state.redis,
-        tenant_id,
-        MeterEventType::EmailsSent,
-        quantity,
-        Some(reservation.event_id),
-        None,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, tenant_id = %tenant_id, "quota reservation failed");
-        ApiError::ServiceUnavailable("billing quota enforcement is temporarily unavailable".into())
-    })?;
-
-    if !quota.allowed {
-        return Err(ApiError::Forbidden(
-                    "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling".into(),
-                ));
-    }
-
-    // F22: explicit inserted/duplicate outcome — a duplicate billing event
-    // reserved nothing and its compensation is a no-op.
-    Ok(QuotaReservation {
-        duplicate: quota.duplicate,
-        ..reservation
-    })
+    send_admission_service(state)
+        .admit(SendAdmissionRequest {
+            tenant_id,
+            meter: AdmissionMeter::Quantity(quantity),
+            idempotency_key,
+            idempotency_item,
+            category,
+        })
+        .await
+        .map_err(map_send_admission_error)
 }
 
 /// F22: compensate a reservation — idempotently, and ONLY the loser.
@@ -2870,20 +2873,24 @@ async fn reserve_email_quota(
 ///   winner's usage record, so it is skipped;
 /// * a real insert is rolled back exactly once by the billing layer's
 ///   event-id keyed `rollback_usage_record`.
-async fn compensate_reservation(state: &AppState, tenant_id: &str, reservation: &QuotaReservation) {
-    if reservation.duplicate {
+async fn compensate_reservation(
+    _state: &AppState,
+    tenant_id: &str,
+    reservation: &QuotaReservation,
+) {
+    if reservation.duplicate() {
         tracing::debug!(
             tenant_id = tenant_id,
-            event_id = %reservation.event_id,
+            event_id = %reservation.event_id(),
             "skipping quota compensation for duplicate billing event (F22)"
         );
         return;
     }
-    if let Err(rollback_error) = rollback_email_quota(state, tenant_id, reservation).await {
+    if let Err(rollback_error) = reservation.rollback().await {
         tracing::error!(
             error = %rollback_error,
             tenant_id = tenant_id,
-            event_id = %reservation.event_id,
+            event_id = %reservation.event_id(),
             "failed to roll back reserved email quota"
         );
     }
@@ -2968,24 +2975,6 @@ async fn record_tenant_message_circuit_success(state: &AppState, tenant_id: &str
         .arg(tenant_message_circuit_failure_key(tenant_id))
         .query_async(&mut *conn)
         .await;
-}
-
-async fn rollback_email_quota(
-    state: &AppState,
-    tenant_id: &str,
-    reservation: &QuotaReservation,
-) -> Result<(), ApiError> {
-    billing_service::usage::rollback_usage_record(
-        &state.db,
-        &state.redis,
-        tenant_id,
-        MeterEventType::EmailsSent,
-        reservation.quantity,
-        reservation.event_id,
-        reservation.recorded_at,
-    )
-    .await
-    .map_err(|e| ApiError::ServiceUnavailable(format!("failed to roll back reserved quota: {e}")))
 }
 
 // ─── Tests ─────────────────────────────────────────────────────
@@ -3174,6 +3163,7 @@ mod tests {
             &body.metadata,
             None,
             Some(domain_id.clone()),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("failed to persist message delivery")
@@ -3523,18 +3513,6 @@ Bcc: victim@example.com"@example.com"#
         }
     }
 
-    #[test]
-    fn test_quota_reservation_debug_format_includes_event_id() {
-        let reservation = QuotaReservation {
-            event_id: Uuid::new_v4(),
-            recorded_at: Utc::now(),
-            quantity: 3,
-            duplicate: false,
-        };
-        let debug_str = format!("{:?}", reservation);
-        assert!(debug_str.contains("event_id"));
-    }
-
     // ── Per-recipient quota metering (F1) ───────────────────────
 
     #[test]
@@ -3663,6 +3641,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id.clone()),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("failed to persist message delivery")
@@ -4257,26 +4236,29 @@ Bcc: victim@example.com"@example.com"#
 
     #[test]
     fn quota_usage_event_id_is_stable_per_idempotency_key() {
-        let a = quota_usage_event_id("ten_1", Some("key-1"), None);
-        let b = quota_usage_event_id("ten_1", Some("key-1"), None);
+        // The identity derivation moved to the shared admission service so
+        // REST and SMTP bind the same way.
+        let usage_event_id = send_admission::usage_event_id;
+        let a = usage_event_id("ten_1", Some("key-1"), None);
+        let b = usage_event_id("ten_1", Some("key-1"), None);
         assert_eq!(a, b, "a duplicate send derives the SAME usage event");
         // Different key / tenant / item → different event.
-        assert_ne!(a, quota_usage_event_id("ten_1", Some("key-2"), None));
-        assert_ne!(a, quota_usage_event_id("ten_2", Some("key-1"), None));
-        assert_ne!(a, quota_usage_event_id("ten_1", Some("key-1"), Some(0)));
+        assert_ne!(a, usage_event_id("ten_1", Some("key-2"), None));
+        assert_ne!(a, usage_event_id("ten_2", Some("key-1"), None));
+        assert_ne!(a, usage_event_id("ten_1", Some("key-1"), Some(0)));
         // Batch items are distinct from each other and stable.
         assert_eq!(
-            quota_usage_event_id("ten_1", Some("bk"), Some(3)),
-            quota_usage_event_id("ten_1", Some("bk"), Some(3))
+            usage_event_id("ten_1", Some("bk"), Some(3)),
+            usage_event_id("ten_1", Some("bk"), Some(3))
         );
         assert_ne!(
-            quota_usage_event_id("ten_1", Some("bk"), Some(3)),
-            quota_usage_event_id("ten_1", Some("bk"), Some(4))
+            usage_event_id("ten_1", Some("bk"), Some(3)),
+            usage_event_id("ten_1", Some("bk"), Some(4))
         );
         // Without a key there is no replay identity — random events.
         assert_ne!(
-            quota_usage_event_id("ten_1", None, None),
-            quota_usage_event_id("ten_1", None, None)
+            usage_event_id("ten_1", None, None),
+            usage_event_id("ten_1", None, None)
         );
     }
 
@@ -4511,21 +4493,33 @@ Bcc: victim@example.com"@example.com"#
 
     #[test]
     fn category_is_normalized_and_invalid_values_rejected() {
+        // Normalization is the SHARED admission helper
+        // (`billing_service::send_admission::normalize_category`) — the same
+        // one the SMTP submission path calls.
         let mut body = options_request();
         body.category = Some("  MARKETING ".into());
         assert!(validate_send_options(&body).is_empty());
-        assert_eq!(message_category_of(&body), "marketing");
+        assert_eq!(
+            send_admission::normalize_category(body.category.as_deref()).unwrap(),
+            "marketing"
+        );
 
         body.category = Some("transactional".into());
-        assert_eq!(message_category_of(&body), "transactional");
+        assert_eq!(
+            send_admission::normalize_category(body.category.as_deref()).unwrap(),
+            "transactional"
+        );
 
         body.category = Some("newsletter_2026".into());
-        assert_eq!(message_category_of(&body), "newsletter_2026");
+        assert_eq!(
+            send_admission::normalize_category(body.category.as_deref()).unwrap(),
+            "newsletter_2026"
+        );
 
         assert_eq!(
-            message_category_of(&options_request()),
+            send_admission::normalize_category(None).unwrap(),
             "marketing",
-            "absent category defaults to marketing"
+            "absent category gets the documented policy default explicitly"
         );
 
         body.category = Some("bad\ncategory".into());
@@ -4537,6 +4531,80 @@ Bcc: victim@example.com"@example.com"#
 
         body.category = Some("x".repeat(101));
         assert!(!validate_send_options(&body).is_empty());
+    }
+
+    // ── P0: REST admission error contract (unchanged status/messages) ──
+
+    #[test]
+    fn quota_refusal_maps_to_the_existing_403_message() {
+        let error = map_send_admission_error(SendAdmissionError::QuotaExceeded);
+        match error {
+            ApiError::Forbidden(message) => assert_eq!(message, QUOTA_EXCEEDED_MESSAGE),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metering_outage_maps_to_the_existing_503_message() {
+        let error = map_send_admission_error(SendAdmissionError::MeteringUnavailable(
+            billing_service::usage::UsageError::InvalidQuantity(0),
+        ));
+        match error {
+            ApiError::ServiceUnavailable(message) => {
+                assert_eq!(message, METERING_UNAVAILABLE_MESSAGE)
+            }
+            other => panic!("expected ServiceUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppressed_admission_maps_to_the_existing_validation_message() {
+        let error = map_send_admission_error(SendAdmissionError::Suppressed(vec![
+            "blocked@example.com".into(),
+        ]));
+        match error {
+            ApiError::Validation(errors) => {
+                assert_eq!(errors, vec!["recipient is suppressed: blocked@example.com"]);
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_category_admission_maps_to_the_existing_validation_message() {
+        let error = map_send_admission_error(SendAdmissionError::InvalidCategory {
+            raw: "bad\ncategory".into(),
+        });
+        match error {
+            ApiError::Validation(errors) => {
+                assert_eq!(errors, vec![invalid_category_message("bad\ncategory")]);
+                assert!(errors[0].contains("category must be"));
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rest_queue_failure_paths_release_the_admission() {
+        // The REST send path's failure arms must compensate the reservation;
+        // the queue-failure arm is pinned against the compiled-in source
+        // (unit suite has no live Postgres), same convention as the SMTP
+        // source pin.
+        let source = include_str!("messages.rs");
+        let persist_failure = source
+            .find("\"failed to persist message delivery\"")
+            .expect("the insert failure arm must exist");
+        let arm_start = source[..persist_failure]
+            .rfind("Err(error) =>")
+            .expect("the insert failure arm is an Err arm");
+        assert!(
+            source[arm_start..persist_failure].contains("compensate_reservation("),
+            "a failed queue insert must roll the admission back"
+        );
+        assert!(
+            source[arm_start..persist_failure].contains("tx.rollback()"),
+            "a failed queue insert must roll the transaction back"
+        );
     }
 
     #[test]
@@ -4580,6 +4648,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id.clone()),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("persist")
@@ -4641,6 +4710,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("persist")
@@ -4704,6 +4774,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id.clone()),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("insert 0")
@@ -4740,6 +4811,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("insert 2")
@@ -4788,6 +4860,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("persist")
@@ -4847,6 +4920,7 @@ Bcc: victim@example.com"@example.com"#
             &body.metadata,
             None,
             Some(domain_id),
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY,
         )
         .await
         .expect("persist")

@@ -775,6 +775,11 @@ stage_main() {
     if command -v python3 >/dev/null 2>&1; then
         (cd "$REPO_ROOT" && ci_check "workspace dependency cycles" python3 tools/check_cargo_cycles.py)
         (cd "$REPO_ROOT" && ci_check "security feature flags" python3 tools/validate_security_feature_flags.py)
+        # Release gate: every PlanFeatures field must be classified
+        # RuntimeEnforced / ContractualOnly / NotYetImplemented (and a field
+        # marked RuntimeEnforced must be referenced by a real api-server
+        # handler). Fails on a NEW field without a classification.
+        (cd "$REPO_ROOT" && ci_check "feature entitlement classification" python3 tools/check_feature_entitlements.py)
         # WS-ALL audit-coverage ledger: currently lists removed crates
         # (bounce-analytics — README §9 F9), so it reports rather than
         # blocks until the ledger is fixed.

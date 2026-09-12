@@ -120,7 +120,7 @@ This amendment clarifies that **dedicated IPs are always provisioned via Hetzner
 
 1. **Cost:** Hetzner floating IPs cost ~$4/mo vs AWS SES dedicated IPs at $24.95/mo — **83% cost reduction** per IP.
 2. **Control:** Full rDNS and IP assignment control via Hetzner Cloud API.
-3. **Flexibility:** A tenant can use both SES (shared) and SMTP (dedicated) simultaneously, with warmup overflow to SES.
+3. **Flexibility:** A tenant can use both SES (shared) and SMTP (dedicated) simultaneously; a warming dedicated IP enforces its daily quota (a full cap defers the send — there is no automatic overflow to SES).
 4. **Simplicity:** No manual transport switching required — routing is automatic based on dedicated IP ownership.
 
 ### Implementation Details
@@ -128,7 +128,7 @@ This amendment clarifies that **dedicated IPs are always provisioned via Hetzner
 - `DedicatedIpProvider` manages Hetzner floating IPs (create, assign, rDNS, release).
 - `transport_routing_cache` table is maintained by a PostgreSQL trigger.
 - `TransportRouter` reads the cache (30s refresh) and routes per-message.
-- Warmup schedule: 45 days, with excess traffic overflowing to SES.
+- Warmup schedule: 60 days (canonical [`mail_common::warmup`](../../services/mail-server/crates/mail-common/src/warmup.rs)); a full daily cap defers the row, it does not overflow to SES. `DedicatedIpProvider::tick_warmup()` exists but nothing in this tree schedules it (see [warmup-schedule.md](../operations/warmup-schedule.md)).
 
 ### Related Documents
 

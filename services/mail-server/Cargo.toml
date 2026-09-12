@@ -7,6 +7,7 @@ members = [
     "crates/tracking-service",
     "crates/worker-processors",
     "crates/mta",
+    "crates/outbound-mta",
     "crates/imap-server",
     "crates/edge-cases",
     "crates/analytics",
@@ -22,8 +23,10 @@ members = [
     "crates/dns-resolver",
     "crates/api-server",
     "crates/auth-server",
+    "crates/accounting-core",
     "crates/billing-service",
     "crates/billing-common",
+    "crates/billing-entitlements",
     "crates/devex-service",
     "crates/observability-service",
     "crates/ui-foundation",
@@ -193,6 +196,9 @@ ipnetwork = "0.20"
 
 # Hex encoding
 hex = "0.4"
+
+# Statutory accounting core (migration 220 accounting domain)
+accounting-core = { path = "crates/accounting-core" }
 
 # URL parsing / percent-decoding
 url = "2.5"

@@ -95,13 +95,9 @@ impl AuditLogger {
     /// (verify/export already span both tables, E-2). Deployments without an
     /// archive table fall back to the live-only head.
     pub async fn initialize(&self) -> Result<(), String> {
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_timestamp ON audit_logs (tenant_id, timestamp DESC)",
-        )
-        .execute(&self.db)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
-
+        // No runtime DDL: the index this method used to create
+        // (`idx_audit_logs_tenant_timestamp`) is migration-owned (213). A
+        // DML-only production role can therefore boot the service.
         let rows: Vec<(Option<String>, String)> = match sqlx::query_as(
             "SELECT DISTINCT ON (COALESCE(tenant_id, 'global')) tenant_id, hash
              FROM (

@@ -85,11 +85,23 @@ fn vat_estonian_customer_24_percent() {
     assert_eq!(amt, 2400);
 }
 
+/// A structurally valid EU VAT number is NOT sufficient for a reverse charge:
+/// only authoritative (VIES) evidence is. This test previously asserted the
+/// opposite, which was the vulnerability — any caller could zero-rate by
+/// supplying a well-formed number.
 #[test]
-fn vat_eu_b2b_with_vat_number_reverse_charge() {
+fn vat_eu_b2b_without_evidence_charges_the_destination_rate() {
     let (rate, amt) = calculate_vat(10_000, "DE", Some("DE123456789"));
-    assert_eq!(rate, 0.0);
-    assert_eq!(amt, 0);
+    assert_eq!(
+        rate, 19.0,
+        "without VIES evidence the destination rate applies, never a zero rate"
+    );
+    assert_eq!(amt, 1900);
+
+    // The evidence-backed positive case (valid VIES evidence → 0%) is covered
+    // in `billing-common`'s own unit tests, which can reach the evidence type
+    // directly; this suite asserts only the rule that a bare VAT number is not
+    // sufficient.
 }
 
 #[test]

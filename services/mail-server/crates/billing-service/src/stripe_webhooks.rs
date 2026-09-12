@@ -1605,6 +1605,654 @@ async fn handle_subscription_deleted(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Tax truth (P0): immutable Stripe tax snapshot + independent validation
+// ---------------------------------------------------------------------------
+//
+// Stripe and ApexMail must not be two tax deciders. Stripe Tax is the
+// charging authority (`automatic_tax` is enabled at checkout session
+// creation in api-server and is requested on usage invoices); ApexMail
+// persists what Stripe actually decided — amounts, jurisdiction, tax-ID
+// status, invoice id and a payload hash — into `stripe_tax_snapshots`
+// (immutable, migration 218), recomputes the total independently and
+// compares. A mismatch BLOCKS local invoice finalization and raises a
+// `finance_incidents` row instead of quietly recording inconsistent books.
+
+/// ApexMail's independently computed total for a Stripe invoice.
+#[derive(Debug, Clone, PartialEq)]
+struct ExpectedTax {
+    subtotal_cents: i64,
+    vat_cents: i64,
+    total_cents: i64,
+    /// `local_invoice`, `recomputed` or `unavailable`.
+    source: &'static str,
+    country: Option<String>,
+    vat_rate: f64,
+    evidence_id: Option<Uuid>,
+}
+
+/// A charged-total mismatch between Stripe and ApexMail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaxTotalDiscrepancy {
+    observed_subtotal_cents: i64,
+    observed_vat_cents: i64,
+    observed_total_cents: i64,
+    expected_subtotal_cents: i64,
+    expected_vat_cents: i64,
+    expected_total_cents: i64,
+    delta_cents: i64,
+}
+
+impl TaxTotalDiscrepancy {
+    fn summary(&self) -> String {
+        format!(
+            "charged total {} != ApexMail-computed {} (subtotal {} vs {}, VAT {} vs {})",
+            self.observed_total_cents,
+            self.expected_total_cents,
+            self.observed_subtotal_cents,
+            self.expected_subtotal_cents,
+            self.observed_vat_cents,
+            self.expected_vat_cents,
+        )
+    }
+}
+
+/// Compare the charged (Stripe) money fields against ApexMail's independent
+/// computation. Pure and unit-tested: the required P0 behaviour is that a
+/// mismatch is an error (the caller blocks finalization and raises a
+/// finance incident), never a warning.
+fn check_charged_total(
+    expected: &ExpectedTax,
+    observed_subtotal_cents: i64,
+    observed_vat_cents: i64,
+    observed_total_cents: i64,
+) -> Result<(), TaxTotalDiscrepancy> {
+    if expected.subtotal_cents == observed_subtotal_cents
+        && expected.vat_cents == observed_vat_cents
+        && expected.total_cents == observed_total_cents
+    {
+        return Ok(());
+    }
+    Err(TaxTotalDiscrepancy {
+        observed_subtotal_cents,
+        observed_vat_cents,
+        observed_total_cents,
+        expected_subtotal_cents: expected.subtotal_cents,
+        expected_vat_cents: expected.vat_cents,
+        expected_total_cents: expected.total_cents,
+        delta_cents: observed_total_cents - expected.total_cents,
+    })
+}
+
+/// Customer tax-ID summary persisted on the snapshot. Stripe verification
+/// states (`verified`, `pending`, `unverified`) are preserved verbatim.
+fn summarize_tax_ids(invoice: &InvoiceEvent) -> (String, serde_json::Value) {
+    let entries = invoice.customer_tax_ids.as_deref().unwrap_or_default();
+    if entries.is_empty() {
+        return ("not_provided".to_string(), serde_json::json!([]));
+    }
+    let mut rows = Vec::with_capacity(entries.len());
+    let mut any_verified = false;
+    for entry in entries {
+        let verification_status = entry
+            .verification
+            .as_ref()
+            .and_then(|verification| verification.get("status"))
+            .and_then(|status| status.as_str())
+            .map(str::to_string);
+        if verification_status.as_deref() == Some("verified") {
+            any_verified = true;
+        }
+        rows.push(serde_json::json!({
+            "type": entry.kind,
+            "value": entry.value,
+            "verification_status": verification_status,
+        }));
+    }
+    let status = if any_verified {
+        "verified"
+    } else {
+        "provided_unverified"
+    };
+    (status.to_string(), serde_json::Value::Array(rows))
+}
+
+/// The jurisdiction Stripe attributed the tax to, from whichever tax
+/// breakdown shape the API version supplies.
+fn tax_jurisdiction(invoice: &InvoiceEvent) -> Option<String> {
+    let entries = invoice
+        .total_taxes
+        .as_ref()
+        .or(invoice.total_tax_amounts.as_ref())?;
+    for entry in entries {
+        for container in [entry.tax_rate_details.as_ref(), entry.tax_rate.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(country) = container.get("country").and_then(|value| value.as_str()) {
+                if !country.trim().is_empty() {
+                    return Some(country.trim().to_uppercase());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Normalized tax breakdown persisted on the snapshot (raw Stripe objects
+/// are not retained verbatim; the hash covers this normalized payload).
+fn tax_breakdown_json(invoice: &InvoiceEvent) -> serde_json::Value {
+    let Some(entries) = invoice
+        .total_taxes
+        .as_ref()
+        .or(invoice.total_tax_amounts.as_ref())
+    else {
+        return serde_json::json!([]);
+    };
+    serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "amount": entry.amount,
+                    "inclusive": entry.inclusive,
+                    "taxability_reason": entry.taxability_reason,
+                    "tax_rate_details": entry.tax_rate_details,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The `automatic_tax` status Stripe reported, or `not_enabled`.
+fn automatic_tax_status(invoice: &InvoiceEvent) -> String {
+    invoice
+        .automatic_tax
+        .as_ref()
+        .and_then(|automatic| automatic.status.clone())
+        .or_else(|| {
+            invoice
+                .automatic_tax
+                .as_ref()
+                .and_then(|automatic| automatic.disabled_reason.clone())
+        })
+        .unwrap_or_else(|| "not_enabled".to_string())
+}
+
+fn automatic_tax_complete(invoice: &InvoiceEvent) -> bool {
+    invoice.automatic_tax.as_ref().is_some_and(|automatic| {
+        automatic.enabled.unwrap_or(false) && automatic.status.as_deref() == Some("complete")
+    })
+}
+
+/// SHA-256 over the canonical snapshot payload.
+fn snapshot_payload_hash(payload: &serde_json::Value) -> String {
+    use sha2::Digest;
+    let canonical = serde_json::to_vec(payload).unwrap_or_default();
+    hex::encode(Sha256::digest(&canonical))
+}
+
+/// Row of `stripe_tax_snapshots` already persisted for this Stripe invoice.
+async fn load_existing_tax_snapshot(
+    db: &sqlx::PgPool,
+    stripe_invoice_id: &str,
+) -> Result<Option<(String, i64, i64)>, String> {
+    sqlx::query_as(
+        r#"
+        SELECT validation_status, total_cents,
+               COALESCE(apexmail_expected_total_cents, total_cents)::bigint
+        FROM stripe_tax_snapshots
+        WHERE stripe_invoice_id = $1
+        "#,
+    )
+    .bind(stripe_invoice_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to load existing tax snapshot: {error}"))
+}
+
+/// Persist a snapshot (first write wins; the table is trigger-immutable).
+/// Returns the snapshot id.
+#[allow(clippy::too_many_arguments)]
+async fn persist_tax_snapshot(
+    db: &sqlx::PgPool,
+    invoice: &InvoiceEvent,
+    tenant_id: &str,
+    local_invoice_id: Option<Uuid>,
+    currency: &str,
+    observed: (i64, i64, i64),
+    expected: &ExpectedTax,
+    authority: &str,
+    validation_status: &str,
+    discrepancy_cents: i64,
+    tax_id_status: &str,
+    tax_ids: &serde_json::Value,
+) -> Result<Uuid, String> {
+    let breakdown = tax_breakdown_json(invoice);
+    let jurisdiction = tax_jurisdiction(invoice).or_else(|| expected.country.clone());
+    let observed_payload = serde_json::json!({
+        "stripe_invoice_id": invoice.id,
+        "stripe_invoice_number": invoice.number,
+        "currency": currency,
+        "subtotal_cents": observed.0,
+        "tax_cents": observed.1,
+        "total_cents": observed.2,
+        "amount_paid_cents": invoice.amount_paid,
+        "automatic_tax_status": automatic_tax_status(invoice),
+        "tax_id_status": tax_id_status,
+        "tax_ids": tax_ids,
+        "jurisdiction": jurisdiction,
+        "tax_breakdown": breakdown,
+        "apexmail": {
+            "expected_subtotal_cents": expected.subtotal_cents,
+            "expected_vat_cents": expected.vat_cents,
+            "expected_total_cents": expected.total_cents,
+            "source": expected.source,
+            "vat_rate": expected.vat_rate,
+            "evidence_id": expected.evidence_id,
+        },
+        "validation_status": validation_status,
+    });
+    let raw_hash = snapshot_payload_hash(&observed_payload);
+
+    let inserted: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        INSERT INTO stripe_tax_snapshots (
+            stripe_invoice_id, stripe_invoice_number, tenant_id, local_invoice_id,
+            currency, subtotal_cents, tax_cents, total_cents, amount_paid_cents,
+            automatic_tax_status, authority, jurisdiction, tax_id_status,
+            tax_ids, tax_breakdown,
+            apexmail_expected_subtotal_cents, apexmail_expected_vat_cents,
+            apexmail_expected_total_cents, validation_status, discrepancy_cents,
+            raw_payload_hash, raw_payload
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+            $16, $17, $18, $19, $20, $21, $22
+        )
+        ON CONFLICT (stripe_invoice_id) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(&invoice.id)
+    .bind(&invoice.number)
+    .bind(tenant_id)
+    .bind(local_invoice_id)
+    .bind(currency)
+    .bind(observed.0)
+    .bind(observed.1)
+    .bind(observed.2)
+    .bind(invoice.amount_paid)
+    .bind(automatic_tax_status(invoice))
+    .bind(authority)
+    .bind(&jurisdiction)
+    .bind(tax_id_status)
+    .bind(tax_ids)
+    .bind(&breakdown)
+    .bind(expected.subtotal_cents)
+    .bind(expected.vat_cents)
+    .bind(expected.total_cents)
+    .bind(validation_status)
+    .bind(discrepancy_cents)
+    .bind(&raw_hash)
+    .bind(&observed_payload)
+    .fetch_optional(db)
+    .await
+    .map_err(|error| format!("failed to persist stripe tax snapshot: {error}"))?;
+
+    if let Some((id,)) = inserted {
+        return Ok(id);
+    }
+    // Already persisted (replay): immutability means first write wins.
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM stripe_tax_snapshots WHERE stripe_invoice_id = $1",
+    )
+    .bind(&invoice.id)
+    .fetch_one(db)
+    .await
+    .map_err(|error| format!("failed to reload stripe tax snapshot: {error}"))
+}
+
+/// Raise a durable finance incident. Idempotent per open incident: webhook
+/// retries and dead-letter replays cannot spam duplicate open rows.
+#[allow(clippy::too_many_arguments)]
+async fn raise_finance_incident(
+    db: &sqlx::PgPool,
+    kind: &str,
+    severity: &str,
+    tenant_id: &str,
+    local_invoice_id: Option<Uuid>,
+    stripe_invoice_id: &str,
+    currency: &str,
+    expected_total_cents: Option<i64>,
+    observed_total_cents: Option<i64>,
+    detail: &serde_json::Value,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        INSERT INTO finance_incidents (
+            kind, severity, status, tenant_id, local_invoice_id,
+            stripe_invoice_id, currency, expected_total_cents,
+            observed_total_cents, delta_cents, detail
+        )
+        SELECT $1, $2, 'open', $3, $4, $5, $6, $7, $8,
+               COALESCE($7, 0) - COALESCE($8, 0), $9
+        WHERE NOT EXISTS (
+            SELECT 1 FROM finance_incidents
+            WHERE kind = $1 AND stripe_invoice_id = $5 AND status = 'open'
+        )
+        "#,
+    )
+    .bind(kind)
+    .bind(severity)
+    .bind(tenant_id)
+    .bind(local_invoice_id)
+    .bind(stripe_invoice_id)
+    .bind(currency)
+    .bind(expected_total_cents)
+    .bind(observed_total_cents)
+    .bind(detail)
+    .execute(db)
+    .await
+    .map_err(|error| format!("failed to raise finance incident: {error}"))?;
+    Ok(())
+}
+
+/// Load local invoices bound to a Stripe invoice for validation.
+async fn load_local_invoice_tax_rows(
+    db: &sqlx::PgPool,
+    stripe_invoice_id: &str,
+    tenant_id: &str,
+) -> Result<Vec<(Uuid, i64, i64, i64, Option<String>, Option<f64>)>, String> {
+    sqlx::query_as(
+        r#"
+        SELECT id,
+               COALESCE(subtotal, amount, 0)::bigint,
+               COALESCE(vat_total, 0)::bigint,
+               COALESCE(total, amount, 0)::bigint,
+               billing_country,
+               vat_rate
+        FROM invoices
+        WHERE stripe_invoice_id = $1
+          AND (tenant_id = $2 OR tenant_id IS NULL)
+        ORDER BY created_at
+        "#,
+    )
+    .bind(stripe_invoice_id)
+    .bind(tenant_id)
+    .fetch_all(db)
+    .await
+    .map_err(|error| format!("failed to load local invoices for tax validation: {error}"))
+}
+
+/// The tax-truth gate. Persists an immutable snapshot of the finalized
+/// Stripe invoice and validates the charged total against ApexMail's own
+/// computation. Returns `Err` (blocking invoice finalization) when the
+/// charged total disagrees, after raising a durable finance incident.
+async fn validate_and_snapshot_stripe_tax(
+    state: &AppState,
+    invoice: &InvoiceEvent,
+    tenant_id: &str,
+) -> Result<Option<Uuid>, String> {
+    // Replays: the first snapshot is immutable. A recorded discrepancy stays
+    // blocking until a finance operator resolves it; a validated snapshot
+    // makes replays no-ops.
+    if let Some((status, expected_total, observed_total)) =
+        load_existing_tax_snapshot(&state.db, &invoice.id).await?
+    {
+        if status == "discrepancy" {
+            raise_finance_incident(
+                &state.db,
+                "tax_total_mismatch",
+                "high",
+                tenant_id,
+                None,
+                &invoice.id,
+                &normalize_stripe_currency(invoice.currency.as_deref()),
+                Some(expected_total),
+                Some(observed_total),
+                &serde_json::json!({
+                    "reason": "existing immutable snapshot records a charged-total discrepancy",
+                }),
+            )
+            .await?;
+            return Err(format!(
+                "invoice.paid for {} blocked: an open finance incident records a Stripe/ApexMail \
+                 tax discrepancy (Stripe total {observed_total}, ApexMail expected {expected_total})",
+                invoice.id
+            ));
+        }
+        return Ok(Some(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM stripe_tax_snapshots WHERE stripe_invoice_id = $1",
+            )
+            .bind(&invoice.id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|error| format!("failed to load tax snapshot id: {error}"))?,
+        ));
+    }
+
+    let (observed_subtotal, observed_vat, observed_total) = derive_invoice_totals(
+        invoice.subtotal,
+        invoice.tax,
+        invoice.total,
+        invoice.amount_due,
+    );
+    let currency = normalize_stripe_currency(invoice.currency.as_deref());
+
+    // Expected side 1: the local invoice row(s) already bound to this Stripe
+    // invoice (the overage collection path writes them before finalizing
+    // Stripe-side). Their stored totals ARE ApexMail's computation.
+    let local_rows = load_local_invoice_tax_rows(&state.db, &invoice.id, tenant_id).await?;
+    let expected = if let Some((_, subtotal, vat, total, country, rate)) = local_rows.first() {
+        ExpectedTax {
+            subtotal_cents: *subtotal,
+            vat_cents: *vat,
+            total_cents: *total,
+            source: "local_invoice",
+            country: country.clone(),
+            vat_rate: rate.unwrap_or(0.0),
+            evidence_id: None,
+        }
+    } else {
+        // Expected side 2: recompute from the tenant's billing address and
+        // the tenant's authoritative VAT evidence (reverse charge only
+        // against VIES-verified numbers).
+        let address: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT country, vat_number FROM billing_addresses WHERE tenant_id = $1 \
+             ORDER BY updated_at DESC, created_at DESC, id LIMIT 1",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|error| format!("failed to load billing address for tax validation: {error}"))?;
+
+        match address {
+            Some((country, vat_number)) => {
+                let country = country.filter(|value| !value.trim().is_empty());
+                let vat_number = vat_number.filter(|value| !value.trim().is_empty());
+                let evidence = match (country.as_deref(), vat_number.as_deref()) {
+                    (Some(_), Some(vat)) => {
+                        crate::invoices::load_vat_evidence_for_tenant(&state.db, tenant_id, vat)
+                            .await
+                    }
+                    _ => None,
+                };
+                let at = Utc::now().date_naive();
+                let (rate, vat) = match country.as_deref() {
+                    Some(country) => billing_common::vat_rates::calculate_vat_with_evidence(
+                        observed_subtotal,
+                        country,
+                        vat_number.as_deref(),
+                        evidence.as_ref(),
+                        at,
+                    ),
+                    None => (0.0, 0),
+                };
+                ExpectedTax {
+                    subtotal_cents: observed_subtotal,
+                    vat_cents: vat,
+                    total_cents: observed_subtotal + vat,
+                    source: "recomputed",
+                    country: country.clone(),
+                    vat_rate: rate,
+                    evidence_id: evidence.and_then(|evidence| evidence.id),
+                }
+            }
+            None => ExpectedTax {
+                // No expectation: ApexMail could not recompute. Explicitly
+                // zero/`unavailable` rather than echoing Stripe's numbers,
+                // which would read as an independent match.
+                subtotal_cents: 0,
+                vat_cents: 0,
+                total_cents: 0,
+                source: "unavailable",
+                country: None,
+                vat_rate: 0.0,
+                evidence_id: None,
+            },
+        }
+    };
+
+    let (tax_id_status, tax_ids) = summarize_tax_ids(invoice);
+    let stripe_tax_complete = automatic_tax_complete(invoice);
+    let authority = if stripe_tax_complete {
+        "stripe_tax"
+    } else {
+        "apexmail_local"
+    };
+
+    // Cannot independently recompute (no billing address) and Stripe Tax did
+    // not authoritatively compute either: fail closed. Zero-value invoices
+    // (100% discounts/credits) are exempt — there is no tax decision to
+    // validate and nothing was charged.
+    let zero_value = observed_total <= 0 && observed_vat <= 0;
+    if expected.source == "unavailable" && !stripe_tax_complete && !zero_value {
+        let detail = serde_json::json!({
+            "reason": "no billing address and Stripe Tax is not complete — cannot validate the charged tax",
+            "automatic_tax_status": automatic_tax_status(invoice),
+        });
+        persist_tax_snapshot(
+            &state.db,
+            invoice,
+            tenant_id,
+            None,
+            &currency,
+            (observed_subtotal, observed_vat, observed_total),
+            &expected,
+            authority,
+            "discrepancy",
+            0,
+            &tax_id_status,
+            &tax_ids,
+        )
+        .await?;
+        raise_finance_incident(
+            &state.db,
+            "tax_validation_unavailable",
+            "high",
+            tenant_id,
+            None,
+            &invoice.id,
+            &currency,
+            None,
+            Some(observed_total),
+            &detail,
+        )
+        .await?;
+        return Err(format!(
+            "invoice.paid for {} blocked: cannot validate charged tax (no billing address, \
+             Stripe Tax status {})",
+            invoice.id,
+            automatic_tax_status(invoice)
+        ));
+    }
+
+    let validation = if expected.source == "unavailable" {
+        // Stripe Tax is the authoritative charging authority and ApexMail
+        // has no address to recompute from: accept the external authority,
+        // explicitly flagged.
+        Ok(())
+    } else {
+        check_charged_total(&expected, observed_subtotal, observed_vat, observed_total)
+    };
+
+    let (validation_status, discrepancy_cents) = match &validation {
+        Ok(()) if expected.source == "unavailable" => ("unverified_external", 0),
+        Ok(()) if stripe_tax_complete => ("validated", 0),
+        Ok(()) => ("fallback_unavailable", 0),
+        Err(discrepancy) => ("discrepancy", discrepancy.delta_cents),
+    };
+
+    let local_invoice_id = local_rows.first().map(|row| row.0);
+    let snapshot_id = persist_tax_snapshot(
+        &state.db,
+        invoice,
+        tenant_id,
+        local_invoice_id,
+        &currency,
+        (observed_subtotal, observed_vat, observed_total),
+        &expected,
+        authority,
+        validation_status,
+        discrepancy_cents,
+        &tax_id_status,
+        &tax_ids,
+    )
+    .await?;
+
+    if let Err(discrepancy) = validation {
+        let detail = serde_json::json!({
+            "reason": discrepancy.summary(),
+            "automatic_tax_status": automatic_tax_status(invoice),
+            "expected_source": expected.source,
+            "expected_country": expected.country,
+            "expected_vat_rate": expected.vat_rate,
+            "vat_evidence_id": expected.evidence_id,
+            "tax_id_status": tax_id_status,
+        });
+        raise_finance_incident(
+            &state.db,
+            "tax_total_mismatch",
+            "critical",
+            tenant_id,
+            local_invoice_id,
+            &invoice.id,
+            &currency,
+            Some(expected.total_cents),
+            Some(observed_total),
+            &detail,
+        )
+        .await?;
+        error!(
+            stripe_invoice_id = %invoice.id,
+            tenant_id = %tenant_id,
+            observed_total_cents = observed_total,
+            expected_total_cents = expected.total_cents,
+            delta_cents = discrepancy.delta_cents,
+            "BLOCKED invoice finalization: Stripe charged a total that disagrees with ApexMail's \
+             computation — finance incident raised"
+        );
+        return Err(format!(
+            "invoice.paid for {} blocked: {}",
+            invoice.id,
+            discrepancy.summary()
+        ));
+    }
+
+    info!(
+        stripe_invoice_id = %invoice.id,
+        tenant_id = %tenant_id,
+        authority,
+        validation_status,
+        observed_total_cents = observed_total,
+        expected_total_cents = expected.total_cents,
+        "stripe tax snapshot persisted and charged total validated"
+    );
+
+    Ok(Some(snapshot_id))
+}
+
 async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {
     // Prefer tenant_id from event metadata (immutable snapshot from Stripe),
     // then fall back to resolving the invoice's subscription locally.
@@ -1646,6 +2294,14 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
             invoice.id
         ));
     };
+
+    // TAX-TRUTH GATE (P0): persist an immutable snapshot of the finalized
+    // Stripe invoice's tax decision and validate the charged total against
+    // ApexMail's own computation BEFORE finalizing any local invoice. A
+    // mismatch returns Err here — no local invoice is marked paid, no
+    // revenue-recognising insert runs — and a durable finance incident is
+    // raised for operators.
+    let tax_snapshot_id = validate_and_snapshot_stripe_tax(state, &invoice, &tenant_id).await?;
 
     // Settle the local invoice(s) bound to this Stripe invoice (audits
     // F72/F73). The old modifying CTE ended in `SELECT 1` and relied on
@@ -1755,6 +2411,15 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
             .execute(&mut *tx)
             .await
             .map_err(|error| format!("Failed to record Stripe payment allocation: {error}"))?;
+
+            // Statutory ledger: post the settlement (Dr processor clearing,
+            // Cr AR) in the same transaction. Idempotent on the allocation's
+            // unique operation id, so a replayed webhook posts once.
+            crate::accounting_postings::post_payment_allocation_in(
+                &mut tx,
+                &format!("stripe:{}", invoice.id),
+            )
+            .await;
         } else {
             info!(
                 invoice_id = %invoice_row_id,
@@ -1769,6 +2434,15 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     tx.commit()
         .await
         .map_err(|error| format!("Failed to commit invoice settlement: {error}"))?;
+
+    // Statutory ledger: post invoice finalization for every locally settled
+    // invoice (no-op replay when the usage sweep already posted it). Runs
+    // AFTER the settlement commit because a zero/legacy invoice may still
+    // need its revenue entry; the source identity makes the replay
+    // idempotent.
+    for (invoice_row_id, _row_tenant, _invoice_currency) in &marked {
+        crate::accounting_postings::post_invoice_issued(&state.db, *invoice_row_id).await;
+    }
 
     // Fix F4/F72 — dunning recovery is only legitimate when this event
     // actually settled THE tenant's invoice. `marked` contains the REAL
@@ -1791,6 +2465,20 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
                 tenant_id = %tenant_id,
                 "invoice.paid upsert matched 0 rows (invoice bound to another tenant) — dunning state left untouched"
             );
+        } else {
+            // Statutory ledger: post the imported invoice's revenue/AR entry.
+            // The local id is resolved by the unique Stripe invoice id.
+            let local_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM invoices WHERE stripe_invoice_id = $1")
+                    .bind(&invoice.id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|error| {
+                        format!("Failed to resolve imported invoice {}: {error}", invoice.id)
+                    })?;
+            if let Some(local_id) = local_id {
+                crate::accounting_postings::post_invoice_issued(&state.db, local_id).await;
+            }
         }
     }
 
@@ -1803,6 +2491,68 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     // invoice's failure history inside mark_payment_recovered.
     if invoice_persisted {
         crate::maintenance::mark_payment_recovered(state, &tenant_id, Some(&invoice.id)).await?;
+    }
+
+    // Recognition ledger: reflect the settlement/new invoice in
+    // `vat_recognition_entries`. General-scheme supplies were recognised at
+    // issue; cash-accounting supplies recognise on payment (or the
+    // third-month fallback, handled by the sweep). Idempotent, best-effort:
+    // a failure here is logged, never allowed to fake or skip the ledger.
+    let bound_invoices: Vec<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT id FROM invoices
+        WHERE stripe_invoice_id = $1
+          AND (tenant_id = $2 OR tenant_id IS NULL)
+        "#,
+    )
+    .bind(&invoice.id)
+    .bind(&tenant_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for (invoice_row_id,) in &bound_invoices {
+        if let Err(error) = crate::vat_recognition::materialize_invoice_recognition_by_id(
+            &state.db,
+            *invoice_row_id,
+            Utc::now(),
+        )
+        .await
+        {
+            warn!(
+                invoice_id = %invoice_row_id,
+                stripe_invoice_id = %invoice.id,
+                error = %error,
+                "failed to materialize VAT recognition after Stripe settlement"
+            );
+        }
+    }
+
+    // Link the immutable tax snapshot onto every local invoice bound to this
+    // Stripe invoice (rows settled above plus the row inserted from the
+    // Stripe payload when there was none).
+    if let Some(snapshot_id) = tax_snapshot_id {
+        if let Err(error) = sqlx::query(
+            r#"
+            UPDATE invoices
+            SET stripe_tax_snapshot_id = $2,
+                updated_at = NOW()
+            WHERE stripe_invoice_id = $1
+              AND (tenant_id = $3 OR tenant_id IS NULL)
+            "#,
+        )
+        .bind(&invoice.id)
+        .bind(snapshot_id)
+        .bind(&tenant_id)
+        .execute(&state.db)
+        .await
+        {
+            warn!(
+                stripe_invoice_id = %invoice.id,
+                snapshot_id = %snapshot_id,
+                error = %error,
+                "failed to link stripe tax snapshot onto local invoice(s) — snapshot remains authoritative"
+            );
+        }
     }
 
     info!(
@@ -2935,6 +3685,59 @@ struct InvoiceEvent {
     /// line-level detail instead of an empty items table.
     #[serde(default)]
     lines: Option<StripeInvoiceLines>,
+    /// Stripe Tax decision state (`enabled`, `status`, `disabled_reason`).
+    /// Present when automatic tax was requested at checkout / invoice
+    /// creation; `status = "complete"` is the only authoritative state.
+    #[serde(default)]
+    automatic_tax: Option<StripeAutomaticTax>,
+    /// Tax IDs collected for the customer (checkout `tax_id_collection`).
+    #[serde(default)]
+    customer_tax_ids: Option<Vec<StripeCustomerTaxId>>,
+    /// Per-jurisdiction tax breakdown on newer API versions.
+    #[serde(default)]
+    total_taxes: Option<Vec<StripeTotalTax>>,
+    /// Per-jurisdiction tax breakdown on older API versions.
+    #[serde(default)]
+    total_tax_amounts: Option<Vec<StripeTotalTax>>,
+}
+
+/// Stripe `automatic_tax` object (subset).
+#[derive(Debug, Deserialize)]
+struct StripeAutomaticTax {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    disabled_reason: Option<String>,
+}
+
+/// Stripe `customer_tax_ids[]` entry (subset).
+#[derive(Debug, Deserialize)]
+struct StripeCustomerTaxId {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    verification: Option<serde_json::Value>,
+}
+
+/// Stripe `total_taxes[]` / `total_tax_amounts[]` entry (subset). The
+/// jurisdiction is read from whichever nested rate object the API version
+/// supplies.
+#[derive(Debug, Deserialize)]
+struct StripeTotalTax {
+    #[serde(default)]
+    amount: Option<i64>,
+    #[serde(default)]
+    inclusive: Option<bool>,
+    #[serde(default)]
+    taxability_reason: Option<String>,
+    #[serde(default)]
+    tax_rate_details: Option<serde_json::Value>,
+    #[serde(default)]
+    tax_rate: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3458,7 +4261,164 @@ mod tests {
             subscription_details: None,
             subscription: None,
             lines: None,
+            automatic_tax: None,
+            customer_tax_ids: None,
+            total_taxes: None,
+            total_tax_amounts: None,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Tax truth (P0) — a Stripe/ApexMail charged-total discrepancy blocks
+    // finalization; a match passes.
+    // ------------------------------------------------------------------
+
+    fn expected(subtotal: i64, vat: i64) -> ExpectedTax {
+        ExpectedTax {
+            subtotal_cents: subtotal,
+            vat_cents: vat,
+            total_cents: subtotal + vat,
+            source: "local_invoice",
+            country: Some("EE".into()),
+            vat_rate: 24.0,
+            evidence_id: None,
+        }
+    }
+
+    #[test]
+    fn tax_total_mismatch_is_an_error_not_a_warning() {
+        // Stripe charged X (e.g. 10.00 + 0 tax); ApexMail's statutory
+        // invoice says X + VAT (10.00 + 2.40). This MUST block.
+        let discrepancy = check_charged_total(&expected(1_000, 240), 1_000, 0, 1_000)
+            .expect_err("mismatch must be an error");
+        assert_eq!(discrepancy.expected_total_cents, 1_240);
+        assert_eq!(discrepancy.observed_total_cents, 1_000);
+        assert_eq!(discrepancy.delta_cents, -240);
+        assert!(discrepancy.summary().contains("1240"));
+
+        // Subtotal or VAT disagreement alone is also a discrepancy.
+        assert!(check_charged_total(&expected(1_000, 240), 1_000, 190, 1_190).is_err());
+        assert!(check_charged_total(&expected(1_000, 240), 900, 240, 1_140).is_err());
+    }
+
+    #[test]
+    fn matching_charged_total_passes_validation() {
+        assert!(check_charged_total(&expected(1_000, 240), 1_000, 240, 1_240).is_ok());
+        // A legitimately zero-rated reverse charge matches with zero VAT.
+        let reverse = ExpectedTax {
+            subtotal_cents: 1_000,
+            vat_cents: 0,
+            total_cents: 1_000,
+            source: "local_invoice",
+            country: Some("DE".into()),
+            vat_rate: 0.0,
+            evidence_id: Some(Uuid::new_v4()),
+        };
+        assert!(check_charged_total(&reverse, 1_000, 0, 1_000).is_ok());
+    }
+
+    #[test]
+    fn automatic_tax_status_is_read_verbatim() {
+        let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
+        invoice.automatic_tax = Some(StripeAutomaticTax {
+            enabled: Some(true),
+            status: Some("complete".into()),
+            disabled_reason: None,
+        });
+        assert_eq!(automatic_tax_status(&invoice), "complete");
+        assert!(automatic_tax_complete(&invoice));
+
+        invoice.automatic_tax = Some(StripeAutomaticTax {
+            enabled: Some(true),
+            status: Some("requires_location_inputs".into()),
+            disabled_reason: None,
+        });
+        assert!(!automatic_tax_complete(&invoice));
+
+        invoice.automatic_tax = None;
+        assert_eq!(automatic_tax_status(&invoice), "not_enabled");
+        assert!(!automatic_tax_complete(&invoice));
+    }
+
+    #[test]
+    fn tax_id_summary_distinguishes_verified_from_merely_provided() {
+        let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
+        assert_eq!(summarize_tax_ids(&invoice).0, "not_provided");
+
+        invoice.customer_tax_ids = Some(vec![StripeCustomerTaxId {
+            kind: Some("eu_vat".into()),
+            value: Some("DE123456789".into()),
+            verification: Some(serde_json::json!({"status": "unverified"})),
+        }]);
+        let (status, ids) = summarize_tax_ids(&invoice);
+        assert_eq!(status, "provided_unverified");
+        assert_eq!(ids[0]["value"], "DE123456789");
+
+        invoice.customer_tax_ids = Some(vec![StripeCustomerTaxId {
+            kind: Some("eu_vat".into()),
+            value: Some("DE123456789".into()),
+            verification: Some(serde_json::json!({"status": "verified"})),
+        }]);
+        let (status, _) = summarize_tax_ids(&invoice);
+        assert_eq!(status, "verified");
+    }
+
+    #[test]
+    fn jurisdiction_is_read_from_either_api_shape() {
+        let mut invoice = invoice_event_with(Some(1_240), Some(1_240), 0);
+        assert_eq!(tax_jurisdiction(&invoice), None);
+
+        invoice.total_taxes = Some(vec![StripeTotalTax {
+            amount: Some(240),
+            inclusive: Some(false),
+            taxability_reason: Some("standard_rated".into()),
+            tax_rate_details: Some(
+                serde_json::json!({"country": "ee", "percentage_decimal": "24"}),
+            ),
+            tax_rate: None,
+        }]);
+        assert_eq!(tax_jurisdiction(&invoice).as_deref(), Some("EE"));
+
+        invoice.total_taxes = None;
+        invoice.total_tax_amounts = Some(vec![StripeTotalTax {
+            amount: Some(240),
+            inclusive: Some(false),
+            taxability_reason: None,
+            tax_rate_details: None,
+            tax_rate: Some(serde_json::json!({"country": "DE"})),
+        }]);
+        assert_eq!(tax_jurisdiction(&invoice).as_deref(), Some("DE"));
+    }
+
+    #[test]
+    fn snapshot_payload_hash_is_stable_and_content_addressed() {
+        let payload = serde_json::json!({"a": 1, "b": [true, null]});
+        let first = snapshot_payload_hash(&payload);
+        let second = snapshot_payload_hash(&payload);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, snapshot_payload_hash(&serde_json::json!({"a": 2})));
+    }
+
+    #[test]
+    fn snapshot_persist_sql_binds_expected_and_observed_sides() {
+        // Guard the write shape: the snapshot must carry both the observed
+        // Stripe figures and ApexMail's independent expectation plus hash.
+        let source = include_str!("stripe_webhooks.rs");
+        for needle in [
+            "apexmail_expected_total_cents",
+            "raw_payload_hash",
+            "validation_status",
+            "ON CONFLICT (stripe_invoice_id) DO NOTHING",
+        ] {
+            assert!(
+                source.contains(needle),
+                "snapshot write must include {needle}"
+            );
+        }
+        // The discrepancy path must both block (Err) and persist an incident.
+        assert!(source.contains("finance_incidents"));
+        assert!(source.contains("BLOCKED invoice finalization"));
     }
 
     #[test]

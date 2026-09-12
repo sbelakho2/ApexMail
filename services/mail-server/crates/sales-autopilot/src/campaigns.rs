@@ -9,6 +9,15 @@
 //! Decision Packet, the legal gate, the sender-health gate and the action
 //! fence. There is no `CampaignEmailDispatcher`, no `dispatch_batch` and no
 //! direct enqueue into the platform queue from this module.
+//!
+//! Starting is a durable, resumable operation (`start_state` /
+//! `start_operation_id`, migration 216): a draft/paused campaign is admitted
+//! under a tenant-scoped advisory lock, materialized idempotently, and only
+//! becomes `active` once at least one contact can actually be sent to.
+//! Failures stay resumable in `starting`; a batch that accepted zero contacts
+//! parks in `verification_pending` instead of activating. The policy is
+//! resolved by the canonical store per contact — never as one batch-level
+//! `autonomy_policy_id`.
 
 use chrono::Utc;
 use sqlx::PgPool;
@@ -87,6 +96,74 @@ pub const LEGACY_RECIPIENT_CONFIDENCE: f64 = 0.1;
 /// `sales_contact_points.source` marker for a point created from the legacy
 /// campaign recipient list.
 pub const LEGACY_RECIPIENT_SOURCE: &str = "legacy_campaign";
+
+// ---------------------------------------------------------------------------
+// Durable start-operation state
+// ---------------------------------------------------------------------------
+
+/// Phase of a campaign start operation.
+///
+/// `sales_campaigns.status` keeps the legacy CP vocabulary
+/// (`draft`/`active`/`paused`/`completed`); the start operation is layered over
+/// it so a failed or partially-completed start is never misreported as active:
+///
+/// * [`CampaignStartPhase::Starting`] — persisted as
+///   `sales_campaigns.start_state = 'starting'` with a durable
+///   `start_operation_id`. Enrollment materialization is in flight; the
+///   campaign is NOT active. A failure or crash leaves this state in place and
+///   the next call resumes the same operation id.
+/// * [`CampaignStartPhase::VerificationPending`] — persisted as
+///   `start_state = 'verification_pending'`. Enrollment completed but zero
+///   contacts were accepted, so the campaign is NOT active: an "active"
+///   campaign whose every recipient was rejected advertises sends that can
+///   never happen. The operator-readable reason is in
+///   `sales_campaigns.last_error` and in the start response.
+/// * [`CampaignStartPhase::Active`] — terminal success: `status = 'active'`,
+///   `start_state IS NULL`; the operation id is retained for audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CampaignStartPhase {
+    Starting,
+    VerificationPending,
+    Active,
+}
+
+impl CampaignStartPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::VerificationPending => "verification_pending",
+            Self::Active => "active",
+        }
+    }
+
+    /// Parse a persisted `sales_campaigns.start_state` value. `active` is never
+    /// persisted in that column (it is expressed by `status = 'active'`).
+    fn parse_durable(raw: &str) -> Option<Self> {
+        match raw {
+            "starting" => Some(Self::Starting),
+            "verification_pending" => Some(Self::VerificationPending),
+            _ => None,
+        }
+    }
+}
+
+/// Outcome of [`CampaignManager::start_campaign_operation`]: the durable
+/// operation id, the phase it reached, the canonical enrollment outcome (when
+/// the campaign had recipients) and the operator message for a non-active
+/// phase.
+#[derive(Debug)]
+pub struct CampaignStartReport {
+    /// The durable start operation id (`sales_campaigns.start_operation_id`).
+    /// Stable across every retry/resume of the same operation.
+    pub operation_id: Uuid,
+    pub phase: CampaignStartPhase,
+    /// The canonical enrollment outcome; `None` when the campaign has no
+    /// recipients (nothing was enrolled).
+    pub outreach: Option<StartOutreachResponse>,
+    /// Operator-readable explanation for a non-active phase (also persisted in
+    /// `sales_campaigns.last_error`).
+    pub message: Option<String>,
+}
 
 /// Stats reconciliation SQL (see `reconcile_campaign_stats`): `sent` counts
 /// worker 'sent' events joined via the send ledger's message_id (delivered
@@ -237,53 +314,60 @@ impl CampaignManager {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Transition a draft/paused campaign to Active and materialize its
-    /// recipients into canonical enrollments.
+    /// Transition a draft/paused campaign to Active through a durable,
+    /// resumable start operation, and materialize its recipients into
+    /// canonical enrollments.
     ///
-    /// # Behaviour (release-blocker: one send engine)
+    /// # Durable start state machine
     ///
-    /// This is the compatibility-planner boundary: it never sends mail. In
-    /// order it
+    /// 1. **Admission** ([`Self::admit_campaign_start`]): in one transaction
+    ///    holding the tenant-scoped advisory xact lock
+    ///    `pg_advisory_xact_lock(hashtext(tenant_id))`, the campaign row is
+    ///    locked `FOR UPDATE`, the max-active limit counts ACTIVE campaigns
+    ///    plus in-flight `'starting'` reservations, and the operation is
+    ///    durably admitted: `start_state = 'starting'` with a stable
+    ///    `start_operation_id`. The advisory lock makes count + reserve atomic,
+    ///    so two concurrent starts with one remaining slot serialize and the
+    ///    second is refused with [`SalesError::MaxCampaignsReached`].
+    /// 2. **Materialization** ([`Self::enroll_campaign_recipients`]): one
+    ///    compatibility sequence (keyed by
+    ///    `sales_sequences.legacy_campaign_id`, so retries reuse it), one
+    ///    contact + email contact point per recipient, and canonical
+    ///    enrollments through [`crate::enrollments::start_outreach`]. Every
+    ///    write is idempotent, so a retry duplicates nothing. A failure here
+    ///    propagates with the campaign still `'starting'` — NOT active — and
+    ///    the next call resumes the SAME operation id.
+    /// 3. **Finalization** ([`Self::activate_campaign_operation`] /
+    ///    [`Self::park_campaign_verification_pending`]): under the tenant lock,
+    ///    the campaign becomes ACTIVE when at least one contact is eligible
+    ///    (accepted now, or a live enrollment already exists for the campaign);
+    ///    with zero eligible contacts it parks in `'verification_pending'` —
+    ///    never active with no recipient that could actually be sent to.
     ///
-    /// 1. resolves the approved, in-date `sales_jurisdiction_policies` email
-    ///    policy for the recipients' jurisdiction — with no approved policy it
-    ///    REFUSES the start (before any state change) instead of bypassing the
-    ///    legal gate;
-    /// 2. atomically transitions the campaign to Active (SA-13 tenant-scoped
-    ///    conditional UPDATE plus the max-active-campaigns check);
-    /// 3. materializes one canonical compatibility sequence per campaign
-    ///    (keyed by `sales_sequences.legacy_campaign_id`, so restarting reuses
-    ///    it), one contact + email contact point per recipient (a legacy
-    ///    recipient is `verification = 'unknown'`, never `valid`) and enrolls
-    ///    every contact through [`crate::enrollments::start_outreach`].
+    /// This is deliberately NOT one giant transaction: every materialization
+    /// write is individually idempotent and the durable `'starting'` row is the
+    /// operation's recovery point.
     ///
-    /// Enrollment happens after the status commit (the same ordering the old
-    /// dispatch used), and re-running the start is idempotent: `start_outreach`
-    /// reports `already_enrolled` and creates no duplicate actions. A rejected
-    /// recipient is never handed to a direct-send fallback.
+    /// # Per-recipient legal policy
+    ///
+    /// The start does NOT choose a batch-level autonomy policy. Each contact's
+    /// current policy is resolved independently by `start_outreach` from the
+    /// canonical store (fail-closed), so a campaign spanning several
+    /// jurisdictions enrolls each recipient under its own policy instead of
+    /// collapsing the batch to `UNKNOWN` and rejecting legitimate contacts as
+    /// `stale_policy`.
     ///
     /// # Security (SA-13)
     ///
-    /// **Root cause**: The previous implementation used a SELECT-then-UPDATE
-    /// pattern where the UPDATE SQL omitted `tenant_id`. This created a TOCTOU
-    /// (time-of-check-time-of-use) race window: between the SELECT verifying
-    /// tenant ownership and the UPDATE, another concurrent request could modify
-    /// the campaign state, potentially allowing cross-tenant state manipulation.
-    ///
-    /// **Fix**: Replaced the SELECT-then-UPDATE with a single atomic conditional
-    /// UPDATE that includes:
-    ///   - `AND tenant_id = $2` — prevents cross-tenant manipulation
-    ///   - `AND status = $3` — atomic state transition (fails if status changed
-    ///     between read and write, eliminating the race window entirely)
-    ///
-    ///   The UPDATE `RETURNING *` is used so the caller receives the confirmed
-    ///   new state without a follow-up SELECT.
+    /// Every state write is scoped by `tenant_id` and guarded by the expected
+    /// operation id / status, so no request can mutate a campaign it does not
+    /// own and no stale writer can clobber a newer operation.
     ///
     /// Callers that render the per-recipient outcome (accepted / rejected /
-    /// rejection reasons) should use [`Self::start_campaign_with_outreach`];
-    /// this method keeps the `Campaign` return type for existing callers.
+    /// rejection reasons) should use [`Self::start_campaign_operation`]; this
+    /// method keeps the `Campaign` return type for existing callers.
     pub async fn start_campaign(&self, tenant_id: &str, id: Uuid) -> Result<Campaign, SalesError> {
-        let (campaign, _outreach) = self.start_campaign_with_outreach(tenant_id, id).await?;
+        let (campaign, _report) = self.start_campaign_operation(tenant_id, id).await?;
         Ok(campaign)
     }
 
@@ -299,144 +383,468 @@ impl CampaignManager {
         tenant_id: &str,
         id: Uuid,
     ) -> Result<(Campaign, Option<StartOutreachResponse>), SalesError> {
+        let (campaign, report) = self.start_campaign_operation(tenant_id, id).await?;
+        Ok((campaign, report.outreach))
+    }
+
+    /// [`Self::start_campaign`], returning the full durable start-operation
+    /// state: the operation id, its phase, the operator message and the
+    /// canonical enrollment outcome.
+    ///
+    /// This is the route-facing entry point. A campaign that could not be
+    /// activated (mid-materialization failure, or enrollment accepted zero
+    /// contacts) is reported with its durable phase instead of a bare status,
+    /// and a retry resumes the same `operation_id`.
+    pub async fn start_campaign_operation(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> Result<(Campaign, CampaignStartReport), SalesError> {
+        // 1. Durable admission under the tenant lock (count + reserve).
+        let admission = self.admit_campaign_start(tenant_id, id).await?;
+
+        // 2. Normalized, de-duplicated legacy recipient list. Every address
+        //    becomes a canonical contact whose gates the enrollment machinery
+        //    evaluates. Empty means nothing to enroll — zero accepted, handled
+        //    at finalization.
+        let emails = self.campaign_recipient_emails(tenant_id, id).await?;
+
+        // 3. Materialization + enrollment, outside the admission lock. A
+        //    failure here leaves the durable 'starting' state, and the next
+        //    call resumes the same operation.
+        let outreach = if emails.is_empty() {
+            None
+        } else {
+            Some(
+                self.enroll_campaign_recipients(tenant_id, &admission.campaign, &emails)
+                    .await?,
+            )
+        };
+
+        let accepted = outreach.as_ref().map_or(0, |outcome| outcome.accepted);
+        let live_enrollments = self
+            .live_campaign_enrollment_count(tenant_id, admission.campaign.id)
+            .await?;
+
+        // 4. Finalize: ACTIVE only when at least one contact can actually be
+        //    sent to (newly accepted, or already live from an earlier partial
+        //    attempt). Zero eligible contacts parks in verification_pending.
+        if accepted == 0 && live_enrollments == 0 {
+            let message = self
+                .park_campaign_verification_pending(
+                    tenant_id,
+                    id,
+                    admission.operation_id,
+                    emails.len(),
+                    outreach.as_ref(),
+                )
+                .await?;
+            let campaign = self
+                .load_campaign(tenant_id, id)
+                .await?
+                .ok_or(SalesError::CampaignNotFound(id))?;
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                campaign_id = %id,
+                operation_id = %admission.operation_id,
+                recipients = emails.len(),
+                "campaign start accepted zero contacts — campaign parked in \
+                 verification_pending and is NOT active"
+            );
+            return Ok((
+                campaign,
+                CampaignStartReport {
+                    operation_id: admission.operation_id,
+                    phase: CampaignStartPhase::VerificationPending,
+                    outreach,
+                    message: Some(message),
+                },
+            ));
+        }
+
+        let campaign = self
+            .activate_campaign_operation(tenant_id, id, admission.operation_id)
+            .await?;
+
+        match outreach {
+            Some(ref outcome) => {
+                tracing::info!(
+                    tenant_id = %tenant_id,
+                    campaign_id = %id,
+                    operation_id = %admission.operation_id,
+                    accepted = outcome.accepted,
+                    rejected = outcome.rejected,
+                    live_enrollments,
+                    "campaign start materialized canonical enrollments"
+                );
+                if outcome.rejected > 0 {
+                    tracing::warn!(
+                        tenant_id = %tenant_id,
+                        campaign_id = %id,
+                        rejection_reasons = ?outcome.rejection_reasons,
+                        "campaign start: some recipients could not be enrolled — \
+                         they are NOT sent to directly"
+                    );
+                }
+            }
+            None => {
+                tracing::info!(
+                    tenant_id = %tenant_id,
+                    campaign_id = %id,
+                    operation_id = %admission.operation_id,
+                    live_enrollments,
+                    "campaign start activated with no recipients to enroll"
+                );
+            }
+        }
+
+        Ok((
+            campaign,
+            CampaignStartReport {
+                operation_id: admission.operation_id,
+                phase: CampaignStartPhase::Active,
+                outreach,
+                message: None,
+            },
+        ))
+    }
+
+    /// Durable admission of a start operation, under the tenant-scoped advisory
+    /// xact lock. Returns the campaign as read (status draft/paused) plus the
+    /// operation id that every retry will reuse.
+    async fn admit_campaign_start(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> Result<StartAdmission, SalesError> {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            self.admit_campaign_start_locked(tenant_id, id),
+        )
+        .await
+        .map_err(|_| {
+            SalesError::Database(
+                "campaign start admission timed out — another start for this tenant is \
+                 holding the tenant lock"
+                    .into(),
+            )
+        })?
+    }
+
+    async fn admit_campaign_start_locked(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> Result<StartAdmission, SalesError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        // Tenant-scoped advisory xact lock: serialize every start decision for
+        // this tenant so the max-active count + reservation below cannot race.
+        // A hash collision between tenants only over-serializes (correctness is
+        // unaffected).
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        let row: Option<CampaignStartRow> = sqlx::query_as(
+            "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, \
+                    created_at, start_state, start_operation_id \
+             FROM sales_campaigns WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        let row = row.ok_or(SalesError::CampaignNotFound(id))?;
+
+        if !matches!(row.status.as_str(), "draft" | "paused") {
+            return Err(SalesError::InvalidInput(format!(
+                "cannot start campaign in status {}",
+                row.status
+            )));
+        }
+
+        let durable_phase = match row.start_state.as_deref() {
+            None => None,
+            Some(raw) => match CampaignStartPhase::parse_durable(raw) {
+                Some(phase) => Some(phase),
+                None => {
+                    return Err(SalesError::Internal(anyhow::anyhow!(
+                        "campaign {id} has unknown start_state '{raw}'"
+                    )))
+                }
+            },
+        };
+        // A pending phase implies a durable operation id (DB constraint); a
+        // missing id is corruption, not a reason to mint a second operation.
+        if durable_phase.is_some() && row.start_operation_id.is_none() {
+            return Err(SalesError::Internal(anyhow::anyhow!(
+                "campaign {id} is in start_state '{}' without a start_operation_id",
+                row.start_state.as_deref().unwrap_or_default()
+            )));
+        }
+
+        // Resume the SAME durable operation after a failure/zero-accept park;
+        // only a fresh admission mints a new id and takes a new slot.
+        let resuming = durable_phase.is_some();
+        let operation_id = row.start_operation_id.unwrap_or_else(Uuid::new_v4);
+
+        if !resuming {
+            // Count ACTIVE campaigns plus in-flight 'starting' reservations
+            // (this campaign is excluded: it holds no slot yet). Create-time
+            // counting alone is bypassable — drafts are unlimited — so the
+            // authoritative check is here, under the tenant lock.
+            let reserved: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sales_campaigns \
+                 WHERE tenant_id = $1 AND id <> $2 \
+                   AND (status = 'active' OR start_state = 'starting')",
+            )
+            .bind(tenant_id)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+            if reserved >= self.max_campaigns as i64 {
+                // Nothing written: dropping the transaction rolls back.
+                return Err(SalesError::MaxCampaignsReached(self.max_campaigns));
+            }
+        }
+
+        let updated: Option<Option<Uuid>> = sqlx::query_scalar(
+            "UPDATE sales_campaigns \
+             SET start_state = 'starting', start_operation_id = $3, last_error = NULL \
+             WHERE id = $1 AND tenant_id = $2 \
+             RETURNING start_operation_id",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        // The row is held FOR UPDATE, so the UPDATE must have hit it.
+        let stored_operation_id = updated.flatten().ok_or_else(|| {
+            SalesError::Internal(anyhow::anyhow!(
+                "campaign {id} start admission did not persist its operation id"
+            ))
+        })?;
+
+        let campaign = row.into_campaign()?;
+        tx.commit()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        Ok(StartAdmission {
+            campaign,
+            operation_id: stored_operation_id,
+        })
+    }
+
+    /// The normalized, de-duplicated legacy recipient list for a campaign.
+    async fn campaign_recipient_emails(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+    ) -> Result<Vec<String>, SalesError> {
+        let emails: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT LOWER(BTRIM(r.email)) FROM sales_campaign_recipients r \
+             JOIN sales_campaigns c ON c.id = r.campaign_id \
+             WHERE r.campaign_id = $1 AND c.tenant_id = $2 \
+             ORDER BY 1",
+        )
+        .bind(campaign_id)
+        .bind(tenant_id)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(emails
+            .into_iter()
+            .filter(|email| !email.is_empty())
+            .collect())
+    }
+
+    /// Live (non-terminal) enrollments of the campaign's compatibility
+    /// sequence. These are contacts that can still be sent to, so an
+    /// already-enrolled re-start (e.g. after a pause) is a legitimate
+    /// activation even when the enrollment command reports `accepted = 0`.
+    async fn live_campaign_enrollment_count(
+        &self,
+        tenant_id: &str,
+        campaign_id: Uuid,
+    ) -> Result<i64, SalesError> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_enrollments e \
+             JOIN sales_sequence_versions v ON v.id = e.sequence_version_id \
+             JOIN sales_sequences s ON s.id = v.sequence_id \
+             WHERE e.tenant_id = $1 AND s.tenant_id = $1 \
+               AND s.legacy_campaign_id = $2 \
+               AND e.state NOT IN ('completed', 'failed', 'suppressed')",
+        )
+        .bind(tenant_id)
+        .bind(campaign_id)
+        .fetch_one(&self.db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))
+    }
+
+    /// Park a completed start whose enrollment accepted zero contacts in the
+    /// durable `verification_pending` phase: the campaign is NOT activated and
+    /// the operator-readable reason is persisted in `last_error`.
+    async fn park_campaign_verification_pending(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+        operation_id: Uuid,
+        recipients: usize,
+        outreach: Option<&StartOutreachResponse>,
+    ) -> Result<String, SalesError> {
+        let rejection_detail = match outreach {
+            Some(outcome) if !outcome.rejection_reasons.is_empty() => {
+                format!("{:?}", outcome.rejection_reasons)
+            }
+            Some(_) => "no rejection reasons recorded".to_string(),
+            None => "the campaign has no recipients".to_string(),
+        };
+        let message = format!(
+            "start operation {operation_id} accepted 0 of {recipients} recipients — campaign \
+             not activated (verification_pending); rejections: {rejection_detail}"
+        );
+
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        let affected = sqlx::query(
+            "UPDATE sales_campaigns \
+             SET start_state = 'verification_pending', last_error = $4 \
+             WHERE id = $1 AND tenant_id = $2 AND start_operation_id = $3 \
+               AND status IN ('draft', 'paused')",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(operation_id)
+        .bind(&message)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?
+        .rows_affected();
+
+        if affected == 0 {
+            return Err(SalesError::InvalidInput(
+                "campaign start operation is no longer resumable (status or operation id \
+                 changed concurrently)"
+                    .into(),
+            ));
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(message)
+    }
+
+    /// Activate a campaign whose start operation completed with at least one
+    /// eligible contact. The operation-id guard makes this write idempotent and
+    /// impossible for a superseded operation to perform.
+    async fn activate_campaign_operation(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+        operation_id: Uuid,
+    ) -> Result<Campaign, SalesError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+
         let row: Option<CampaignRow> = sqlx::query_as(
-            "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
+            "UPDATE sales_campaigns \
+             SET status = 'active', start_state = NULL, last_error = NULL \
+             WHERE id = $1 AND tenant_id = $2 AND start_operation_id = $3 \
+               AND status IN ('draft', 'paused') \
+             RETURNING id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        let campaign = match row.and_then(|r| r.into_campaign().ok()) {
+            Some(campaign) => campaign,
+            None => {
+                // A concurrent resume of the SAME operation already activated
+                // it (we hold the tenant lock, so that commit is visible):
+                // activation is idempotent, not an error.
+                let already: Option<CampaignRow> = sqlx::query_as(
+                    "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, \
+                            clicked, created_at \
+                     FROM sales_campaigns \
+                     WHERE id = $1 AND tenant_id = $2 AND start_operation_id = $3 \
+                       AND status = 'active'",
+                )
+                .bind(id)
+                .bind(tenant_id)
+                .bind(operation_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+                already
+                    .and_then(|r| r.into_campaign().ok())
+                    .ok_or_else(|| {
+                        SalesError::InvalidInput(
+                            "campaign start operation is no longer resumable (status or operation \
+                         id changed concurrently)"
+                                .into(),
+                        )
+                    })?
+            }
+        };
+
+        tx.commit()
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
+        Ok(campaign)
+    }
+
+    /// Read one campaign for a tenant.
+    async fn load_campaign(
+        &self,
+        tenant_id: &str,
+        id: Uuid,
+    ) -> Result<Option<Campaign>, SalesError> {
+        let row: Option<CampaignRow> = sqlx::query_as(
+            "SELECT id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at \
+             FROM sales_campaigns WHERE id = $1 AND tenant_id = $2",
         )
         .bind(id)
         .bind(tenant_id)
         .fetch_optional(&self.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        let campaign = row
-            .and_then(|r| r.into_campaign().ok())
-            .ok_or(SalesError::CampaignNotFound(id))?;
-
-        match campaign.status {
-            CampaignStatus::Draft | CampaignStatus::Paused => {
-                // Normalized, de-duplicated legacy recipient list. Every
-                // address becomes a canonical contact whose gates the
-                // enrollment machinery evaluates.
-                let emails: Vec<String> = sqlx::query_scalar(
-                    "SELECT DISTINCT LOWER(BTRIM(r.email)) FROM sales_campaign_recipients r \
-                     JOIN sales_campaigns c ON c.id = r.campaign_id \
-                     WHERE r.campaign_id = $1 AND c.tenant_id = $2 \
-                     ORDER BY 1",
-                )
-                .bind(id)
-                .bind(tenant_id)
-                .fetch_all(&self.db)
-                .await
-                .map_err(|e| SalesError::Database(e.to_string()))?
-                .into_iter()
-                .filter(|email: &String| !email.is_empty())
-                .collect();
-
-                // Legal basis FIRST: resolve the approved autonomy policy
-                // before any state change. If none resolves, the start is
-                // refused and the campaign stays draft/paused.
-                let autonomy_policy_id = if emails.is_empty() {
-                    None
-                } else {
-                    Some(self.resolve_autonomy_policy_id(tenant_id, &emails).await?)
-                };
-
-                // Enforce the max-active-campaigns limit at start time as well.
-                //
-                // `create_campaign` only counts ACTIVE campaigns, so a tenant
-                // can create unlimited drafts and then start them all — the
-                // create-time check alone is bypassable. The count and the
-                // status UPDATE below run inside a single transaction so that
-                // concurrent starts cannot both pass the count check (TOCTOU).
-                let mut tx = self
-                    .db
-                    .begin()
-                    .await
-                    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-                let active_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM sales_campaigns WHERE tenant_id = $1 AND status = 'active'",
-                )
-                .bind(tenant_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| SalesError::Database(e.to_string()))?;
-
-                if active_count >= self.max_campaigns as i64 {
-                    // Nothing written in this transaction yet — dropping it
-                    // rolls back (a no-op).
-                    return Err(SalesError::MaxCampaignsReached(self.max_campaigns));
-                }
-
-                // Atomic conditional UPDATE: tenant filter + expected status
-                // eliminate the TOCTOU race window (SA-13).
-                let expected_status = campaign.status.to_string();
-                let updated_row: Option<CampaignRow> = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    sqlx::query_as(
-                        "UPDATE sales_campaigns SET status = 'active' WHERE id = $1 AND tenant_id = $2 AND status = $3 RETURNING id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at",
-                    )
-                    .bind(id)
-                    .bind(tenant_id)
-                    .bind(&expected_status)
-                    .fetch_optional(&mut *tx),
-                )
-                .await
-                .map_err(|_| SalesError::Database("campaign start query timed out".into()))?
-                .map_err(|e| SalesError::Database(e.to_string()))?;
-
-                let updated = match updated_row.and_then(|r| r.into_campaign().ok()) {
-                    Some(c) => c,
-                    None => {
-                        return Err(SalesError::InvalidInput(
-                            "campaign status changed concurrently; retry".into(),
-                        ))
-                    }
-                };
-
-                tx.commit()
-                    .await
-                    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-                // Canonical materialization + enrollment, AFTER the status
-                // commit (same ordering the old dispatch used): every accepted
-                // recipient becomes a canonical enrollment whose first step
-                // action is queued for the durable worker. Rejections are
-                // reported, never re-routed to a direct send.
-                let outreach = match autonomy_policy_id {
-                    None => None,
-                    Some(policy_id) => Some(
-                        self.enroll_campaign_recipients(tenant_id, &campaign, policy_id, &emails)
-                            .await?,
-                    ),
-                };
-
-                if let Some(ref outcome) = outreach {
-                    tracing::info!(
-                        tenant_id = %tenant_id,
-                        campaign_id = %id,
-                        accepted = outcome.accepted,
-                        rejected = outcome.rejected,
-                        "campaign start materialized canonical enrollments"
-                    );
-                    if outcome.rejected > 0 {
-                        tracing::warn!(
-                            tenant_id = %tenant_id,
-                            campaign_id = %id,
-                            rejection_reasons = ?outcome.rejection_reasons,
-                            "campaign start: some recipients could not be enrolled — \
-                             they are NOT sent to directly"
-                        );
-                    }
-                }
-
-                Ok((updated, outreach))
-            }
-            _ => Err(SalesError::InvalidInput(format!(
-                "cannot start campaign in status {}",
-                campaign.status
-            ))),
-        }
+        row.map(|r| r.into_campaign()).transpose()
     }
 
     /// Enroll every materialized campaign recipient through the ONE canonical
@@ -445,11 +853,13 @@ impl CampaignManager {
     /// verification, duplicate enrollment). Chunked to the outreach command's
     /// per-call bound; the aggregate response reports the exact per-reason
     /// rejection counts.
+    ///
+    /// No batch-level `autonomy_policy_id` is sent: the enrollment command
+    /// resolves the current policy independently for every contact.
     async fn enroll_campaign_recipients(
         &self,
         tenant_id: &str,
         campaign: &Campaign,
-        autonomy_policy_id: Uuid,
         emails: &[String],
     ) -> Result<StartOutreachResponse, SalesError> {
         let sequence_id = self
@@ -466,7 +876,7 @@ impl CampaignManager {
             let request = StartOutreachRequest {
                 sequence_id,
                 contact_ids: chunk.to_vec(),
-                autonomy_policy_id,
+                autonomy_policy_id: None,
                 experiment_id: None,
             };
             let response =
@@ -697,63 +1107,6 @@ impl CampaignManager {
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
         Ok(sequence_id)
-    }
-
-    /// Resolve the approved, in-date autonomy policy for the contacts'
-    /// jurisdiction.
-    ///
-    /// The recipients' jurisdiction evidence is the account matched by the
-    /// recipient address's domain: one distinct country → that jurisdiction;
-    /// none or several → the fail-closed `UNKNOWN` policy row. No policy id is
-    /// ever invented: when no approved, in-date, email-channel policy exists
-    /// (including a `prohibited` one), the start is refused with
-    /// [`SalesError::PolicyDenied`] rather than bypassing the legal gate.
-    async fn resolve_autonomy_policy_id(
-        &self,
-        tenant_id: &str,
-        emails: &[String],
-    ) -> Result<Uuid, SalesError> {
-        let jurisdictions: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT UPPER(BTRIM(a.country)) FROM sales_accounts a \
-             WHERE a.tenant_id = $1 \
-               AND a.country IS NOT NULL AND BTRIM(a.country) <> '' \
-               AND LOWER(a.domain) IN ( \
-                   SELECT LOWER(SPLIT_PART(e, '@', 2)) FROM UNNEST($2::text[]) AS e \
-               )",
-        )
-        .bind(tenant_id)
-        .bind(emails)
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-        let jurisdiction = if jurisdictions.len() == 1 {
-            jurisdictions[0].clone()
-        } else {
-            "UNKNOWN".to_string()
-        };
-
-        let policy_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT p.id FROM sales_jurisdiction_policies p \
-             WHERE p.channel = 'email' \
-               AND p.jurisdiction = $1 \
-               AND p.approved_by IS NOT NULL AND p.approved_at IS NOT NULL \
-               AND p.valid_from <= NOW() \
-               AND (p.valid_until IS NULL OR p.valid_until > NOW()) \
-               AND p.decision IN ('allowed', 'approval_required') \
-             ORDER BY p.version DESC, p.created_at DESC \
-             LIMIT 1",
-        )
-        .bind(&jurisdiction)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
-
-        policy_id.ok_or_else(|| {
-            SalesError::PolicyDenied(format!(
-                "no approved, in-date email jurisdiction policy for '{jurisdiction}' — \
-                 refusing to start the campaign: the legal gate cannot be satisfied"
-            ))
-        })
     }
 
     /// Due-legacy-recipient rows for the dry-run preview: not yet sent, not
@@ -1307,8 +1660,52 @@ fn is_valid_recipient_email(email: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Internal row type for sqlx mapping
+// Internal types for sqlx mapping and the start state machine
 // ---------------------------------------------------------------------------
+
+/// One admitted (or resumed) start operation.
+struct StartAdmission {
+    /// The campaign as read at admission (status still draft/paused).
+    campaign: Campaign,
+    /// Stable durable operation id, reused by every retry.
+    operation_id: Uuid,
+}
+
+/// A campaign row including the durable start-operation columns
+/// (`start_state`, `start_operation_id`).
+#[derive(sqlx::FromRow)]
+struct CampaignStartRow {
+    id: Uuid,
+    tenant_id: String,
+    name: String,
+    template_id: String,
+    audience: String,
+    status: String,
+    sent: i64,
+    opened: i64,
+    clicked: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    start_state: Option<String>,
+    start_operation_id: Option<Uuid>,
+}
+
+impl CampaignStartRow {
+    fn into_campaign(self) -> Result<Campaign, SalesError> {
+        CampaignRow {
+            id: self.id,
+            tenant_id: self.tenant_id,
+            name: self.name,
+            template_id: self.template_id,
+            audience: self.audience,
+            status: self.status,
+            sent: self.sent,
+            opened: self.opened,
+            clicked: self.clicked,
+            created_at: self.created_at,
+        }
+        .into_campaign()
+    }
+}
 
 #[derive(sqlx::FromRow)]
 struct CampaignRow {
@@ -1363,9 +1760,10 @@ mod tests {
 
     /// Manager on the canonical provisioned test database (fresh pool per
     /// test). No dispatcher is needed any more: `start_campaign` materializes
-    /// canonical enrollments instead of sending. These tests start campaigns
-    /// with no recipients, so no jurisdiction policy or enrollment work is
-    /// required either.
+    /// canonical enrollments instead of sending. Activation requires at least
+    /// one contact that can actually be sent to, so tests that want an ACTIVE
+    /// campaign must seed a verified contact point and add the address as a
+    /// recipient.
     async fn make_mgr(test_name: &str) -> Option<CampaignManager> {
         make_mgr_with_limit(test_name, 10).await
     }
@@ -1420,6 +1818,13 @@ mod tests {
             )
             .await
             .unwrap();
+        // A campaign activates only when at least one recipient can actually
+        // be sent to, so the fixture needs a verified contact point.
+        let email = format!("lifecycle-{}@example.com", &tenant[..12]);
+        seed_verified_point(mgr.db(), &tenant, &email).await;
+        mgr.add_recipients(&tenant, c.id, vec![email])
+            .await
+            .unwrap();
         let started = mgr.start_campaign(&tenant, c.id).await.unwrap();
         assert_eq!(started.status, CampaignStatus::Active);
 
@@ -1443,6 +1848,12 @@ mod tests {
         let tenant = unique_test_tenant("campaign-max");
         let c = mgr
             .create_campaign(tenant.clone(), "C1".into(), "t".into(), "a".into())
+            .await
+            .unwrap();
+        // Activation needs at least one sendable recipient.
+        let email = format!("max-{}@example.com", &tenant[..12]);
+        seed_verified_point(mgr.db(), &tenant, &email).await;
+        mgr.add_recipients(&tenant, c.id, vec![email])
             .await
             .unwrap();
         mgr.start_campaign(&tenant, c.id).await.unwrap();
@@ -1478,6 +1889,16 @@ mod tests {
             .create_campaign(tenant.clone(), "C2".into(), "t".into(), "a".into())
             .await
             .unwrap();
+
+        // Both drafts need a sendable recipient to be admitted (an admission
+        // that accepted zero contacts parks instead of consuming a slot).
+        for (campaign, index) in [(&c1, 1), (&c2, 2)] {
+            let email = format!("max-start-{index}-{}@example.com", &tenant[..12]);
+            seed_verified_point(mgr.db(), &tenant, &email).await;
+            mgr.add_recipients(&tenant, campaign.id, vec![email])
+                .await
+                .unwrap();
+        }
 
         mgr.start_campaign(&tenant, c1.id).await.unwrap();
 
@@ -1643,13 +2064,26 @@ mod tests {
     /// Create a contact with an already-verified email point, so the legacy
     /// recipient has canonical provenance the compatibility path must reuse.
     async fn seed_verified_point(pool: &PgPool, tenant: &str, email: &str) -> Uuid {
+        seed_verified_point_for_account(pool, tenant, email, None).await
+    }
+
+    /// [`seed_verified_point`] with an explicit account relation, so the
+    /// per-contact policy resolution uses the account's country (a contact
+    /// without an account resolves the fail-closed UNKNOWN jurisdiction).
+    async fn seed_verified_point_for_account(
+        pool: &PgPool,
+        tenant: &str,
+        email: &str,
+        account_id: Option<Uuid>,
+    ) -> Uuid {
         let contact_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO sales_contacts (id, tenant_id, full_name) \
-             VALUES ($1, $2, 'Existing Contact')",
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Existing Contact')",
         )
         .bind(contact_id)
         .bind(tenant)
+        .bind(account_id)
         .execute(pool)
         .await
         .unwrap();
@@ -1667,6 +2101,24 @@ mod tests {
         .await
         .unwrap();
         contact_id
+    }
+
+    /// Insert an account owned by `tenant` with `country` and return its id.
+    async fn seed_account(pool: &PgPool, tenant: &str, country: &str) -> (Uuid, String) {
+        let account_id = Uuid::new_v4();
+        let domain = format!("{account_id}.example");
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, country, country_confidence) \
+             VALUES ($1, $2, 'Policy Test Co', $3, $4, 0.95)",
+        )
+        .bind(account_id)
+        .bind(tenant)
+        .bind(&domain)
+        .bind(country)
+        .execute(pool)
+        .await
+        .unwrap();
+        (account_id, domain)
     }
 
     async fn scalar_count(pool: &PgPool, sql: &str, tenant: &str) -> i64 {
@@ -1702,7 +2154,6 @@ mod tests {
     /// exactly ONE compatibility sequence and enrolls exactly ONCE, and the
     /// enqueue goes through the durable `sales_actions` queue — never into
     /// `email_queue` directly.
-    #[ignore = "KNOWN DEFECT (coordination/reservation workstream, unfinished): this gate errors instead of admitting or refusing when sales_contacts.account_id is NULL, and a query in its call path decodes a NULL into a non-Option column. Assertions are NOT weakened; enable once the call path is NULL-safe."]
     #[tokio::test]
     async fn campaign_start_materializes_one_sequence_and_never_duplicates_enrollment() {
         let Some(pool) =
@@ -1854,7 +2305,6 @@ mod tests {
     /// Live DB (canonical schema): a legacy recipient whose address normalizes
     /// to an existing canonical contact point reuses that contact (and its
     /// verification provenance) instead of creating a second contact.
-    #[ignore = "KNOWN DEFECT (coordination/reservation workstream, unfinished): this gate errors instead of admitting or refusing when sales_contacts.account_id is NULL, and a query in its call path decodes a NULL into a non-Option column. Assertions are NOT weakened; enable once the call path is NULL-safe."]
     #[tokio::test]
     async fn campaign_start_reuses_existing_contact_point_and_contact() {
         let Some(pool) =
@@ -1918,7 +2368,11 @@ mod tests {
 
     /// Live DB (canonical schema): a legacy recipient with no matching
     /// `sales_accounts` row migrates with `account_id = NULL` (never an
-    /// invented company) and its new point is `unknown`, not `valid`.
+    /// invented company) and its new point is `unknown`, not `valid`. The
+    /// created point cannot pass the canonical verification gate, so the start
+    /// accepts ZERO contacts and must NOT activate the campaign: the campaign
+    /// parks in `verification_pending` with an operator-visible reason instead
+    /// of advertising an active campaign whose only recipient was rejected.
     #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn campaign_start_creates_unknown_point_with_null_account() {
@@ -1939,12 +2393,21 @@ mod tests {
             .await
             .unwrap();
 
-        let (started, outcome) = mgr
-            .start_campaign_with_outreach(&tenant, campaign.id)
+        let (started, report) = mgr
+            .start_campaign_operation(&tenant, campaign.id)
             .await
             .unwrap();
-        assert_eq!(started.status, CampaignStatus::Active);
-        let outcome = outcome.expect("recipients exist");
+        assert_eq!(
+            started.status,
+            CampaignStatus::Draft,
+            "zero accepted contacts must not activate the campaign"
+        );
+        assert_eq!(
+            report.phase,
+            CampaignStartPhase::VerificationPending,
+            "the honest state is verification_pending, not active"
+        );
+        let outcome = report.outreach.expect("recipients exist");
         // The created point is `unknown`, so the canonical verification gate
         // rejects the enrollment — it is NEVER silently treated as valid.
         assert_eq!(outcome.accepted, 0);
@@ -1953,6 +2416,38 @@ mod tests {
             outcome.rejection_reasons.get("unverified_contact"),
             Some(&1)
         );
+        let message = report
+            .message
+            .expect("a parked start must carry an operator message");
+        assert!(
+            message.contains("verification_pending") && message.contains("unverified_contact"),
+            "the operator message must name the state and the rejection: {message}"
+        );
+
+        // The durable state is persisted and operator-visible in the row.
+        let (status, start_state, operation_id, last_error): (
+            String,
+            Option<String>,
+            Option<Uuid>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, start_state, start_operation_id, last_error \
+             FROM sales_campaigns WHERE id = $1",
+        )
+        .bind(campaign.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "draft");
+        assert_eq!(start_state.as_deref(), Some("verification_pending"));
+        assert_eq!(
+            operation_id,
+            Some(report.operation_id),
+            "the durable operation id must be persisted"
+        );
+        assert!(last_error
+            .expect("last_error is the operator-visible reason")
+            .contains("verification_pending"));
 
         let (verification, confidence, account_id): (String, f64, Option<Uuid>) = sqlx::query_as(
             "SELECT p.verification, p.confidence, c.account_id \
@@ -1986,12 +2481,16 @@ mod tests {
         cleanup_campaign_fixture(&pool, &tenant).await;
     }
 
-    /// Live DB (canonical schema): a campaign whose recipients' jurisdiction
-    /// has no approved, in-date email policy refuses to start instead of
-    /// enrolling (the legal gate is never bypassed).
+    /// Live DB (canonical schema): the start does NOT resolve one batch-level
+    /// policy. A recipient whose jurisdiction has no approved policy is not a
+    /// batch refusal: the canonical store resolves that contact to the
+    /// fail-closed `ApprovalRequired` verdict (policy id NULL) and the
+    /// enrollment proceeds on that verdict — the send path still gates it. The
+    /// campaign must NOT be rejected as `stale_policy` for a policy id the
+    /// batch resolver invented.
     #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
-    async fn campaign_start_without_approved_jurisdiction_policy_is_refused() {
+    async fn campaign_start_resolves_policy_per_contact_for_unlisted_jurisdiction() {
         let Some(pool) =
             canonical_test_pool("campaigns::tests::campaign_start_policy_refused").await
         else {
@@ -2000,41 +2499,203 @@ mod tests {
         let tenant = unique_test_tenant("campaign-policy");
         let mgr = CampaignManager::new(10, pool.clone());
 
-        // A jurisdiction with no policy row, attached to the recipient's
-        // domain so the resolver picks it.
-        let domain = format!("{}.invalid", &tenant[..12]);
-        sqlx::query(
-            "INSERT INTO sales_accounts (id, tenant_id, company, domain, country) \
-             VALUES ($1, $2, 'Policy Test Co', $3, $4)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&tenant)
-        .bind(&domain)
-        .bind(format!("TST-{}", &tenant[..12]))
-        .execute(&pool)
-        .await
-        .unwrap();
+        // A jurisdiction with no policy row at all, carried by the recipient's
+        // account so the per-contact resolver picks it up.
+        let country = crate::test_db::ensure_no_policy_jurisdiction(&pool).await;
+        let (account_id, domain) = seed_account(&pool, &tenant, &country).await;
+        let email = format!("policy-{}@{domain}", &tenant[..12]);
+        seed_verified_point_for_account(&pool, &tenant, &email, Some(account_id)).await;
 
         let campaign = mgr
             .create_campaign(tenant.clone(), "Policy".into(), "t".into(), "all".into())
             .await
             .unwrap();
-        mgr.add_recipients(&tenant, campaign.id, vec![format!("a@{domain}")])
+        mgr.add_recipients(&tenant, campaign.id, vec![email])
             .await
             .unwrap();
 
-        let refused = mgr.start_campaign(&tenant, campaign.id).await;
+        let (started, report) = mgr
+            .start_campaign_operation(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(started.status, CampaignStatus::Active);
+        assert_eq!(report.phase, CampaignStartPhase::Active);
+        let outcome = report.outreach.expect("recipients exist");
+        assert_eq!(
+            outcome.accepted, 1,
+            "ApprovalRequired is planned, not rejected: {:?}",
+            outcome.rejection_reasons
+        );
+        assert_eq!(outcome.rejected, 0);
         assert!(
-            matches!(refused, Err(SalesError::PolicyDenied(_))),
-            "no approved policy must refuse the start: {refused:?}"
+            !outcome.rejection_reasons.contains_key("stale_policy"),
+            "an unlisted jurisdiction must never be mislabelled stale_policy"
+        );
+        assert!(
+            !outcome.rejection_reasons.contains_key("legal_policy"),
+            "no policy resolves to ApprovalRequired, which is not a prohibition"
         );
 
-        let status: String = sqlx::query_scalar("SELECT status FROM sales_campaigns WHERE id = $1")
+        cleanup_campaign_fixture(&pool, &tenant).await;
+    }
+
+    /// Live DB (canonical schema): two recipients in DIFFERENT jurisdictions
+    /// each resolve their OWN current policy. Before the fix the start picked
+    /// one policy id for the whole batch (UNKNOWN for a multi-country list),
+    /// and every contact was then rejected as `stale_policy` even though its
+    /// own policy allowed contact.
+    #[tokio::test]
+    async fn campaign_start_resolves_each_jurisdiction_separately() {
+        let Some(pool) =
+            canonical_test_pool("campaigns::tests::campaign_start_mixed_jurisdictions").await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-mixed-juris");
+        let mgr = CampaignManager::new(10, pool.clone());
+
+        // Two distinct, approved, allowing jurisdictions (fresh unused codes).
+        let (jurisdiction_a, _policy_a) =
+            crate::test_db::insert_unique_jurisdiction_policy_returning_id(
+                &pool,
+                "allowed",
+                "legitimate_interest",
+            )
+            .await;
+        let (jurisdiction_b, _policy_b) =
+            crate::test_db::insert_unique_jurisdiction_policy_returning_id(
+                &pool,
+                "allowed",
+                "legitimate_interest",
+            )
+            .await;
+
+        let (account_a, domain_a) = seed_account(&pool, &tenant, &jurisdiction_a).await;
+        let (account_b, domain_b) = seed_account(&pool, &tenant, &jurisdiction_b).await;
+        let email_a = format!("mixed-a-{}@{domain_a}", &tenant[..12]);
+        let email_b = format!("mixed-b-{}@{domain_b}", &tenant[..12]);
+        let contact_a =
+            seed_verified_point_for_account(&pool, &tenant, &email_a, Some(account_a)).await;
+        let contact_b =
+            seed_verified_point_for_account(&pool, &tenant, &email_b, Some(account_b)).await;
+
+        let campaign = mgr
+            .create_campaign(
+                tenant.clone(),
+                "Mixed jurisdictions".into(),
+                "t".into(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+        mgr.add_recipients(&tenant, campaign.id, vec![email_a, email_b])
+            .await
+            .unwrap();
+
+        let (started, report) = mgr
+            .start_campaign_operation(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(started.status, CampaignStatus::Active);
+        let outcome = report.outreach.expect("recipients exist");
+        assert_eq!(
+            outcome.accepted, 2,
+            "both jurisdictions must enroll under their own policy: {:?}",
+            outcome.rejection_reasons
+        );
+        assert_eq!(outcome.rejected, 0);
+        assert!(
+            !outcome.rejection_reasons.contains_key("stale_policy"),
+            "a mixed-jurisdiction batch must not collapse to stale_policy: {:?}",
+            outcome.rejection_reasons
+        );
+
+        // Each enrollment exists exactly once, under the campaign's sequence.
+        let enrolled: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT e.contact_id FROM sales_enrollments e \
+             JOIN sales_sequence_versions v ON v.id = e.sequence_version_id \
+             JOIN sales_sequences s ON s.id = v.sequence_id \
+             WHERE e.tenant_id = $1 AND s.legacy_campaign_id = $2 ORDER BY e.contact_id",
+        )
+        .bind(&tenant)
+        .bind(campaign.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut expected = vec![contact_a, contact_b];
+        expected.sort_unstable();
+        assert_eq!(enrolled, expected);
+
+        cleanup_campaign_fixture(&pool, &tenant).await;
+    }
+
+    /// Live DB (canonical schema): a failure in the middle of materialization
+    /// leaves the campaign in the durable `starting` phase (NOT active), and a
+    /// retry RESUMES the same operation id without duplicating the sequence,
+    /// contacts, enrollments or queued actions.
+    #[tokio::test]
+    async fn failed_start_is_resumable_and_never_duplicates() {
+        let Some(pool) = canonical_test_pool("campaigns::tests::failed_start_is_resumable").await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-resume");
+        let mgr = CampaignManager::new(10, pool.clone());
+        let email = format!("resume-{}@example.com", &tenant[..12]);
+        seed_verified_point(&pool, &tenant, &email).await;
+
+        let campaign = mgr
+            .create_campaign(tenant.clone(), "Resumable".into(), "t".into(), "all".into())
+            .await
+            .unwrap();
+        mgr.add_recipients(&tenant, campaign.id, vec![email])
+            .await
+            .unwrap();
+
+        // Inject a failure into the FIRST materialization write (the
+        // compatibility sequence), AFTER the durable admission has committed.
+        // The trigger fires for no other test's tenant (every tenant id is
+        // unique per run).
+        let function_name = format!("fail_sequences_{}", tenant.replace('-', "_"));
+        let trigger_name = format!("{function_name}_trg");
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION {function_name}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN RAISE EXCEPTION 'injected mid-materialization failure'; END $$"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(&format!(
+            "CREATE TRIGGER {trigger_name} BEFORE INSERT ON sales_sequences \
+             FOR EACH ROW WHEN (NEW.tenant_id = '{tenant}') \
+             EXECUTE FUNCTION {function_name}()"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let failed = mgr.start_campaign(&tenant, campaign.id).await;
+        assert!(
+            matches!(failed, Err(SalesError::Database(_))),
+            "the injected failure must surface: {failed:?}"
+        );
+
+        let (status, start_state, operation_id): (String, Option<String>, Option<Uuid>) =
+            sqlx::query_as(
+                "SELECT status, start_state, start_operation_id \
+                 FROM sales_campaigns WHERE id = $1",
+            )
             .bind(campaign.id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(status, "draft", "the campaign must not become active");
+        assert_eq!(status, "draft", "a failed start must not activate");
+        assert_eq!(
+            start_state.as_deref(),
+            Some("starting"),
+            "the durable starting phase is the recovery point"
+        );
+        let operation_id = operation_id.expect("the operation id is durable");
         assert_eq!(
             scalar_count(
                 &pool,
@@ -2043,7 +2704,62 @@ mod tests {
             )
             .await,
             0,
-            "a refused start must not enroll anyone"
+            "the failed materialization enrolled nobody"
+        );
+        assert_eq!(
+            scalar_count(
+                &pool,
+                "SELECT COUNT(*) FROM sales_sequences WHERE tenant_id = $1",
+                &tenant
+            )
+            .await,
+            0,
+            "the failed sequence materialization wrote nothing"
+        );
+
+        // Remove the injected failure and retry: the SAME operation resumes.
+        sqlx::query(&format!("DROP TRIGGER {trigger_name} ON sales_sequences"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(&format!("DROP FUNCTION {function_name}()"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (started, report) = mgr
+            .start_campaign_operation(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(started.status, CampaignStatus::Active);
+        assert_eq!(report.phase, CampaignStartPhase::Active);
+        assert_eq!(
+            report.operation_id, operation_id,
+            "the retry must resume the SAME durable operation id"
+        );
+        let outcome = report.outreach.expect("recipients exist");
+        assert_eq!(outcome.accepted, 1);
+        assert_eq!(outcome.rejected, 0);
+
+        // No duplicate sequence/enrollment/action from the resume.
+        let sequences: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_sequences \
+             WHERE tenant_id = $1 AND legacy_campaign_id = $2",
+        )
+        .bind(&tenant)
+        .bind(campaign.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sequences, 1, "the compatibility sequence is reused");
+        assert_eq!(
+            scalar_count(
+                &pool,
+                "SELECT COUNT(*) FROM sales_enrollments WHERE tenant_id = $1",
+                &tenant
+            )
+            .await,
+            1
         );
         assert_eq!(
             scalar_count(
@@ -2052,7 +2768,88 @@ mod tests {
                 &tenant
             )
             .await,
-            0
+            1,
+            "exactly one queued send action after the resume"
+        );
+        let start_state: Option<String> =
+            sqlx::query_scalar("SELECT start_state FROM sales_campaigns WHERE id = $1")
+                .bind(campaign.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(start_state.is_none(), "activation clears the pending phase");
+        let last_error: Option<String> =
+            sqlx::query_scalar("SELECT last_error FROM sales_campaigns WHERE id = $1")
+                .bind(campaign.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(last_error.is_none(), "activation clears the operator error");
+
+        cleanup_campaign_fixture(&pool, &tenant).await;
+    }
+
+    /// Live DB (canonical schema): two concurrent starts with exactly ONE
+    /// remaining active slot must activate exactly one campaign. The
+    /// tenant-scoped advisory xact lock serializes the count + reservation, and
+    /// an in-flight `'starting'` row counts as a taken slot.
+    #[tokio::test]
+    async fn concurrent_starts_with_one_slot_activate_exactly_one() {
+        let Some(pool) = canonical_test_pool("campaigns::tests::concurrent_starts_one_slot").await
+        else {
+            return;
+        };
+        let tenant = unique_test_tenant("campaign-race");
+        let mgr = CampaignManager::new(1, pool.clone());
+
+        let mut campaigns = Vec::new();
+        for index in 0..2 {
+            let campaign = mgr
+                .create_campaign(
+                    tenant.clone(),
+                    format!("Race {index}"),
+                    "t".into(),
+                    "a".into(),
+                )
+                .await
+                .unwrap();
+            let email = format!("race-{index}-{}@example.com", &tenant[..12]);
+            seed_verified_point(&pool, &tenant, &email).await;
+            mgr.add_recipients(&tenant, campaign.id, vec![email])
+                .await
+                .unwrap();
+            campaigns.push(campaign);
+        }
+
+        let (first, second) = tokio::join!(
+            mgr.start_campaign(&tenant, campaigns[0].id),
+            mgr.start_campaign(&tenant, campaigns[1].id),
+        );
+
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_campaigns \
+             WHERE tenant_id = $1 AND status = 'active'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            active, 1,
+            "exactly one of two concurrent starts may take the last slot"
+        );
+
+        let outcomes = [first, second];
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+            1,
+            "exactly one start may succeed: {outcomes:?}"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, Err(SalesError::MaxCampaignsReached(1)))),
+            "the loser must be refused with MaxCampaignsReached: {outcomes:?}"
         );
 
         cleanup_campaign_fixture(&pool, &tenant).await;

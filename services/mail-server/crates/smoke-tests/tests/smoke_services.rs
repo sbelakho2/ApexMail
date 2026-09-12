@@ -235,11 +235,13 @@ mod billing_tests {
         assert_eq!(rate, 24.0);
         assert_eq!(amount, 2_400);
 
-        // EU B2B with VAT number:reverse charge = 0%
+        // EU B2B with a structurally valid VAT number but NO VIES evidence:
+        // the destination rate applies. A well-formed number alone must never
+        // zero-rate a supply.
         let (rate, amount) =
             billing_service::invoices::calculate_vat(10_000, "DE", Some("DE123456789"));
-        assert_eq!(rate, 0.0);
-        assert_eq!(amount, 0);
+        assert_eq!(rate, 19.0);
+        assert_eq!(amount, 1_900);
 
         // Non-EU:0%
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "US", None);

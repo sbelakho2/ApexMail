@@ -5,6 +5,7 @@ use apexmail_analytics::types::SubjectLineScore;
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use billing_entitlements::FeatureKey;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -331,6 +332,10 @@ async fn engagement(
 ) -> Result<Json<ApiResponse<EngagementResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
+    // Entitlement gate: `advanced analytics` (403 Forbidden when the plan does not include it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::AdvancedAnalytics)
+        .await?;
+
     let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     let totals = sqlx::query_as::<_, EngagementTotalsRow>(
@@ -394,6 +399,10 @@ async fn deliverability(
 ) -> Result<Json<ApiResponse<DeliverabilityResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
+    // Entitlement gate: `advanced analytics` (403 Forbidden when the plan does not include it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::AdvancedAnalytics)
+        .await?;
+
     let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     let row = sqlx::query_as::<_, DeliverabilityRow>(
@@ -443,6 +452,9 @@ async fn export(
     Query(params): Query<ExportQuery>,
 ) -> Result<Json<ApiResponse<ExportResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
+
+    // Entitlement gate: `data export` (403 Forbidden when the plan does not include it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DataExport).await?;
 
     let (from, to) = resolve_analytics_range(params.from, params.to)?;
     let format = params.format.clone();
@@ -726,6 +738,9 @@ async fn get_export_job(
 ) -> Result<Json<ApiResponse<ExportJobStatus>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
+    // Entitlement gate: `data export` (403 Forbidden when the plan does not include it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DataExport).await?;
+
     let row: Option<ExportJobRow> = sqlx::query_as(
         "SELECT id, status, total_rows, processed_rows, download_url, download_expires_at, error_message
          FROM export_jobs WHERE id = $1 AND tenant_id = $2"
@@ -776,6 +791,9 @@ async fn download_export(
     use axum::http::header;
 
     require_scopes(&auth, &["analytics:read"])?;
+
+    // Entitlement gate: `data export` (403 Forbidden when the plan does not include it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DataExport).await?;
 
     let row: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
         "SELECT format, download_expires_at
@@ -897,6 +915,9 @@ async fn export_pdf(
     use axum::http::header;
 
     require_scopes(&auth, &["analytics:read"])?;
+
+    // Entitlement gate: `data export` (403 Forbidden when the plan does not include it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DataExport).await?;
 
     let (from, to) = resolve_analytics_range(params.from, params.to)?;
 

@@ -73,6 +73,10 @@ pub fn router() -> Router<AppState> {
         .route("/invoices/:id/pdf", get(get_invoice_pdf_html))
         .route("/invoices/:id/xml", get(get_invoice_xml))
         .route("/quota", get(check_quota))
+        // Presentation-only entitlement view. The SAME resolved snapshot the
+        // handlers enforce with (`require_feature`/`require_capacity`), so
+        // the console cannot advertise availability the API does not honour.
+        .route("/entitlements", get(get_entitlements))
         .route("/admin/tenants", get(admin_list_tenants))
         .route("/admin/tenants/:tenantId", get(admin_get_tenant_details))
         .route("/admin/tenants/:tenantId/credits", post(admin_apply_credit))
@@ -98,6 +102,21 @@ pub fn router() -> Router<AppState> {
         .route("/admin/reports/dunning", get(admin_get_dunning_report))
         .route("/admin/reports/costs", get(admin_get_cost_report))
         .route("/admin/export", get(admin_export_billing_data))
+}
+
+/// `GET /v1/billing/entitlements` — the caller tenant's resolved
+/// entitlement snapshot, for UI/console presentation ONLY.
+///
+/// Backend authority stays in the handlers (`require_feature` /
+/// `require_capacity`); this endpoint exists so the console renders from the
+/// same snapshot instead of re-deriving availability from the plan JSON
+/// (which is how the console and API historically disagreed).
+async fn get_entitlements(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<billing_entitlements::EntitlementPresentation>, ApiError> {
+    let snapshot = crate::entitlements::snapshot(&state, &auth.tenant_id).await?;
+    Ok(Json(snapshot.presentation()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,7 +198,8 @@ impl From<PlanFeatures> for LegacyPlanFeaturesPayload {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyPlanDto {
-    id: uuid::Uuid,
+    /// Mirrors `plans.id VARCHAR(26)`.
+    id: String,
     name: String,
     display_name: String,
     description: String,
@@ -3022,6 +3042,17 @@ async fn create_checkout_session(
                 ("allow_promotion_codes", "true".into()),
                 ("billing_address_collection", "required".into()),
                 ("tax_id_collection[enabled]", "true".into()),
+                // TAX-TRUTH P0: Stripe Tax is the charging authority for the
+                // actual charge. Address collection is required above; the
+                // customer address is written back so automatic tax can
+                // resolve the place of supply, and the finalized invoice's
+                // tax decision is snapshotted + validated by
+                // billing-service's invoice.paid handler. If Stripe rejects
+                // automatic_tax (e.g. account not yet activated), the
+                // webhook records the local-computation fallback and blocks
+                // any charged total that disagrees with it.
+                ("automatic_tax[enabled]", "true".into()),
+                ("customer_update[address]", "auto".into()),
             ],
             // Deterministic idempotency key so a retried checkout request
             // (client timeout, network blip) cannot mint duplicate sessions.

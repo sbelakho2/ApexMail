@@ -701,7 +701,7 @@ async fn growth_signup_timeline_works() {
 }
 
 #[tokio::test]
-async fn growth_activation_funnel_works() {
+async fn growth_activation_milestones_works() {
     let db = test_db().await;
     cleanup(&db).await;
     seed_tenants(&db).await;
@@ -758,7 +758,7 @@ async fn predictive_analytics_correct_structure() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/admin/analytics/predictive?window=90d")
+                .uri("/v1/admin/analytics/predictive")
                 .method("GET")
                 .header(header::AUTHORIZATION, "Bearer test-skip-auth")
                 .body(Body::empty())
@@ -784,6 +784,14 @@ async fn predictive_analytics_correct_structure() {
         json.get("anomalies").is_some(),
         "predictive missing anomalies"
     );
+    // The old ?window= parameter is gone; the response documents the fixed
+    // horizons instead of pretending a client window is honored.
+    assert!(
+        json.get("fixedHorizons")
+            .and_then(Value::as_str)
+            .is_some_and(|horizons| horizons.contains("no window parameter")),
+        "predictive must document its fixed horizons"
+    );
     cleanup(&db).await;
 }
 
@@ -797,7 +805,7 @@ async fn predictive_churn_endpoint_works() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/admin/analytics/predictive/churn?window=90d")
+                .uri("/v1/admin/analytics/predictive/churn")
                 .method("GET")
                 .header(header::AUTHORIZATION, "Bearer test-skip-auth")
                 .body(Body::empty())
@@ -819,7 +827,7 @@ async fn predictive_capacity_endpoint_works() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/admin/analytics/predictive/capacity?window=90d")
+                .uri("/v1/admin/analytics/predictive/capacity")
                 .method("GET")
                 .header(header::AUTHORIZATION, "Bearer test-skip-auth")
                 .body(Body::empty())
@@ -841,7 +849,7 @@ async fn predictive_anomalies_endpoint_works() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/admin/analytics/predictive/anomalies?window=90d")
+                .uri("/v1/admin/analytics/predictive/anomalies")
                 .method("GET")
                 .header(header::AUTHORIZATION, "Bearer test-skip-auth")
                 .body(Body::empty())

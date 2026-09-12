@@ -113,11 +113,17 @@ New IPs start in `warming` status with a graduated send volume:
 | 55-59 | 250,000 |
 | 60+ | Unlimited |
 
-The `tick_warmup()` cron updates `warmup_progress` and graduates IPs to
-`active` status after 60 days.
+`DedicatedIpProvider::tick_warmup()` updates `warmup_progress` and graduates
+IPs to `active` status after 60 days, but **nothing in this tree schedules
+it** — there is no warmup cron; an operator must invoke it
+([`ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504)).
+Send-time admission is gated by `dedicated_ips.warmup_started_at`, not by
+`warmup_progress`.
 
-> **During warmup**, messages exceeding the daily limit overflow to SES
-> shared sending. This ensures deliverability is never blocked.
+> **During warmup**, messages exceeding the IP's daily limit are DEFERRED
+> through the normal requeue path until capacity frees up. There is no
+> automatic overflow to SES shared sending; shared traffic is SES-only and
+> selected by transport configuration, with no per-message failover.
 
 ### 3. Steady state
 
@@ -217,9 +223,9 @@ When a tenant downgrades or releases an IP:
 | Scenario | Behavior |
 |----------|----------|
 | Hetzner API down during provisioning | Allocation fails, tenant stays on SES shared |
-| MTA server offline | Health check marks IPs as `degraded`, overflow to SES |
+| Dedicated relay/transport failure | The send is requeued/deferred by the worker; there is no automatic overflow to SES |
 | Dedicated IP blacklisted | Alert fires, admin can release IP and provision a new one |
-| All dedicated IPs warming | Traffic obeys warmup limits, excess overflows to SES |
+| All dedicated IPs warming | Traffic obeys warmup limits; excess sends are deferred (no SES overflow) |
 | SES rate limit hit | Standard SES throttling (backoff + retry) |
 | DB trigger failure | Routing cache becomes stale; 30s cache TTL limits blast radius |
 

@@ -33,6 +33,7 @@ pub mod calibration;
 pub mod campaigns;
 pub mod config;
 pub mod control;
+pub mod control_read;
 pub mod crm;
 pub mod crm_pg;
 pub mod decision_engine;

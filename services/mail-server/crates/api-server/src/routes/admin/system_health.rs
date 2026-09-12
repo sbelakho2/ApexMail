@@ -1,14 +1,26 @@
-//! System health endpoint — queues, queue writers, IP pool addresses, alerts.
+//! System health endpoint — queues, queue-writer activity, REAL service
+//! process liveness, IP pool addresses, alerts.
 //!
-//! **What these numbers are NOT**: there is no process-heartbeat registry in
-//! the schema (no worker/service heartbeat table exists), so `queueWriters`
-//! are inferred from `queue_jobs` activity — one entry per queue with recent
-//! job activity — not live worker processes. `ipPoolAddresses` are rows of
-//! `ip_pool_addresses` (sending IPs), not MTA processes/nodes. Both are
-//! labelled accordingly and explained in [`SystemHealthResponse::notes`].
+//! **What these numbers are and are NOT**:
 //!
-//! If a real heartbeat registry is ever added, these fields should be
-//! replaced with its data (grep found none at the time of this fix).
+//! * `serviceHeartbeats` / `serviceLiveness` are REAL process leases read
+//!   from the `service_heartbeats` table (migration 215), written by each
+//!   service binary's heartbeat emitter (`apexmail_lib::heartbeat`). A row is
+//!   `live` when its beat is fresh (≤ [`HEARTBEAT_STALE_AFTER_SECS`]), else
+//!   `stale`; a service with no rows is reported as `no_heartbeat`. Process
+//!   health is NEVER inferred from queue traffic.
+//! * `queueWriters` are queue activity OBSERVATIONS derived from `queue_jobs`
+//!   (one entry per queue with recent activity) — NOT live worker processes.
+//!   They remain because queue traffic is operationally useful, but they are
+//!   labelled as observations and the `notes` field says so.
+//! * `ipPoolAddresses` are rows of `ip_pool_addresses` (sending IP
+//!   addresses), not MTA processes/nodes.
+//!
+//! `EXPECTED_SERVICES` lists the services whose emitters are wired in this
+//! repository; each gets an explicit liveness entry even with zero rows
+//! (`no_heartbeat`). Heartbeat rows for other services are still reported
+//! (nothing is hidden), but no liveness claim is invented for services that
+//! never register.
 
 use axum::extract::State;
 use axum::routing::get;
@@ -18,6 +30,14 @@ use serde::Serialize;
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
+
+/// Services whose heartbeat emitters are wired in this repository. An entry
+/// is reported even when the service has never registered (explicit
+/// `no_heartbeat` rather than silence).
+pub const EXPECTED_SERVICES: &[&str] = &["api-server", "worker"];
+
+/// A heartbeat older than this is `stale` (three missed 30-second beats).
+pub const HEARTBEAT_STALE_AFTER_SECS: i64 = 90;
 
 fn is_optional_schema_error(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if matches!(db_error.code().as_deref(), Some("42P01") | Some("42703")))
@@ -48,9 +68,15 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 pub struct SystemHealthResponse {
     pub queues: Vec<QueueStatus>,
-    /// Queue writers OBSERVED via `queue_jobs` activity — not process
-    /// heartbeats (no heartbeat registry exists).
+    /// Queue writers OBSERVED via `queue_jobs` activity — NOT process
+    /// heartbeats. Real liveness is in `service_liveness`.
     pub queue_writers: Vec<QueueWriterStatus>,
+    /// Real process heartbeat rows, newest first. Inactive instances age out
+    /// of this list after 7 days.
+    pub service_heartbeats: Vec<ServiceHeartbeat>,
+    /// One entry per expected (and per actually-registered) service, with an
+    /// explicit `live` / `stale` / `no_heartbeat` state.
+    pub service_liveness: Vec<ServiceLiveness>,
     /// Rows of `ip_pool_addresses` (sending IP addresses), not MTA processes.
     pub ip_pool_addresses: Vec<IpPoolAddress>,
     pub alerts: Vec<SystemAlert>,
@@ -90,6 +116,37 @@ pub struct QueueWriterStatus {
     pub last_observed_activity: Option<String>,
 }
 
+/// One real process lease from `service_heartbeats`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceHeartbeat {
+    pub instance_id: String,
+    pub service: String,
+    pub version: String,
+    pub started_at: String,
+    pub last_seen_at: String,
+    /// Seconds since the last beat (never negative; clock skew is clamped).
+    pub age_seconds: i64,
+    pub capabilities: Vec<String>,
+    pub region: Option<String>,
+    /// `live` (fresh beat) or `stale` (row exists, beat older than
+    /// [`HEARTBEAT_STALE_AFTER_SECS`]).
+    pub status: String,
+}
+
+/// Aggregate liveness for one service.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceLiveness {
+    pub service: String,
+    /// `live` | `stale` | `no_heartbeat`.
+    pub status: String,
+    pub live_instances: i64,
+    pub stale_instances: i64,
+    /// Freshest beat for the service, if any row exists in the 7-day window.
+    pub last_seen_at: Option<String>,
+}
+
 /// A row of `ip_pool_addresses` — a sending IP address in an IP pool, not an
 /// MTA process.
 #[derive(Debug, Serialize)]
@@ -111,6 +168,84 @@ pub struct SystemAlert {
     pub message: String,
     pub timestamp: String,
     pub acknowledged: bool,
+}
+
+/// The liveness verdict for one service. Pure so the explicit
+/// `no_heartbeat` state is testable without a database.
+fn liveness_status(live_instances: i64, stale_instances: i64) -> &'static str {
+    if live_instances > 0 {
+        "live"
+    } else if stale_instances > 0 {
+        "stale"
+    } else {
+        "no_heartbeat"
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct HeartbeatRow {
+    instance_id: String,
+    service: String,
+    version: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    last_seen_at: chrono::DateTime<chrono::Utc>,
+    capabilities: sqlx::types::Json<Vec<String>>,
+    region: Option<String>,
+    live: bool,
+}
+
+/// Turn heartbeat rows into the serialized list and per-service liveness.
+/// Unknown services that did register are included after the expected ones,
+/// so no row is hidden.
+fn heartbeat_views(rows: Vec<HeartbeatRow>) -> (Vec<ServiceHeartbeat>, Vec<ServiceLiveness>) {
+    let now = chrono::Utc::now();
+    let heartbeats: Vec<ServiceHeartbeat> = rows
+        .into_iter()
+        .map(|row| {
+            let age_seconds = now
+                .signed_duration_since(row.last_seen_at)
+                .num_seconds()
+                .max(0);
+            ServiceHeartbeat {
+                instance_id: row.instance_id,
+                service: row.service,
+                version: row.version,
+                started_at: row.started_at.to_rfc3339(),
+                last_seen_at: row.last_seen_at.to_rfc3339(),
+                age_seconds,
+                capabilities: row.capabilities.0,
+                region: row.region,
+                status: if row.live { "live" } else { "stale" }.into(),
+            }
+        })
+        .collect();
+
+    let mut services: Vec<String> = EXPECTED_SERVICES.iter().map(|s| (*s).to_string()).collect();
+    for heartbeat in &heartbeats {
+        if !services.contains(&heartbeat.service) {
+            services.push(heartbeat.service.clone());
+        }
+    }
+
+    let liveness = services
+        .into_iter()
+        .map(|service| {
+            let matching: Vec<&ServiceHeartbeat> =
+                heartbeats.iter().filter(|h| h.service == service).collect();
+            let live_instances = matching.iter().filter(|h| h.status == "live").count() as i64;
+            let stale_instances = matching.len() as i64 - live_instances;
+            let last_seen_at = matching.iter().map(|h| h.last_seen_at.clone()).max();
+            ServiceLiveness {
+                status: liveness_status(live_instances, stale_instances).into(),
+                service,
+                live_instances,
+                stale_instances,
+                last_seen_at,
+            }
+        })
+        .collect();
+
+    (heartbeats, liveness)
 }
 
 async fn system_health(
@@ -163,10 +298,9 @@ async fn system_health(
         .collect();
 
     // ── Queue writers (OBSERVED from queue_jobs activity) ──────
-    // queue_jobs has no worker_id column and no heartbeat registry exists —
-    // derive one logical queue writer per queue from the most recent job
-    // activity (updated_at on jobs that a worker actually touched). These
-    // are observations of queue activity, NOT process heartbeats.
+    // queue_jobs has no worker_id column — derive one logical queue writer
+    // per queue from the most recent job activity. These are observations of
+    // queue activity, NOT process heartbeats; real liveness is below.
     let worker_rows = optional_relation_rows(
         sqlx::query_as::<_, (String, Option<chrono::DateTime<chrono::Utc>>)>(
             "SELECT COALESCE(queue_name, queue) AS worker_queue, MAX(updated_at)
@@ -196,6 +330,28 @@ async fn system_health(
             last_observed_activity: last_activity.map(|t| t.to_rfc3339()),
         })
         .collect();
+
+    // ── Service heartbeats (REAL process liveness) ─────────────
+    // A busy queue is not a live process and an idle process is not dead:
+    // liveness comes only from written leases. `live` is computed in SQL so
+    // the freshness window is one constant (`HEARTBEAT_STALE_AFTER_SECS`).
+    let heartbeat_rows = optional_relation_rows(
+        sqlx::query_as::<_, HeartbeatRow>(
+            "SELECT instance_id, service, version, started_at, last_seen_at,
+                    capabilities, region,
+                    (last_seen_at >= NOW() - make_interval(secs => $1::double precision)) AS live
+             FROM service_heartbeats
+             WHERE last_seen_at >= NOW() - INTERVAL '7 days'
+             ORDER BY last_seen_at DESC
+             LIMIT 100",
+        )
+        .bind(HEARTBEAT_STALE_AFTER_SECS as f64)
+        .fetch_all(&state.db)
+        .await,
+        "service_heartbeats",
+    )?;
+
+    let (service_heartbeats, service_liveness) = heartbeat_views(heartbeat_rows);
 
     // ── IP pool addresses (rows of ip_pool_addresses) ──────────
     // These are sending IP ADDRESSES, not MTA processes/nodes.
@@ -274,11 +430,16 @@ async fn system_health(
     Ok(Json(SystemHealthResponse {
         queues,
         queue_writers,
+        service_heartbeats,
+        service_liveness,
         ip_pool_addresses,
         alerts,
         system_sender,
         notes: vec![
-            "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats — no heartbeat registry exists."
+            format!(
+                "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat — process liveness is never inferred from queue traffic."
+            ),
+            "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats; see serviceLiveness for process liveness."
                 .to_string(),
             "ipPoolAddresses are ip_pool_addresses rows (sending IP addresses), not MTA processes/nodes."
                 .to_string(),
@@ -290,16 +451,52 @@ async fn system_health(
 mod tests {
     use super::*;
 
-    /// Fix 6: the response must say plainly that queue writers are not
-    /// process heartbeats and IP pool addresses are not MTA nodes.
+    /// The response must say plainly that queue writers are activity
+    /// observations (not process heartbeats), that service liveness comes
+    /// from real leases, and that IP pool addresses are not MTA nodes.
     #[test]
-    fn response_notes_disclaim_heartbeats_and_mta_nodes() {
+    fn response_notes_label_activity_heartbeats_and_mta_nodes() {
+        // Mirror the notes construction in the handler.
         let notes = vec![
-            "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats — no heartbeat registry exists.",
-            "ipPoolAddresses are ip_pool_addresses rows (sending IP addresses), not MTA processes/nodes.",
+            format!(
+                "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat — process liveness is never inferred from queue traffic."
+            ),
+            "queueWriters are queue activity observations derived from queue_jobs (one entry per queue), not process heartbeats; see serviceLiveness for process liveness."
+                .to_string(),
+            "ipPoolAddresses are ip_pool_addresses rows (sending IP addresses), not MTA processes/nodes."
+                .to_string(),
         ];
-        assert!(notes[0].contains("not process heartbeats"));
-        assert!(notes[1].contains("not MTA processes"));
+        assert!(notes[0].contains("real process leases"));
+        assert!(notes[0].contains("no_heartbeat"));
+        assert!(notes[0].contains("never inferred from queue traffic"));
+        assert!(notes[1].contains("not process heartbeats"));
+        assert!(notes[2].contains("not MTA processes"));
+    }
+
+    /// `no_heartbeat` is an explicit state: a service with no rows (and no
+    /// stale rows) must never be reported as healthy or active.
+    #[test]
+    fn liveness_has_an_explicit_no_heartbeat_state() {
+        assert_eq!(liveness_status(0, 0), "no_heartbeat");
+        assert_eq!(liveness_status(2, 1), "live");
+        assert_eq!(liveness_status(0, 3), "stale");
+        // A stale instance is NOT live, even if other instances are absent.
+        assert_ne!(liveness_status(0, 1), "live");
+    }
+
+    /// Expected services without rows still appear with `no_heartbeat`, so
+    /// the control plane shows absence instead of hiding it.
+    #[test]
+    fn heartbeat_views_report_expected_services_without_rows() {
+        let (heartbeats, liveness) = heartbeat_views(Vec::new());
+        assert!(heartbeats.is_empty());
+        assert_eq!(liveness.len(), EXPECTED_SERVICES.len());
+        for entry in liveness {
+            assert_eq!(entry.status, "no_heartbeat");
+            assert_eq!(entry.live_instances, 0);
+            assert_eq!(entry.stale_instances, 0);
+            assert_eq!(entry.last_seen_at, None);
+        }
     }
 
     /// The renamed structs must not carry the misleading "heartbeat" or
@@ -386,5 +583,105 @@ mod tests {
             .bind("192.0.2.25")
             .execute(&pool)
             .await;
+    }
+
+    /// End-to-end: the emitter writes a lease, `system_health` reports it as
+    /// a LIVE process; a stale row is reported stale; a service with no row
+    /// at all is reported `no_heartbeat` — never inferred from queue
+    /// activity.
+    #[tokio::test]
+    async fn service_heartbeats_report_real_process_liveness() {
+        let Some(pool) = crate::test_db::canonical_pool("system_health_heartbeats").await else {
+            return;
+        };
+
+        // The emitter's real write path.
+        let live_config = apexmail_lib::heartbeat::HeartbeatConfig::new("api-server", "9.9.9")
+            .with_capabilities(vec!["http-api".into(), "control-plane".into()]);
+        apexmail_lib::heartbeat::record_heartbeat(&pool, &live_config)
+            .await
+            .expect("record live heartbeat");
+
+        // A worker row that stopped beating: stale, not live.
+        sqlx::query(
+            "INSERT INTO service_heartbeats
+                 (instance_id, service, version, started_at, last_seen_at, capabilities, region)
+             VALUES ('worker-test-host-1', 'worker', '9.9.9',
+                     NOW() - INTERVAL '1 hour', NOW() - INTERVAL '10 minutes',
+                     '[\"email\"]'::jsonb, NULL)
+             ON CONFLICT (instance_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed stale worker heartbeat");
+
+        // A dead instance from long ago must age out (outside the 7-day
+        // window) and must NOT keep a service looking alive.
+        sqlx::query(
+            "INSERT INTO service_heartbeats
+                 (instance_id, service, version, started_at, last_seen_at, capabilities)
+             VALUES ('api-server-ancient-1', 'api-server', '0.0.1',
+                     NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', '[]'::jsonb)
+             ON CONFLICT (instance_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed aged-out heartbeat");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let response = system_health(State(state), admin_auth())
+            .await
+            .expect("system health must read heartbeats");
+        let body = serde_json::to_value(&response.0).expect("serialize system health");
+
+        // The live lease is reported with its real instance identity.
+        let heartbeats = body["serviceHeartbeats"]
+            .as_array()
+            .expect("serviceHeartbeats is an array");
+        let live = heartbeats
+            .iter()
+            .find(|h| h["instanceId"] == live_config.instance_id)
+            .expect("the recorded heartbeat is present");
+        assert_eq!(live["service"], "api-server");
+        assert_eq!(live["status"], "live");
+        assert_eq!(live["capabilities"][0], "http-api");
+        assert!(live["ageSeconds"].as_i64().expect("age") < HEARTBEAT_STALE_AFTER_SECS);
+
+        // The aged-out row is not reported at all.
+        assert!(
+            !heartbeats
+                .iter()
+                .any(|h| h["instanceId"] == "api-server-ancient-1"),
+            "heartbeat rows older than 7 days must age out"
+        );
+
+        // Liveness states: api-server live, worker stale (never live), and
+        // the explicit aggregate verdicts.
+        let liveness = body["serviceLiveness"]
+            .as_array()
+            .expect("serviceLiveness is an array");
+        let api = liveness
+            .iter()
+            .find(|l| l["service"] == "api-server")
+            .expect("api-server liveness entry");
+        assert_eq!(api["status"], "live");
+        assert!(api["liveInstances"].as_i64().expect("live count") >= 1);
+
+        let worker = liveness
+            .iter()
+            .find(|l| l["service"] == "worker")
+            .expect("worker liveness entry");
+        assert_eq!(worker["status"], "stale");
+        assert_eq!(worker["liveInstances"], 0);
+
+        // Queue writers (activity observations) exist in the same response
+        // shape but are explicitly NOT the liveness signal.
+        assert!(body["queueWriters"].is_array());
+        assert!(body["notes"][0]
+            .as_str()
+            .expect("note")
+            .contains("never inferred from queue traffic"));
+
+        pool.close().await;
     }
 }

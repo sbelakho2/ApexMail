@@ -3,6 +3,7 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
+use billing_entitlements::FeatureKey;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -88,6 +89,10 @@ async fn send_time_optimization(
     Query(params): Query<SendTimeQuery>,
 ) -> Result<Json<SendTimeResponse>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
+
+    // Entitlement gate: `send_time_optimization` (403 Forbidden without it).
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::SendTimeOptimization)
+        .await?;
 
     let tz = params.timezone.clone().unwrap_or_else(|| "UTC".into());
     let recipient = params.recipient.as_deref();

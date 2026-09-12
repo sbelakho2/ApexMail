@@ -90,7 +90,7 @@ Worker builds RFC 5322 MIME message
 incoming → active → bounce → notification
 ```
 
-> **During warmup**, messages exceeding the daily limit overflow to SES shared sending automatically.
+> **During warmup**, messages exceeding the IP's daily limit are deferred through the normal requeue path (retried once capacity frees up) — they do NOT overflow to SES shared sending automatically.
 
 ---
 

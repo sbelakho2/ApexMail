@@ -314,7 +314,11 @@ pub async fn active_contact_count(
     .bind(ACTIVE_ENROLLMENT_STATES)
     .fetch_one(db)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/active_contact_count: {error}"
+        ))
+    })?;
     Ok(count.max(0) as usize)
 }
 
@@ -332,17 +336,18 @@ pub async fn request_contact_slot(
     contact_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<CoordinationVerdict, SalesError> {
-    let mut tx = db
-        .begin()
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let mut tx = db.begin().await.map_err(|error| {
+        SalesError::Database(format!("account_coordination/begin_transaction: {error}"))
+    })?;
     // Referral promotion requires first-party knowledge the account tables do
     // not carry; callers with it use `request_contact_slot_in_tx` or `decide`.
     let verdict =
         request_contact_slot_in_tx(&mut tx, tenant_id, account_id, contact_id, now, false).await?;
-    tx.rollback()
-        .await
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+    tx.rollback().await.map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/rollback_transaction: {error}"
+        ))
+    })?;
     Ok(verdict)
 }
 
@@ -391,7 +396,9 @@ pub async fn request_contact_slot_in_tx(
     .bind(tenant_id)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!("account_coordination/account_policy: {error}"))
+    })?;
     let Some(account) = account else {
         return Err(SalesError::InvalidInput(format!(
             "account {account_id} not found for tenant"
@@ -399,24 +406,39 @@ pub async fn request_contact_slot_in_tx(
     };
 
     // SMALLINT in the schema; widen to i32 so hostile values stay representable.
-    let max_active_contacts: i16 = account
-        .try_get("max_active_contacts")
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let max_active_contacts: i16 = account.try_get("max_active_contacts").map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/account_policy/max_active_contacts: {error}"
+        ))
+    })?;
     let max_active_contacts = i32::from(max_active_contacts);
-    let multi_thread_allowed: bool = account
-        .try_get("multi_thread_allowed")
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let multi_thread_allowed: bool = account.try_get("multi_thread_allowed").map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/account_policy/multi_thread_allowed: {error}"
+        ))
+    })?;
     // INTEGER in the schema; widen to i64 for the checked cooldown arithmetic.
     let negative_reply_cooldown_hours: i32 = account
         .try_get("negative_reply_cooldown_hours")
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+        .map_err(|error| {
+            SalesError::Database(format!(
+                "account_coordination/account_policy/negative_reply_cooldown_hours: {error}"
+            ))
+        })?;
     let negative_reply_cooldown_hours = i64::from(negative_reply_cooldown_hours);
-    let lifecycle: String = account
-        .try_get("lifecycle")
-        .map_err(|error| SalesError::Database(error.to_string()))?;
+    let lifecycle: String = account.try_get("lifecycle").map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/account_policy/lifecycle: {error}"
+        ))
+    })?;
 
-    // The requested contact must belong to the account.
-    let persona: Option<String> = sqlx::query_scalar(
+    // The requested contact must belong to the account. `persona` is a NULLable
+    // column, so the decode is a two-level `Option`: the outer level is row
+    // presence (`fetch_optional`), the inner level is the column value. A bare
+    // `Option<String>` here would make the scalar `O = String` and turn a NULL
+    // persona into "unexpected null; try decoding as an Option" instead of
+    // ranking the contact as unknown (0).
+    let persona: Option<Option<String>> = sqlx::query_scalar(
         "SELECT persona FROM sales_contacts
          WHERE id = $1 AND tenant_id = $2 AND account_id = $3",
     )
@@ -425,7 +447,9 @@ pub async fn request_contact_slot_in_tx(
     .bind(account_id)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!("account_coordination/contact_persona: {error}"))
+    })?;
     let Some(requested_persona) = persona else {
         return Err(SalesError::InvalidInput(format!(
             "contact {contact_id} not found on account {account_id} for tenant"
@@ -451,7 +475,9 @@ pub async fn request_contact_slot_in_tx(
     .bind(STRONG_OBJECTION_DISPOSITIONS)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!("account_coordination/strong_objection: {error}"))
+    })?;
     let has_strong_objection = strong_objection || lifecycle == STOPPED_LIFECYCLE;
 
     // R2 input: the most recent negative reply for the account.
@@ -471,7 +497,11 @@ pub async fn request_contact_slot_in_tx(
     .bind(NEGATIVE_REPLY_DISPOSITIONS)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/negative_reply_cooldown: {error}"
+        ))
+    })?;
 
     // R3 input: personas of the currently active contacts.
     let active_personas: Vec<Option<String>> = sqlx::query_scalar(
@@ -485,7 +515,9 @@ pub async fn request_contact_slot_in_tx(
     .bind(ACTIVE_ENROLLMENT_STATES)
     .fetch_all(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!("account_coordination/active_personas: {error}"))
+    })?;
     let active_personas: Vec<String> = active_personas.into_iter().flatten().collect();
 
     let active_contacts: i64 = sqlx::query_scalar(
@@ -497,14 +529,18 @@ pub async fn request_contact_slot_in_tx(
     .bind(ACTIVE_ENROLLMENT_STATES)
     .fetch_one(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| {
+        SalesError::Database(format!(
+            "account_coordination/active_contact_count_for_decision: {error}"
+        ))
+    })?;
 
     let policy = AccountPolicy {
         max_active_contacts,
         multi_thread_allowed,
         negative_reply_cooldown_hours,
         priority_persona_selected: is_priority_persona(
-            Some(requested_persona.as_str()),
+            requested_persona.as_deref(),
             &active_personas,
         ),
     };
@@ -551,7 +587,7 @@ pub async fn request_contact_slot_locked_in_tx(
     .bind(tenant_id)
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| SalesError::Database(error.to_string()))?;
+    .map_err(|error| SalesError::Database(format!("account_coordination/lock_account: {error}")))?;
     if locked.is_none() {
         return Err(SalesError::InvalidInput(format!(
             "account {account_id} not found for tenant '{tenant_id}'; \

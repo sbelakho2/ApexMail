@@ -34,6 +34,7 @@ use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::routes::system_sender::{SYSTEM_DOMAIN, SYSTEM_DOMAIN_ID, SYSTEM_TENANT_ID};
 use crate::state::AppState;
+use billing_entitlements::CapacityKey;
 
 static DNS_LOOKUP: LazyLock<Result<DnsLookup, String>> = LazyLock::new(|| {
     DnsLookup::new().map_err(|e| format!("DNS resolver initialization failed: {e}"))
@@ -326,6 +327,11 @@ async fn create_domain(
         )]));
     }
 
+    // Runtime entitlement snapshot, fetched BEFORE the transaction. The
+    // authoritative capacity decision is evaluated below against the
+    // in-transaction count; the SQL plan check stays as the race guard.
+    let entitlement = crate::entitlements::snapshot(&state, &auth.tenant_id).await?;
+
     let mut tx = state.db.begin().await?;
     lock_tenant_domain_mutations(&mut tx, &auth.tenant_id).await?;
     lock_domain_identity(&mut tx, &domain_name).await?;
@@ -366,6 +372,14 @@ async fn create_domain(
             )));
         }
     }
+
+    // Runtime entitlement capacity gate (override-aware, 403 Forbidden):
+    // `domain_count + 1` is the total after this creation.
+    crate::entitlements::gate_capacity(
+        &entitlement,
+        CapacityKey::SendingDomains,
+        domain_count + 1,
+    )?;
 
     let id = Uuid::new_v4();
     let now = Utc::now();

@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 pub mod admin_routes;
 pub mod audit_logger;
+pub mod bootstrap;
 pub mod breach_notification;
 pub mod config;
 pub mod content_scanner;
@@ -10,9 +11,12 @@ pub mod entitlements;
 pub mod estonia_ou;
 pub mod financial_analytics;
 pub mod gdpr_automation;
+pub mod governance;
 pub mod hipaa;
+pub mod legal_archive;
 pub mod registry_monitor;
 pub mod retention;
+pub mod retention_classes;
 pub mod retention_sweep;
 pub mod risk_scoring;
 pub mod routes;
@@ -22,6 +26,8 @@ pub mod soc2;
 pub mod tax_policy;
 pub mod trust_portal;
 pub mod types;
+pub mod vat_oss;
+pub mod vat_vies;
 
 /// Existence probe for optional source tables (estonia_ou queries payroll /
 /// dividend / operating-cost stores that may be absent on a deployment).

@@ -17,7 +17,7 @@ use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
@@ -25,11 +25,6 @@ use crate::auth::{
     verify_against_dummy, AuthError, AuthFailTracker, EmailAuthenticator, SpfStatus,
 };
 use crate::config::{InboundConfig, RateLimitConfig};
-use mail_proto::mailstore_service_client::MailstoreServiceClient;
-use mail_proto::{
-    GetAccountRequest, InternalServiceAuthInterceptor, MessageFlags, StoreMessageRequest,
-};
-use tonic::transport::Channel;
 
 use super::util::{
     build_received_header, is_mail_from_arg, is_rcpt_to_arg, is_strict_end_of_data,
@@ -53,30 +48,15 @@ static INBOUND_RDNS_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
 /// dropped and the per-IP connection slot released.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// M28: bounded deadlines for mailstore gRPC calls — a hung mailstore must
-/// never stall the SMTP session task indefinitely.
-const MAILSTORE_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
-const MAILSTORE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Overall wall-clock cap for the WHOLE mailbox-delivery phase of one
-/// message (end-of-DATA), regardless of recipient count: per-recipient RPC
-/// pairs are fanned out concurrently under this single deadline, so a slow
-/// mailstore bounds end-of-DATA to ~30 s instead of
-/// max_recipients × 2 × MAILSTORE_RPC_TIMEOUT.
-const MAILSTORE_DELIVERY_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Mailbox names for mailbox delivery. The mailstore creates the standard
-/// mailbox set at account creation; "Spam" is the store-side name of the
-/// folder IMAP advertises with the `\Junk` special-use attribute.
-const INBOX_MAILBOX: &str = "Inbox";
-const QUARANTINE_MAILBOX: &str = "Spam";
-
-/// Backoff ladder for mailstore SERVICE failures (get_account/store_message
-/// RPC errors that are not "account not found"): the initial attempt plus
-/// these sleeps bound a transient mailstore blip to ~5.25 s of waiting
-/// inside the overall [`MAILSTORE_DELIVERY_DEADLINE`] before the message is
-/// left recorded for a later sweep/manual replay.
-const MAILSTORE_RETRY_BACKOFF_MS: [u64; 3] = [250, 1_000, 4_000];
+/// RCPT-time mailbox resolution failure replies. The decision rule is pure
+/// ([`rcpt_resolution_reply`]) so the 550/451/accept matrix is unit-testable:
+///
+/// * a definitive "no such mailbox" is a PERMANENT refusal (550 5.1.1) — the
+///   sender must not retry into a black hole;
+/// * a directory/mailstore error is TRANSIENT (451 4.3.0) — the sender must
+///   retry rather than have the message silently accepted and dropped.
+const RCPT_NO_SUCH_USER_REPLY: &str = "550 5.1.1 No such user here\r\n";
+const RCPT_TEMPFAIL_REPLY: &str = "451 4.3.0 Temporary local problem\r\n";
 
 /// F-14: number of 4xx/5xx replies after which the session is closed with
 /// `421 4.7.0 Too many errors` (RFC 5321 §4.3.2 recommends a small limit).
@@ -85,10 +65,6 @@ const MAX_SESSION_ERRORS: u32 = 20;
 /// F-14: hard wall-clock cap for an UNAUTHENTICATED session. Authenticated
 /// sessions are bounded by the per-command idle timeout instead.
 const SESSION_DEADLINE: Duration = Duration::from_secs(30 * 60);
-
-type MailstoreClient = MailstoreServiceClient<
-    tonic::service::interceptor::InterceptedService<Channel, InternalServiceAuthInterceptor>,
->;
 
 // ── types ──────────────────────────────────────────────────────────────────────
 
@@ -179,6 +155,87 @@ pub struct SessionContext {
     pub mail_smtputf8: bool,
 }
 
+// ── RCPT-time mailbox directory ────────────────────────────────────────────────
+
+/// A recipient address resolved to an actual mailstore mailbox.
+///
+/// "A mailbox" in this system is a row in `mail_accounts` — the mailstore's
+/// account registry. The mailstore service resolves delivery targets with
+/// `SELECT ... FROM mail_accounts WHERE email = $1 AND is_active = true`
+/// (`crates/mailstore-core/src/storage.rs:298`, table created by
+/// `migrations/109_init.sql:6`), and `GetAccount` is the same lookup over
+/// gRPC (`crates/mailstore-core/src/service.rs:1400`). Resolving RCPT against
+/// the same registry is what makes "accepted" mean "deliverable".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMailbox {
+    /// `mail_accounts.id` (UUID as text) — the account id every mailstore
+    /// RPC takes.
+    pub mailbox_id: String,
+    /// The canonical address stored in the directory.
+    pub email: String,
+}
+
+/// The mailbox directory could not be consulted (database down, query
+/// error, timeout). This is NOT "no such mailbox": callers must tempfail.
+#[derive(Debug, thiserror::Error)]
+#[error("mailbox directory unavailable: {0}")]
+pub struct DirectoryUnavailable(pub String);
+
+/// RCPT-time recipient resolution against the mailbox registry.
+#[async_trait::async_trait]
+pub trait MailboxDirectory: Send + Sync {
+    /// `Ok(Some(_))` = the mailbox exists; `Ok(None)` = definitively no such
+    /// account; `Err(_)` = the directory itself failed (retryable).
+    async fn resolve(
+        &self,
+        recipient: &str,
+    ) -> Result<Option<ResolvedMailbox>, DirectoryUnavailable>;
+}
+
+/// The production directory: the shared Postgres pool, `mail_accounts`.
+pub struct PgMailboxDirectory {
+    pool: PgPool,
+}
+
+impl PgMailboxDirectory {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl MailboxDirectory for PgMailboxDirectory {
+    async fn resolve(
+        &self,
+        recipient: &str,
+    ) -> Result<Option<ResolvedMailbox>, DirectoryUnavailable> {
+        // Case-insensitive match (accounts are provisioned lowercased in
+        // practice, but RCPT must not hard-reject a differently-cased
+        // address); the canonical email is returned to the caller.
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT id::text, email FROM mail_accounts
+              WHERE LOWER(email) = LOWER($1) AND is_active = true
+              LIMIT 1",
+        )
+        .bind(recipient)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| DirectoryUnavailable(error.to_string()))?;
+        Ok(row.map(|(mailbox_id, email)| ResolvedMailbox { mailbox_id, email }))
+    }
+}
+
+/// The RCPT reply implied by a directory resolution (`None` = accept).
+fn rcpt_resolution_reply(
+    resolution: &Result<Option<ResolvedMailbox>, DirectoryUnavailable>,
+) -> Option<&'static str> {
+    match resolution {
+        Ok(Some(_)) => None,
+        Ok(None) => Some(RCPT_NO_SUCH_USER_REPLY),
+        Err(_) => Some(RCPT_TEMPFAIL_REPLY),
+    }
+}
+
 /// Inbound SMTP server.
 pub struct InboundServer {
     config: InboundConfig,
@@ -197,8 +254,13 @@ pub struct InboundServer {
     /// the submission server.
     auth_fail_tracker: AuthFailTracker,
     shutdown: Arc<Notify>,
-    /// gRPC client for mailbox delivery to the mailstore service.
-    mailstore: MailstoreClient,
+    /// RCPT-time mailbox resolution (the `mail_accounts` registry).
+    mailbox_directory: Arc<dyn MailboxDirectory>,
+    /// Managed VERP domains (`VERP_DOMAIN`): `bounces+…@<verp_domain>`
+    /// addresses are replies consumed by the bounce/reply-handler path, not
+    /// mailbox deliveries, so RCPT must not resolve them against
+    /// `mail_accounts`.
+    verp_domains: Vec<String>,
 }
 
 impl InboundServer {
@@ -209,17 +271,10 @@ impl InboundServer {
         redis: deadpool_redis::Pool,
         authenticator: Arc<EmailAuthenticator>,
         hostname: String,
-        mailstore_addr: String,
+        verp_domains: Vec<String>,
     ) -> anyhow::Result<Self> {
-        let channel = Channel::from_shared(mailstore_addr)
-            .map_err(|error| anyhow::anyhow!("invalid MAILSTORE_GRPC_ADDR: {error}"))?
-            .timeout(MAILSTORE_CHANNEL_TIMEOUT)
-            .connect_lazy();
-        let interceptor = InternalServiceAuthInterceptor::from_env().map_err(|error| {
-            anyhow::anyhow!("invalid internal mailstore authentication: {error}")
-        })?;
-
         let auth_fail_tracker = AuthFailTracker::with_redis(redis.clone());
+        let mailbox_directory = Arc::new(PgMailboxDirectory::new(pool.clone()));
         Ok(Self {
             config,
             rate_limit_config,
@@ -234,8 +289,29 @@ impl InboundServer {
                 .build(),
             auth_fail_tracker,
             shutdown: Arc::new(Notify::new()),
-            mailstore: MailstoreServiceClient::with_interceptor(channel, interceptor),
+            mailbox_directory,
+            verp_domains: verp_domains
+                .into_iter()
+                .map(|domain| domain.trim().trim_end_matches('.').to_string())
+                .filter(|domain| !domain.is_empty())
+                .collect(),
         })
+    }
+
+    /// True for a VERP reply address (`bounces+…@<configured VERP domain>`):
+    /// a reply to outbound mail consumed by the bounce/reply-handler path,
+    /// never a mailbox. Mirrors `bounce::parse_verp_address`.
+    fn is_verp_recipient(&self, recipient: &str) -> bool {
+        if !recipient.starts_with("bounces+") {
+            return false;
+        }
+        let Some((_, domain)) = recipient.rsplit_once('@') else {
+            return false;
+        };
+        let domain = domain.trim_end_matches('.');
+        self.verp_domains
+            .iter()
+            .any(|configured| domain.eq_ignore_ascii_case(configured))
     }
 
     /// Start listening on both plain (STARTTLS) and implicit‑TLS ports.
@@ -1158,16 +1234,26 @@ impl InboundServer {
             if !super::submission::is_valid_envelope_address(&addr) {
                 return "501 5.1.3 Bad recipient address syntax\r\n".into();
             }
-            match self.is_managed_recipient(&addr).await {
-                Ok(true) => {}
-                Ok(false) => return "550 5.1.1 No such user here\r\n".into(),
-                Err(error) => {
-                    warn!(
-                        recipient = %mail_common::pii::redact_email(&addr),
-                        %error,
-                        "Failed to validate inbound recipient domain"
-                    );
-                    return "451 4.3.0 Temporary local problem\r\n".into();
+            // A VERP reply (`bounces+…@<verp domain>`) is not a mailbox: it
+            // is consumed by the bounce/reply-handler path, so the mailbox
+            // directory does not know it. Everything else MUST resolve to an
+            // actual `mail_accounts` row before the recipient is accepted:
+            // accepting a syntactically valid address on a verified domain
+            // and then skipping it at delivery is an accept-then-drop bug.
+            if !self.is_verp_recipient(&addr) {
+                let resolution = self.mailbox_directory.resolve(&addr).await;
+                match rcpt_resolution_reply(&resolution) {
+                    None => {}
+                    Some(reply) => {
+                        if let Err(error) = &resolution {
+                            warn!(
+                                recipient = %mail_common::pii::redact_email(&addr),
+                                %error,
+                                "Mailbox directory unavailable at RCPT; tempfailing"
+                            );
+                        }
+                        return reply.to_string();
+                    }
                 }
             }
             ctx.rcpt_to.push(addr);
@@ -1299,7 +1385,38 @@ impl InboundServer {
         );
         let sender = if mail_from == "<>" { "" } else { mail_from };
 
-        // 5. Persist the message using ONLY the columns migration 088
+        // 5. Resolve every non-VERP recipient against the mailbox registry
+        //    once more (the same lookup RCPT performed). RCPT plus this
+        //    check are what make the final 250 mean "a deliverable mailbox
+        //    exists": a mailbox deleted between RCPT and DATA must fail the
+        //    transaction (550), and a directory failure must tempfail (451)
+        //    — never produce an accepted message with a silently skipped
+        //    recipient job.
+        let mut recipient_jobs: Vec<(String, Option<String>)> = Vec::new();
+        for recipient in &ctx.rcpt_to {
+            if self.is_verp_recipient(recipient) {
+                // A VERP reply is consumed through
+                // inbound_messages.is_verp_reply by the bounce/reply-handler
+                // path; it is not a mailbox delivery.
+                continue;
+            }
+            match self.mailbox_directory.resolve(recipient).await {
+                Ok(Some(resolved)) => {
+                    recipient_jobs.push((recipient.clone(), Some(resolved.mailbox_id)))
+                }
+                Ok(None) => return Err(anyhow::Error::new(NoSuchRecipient)),
+                Err(error) => return Err(anyhow::Error::new(error)),
+            }
+        }
+
+        // 6. Persist the message AND one delivery job per accepted recipient
+        //    in ONE transaction; the SMTP 250 is only written after this
+        //    COMMIT, so an accepted message can never lose a recipient to a
+        //    crash between the message row and its jobs. The worker
+        //    (servers::inbound_delivery) owns mailbox delivery from here and
+        //    retries/DSNs every failure.
+        //
+        //    The message INSERT uses ONLY the columns migration 088
         //    guarantees on inbound_messages (tenant_id, mail_from, rcpt_to,
         //    client_ip, helo_hostname, raw_message, raw_size, auth_results,
         //    spf_result, disposition, is_verp_reply). The previously written
@@ -1308,6 +1425,7 @@ impl InboundServer {
         //    failed with "column does not exist" and 451-rejected every
         //    inbound message. The full raw MIME (trace headers included) is
         //    preserved in raw_message for downstream consumers.
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"INSERT INTO inbound_messages (
                 id, tenant_id, mail_from, rcpt_to, client_ip, helo_hostname,
@@ -1328,29 +1446,28 @@ impl InboundServer {
         .bind(format!("{:?}", auth_results.spf.result).to_lowercase())
         .bind(format!("{:?}", disposition).to_lowercase())
         .bind(is_verp)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        // 6. Queue webhook notification
+        for (recipient, mailbox_id) in &recipient_jobs {
+            sqlx::query(
+                r#"INSERT INTO inbound_recipients (
+                    message_id, recipient, mailbox_id, status, attempt, next_attempt_at
+                ) VALUES ($1, $2, $3, 'pending', 0, NOW())
+                ON CONFLICT (message_id, recipient) DO NOTHING"#,
+            )
+            .bind(&message_id)
+            .bind(recipient)
+            .bind(mailbox_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+
+        // 7. Queue webhook notification (best-effort, after the durable
+        //    commit — a webhook failure must never reject accepted mail).
         self.queue_inbound_webhook(&message_id, mail_from, &ctx.rcpt_to)
             .await?;
-
-        // 7. Deliver to the mailstore mailbox. inbound_messages is the
-        //    durable record; a mailstore SERVICE failure is retried in-line
-        //    (see deliver_to_mailstore) and, if it persists, strands the row
-        //    with an ERROR log for a later sweep/manual replay — never a
-        //    silent skip. Unknown recipients are simply skipped.
-        if !ctx.rcpt_to.is_empty() {
-            // DMARC p=quarantine must land in the Junk folder (the
-            // mailstore's "Spam" mailbox, advertised to IMAP clients with
-            // the \Junk special-use attribute), not the Inbox.
-            let mailbox = match disposition {
-                crate::auth::MessageDisposition::Quarantine => QUARANTINE_MAILBOX,
-                _ => INBOX_MAILBOX,
-            };
-            self.deliver_to_mailstore(ctx, &stored_message, &message_id, mailbox)
-                .await;
-        }
 
         info!(
             id = %message_id,
@@ -1523,75 +1640,7 @@ impl InboundServer {
         Ok(())
     }
 
-    /// Deliver an accepted message into the recipients' mailstore mailboxes.
-    ///
-    /// The fully-composed stored message (Received trace header +
-    /// Authentication-Results + optional ARC seal + raw client bytes) is
-    /// stored into each recipient's mailbox via the mailstore gRPC service so
-    /// the message is visible over IMAP.
-    ///
-    /// The composed message is shared as ONE refcounted `Bytes` buffer
-    /// across all N recipients (each store request is a refcount bump,
-    /// never a copy): a per-recipient `to_vec()` of a 25 MB message
-    /// × 100 recipients buffered ~2.5 GB inside a single transaction.
-    ///
-    /// Recipients are delivered CONCURRENTLY under ONE overall deadline
-    /// (see [`MAILSTORE_DELIVERY_DEADLINE`]): sequentially, two RPCs at up
-    /// to [`MAILSTORE_RPC_TIMEOUT`] each for up to max_recipients
-    /// recipients could stall end-of-DATA for tens of minutes inside a
-    /// single SMTP transaction.
-    async fn deliver_to_mailstore(
-        &self,
-        ctx: &SessionContext,
-        final_message: &[u8],
-        message_id: &str,
-        mailbox: &str,
-    ) {
-        let deadline = tokio::time::Instant::now() + MAILSTORE_DELIVERY_DEADLINE;
-        let message = bytes::Bytes::from(final_message.to_vec());
-        let deliveries = ctx
-            .rcpt_to
-            .iter()
-            .map(|recipient| {
-                let mut client = self.mailstore.clone();
-                let recipient = recipient.clone();
-                // Refcount bump only — one composed buffer backs every
-                // recipient's gRPC store request.
-                let message = message.clone();
-                let message_id = message_id.to_string();
-                let mailbox = mailbox.to_string();
-                async move {
-                    deliver_one_to_mailstore(
-                        &mut client,
-                        &recipient,
-                        &message,
-                        &message_id,
-                        &mailbox,
-                        deadline,
-                    )
-                    .await
-                }
-            })
-            .collect::<Vec<_>>();
-        fan_out_under_deadline(deliveries, deadline).await;
-    }
-
     // ── rate limiting ──────────────────────────────────────────────────────────
-
-    async fn is_managed_recipient(&self, recipient: &str) -> anyhow::Result<bool> {
-        let Some(domain) = recipient_domain(recipient) else {
-            return Ok(false);
-        };
-
-        let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM domains WHERE LOWER(name) = LOWER($1) AND status = 'verified')",
-        )
-        .bind(domain)
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(exists)
-    }
 
     /// F-02: verify the client source via PTR + forward confirmation
     /// (FCrDNS). Returns a [`SourceCheck`] the MAIL FROM handler turns into
@@ -1849,7 +1898,7 @@ fn extract_address(line: &str) -> String {
         .to_string()
 }
 
-fn recipient_domain(recipient: &str) -> Option<&str> {
+pub(crate) fn recipient_domain(recipient: &str) -> Option<&str> {
     let (_, domain) = recipient.rsplit_once('@')?;
     let domain = domain.trim();
     if domain.is_empty() {
@@ -1967,16 +2016,28 @@ async fn write_line_buf<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
 #[error("Message rejected by policy")]
 pub(crate) struct PermanentReject;
 
+/// A recipient definitively stopped existing between RCPT and end-of-DATA
+/// (or a race resolved to "no mailbox"). The message must be refused with
+/// `550 5.1.1` — never committed with a recipient that would be dropped.
+#[derive(Debug, thiserror::Error)]
+#[error("No such recipient mailbox")]
+pub(crate) struct NoSuchRecipient;
+
 /// M23: format the SMTP response for a DATA result. The client only ever sees
 /// a generic temporary-failure message; internal error details are logged
-/// server-side and never echoed to the remote peer. The single exception is
-/// the [`PermanentReject`] policy marker, which surfaces as a hard `550 5.7.1`.
+/// server-side and never echoed to the remote peer. The two exceptions are
+/// typed markers: [`PermanentReject`] surfaces as `550 5.7.1`, and
+/// [`NoSuchRecipient`] as `550 5.1.1`.
 fn format_data_response(result: &anyhow::Result<String>) -> String {
     match result {
         Ok(id) => format!("250 2.0.0 Ok id={id}\r\n"),
         Err(e) if e.downcast_ref::<PermanentReject>().is_some() => {
             warn!(error = %e, "Message rejected by policy; sending 550");
             "550 5.7.1 Message rejected by policy\r\n".into()
+        }
+        Err(e) if e.downcast_ref::<NoSuchRecipient>().is_some() => {
+            warn!(error = %e, "Recipient no longer exists; sending 550 5.1.1");
+            RCPT_NO_SUCH_USER_REPLY.into()
         }
         Err(e) => {
             warn!(error = %e, "Message processing failed; sending generic 451");
@@ -2010,261 +2071,6 @@ where
             warn!("TLS handshake timed out; closing connection");
             Err(())
         }
-    }
-}
-
-/// M28: run a mailstore RPC under a bounded deadline. Returns None on timeout
-/// so the caller can degrade gracefully (best-effort delivery semantics).
-async fn rpc_with_deadline<T>(fut: impl Future<Output = T>, dur: Duration) -> Option<T> {
-    match tokio::time::timeout(dur, fut).await {
-        Ok(value) => Some(value),
-        Err(_) => {
-            warn!(timeout = %dur.as_secs(), "mailstore RPC timed out");
-            None
-        }
-    }
-}
-
-/// One recipient's mailbox delivery: account lookup then store, both under
-/// the shared overall deadline (which also subsumes the per-RPC
-/// [`MAILSTORE_RPC_TIMEOUT`] bounds).
-///
-/// Failure discipline (RFC 5321 §6.1 — a 250-accepted message must be
-/// delivered or DSN'd, never silently dropped):
-/// * NotFound / empty account — no mailstore account for the recipient;
-///   skipped with a debug log (the SMTP RCPT path only guarantees the
-///   DOMAIN is managed, not that the mailbox exists).
-/// * Any OTHER error (service unavailable, internal error, timeout) — a
-///   SERVICE failure, not "no account": retried up to
-///   [`MAILSTORE_RETRY_BACKOFF_MS`.len()] times with backoff inside the
-///   overall deadline. If the retries are exhausted (or the deadline
-///   cancels the ladder), the message stays recorded in
-///   `inbound_messages` and an ERROR-level log carries recipient + message
-///   id so a later sweep or manual replay can deliver it. The SMTP session
-///   is never failed: the message was already accepted with 250.
-async fn deliver_one_to_mailstore(
-    client: &mut MailstoreClient,
-    recipient: &str,
-    final_message: &bytes::Bytes,
-    message_id: &str,
-    mailbox: &str,
-    deadline: tokio::time::Instant,
-) {
-    let mut retries_done = 0usize;
-    let work = async {
-        let lookup = GetAccountRequest {
-            account_id: String::new(),
-            email: recipient.to_string(),
-        };
-        // M28: bounded RPC — a hung mailstore must not stall the session.
-        let account_id = loop {
-            match rpc_with_deadline(client.get_account(lookup.clone()), MAILSTORE_RPC_TIMEOUT).await
-            {
-                Some(Ok(resp)) => {
-                    let r = resp.into_inner();
-                    if r.account_id.is_empty() {
-                        // Ok(None)-equivalent: determinately no account.
-                        debug!(
-                            recipient = %mail_common::pii::redact_email(recipient),
-                            "No mailstore account for recipient; skipping mailbox delivery"
-                        );
-                        return;
-                    }
-                    break r.account_id;
-                }
-                Some(Err(status)) if status.code() == tonic::Code::NotFound => {
-                    // The mailstore answers "no account" as NotFound — the
-                    // same determinate skip as the empty account_id above.
-                    debug!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        "No mailstore account for recipient; skipping mailbox delivery"
-                    );
-                    return;
-                }
-                outcome => {
-                    let cause = match outcome {
-                        Some(Err(e)) => e.to_string(),
-                        _ => "RPC timed out".to_string(),
-                    };
-                    if !mailstore_retry(
-                        &mut retries_done,
-                        "get_account",
-                        &cause,
-                        recipient,
-                        message_id,
-                        deadline,
-                    )
-                    .await
-                    {
-                        return;
-                    }
-                }
-            }
-        };
-
-        // The requested mailbox (Inbox, or the Spam/Junk folder for a DMARC
-        // quarantine disposition) may have been deleted by the user. A
-        // NotFound here is determinate for THAT mailbox only — fall back to
-        // the Inbox once rather than stranding the message, then stop.
-        let mut mailbox = mailbox.to_string();
-        loop {
-            let req = StoreMessageRequest {
-                account_id: account_id.clone(),
-                mailbox: mailbox.clone(),
-                // Refcount bump onto the shared composed buffer — no
-                // per-recipient copy of the message body.
-                raw_message: final_message.clone(),
-                flags: Some(MessageFlags {
-                    recent: true,
-                    ..Default::default()
-                }),
-                internal_date: chrono::Utc::now().timestamp(),
-                // Delivery path: keep per-mailbox Message-ID dedup active.
-                dedup_exempt: false,
-            };
-            match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
-                Some(Ok(resp)) => {
-                    info!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        mailbox = %mailbox,
-                        uid = resp.into_inner().uid,
-                        "Message delivered to mailstore mailbox"
-                    );
-                    return;
-                }
-                Some(Err(status)) if status.code() == tonic::Code::NotFound => {
-                    warn!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        mailbox = %mailbox,
-                        "Mailbox not found for delivery; falling back to Inbox"
-                    );
-                    if mailbox == INBOX_MAILBOX {
-                        // Even the Inbox is gone — determinate, not a service
-                        // failure. The durable inbound_messages row stands.
-                        error!(
-                            recipient = %mail_common::pii::redact_email(recipient),
-                            message_id = %message_id,
-                            mailbox = %mailbox,
-                            "Mailstore reports no Inbox for account; mailbox delivery skipped — \
-                             message remains recorded in inbound_messages for replay"
-                        );
-                        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
-                        return;
-                    }
-                    mailbox = INBOX_MAILBOX.to_string();
-                    continue;
-                }
-                outcome => {
-                    let cause = match outcome {
-                        Some(Err(e)) => e.to_string(),
-                        _ => "RPC timed out".to_string(),
-                    };
-                    if !mailstore_retry(
-                        &mut retries_done,
-                        "store_message",
-                        &cause,
-                        recipient,
-                        message_id,
-                        deadline,
-                    )
-                    .await
-                    {
-                        return;
-                    }
-                }
-            }
-        }
-    };
-    if tokio::time::timeout_at(deadline, work).await.is_err() {
-        // The overall delivery deadline cancelled the ladder mid-retry: the
-        // message IS stranded (row recorded, mailbox delivery not done) —
-        // the same operational condition as exhausted retries.
-        error!(
-            recipient = %mail_common::pii::redact_email(recipient),
-            message_id = %message_id,
-            deadline_secs = MAILSTORE_DELIVERY_DEADLINE.as_secs(),
-            "Mailstore delivery exceeded the overall deadline; mailbox delivery skipped — \
-             message remains recorded in inbound_messages for replay"
-        );
-        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
-    }
-}
-
-/// Service-failure retry ladder shared by both RPCs of a mailbox delivery.
-/// `retries_done` tracks the backoff step already consumed for this
-/// recipient (the get_account and store_message stages share the ladder so
-/// one recipient can never spend more than the full schedule inside the
-/// delivery deadline). Returns `true` when the caller should retry (the
-/// backoff was slept through, still inside the deadline), `false` when the
-/// ladder is exhausted or the deadline passed — in which case the ERROR
-/// log that flags the row for replay has already been emitted here.
-async fn mailstore_retry(
-    retries_done: &mut usize,
-    stage: &str,
-    cause: &str,
-    recipient: &str,
-    message_id: &str,
-    deadline: tokio::time::Instant,
-) -> bool {
-    let Some(&backoff_ms) = MAILSTORE_RETRY_BACKOFF_MS.get(*retries_done) else {
-        // Ladder exhausted: the durable inbound_messages row is the replay
-        // source — surface it loudly, never silently skip.
-        error!(
-            recipient = %mail_common::pii::redact_email(recipient),
-            message_id = %message_id,
-            stage = stage,
-            cause = %cause,
-            "Mailstore delivery failed after all retries — message remains recorded in \
-             inbound_messages; a sweep or manual replay must deliver it"
-        );
-        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
-        return false;
-    };
-    *retries_done += 1;
-    warn!(
-        recipient = %mail_common::pii::redact_email(recipient),
-        message_id = %message_id,
-        stage = stage,
-        cause = %cause,
-        backoff_ms = backoff_ms,
-        "Mailstore service failure; retrying mailbox delivery"
-    );
-    // Sleep the backoff, but never past the overall delivery deadline —
-    // the caller's timeout_at would cancel us mid-sleep anyway, and this
-    // way the stranded-message ERROR log lands deterministically here.
-    let sleep = tokio::time::sleep(Duration::from_millis(backoff_ms));
-    if tokio::time::timeout_at(deadline, sleep).await.is_err() {
-        error!(
-            recipient = %mail_common::pii::redact_email(recipient),
-            message_id = %message_id,
-            stage = stage,
-            cause = %cause,
-            "Mailstore delivery deadline reached mid-backoff — message remains recorded in \
-             inbound_messages for replay"
-        );
-        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
-        return false;
-    }
-    true
-}
-
-/// Fan one delivery future out per recipient, all sharing a single overall
-/// deadline: the returned future completes no later than `deadline`, and any
-/// per-recipient future still pending at the deadline is dropped (cancelling
-/// its in-flight RPC). Generic so the deadline semantics are unit-testable
-/// with plain sleep/pending futures.
-async fn fan_out_under_deadline<Fut>(futures: Vec<Fut>, deadline: tokio::time::Instant)
-where
-    Fut: Future<Output = ()>,
-{
-    if tokio::time::timeout_at(deadline, futures::future::join_all(futures))
-        .await
-        .is_err()
-    {
-        warn!(
-            deadline_secs = MAILSTORE_DELIVERY_DEADLINE.as_secs(),
-            "Mailstore delivery phase exceeded its overall deadline; cancelling remaining deliveries"
-        );
     }
 }
 
@@ -2507,10 +2313,67 @@ mod tests {
             redis,
             authenticator,
             "mail.test".into(),
-            "http://127.0.0.1:1".into(),
+            vec!["bounces.apexmail.ee".into()],
         )
-        .expect("test mailstore configuration must be valid");
+        .expect("inbound server construction cannot fail");
         (server, ctx)
+    }
+
+    // ── RCPT-time mailbox resolution fakes ─────────────────────────────────
+
+    #[derive(Clone)]
+    enum FakeResolution {
+        Found(String),
+        Missing,
+        Unavailable,
+    }
+
+    /// In-memory [`MailboxDirectory`] for the RCPT accept/reject matrix.
+    struct FakeDirectory {
+        outcomes: std::collections::HashMap<String, FakeResolution>,
+        default_resolution: FakeResolution,
+    }
+
+    impl FakeDirectory {
+        fn resolving(default_resolution: FakeResolution) -> Self {
+            Self {
+                outcomes: std::collections::HashMap::new(),
+                default_resolution,
+            }
+        }
+
+        fn with(mut self, recipient: &str, resolution: FakeResolution) -> Self {
+            self.outcomes.insert(recipient.to_string(), resolution);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MailboxDirectory for FakeDirectory {
+        async fn resolve(
+            &self,
+            recipient: &str,
+        ) -> Result<Option<ResolvedMailbox>, DirectoryUnavailable> {
+            match self
+                .outcomes
+                .get(recipient)
+                .unwrap_or(&self.default_resolution)
+            {
+                FakeResolution::Found(mailbox_id) => Ok(Some(ResolvedMailbox {
+                    mailbox_id: mailbox_id.clone(),
+                    email: recipient.to_string(),
+                })),
+                FakeResolution::Missing => Ok(None),
+                FakeResolution::Unavailable => {
+                    Err(DirectoryUnavailable("simulated directory outage".into()))
+                }
+            }
+        }
+    }
+
+    fn with_directory(mut server: InboundServer, directory: FakeDirectory) -> InboundServer {
+        server.mailbox_directory = Arc::new(directory);
+        server
     }
 
     #[tokio::test]
@@ -2734,46 +2597,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn concurrent_delivery_fans_out_instead_of_serializing() {
-        // 20 deliveries of 150 ms each must complete in ~150 ms wall clock
-        // (fan-out), not 3 s (serial per-recipient loop).
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let deliveries: Vec<_> = (0..20)
-            .map(|_| async {
-                tokio::time::sleep(Duration::from_millis(150)).await;
-            })
-            .collect();
-        let started = tokio::time::Instant::now();
-        fan_out_under_deadline(deliveries, deadline).await;
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "fan-out must overlap per-recipient work (took {:?})",
-            started.elapsed()
-        );
-    }
-
-    #[tokio::test]
-    async fn delivery_deadline_bounds_stragglers() {
-        // A recipient whose delivery never completes must not hold
-        // end-of-DATA open: the shared deadline cuts it (the pending future
-        // is dropped) and the delivery phase returns at the deadline.
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
-        let deliveries: Vec<std::pin::Pin<Box<dyn Future<Output = ()>>>> = vec![
-            Box::pin(async {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }),
-            Box::pin(std::future::pending()),
-        ];
-        let started = tokio::time::Instant::now();
-        fan_out_under_deadline(deliveries, deadline).await;
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the overall deadline must bound the delivery phase (took {:?})",
-            started.elapsed()
-        );
-    }
-
     #[test]
     fn test_format_data_response_policy_reject_answers_550() {
         // A Reject disposition (DMARC p=reject, require_spf/require_dkim
@@ -2875,30 +2698,6 @@ mod tests {
                 .starts_with("250")
         );
         assert_eq!(ctx.mail_from.as_deref(), Some("second@example.com"));
-    }
-
-    // ── FIX-H (M28): bounded mailstore RPCs ───────────────────────────────
-
-    #[tokio::test]
-    async fn test_rpc_with_deadline_never_resolving_future_returns_none() {
-        // A hung mailstore RPC must never stall the session: the deadline
-        // helper must return None long before the outer test deadline.
-        let result = tokio::time::timeout(
-            Duration::from_millis(500),
-            rpc_with_deadline(std::future::pending::<()>(), Duration::from_millis(50)),
-        )
-        .await;
-        assert!(
-            result.is_ok(),
-            "rpc_with_deadline must return before the outer deadline"
-        );
-        assert_eq!(result.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn test_rpc_with_deadline_returns_value_when_resolves() {
-        let result = rpc_with_deadline(async { 42 }, Duration::from_millis(50)).await;
-        assert_eq!(result, Some(42));
     }
 
     // ── FIX-G (M26): bounded TLS handshakes ───────────────────────────────
@@ -3696,9 +3495,140 @@ mod tests {
             assert!(ctx.rcpt_to.is_empty(), "nothing stored for {bad:?}");
         }
         // A WELL-FORMED recipient passes the syntax gate: the next failure
-        // is the (DB-unreachable) managed-recipient lookup's 451 — not 501.
+        // is the (DB-unreachable) mailbox-directory lookup's 451 — not 501.
         let resp = handle_cmd(&server, "RCPT TO:<user@example.com>\r\n", &mut ctx).await;
         assert_eq!(resp, "451 4.3.0 Temporary local problem\r\n");
+    }
+
+    // ── RCPT-time mailbox resolution (accept-then-drop repair) ─────────────
+
+    /// The pure decision matrix behind RCPT: resolved → accept, definitively
+    /// absent → 550 5.1.1, directory failure → 451 4.3.0.
+    #[test]
+    fn rcpt_resolution_reply_matrix() {
+        assert_eq!(
+            rcpt_resolution_reply(&Ok(Some(ResolvedMailbox {
+                mailbox_id: "11111111-1111-1111-1111-111111111111".into(),
+                email: "user@managed.test".into(),
+            }))),
+            None,
+            "a resolved mailbox is accepted"
+        );
+        assert_eq!(
+            rcpt_resolution_reply(&Ok(None)),
+            Some(RCPT_NO_SUCH_USER_REPLY),
+            "a definitive miss is a permanent 550 5.1.1"
+        );
+        assert_eq!(
+            rcpt_resolution_reply(&Err(DirectoryUnavailable("db down".into()))),
+            Some(RCPT_TEMPFAIL_REPLY),
+            "a directory outage is a retryable 451, never a silent accept"
+        );
+    }
+
+    #[tokio::test]
+    async fn rcpt_nonexistent_mailbox_is_refused_550() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = with_directory(server, FakeDirectory::resolving(FakeResolution::Missing));
+        ctx.mail_from = Some("sender@remote.test".into());
+
+        let resp = handle_cmd(&server, "RCPT TO:<ghost@managed.test>\r\n", &mut ctx).await;
+        assert_eq!(
+            resp, "550 5.1.1 No such user here\r\n",
+            "a syntactically valid address on a verified domain without a mailbox must be refused"
+        );
+        assert!(
+            ctx.rcpt_to.is_empty(),
+            "a rejected recipient must never enter the envelope"
+        );
+    }
+
+    #[tokio::test]
+    async fn rcpt_directory_outage_tempfails_451_and_never_accepts() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = with_directory(
+            server,
+            FakeDirectory::resolving(FakeResolution::Unavailable),
+        );
+        ctx.mail_from = Some("sender@remote.test".into());
+
+        let resp = handle_cmd(&server, "RCPT TO:<user@managed.test>\r\n", &mut ctx).await;
+        assert_eq!(
+            resp, "451 4.3.0 Temporary local problem\r\n",
+            "an unavailable directory must tempfail so the sender retries"
+        );
+        assert!(
+            ctx.rcpt_to.is_empty(),
+            "an unresolvable recipient must never be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn rcpt_resolved_mailbox_is_accepted() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = with_directory(
+            server,
+            FakeDirectory::resolving(FakeResolution::Missing).with(
+                "user@managed.test",
+                FakeResolution::Found("22222222-2222-2222-2222-222222222222".into()),
+            ),
+        );
+        ctx.mail_from = Some("sender@remote.test".into());
+
+        let resp = handle_cmd(&server, "RCPT TO:<user@managed.test>\r\n", &mut ctx).await;
+        assert_eq!(resp, "250 2.0.0 Ok\r\n");
+        assert_eq!(ctx.rcpt_to, vec!["user@managed.test".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn verp_reply_is_accepted_without_a_mailbox_resolution() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        // The directory would 550 everything: VERP replies are not mailboxes.
+        let server = with_directory(server, FakeDirectory::resolving(FakeResolution::Missing));
+        ctx.mail_from = Some(String::new()); // bounces arrive with a null sender
+
+        let resp = handle_cmd(
+            &server,
+            "RCPT TO:<bounces+abc=example.com=user@bounces.apexmail.ee>\r\n",
+            &mut ctx,
+        )
+        .await;
+        assert_eq!(resp, "250 2.0.0 Ok\r\n");
+
+        // The same local part on a domain that is NOT the configured VERP
+        // domain is an ordinary recipient and must resolve (or 550).
+        let resp = handle_cmd(&server, "RCPT TO:<bounces+abc=x@other.test>\r\n", &mut ctx).await;
+        assert_eq!(resp, "550 5.1.1 No such user here\r\n");
+    }
+
+    #[tokio::test]
+    async fn rcpt_hostile_inputs_are_refused_without_panic() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let server = with_directory(
+            server,
+            FakeDirectory::resolving(FakeResolution::Unavailable),
+        );
+        ctx.mail_from = Some("sender@remote.test".into());
+
+        let overlong = format!("RCPT TO:<{}@managed.test>", "a".repeat(500));
+        for line in [
+            "RCPT TO:<>",
+            "RCPT TO:",
+            "RCPT TO:<@managed.test>",
+            "RCPT TO:<user@>",
+            &overlong,
+            "RCPT TO:<user@ex\u{e4}mple.test>",
+            "RCPT TO:<user@managed.test\r\n",
+        ] {
+            let resp = handle_cmd(&server, line, &mut ctx).await;
+            assert!(
+                resp.starts_with('4') || resp.starts_with('5'),
+                "hostile RCPT {line:?} must be refused, got {resp:?}"
+            );
+        }
+        // Non-ASCII in a well-formed SMTPUTF8 address must not panic the
+        // resolver path either (either accepted or cleanly refused).
+        let _ = handle_cmd(&server, "RCPT TO:<üser@managed.test>\r\n", &mut ctx).await;
     }
 
     // ── F-12: inbound AUTH verb case, inline LOGIN, cancellation ───────────

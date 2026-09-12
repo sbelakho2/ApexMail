@@ -409,7 +409,7 @@ truth for per-tenant warmup. Key columns:
 | `rdns_hostname` | VARCHAR(255) | Reverse DNS hostname |
 | `status` | VARCHAR(20) | One of: `pending`, `warming`, `active`, `suspended`, `releasing`, `retired` |
 | `warmup_started_at` | TIMESTAMPTZ | Start of the 60-day warmup day count |
-| `warmup_progress` | DOUBLE PRECISION | Progress fraction (0.0–1.0), written by `tick_warmup()` |
+| `warmup_progress` | DOUBLE PRECISION | Progress fraction (0.0–1.0); written only by `tick_warmup()` when invoked manually (nothing schedules it) |
 | `warmup_completed_at` | TIMESTAMPTZ | Set when the IP graduates to `active` |
 
 Only rows with `status = 'warming'` participate in warmup admission.

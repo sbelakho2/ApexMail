@@ -316,9 +316,18 @@ The provisioning flow in detail:
 5. **DB trigger** [`trg_update_transport_routing`](../architecture/hybrid-email-infrastructure.md:163) updates `transport_routing_cache`
 6. Subsequent messages for this tenant route via **self-hosted SMTP with the dedicated IP**
 
-#### 3.5.2 Warmup (45-Day Schedule)
+#### 3.5.2 Warmup (60-Day Schedule)
 
-New IPs require a graduated warmup schedule to build reputation with mailbox providers. The [`tick_warmup()`](../../services/mail-server/crates/api-server/src/ip_provider.rs:505) cron job manages this.
+New IPs require a graduated warmup schedule to build reputation with mailbox
+providers. The canonical schedule is
+[`mail_common::warmup::limit_for_day`](../../services/mail-server/crates/mail-common/src/warmup.rs)
+(see [warmup-schedule.md](../operations/warmup-schedule.md)).
+
+[`tick_warmup()`](../../services/mail-server/crates/api-server/src/ip_provider.rs:505)
+updates `warmup_progress` and graduates IPs to `active`, but **nothing in this
+tree schedules it — there is no warmup cron**; run it manually if the
+progress/graduation bookkeeping matters. Send-time admission is gated by
+`dedicated_ips.warmup_started_at`, not by `warmup_progress`.
 
 | Day Range | Daily Send Limit |
 |-----------|-----------------|
@@ -332,9 +341,15 @@ New IPs require a graduated warmup schedule to build reputation with mailbox pro
 | 21-28 | 10,000 |
 | 29-35 | 25,000 |
 | 36-44 | 50,000 |
-| 45+ | Unlimited |
+| 45-49 | 75,000 |
+| 50-54 | 100,000 |
+| 55-59 | 250,000 |
+| 60+ | Unlimited |
 
-> **Overflow behavior:** Traffic exceeding the warmup limit overflows to SES shared sending automatically — no messages are dropped.
+> **Deferral behavior:** a send that exceeds the warmup limit is deferred
+> through the normal requeue path until capacity frees up (no messages are
+> dropped). There is **no automatic overflow to SES shared sending** — shared
+> traffic is SES-only and selected by transport configuration.
 
 #### 3.5.3 Steady State
 
@@ -692,7 +707,7 @@ All events are:
 - [ ] Prometheus scraping configured on `apx-mon-1`
 - [ ] Grafana dashboards imported
 - [ ] DNSBL monitoring cron job configured (15-minute interval)
-- [ ] `tick_warmup()` cron job active for IP warmup progression
+- [ ] Operators know there is NO warmup cron: `tick_warmup()` only runs when invoked manually, and sending is gated by `warmup_started_at` (not by `warmup_progress`)
 
 ### 6.3 Environment Variables
 
@@ -744,7 +759,7 @@ All events are:
 | rDNS not updating | API token lacks write scope | Regenerate token with read/write permissions |
 | Tenant not routing via SMTP | `transport_routing_cache` stale | Cache refreshes every 30 seconds; or call [`invalidate_cache()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:202) |
 | IP showing as blacklisted | DNSBL listing | Check DNSBL monitoring alerts; initiate delisting process |
-| Warmup not progressing | `tick_warmup()` cron not running | Verify the cron job is active |
+| Warmup not progressing | Nothing schedules `tick_warmup()` — there is no cron | `warmup_progress` is bookkeeping only; sending is gated by `warmup_started_at`. Invoke `tick_warmup()` manually if the progress column matters |
 
 ### 7.3 Transport Routing Issues
 

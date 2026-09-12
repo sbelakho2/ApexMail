@@ -2,12 +2,29 @@
 //!
 //! Supports AUTH PLAIN and AUTH LOGIN against the `users` table.
 //! Supports STARTTLS when a TLS acceptor is provided.
+//!
+//! ## Send admission (finding P0) and category policy (finding P1)
+//!
+//! Every submitted message passes the SAME
+//! [`billing_service::send_admission::SendAdmissionService`] gate the REST
+//! `POST /v1/messages` path uses — quota reservation against the tenant's
+//! plan, suppression check, and server-owned category validation — BEFORE it
+//! is queued. A submission that cannot reserve is refused with a transient
+//! SMTP 4xx reply (see [`admission_refusal_reply`]), never silently
+//! accepted. The category comes exclusively from authenticated server-owned
+//! state (see [`submission_credential_category`]); the message headers and
+//! envelope are never consulted, and the `email_queue.message_category`
+//! schema default is never relied on.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use billing_service::send_admission::{
+    AdmissionMeter, PostgresAdmissionBackend, SendAdmission, SendAdmissionError,
+    SendAdmissionRequest, SendAdmissionService,
+};
 use dashmap::DashMap;
 use mail_parser::{ContentType, HeaderName, HeaderValue};
 use sqlx::PgPool;
@@ -67,6 +84,10 @@ enum ReadDataOutcome {
 }
 
 /// Outcome of persisting a submitted message.
+///
+/// Suppressed recipients (all of them) are no longer an outcome here: the
+/// shared admission gate refuses such a submission before the queue write
+/// (see [`admission_refusal_reply`] and `QueueOutcome`'s callers).
 enum QueueOutcome {
     /// The message was inserted into `email_queue`.
     Queued,
@@ -76,10 +97,6 @@ enum QueueOutcome {
     /// The sender belongs to the tenant but does not satisfy the unified
     /// current-domain readiness contract for the selected transport.
     SenderNotReady,
-    /// Every recipient is on the tenant suppression list — refused with
-    /// `550 5.1.1` (CAN-SPAM: the SMTP path must not bypass the list the
-    /// REST send path enforces).
-    RecipientSuppressed,
 }
 
 /// Why the queue write itself failed. Every constructor logs the CAUSE at
@@ -120,7 +137,10 @@ impl QueueWriteFailure {
 /// `log_smtp_reject` — a brute-forcer hammering AUTH disconnects after
 /// MAX_SESSION_ERRORS attempts exactly like any other error source.
 enum AuthOutcome {
-    Success(String, Uuid),
+    /// (authenticated email, tenant id). The tenant comes from the same
+    /// authenticated row the admission gate meters against, so the SMTP
+    /// path cannot reserve quota for a different tenant than it queues for.
+    Success(String, String),
     /// Terminal reply (already CRLF-terminated), to be emitted via `reply!`.
     Reply(&'static str),
     /// The transport died mid-exchange; no reply can be delivered.
@@ -149,6 +169,9 @@ pub struct SubmissionServer {
     config: SubmissionConfig,
     rate_limit: RateLimitConfig,
     pool: PgPool,
+    /// Unified send admission (finding P0): the SAME quota reservation,
+    /// suppression gate, and category validation the REST send path uses.
+    admission: SendAdmissionService,
     shutdown: Arc<Notify>,
     connections: Arc<DashMap<std::net::IpAddr, u32>>,
     /// Failed-AUTH lockout tracking. Backed by Redis when a pool is
@@ -166,10 +189,15 @@ impl SubmissionServer {
         redis: deadpool_redis::Pool,
         tls_acceptor: Option<TlsAcceptor>,
     ) -> Self {
+        let admission = SendAdmissionService::new(Arc::new(PostgresAdmissionBackend::new(
+            pool.clone(),
+            redis.clone(),
+        )));
         Self {
             config,
             rate_limit,
             pool,
+            admission,
             shutdown: Arc::new(Notify::new()),
             connections: Arc::new(DashMap::new()),
             auth_fail_tracker: AuthFailTracker::with_redis(redis),
@@ -291,7 +319,9 @@ impl SubmissionServer {
         already_tls: bool,
     ) -> (bool, u32) {
         let mut authenticated = false;
-        let mut auth_email = String::new();
+        // Tenant of the authenticated identity — the admission gate and the
+        // queue row MUST use this exact tenant (finding P0).
+        let mut auth_tenant = String::new();
         let mut helo_seen = false;
         // Validated EHLO/HELO argument ("unknown" when it failed validation) —
         // used for the Received trace header (F-01).
@@ -511,9 +541,9 @@ impl SubmissionServer {
                     reply!("503 5.5.1 AUTH not permitted during a mail transaction\r\n");
                 } else if mech == "LOGIN" {
                     match self.handle_auth_login(stream, initial_response, ip).await {
-                        AuthOutcome::Success(email, _account_id) => {
+                        AuthOutcome::Success(_email, tenant_id) => {
                             authenticated = true;
-                            auth_email = email;
+                            auth_tenant = tenant_id;
                         }
                         AuthOutcome::Reply(reply) => {
                             log_smtp_reject("submission", ip, &session_id, reply.trim_end());
@@ -523,9 +553,9 @@ impl SubmissionServer {
                     }
                 } else if mech == "PLAIN" {
                     match self.handle_auth_plain(stream, initial_response, ip).await {
-                        AuthOutcome::Success(email, _account_id) => {
+                        AuthOutcome::Success(_email, tenant_id) => {
                             authenticated = true;
-                            auth_email = email;
+                            auth_tenant = tenant_id;
                         }
                         AuthOutcome::Reply(reply) => {
                             log_smtp_reject("submission", ip, &session_id, reply.trim_end());
@@ -715,16 +745,86 @@ impl SubmissionServer {
                                 &msg_id,
                             );
                             let message = compose_stored_message(&received, &data);
-                            match self
-                                .queue_message(
-                                    &auth_email,
-                                    mail_from.as_deref().unwrap_or(""),
-                                    &rcpt_to,
-                                    &message,
-                                    &msg_id,
-                                )
+
+                            // ── Unified send admission (finding P0) ────────
+                            //
+                            // The SAME gate as the REST send path: validate
+                            // the server-owned category, check the tenant
+                            // suppression list, and reserve EmailsSent quota
+                            // against the tenant's plan under an idempotency
+                            // identity derived from the submitted message.
+                            // Nothing is queued unless the reservation
+                            // succeeds; a refusal is a 4xx SMTP error, never
+                            // a silent accept.
+                            let idempotency_key = submission_idempotency_key(&message, &msg_id);
+                            let admission = match self
+                                .admission
+                                .admit(SendAdmissionRequest {
+                                    tenant_id: &auth_tenant,
+                                    meter: AdmissionMeter::FilteredRecipients(&rcpt_to),
+                                    idempotency_key: Some(&idempotency_key),
+                                    idempotency_item: None,
+                                    category: submission_credential_category(),
+                                })
                                 .await
                             {
+                                Ok(admission) => admission,
+                                Err(error) => {
+                                    let refusal = admission_refusal_reply(&error);
+                                    log_smtp_reject(
+                                        "submission",
+                                        ip,
+                                        &session_id,
+                                        refusal.trim_end(),
+                                    );
+                                    metric_message("submission", "rejected");
+                                    reply!("{refusal}");
+                                    mail_from = None;
+                                    rcpt_to.clear();
+                                    smtputf8 = false;
+                                    continue;
+                                }
+                            };
+
+                            // Preserve the per-recipient audit trail for the
+                            // suppression filter the admission gate applied.
+                            for dropped in admission.suppressed_recipients() {
+                                warn!(
+                                    recipient = %mail_common::pii::redact_email(dropped),
+                                    "Submission recipient is suppressed; dropping from queue"
+                                );
+                            }
+
+                            let outcome = self
+                                .queue_message(
+                                    &auth_tenant,
+                                    mail_from.as_deref().unwrap_or(""),
+                                    admission.allowed_recipients(),
+                                    &message,
+                                    &msg_id,
+                                    &admission,
+                                )
+                                .await;
+
+                            // ONLY a durably queued row keeps the
+                            // reservation; every refusal / queue failure
+                            // releases it (no quota is consumed by a
+                            // submission that was never queued).
+                            match settlement_for_queue_outcome(&outcome) {
+                                AdmissionSettlement::Commit => admission.commit(),
+                                AdmissionSettlement::Rollback => {
+                                    if let Err(error) = admission.rollback().await {
+                                        tracing::error!(
+                                            error = %error,
+                                            tenant_id = %auth_tenant,
+                                            message_id = %msg_id,
+                                            "failed to release reserved sending quota after queue failure"
+                                        );
+                                    }
+                                }
+                            }
+
+                            match outcome {
                                 Ok(QueueOutcome::Queued) => {
                                     message_count += 1;
                                     let _ = write_line(
@@ -749,9 +849,6 @@ impl SubmissionServer {
                                 }
                                 Ok(QueueOutcome::SenderNotReady) => {
                                     reply!("550 5.7.1 sender domain is not verified and ready for delivery\r\n");
-                                }
-                                Ok(QueueOutcome::RecipientSuppressed) => {
-                                    reply!("550 5.1.1 recipient address suppressed\r\n");
                                 }
                                 Err(QueueWriteFailure::Transient) => {
                                     // Infrastructure failure — already
@@ -949,9 +1046,9 @@ impl SubmissionServer {
                 let user_str = String::from_utf8_lossy(&user);
                 let pass_str = String::from_utf8_lossy(&pass);
                 match self.authenticate_user(&user_str, &pass_str, ip).await {
-                    Ok((email, account_id)) => {
+                    Ok((email, tenant_id)) => {
                         let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                        AuthOutcome::Success(email, account_id)
+                        AuthOutcome::Success(email, tenant_id)
                     }
                     Err(AuthError::LockedOut) => AuthOutcome::Reply(AUTH_LOCKED_OUT),
                     Err(AuthError::Failed) => AuthOutcome::Reply(AUTH_FAILED),
@@ -994,10 +1091,10 @@ impl SubmissionServer {
                 let parts: Vec<&str> = s.splitn(3, '\0').collect();
                 if parts.len() >= 3 {
                     match self.authenticate_user(parts[1], parts[2], ip).await {
-                        Ok((email, account_id)) => {
+                        Ok((email, tenant_id)) => {
                             let _ =
                                 write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                            AuthOutcome::Success(email, account_id)
+                            AuthOutcome::Success(email, tenant_id)
                         }
                         Err(AuthError::LockedOut) => AuthOutcome::Reply(AUTH_LOCKED_OUT),
                         Err(AuthError::Failed) => AuthOutcome::Reply(AUTH_FAILED),
@@ -1042,12 +1139,15 @@ impl SubmissionServer {
 
     // ── Auth helper ──────────────────────────────────────────────────────
 
+    /// Returns `(email, tenant_id)` — the tenant rides along so the
+    /// admission gate and the queue row use the SAME tenant as the
+    /// authenticated credential.
     async fn authenticate_user(
         &self,
         email: &str,
         password: &str,
         ip: std::net::IpAddr,
-    ) -> Result<(String, Uuid), AuthError> {
+    ) -> Result<(String, String), AuthError> {
         // FIX-3: lockout short-circuit BEFORE any work. Once an (IP,
         // account) pair — or an IP across all accounts — has accumulated
         // enough recent failures, further attempts are rejected without
@@ -1064,8 +1164,8 @@ impl SubmissionServer {
         // path. The tenant join enforces tenants.status here too (F18): a
         // suspended tenant's SMTP credentials must stop accepting
         // submission, same as the API/SSR gates in api-server.
-        let user = sqlx::query_as::<_, (String, Uuid, String, String, String)>(
-            "SELECT u.email, u.id, u.password_hash, u.status, t.status \
+        let user = sqlx::query_as::<_, (String, Uuid, String, String, String, String)>(
+            "SELECT u.email, u.id, u.password_hash, u.status, t.status, u.tenant_id::text \
              FROM users u JOIN tenants t ON t.id = u.tenant_id \
              WHERE LOWER(u.email) = LOWER($1)",
         )
@@ -1074,7 +1174,7 @@ impl SubmissionServer {
         .await
         .map_err(|_| AuthError::Failed)?;
 
-        let (user_email, user_id, password_hash, status, tenant_status) = match user {
+        let (user_email, _user_id, password_hash, status, tenant_status, tenant_id) = match user {
             Some(u) => u,
             None => {
                 // FIX-3: unknown-account attempts count toward the
@@ -1114,7 +1214,7 @@ impl SubmissionServer {
                     .execute(&self.pool)
                     .await;
                 }
-                Ok((user_email, user_id))
+                Ok((user_email, tenant_id))
             }
             _ => {
                 self.auth_fail_tracker.record_failure(ip, email).await;
@@ -1143,11 +1243,12 @@ impl SubmissionServer {
     /// columns, never to the parser input.
     async fn queue_message(
         &self,
-        auth_email: &str,
+        tenant_id: &str,
         mail_from: &str,
         rcpt_to: &[String],
         data: &[u8],
         msg_id: &str,
+        admission: &SendAdmission,
     ) -> Result<QueueOutcome, QueueWriteFailure> {
         // The MIME parse is pure CPU over up to max_message_size (10 MB) of
         // bytes: it must run on the blocking pool, never on the async
@@ -1186,59 +1287,15 @@ impl SubmissionServer {
                 )
             })?;
 
-        // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
-        // account UUID. Look up the authenticated user's actual tenant (by
-        // email only: `users` has no `username` column).
-        let tenant_id: Option<String> =
-            sqlx::query_scalar("SELECT tenant_id FROM users WHERE LOWER(email) = LOWER($1)")
-                .bind(auth_email)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| {
-                    QueueWriteFailure::transient(e, "submission queue: tenant lookup failed")
-                })?
-                .flatten();
-
-        // CAN-SPAM (F): the REST send path refuses suppressed recipients
-        // before queueing; the SMTP submission path must not be a bypass.
-        // Canonicalize (trim + lowercase) exactly like the api-server check
-        // and drop suppressed recipients from the queued row. A lookup
-        // failure surfaces as Transient → 451 so the client retries rather
-        // than silently delivering to a suppressed address.
-        let rcpt_to: Vec<String> = match tenant_id.as_deref() {
-            Some(tenant) => {
-                let canonical = canonical_recipients(rcpt_to);
-                let suppressed: Vec<String> =
-                    sqlx::query_scalar(
-                        "SELECT LOWER(email) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = ANY($2)",
-                    )
-                    .bind(tenant)
-                    .bind(&canonical)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(|e| {
-                        QueueWriteFailure::transient(
-                            e,
-                            "submission queue: suppression lookup failed",
-                        )
-                    })?;
-                if !suppressed.is_empty() {
-                    for dropped in &suppressed {
-                        warn!(
-                            recipient = %mail_common::pii::redact_email(dropped),
-                            "Submission recipient is suppressed; dropping from queue"
-                        );
-                    }
-                }
-                let allowed = filter_suppressed_recipients(rcpt_to, &suppressed);
-                if allowed.is_empty() {
-                    metric_message("submission", "rejected");
-                    return Ok(QueueOutcome::RecipientSuppressed);
-                }
-                allowed
-            }
-            None => rcpt_to.to_vec(),
-        };
+        // `tenant_id` is the authenticated identity's tenant (VARCHAR(26)
+        // referencing tenants(id) — never the user's account UUID). It was
+        // resolved during AUTH and admission metered against it; the queue
+        // row and the domain authorization use the SAME value.
+        //
+        // The suppression list was applied by the shared admission gate
+        // before this call: `rcpt_to` are exactly the allowed recipients, so
+        // the quota reservation matches the queue rows. CAN-SPAM: the SMTP
+        // path does not bypass the list the REST send path enforces.
 
         // Resolve the sender's domain while holding a share lock through queue
         // insertion. This matches the API's authorization predicate and
@@ -1247,41 +1304,35 @@ impl SubmissionServer {
         let requires_ses = apexmail_lib::transport::email_transport_is_ses(
             std::env::var("EMAIL_TRANSPORT_TYPE").ok().as_deref(),
         );
-        let domain: Option<(Uuid, bool)> = match tenant_id.as_deref() {
-            Some(tenant) => {
-                let domain_name = mail_from
-                    .rsplit_once('@')
-                    .map(|(_, d)| d.trim().trim_end_matches('.'))
-                    .unwrap_or_default();
-                if domain_name.is_empty() {
-                    None
-                } else {
-                    sqlx::query_as(
-                        "SELECT id, status = 'verified'
-                                AND dkim_enabled = true
-                                AND dkim_selector IS NOT NULL
-                                AND dkim_public_key IS NOT NULL
-                                AND dkim_private_key IS NOT NULL
-                                AND COALESCE(dkim_private_key LIKE 'dkim:v1:%', false)
-                                AND ($3::boolean = false OR ses_verified = true)
-                           FROM domains
-                          WHERE LOWER(name) = LOWER($1) AND tenant_id = $2
-                          LIMIT 1 FOR SHARE",
-                    )
-                    .bind(domain_name)
-                    .bind(tenant)
-                    .bind(requires_ses)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| {
-                        QueueWriteFailure::transient(
-                            e,
-                            "submission queue: sender domain lookup failed",
-                        )
-                    })?
-                }
+        let domain: Option<(Uuid, bool)> = {
+            let domain_name = mail_from
+                .rsplit_once('@')
+                .map(|(_, d)| d.trim().trim_end_matches('.'))
+                .unwrap_or_default();
+            if domain_name.is_empty() {
+                None
+            } else {
+                sqlx::query_as(
+                    "SELECT id, status = 'verified'
+                            AND dkim_enabled = true
+                            AND dkim_selector IS NOT NULL
+                            AND dkim_public_key IS NOT NULL
+                            AND dkim_private_key IS NOT NULL
+                            AND COALESCE(dkim_private_key LIKE 'dkim:v1:%', false)
+                            AND ($3::boolean = false OR ses_verified = true)
+                       FROM domains
+                      WHERE LOWER(name) = LOWER($1) AND tenant_id = $2
+                      LIMIT 1 FOR SHARE",
+                )
+                .bind(domain_name)
+                .bind(tenant_id)
+                .bind(requires_ses)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| {
+                    QueueWriteFailure::transient(e, "submission queue: sender domain lookup failed")
+                })?
             }
-            None => None,
         };
 
         let domain_id = match domain {
@@ -1319,9 +1370,9 @@ impl SubmissionServer {
                 id, from_address, to_addresses, subject, raw_headers, text_body,
                 "from", "to", html, text, headers, attachments,
                 status, priority, tenant_id, message_id,
-                domain_id, metadata, created_at, updated_at
+                domain_id, metadata, message_category, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $15, $16, 'pending', 5,
-                      $11, $12, $13, $14, NOW(), NOW())"#,
+                      $11, $12, $13, $14, $17, NOW(), NOW())"#,
         )
         .bind(message_uuid)
         .bind(mail_from)
@@ -1333,12 +1384,16 @@ impl SubmissionServer {
         .bind(&to_first)
         .bind(&payload.html_body)
         .bind(&payload.text_body)
-        .bind(&tenant_id)
+        .bind(tenant_id)
         .bind(message_uuid)
         .bind(domain_id)
         .bind(Option::<serde_json::Value>::None)
         .bind(&payload.custom_headers)
         .bind(&payload.attachments)
+        // F55/P1: the admission-validated, server-owned category — written
+        // EXPLICITLY so legal suppression semantics are never chosen by the
+        // `message_category` schema default.
+        .bind(admission.category())
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -1452,6 +1507,119 @@ fn compose_stored_message(received: &str, data: &[u8]) -> Vec<u8> {
     message.extend_from_slice(b"\r\n");
     message.extend_from_slice(data);
     message
+}
+
+// ── Submission admission policy (findings P0/P1) ────────────────────────
+
+/// Category policy for an authenticated submission (finding P1).
+///
+/// The category must come from authenticated, server-owned state — never
+/// from the message (headers, envelope, body) and never from the
+/// `email_queue.message_category` schema default. The deployed SMTP
+/// credential (the `users` row checked by AUTH) carries no category
+/// attribute yet, so this returns `None` and the shared admission service
+/// applies its documented policy default
+/// ([`billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY`] —
+/// `marketing`, the NON-preference-exempt category, so a missing attribute
+/// can never silently grant a legal opt-out exemption). The normalized value
+/// is returned on the admission handle and written explicitly by
+/// [`SubmissionServer::queue_message`].
+///
+/// MINIMAL CREDENTIAL ATTRIBUTE (proposed; NOT added here because schema
+/// changes are outside this change's scope): add
+/// `message_category VARCHAR(100) NOT NULL DEFAULT 'marketing'` to the SMTP
+/// credential record (`users`, or a dedicated `smtp_credentials` table if
+/// one is introduced), populated at credential creation/rotation and read
+/// back on AUTH. This function then returns that attribute, and the shared
+/// service validates it with the SAME helper the REST path uses. No other
+/// plumbing changes.
+fn submission_credential_category() -> Option<&'static str> {
+    None
+}
+
+/// Idempotency identity for one SMTP submission (finding P0).
+///
+/// SMTP has no `Idempotency-Key`; the RFC 5322 `Message-ID` header is the
+/// identity a retrying client resends verbatim, so it binds the usage event:
+/// a retry after a lost `250` records the SAME metering event and cannot
+/// reserve twice (a true duplicate delivery is still the client's retry
+/// semantics, unchanged). A message without a `Message-ID` falls back to the
+/// server-minted id — no cross-attempt replay identity, exactly like a REST
+/// send without an idempotency key.
+fn submission_idempotency_key(message: &[u8], msg_id: &str) -> String {
+    extract_message_id_header(message)
+        .map(|message_id| format!("smtp:{message_id}"))
+        .unwrap_or_else(|| format!("smtp:{msg_id}"))
+}
+
+/// Extract the first `Message-ID:` header value from the raw (headers +
+/// body) message. Continuation lines are not followed — `Message-ID` is a
+/// short single-line header — and values over the 255-byte identity cap are
+/// ignored so the caller falls back to the minted id.
+fn extract_message_id_header(message: &[u8]) -> Option<String> {
+    let (headers, _) = split_headers_body(message);
+    let headers = String::from_utf8_lossy(headers);
+    for line in headers.lines() {
+        let Some(prefix) = line.get(..11) else {
+            continue;
+        };
+        if !prefix.eq_ignore_ascii_case("message-id:") {
+            continue;
+        }
+        let value = line.get(11..).unwrap_or_default().trim();
+        if !value.is_empty() && value.len() <= 255 {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// SMTP reply for a submission refused by the shared admission gate.
+///
+/// * `452 4.7.0` for quota exhaustion: the plan gate is TRANSIENT (the
+///   billing period resets, or the tenant upgrades), and an RFC 5321 452 is
+///   a retryable insufficient-resource/policy reply. A 5xx would make a
+///   well-behaved sender hard-bounce mail that could legitimately be sent
+///   later.
+/// * `451 4.3.0` for metering/suppression infrastructure failures — same
+///   transient contract as a failed queue write.
+/// * `550 5.1.1` when every recipient is suppressed (mirrors the queue
+///   path's existing reply and the REST path's refusal).
+/// * `550 5.3.0` for an invalid server-owned category policy: permanent for
+///   the client — retrying cannot fix an operator/credential configuration
+///   error.
+fn admission_refusal_reply(error: &SendAdmissionError) -> &'static str {
+    match error {
+        SendAdmissionError::QuotaExceeded => "452 4.7.0 sending quota exceeded\r\n",
+        SendAdmissionError::MeteringUnavailable(_)
+        | SendAdmissionError::SuppressionUnavailable(_) => "451 4.3.0 Requested action aborted\r\n",
+        SendAdmissionError::Suppressed(_) => "550 5.1.1 recipient address suppressed\r\n",
+        SendAdmissionError::InvalidCategory { .. } => {
+            "550 5.3.0 message category policy invalid\r\n"
+        }
+    }
+}
+
+/// What to do with an admitted reservation once its queue write returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionSettlement {
+    /// The row is durably queued — the reservation stands.
+    Commit,
+    /// Anything else — release the reservation so a failed submission never
+    /// consumes quota.
+    Rollback,
+}
+
+/// ONLY a durably queued row keeps the reservation; every refusal or queue
+/// failure releases it. Pure, so the invariant is unit-tested for every
+/// outcome without a live database.
+fn settlement_for_queue_outcome(
+    outcome: &Result<QueueOutcome, QueueWriteFailure>,
+) -> AdmissionSettlement {
+    match outcome {
+        Ok(QueueOutcome::Queued) => AdmissionSettlement::Commit,
+        _ => AdmissionSettlement::Rollback,
+    }
 }
 
 /// Derived values `email_queue` needs from the raw message bytes (F-10).
@@ -1677,26 +1845,6 @@ fn truncate_subject_chars(subject: &str, max_chars: usize) -> String {
     } else {
         subject.chars().take(max_chars).collect()
     }
-}
-
-/// Canonicalize recipient addresses for the suppression lookup (same shape
-/// as the api-server's `canonical_email`: trim + lowercase).
-fn canonical_recipients(rcpt_to: &[String]) -> Vec<String> {
-    rcpt_to
-        .iter()
-        .map(|r| r.trim().to_ascii_lowercase())
-        .collect()
-}
-
-/// Keep only recipients NOT present in the (lowercased) suppressed set.
-fn filter_suppressed_recipients(rcpt_to: &[String], suppressed: &[String]) -> Vec<String> {
-    let suppressed: std::collections::HashSet<&str> =
-        suppressed.iter().map(|s| s.as_str()).collect();
-    rcpt_to
-        .iter()
-        .filter(|r| !suppressed.contains(r.trim().to_ascii_lowercase().as_str()))
-        .cloned()
-        .collect()
 }
 
 async fn write_line<S: AsyncWrite + Unpin>(sink: &mut S, line: &str) -> std::io::Result<()> {
@@ -2495,32 +2643,176 @@ mod tests {
         assert_eq!(extract_subject(&headers).chars().count(), 998);
     }
 
-    // ── F: suppression filtering (pure logic; the query mirrors api-server) ──
+    // ── P0/P1: submission admission policy (pure logic) ────────────────────
 
     #[test]
-    fn canonical_recipients_trims_and_lowercases() {
-        let rcpt = vec!["  Alice@Example.COM ".to_string(), "bob@example.com".into()];
+    fn submission_category_policy_is_server_owned_and_never_the_schema_default() {
+        // The deployed SMTP credential carries no category attribute, so the
+        // documented policy default applies — explicitly, through the shared
+        // helper. `marketing` is the NON-preference-exempt category, so a
+        // missing attribute can never silently grant a legal opt-out
+        // exemption, and the `email_queue.message_category` schema default is
+        // never consulted.
+        assert_eq!(submission_credential_category(), None);
+        let category =
+            billing_service::send_admission::normalize_category(submission_credential_category())
+                .expect("the documented policy default always validates");
         assert_eq!(
-            canonical_recipients(&rcpt),
-            vec!["alice@example.com", "bob@example.com"]
+            category,
+            billing_service::send_admission::DEFAULT_MESSAGE_CATEGORY
+        );
+        assert_eq!(category, "marketing");
+
+        // The queue write names the column and binds the admission-validated
+        // value — the schema default is not in the statement at all.
+        let source = include_str!("submission.rs");
+        let insert = source
+            .find("INSERT INTO email_queue (")
+            .expect("submission must insert queue rows");
+        // Scope the check to the INSERT statement itself (the module docs
+        // mention the schema default when describing the credential
+        // attribute proposal, and this test's own source text must not
+        // match either).
+        let insert_end = source[insert..]
+            .find(".execute(&mut *tx)")
+            .map(|offset| insert + offset)
+            .expect("the queue INSERT must execute");
+        let insert_stmt = &source[insert..insert_end];
+        assert!(
+            insert_stmt.contains("message_category"),
+            "the INSERT must name message_category"
+        );
+        assert!(
+            insert_stmt.contains(".bind(admission.category())"),
+            "message_category must be bound from the admission handle"
+        );
+        // Needle built at runtime so this assertion never matches its own
+        // source text (same convention as the other source-pin tests).
+        let schema_default = std::concat!("DEFAULT ", "'marketing'");
+        assert!(
+            !insert_stmt.contains(schema_default),
+            "the submission path must not rely on the schema default"
         );
     }
 
     #[test]
-    fn filter_suppressed_recipients_drops_only_suppressed() {
-        let rcpt = vec![
-            "alice@example.com".to_string(),
-            "BOB@example.com".to_string(),
-            "carol@example.com".to_string(),
-        ];
-        let suppressed = vec!["bob@example.com".to_string()];
-        let allowed = filter_suppressed_recipients(&rcpt, &suppressed);
-        assert_eq!(allowed, vec!["alice@example.com", "carol@example.com"]);
-        // All suppressed → empty queue payload (caller returns 550 5.1.1).
-        let all = filter_suppressed_recipients(&rcpt[..1], &["alice@example.com".to_string()]);
-        assert!(all.is_empty());
-        // Empty suppression list keeps everything.
-        assert_eq!(filter_suppressed_recipients(&rcpt, &[]), rcpt);
+    fn message_id_header_binds_the_submission_idempotency_identity() {
+        let message =
+            b"Received: from x\r\nMessage-ID: <retry-1@example.com>\r\nSubject: s\r\n\r\nbody";
+        assert_eq!(
+            submission_idempotency_key(message, "minted-id"),
+            "smtp:<retry-1@example.com>"
+        );
+        // Header name is matched case-insensitively.
+        assert_eq!(
+            submission_idempotency_key(b"message-id: <lower@example.com>\r\n\r\n", "minted-id"),
+            "smtp:<lower@example.com>"
+        );
+        // No Message-ID → the server-minted id (no cross-attempt identity).
+        assert_eq!(
+            submission_idempotency_key(b"Subject: s\r\n\r\n", "minted-id"),
+            "smtp:minted-id"
+        );
+        // Over-long values cannot smuggle an unbounded identity.
+        let long = format!("Message-ID: <{}@x>\r\n\r\n", "a".repeat(300));
+        assert_eq!(
+            submission_idempotency_key(long.as_bytes(), "minted-id"),
+            "smtp:minted-id"
+        );
+    }
+
+    #[test]
+    fn admission_refusals_use_retryable_4xx_for_transient_causes() {
+        use billing_service::send_admission::SendAdmissionError;
+
+        assert!(
+            admission_refusal_reply(&SendAdmissionError::QuotaExceeded).starts_with("452 4.7.0"),
+            "quota exhaustion is transient — a 5xx would hard-bounce retryable mail"
+        );
+        assert!(
+            admission_refusal_reply(&SendAdmissionError::MeteringUnavailable(
+                billing_service::usage::UsageError::InvalidQuantity(0)
+            ))
+            .starts_with("451 4.3.0")
+        );
+        assert!(
+            admission_refusal_reply(&SendAdmissionError::SuppressionUnavailable(
+                "db down".into()
+            ))
+            .starts_with("451 4.3.0")
+        );
+        assert!(
+            admission_refusal_reply(&SendAdmissionError::Suppressed(vec!["a@b.c".into()]))
+                .starts_with("550 5.1.1")
+        );
+        assert!(
+            admission_refusal_reply(&SendAdmissionError::InvalidCategory { raw: "bad".into() })
+                .starts_with("550 5.3.0")
+        );
+    }
+
+    #[test]
+    fn only_a_queued_row_keeps_the_reservation() {
+        assert_eq!(
+            settlement_for_queue_outcome(&Ok(QueueOutcome::Queued)),
+            AdmissionSettlement::Commit
+        );
+        for outcome in [
+            Ok(QueueOutcome::SenderNotOwned),
+            Ok(QueueOutcome::SenderNotReady),
+            Err(QueueWriteFailure::Transient),
+            Err(QueueWriteFailure::Permanent),
+        ] {
+            assert_eq!(
+                settlement_for_queue_outcome(&outcome),
+                AdmissionSettlement::Rollback,
+                "every non-queued outcome must release the reservation"
+            );
+        }
+    }
+
+    #[test]
+    fn submission_admission_runs_before_the_queue_insert_and_rolls_back_on_failure() {
+        // The P0 wiring, pinned against the compiled-in source (the unit
+        // suite has no live Postgres, same convention as the
+        // synchronous_commit pin test): admission must precede the queue
+        // INSERT, and the queue call's outcome must be settled through the
+        // tested commit/rollback mapping.
+        let source = include_str!("submission.rs");
+        let admit_pos = source
+            .find(".admit(SendAdmissionRequest")
+            .expect("the submission path must call the shared admission gate");
+        let insert_pos = source
+            .find("INSERT INTO email_queue (")
+            .expect("the queue tx must insert into email_queue");
+        assert!(
+            admit_pos < insert_pos,
+            "admission must run BEFORE anything is queued"
+        );
+        let queue_call_pos = source
+            .find("let outcome = self")
+            .expect("the admission must gate the queue write");
+        let settlement_pos = source
+            .find("settlement_for_queue_outcome(&outcome)")
+            .expect("the queue outcome must be settled");
+        assert!(
+            admit_pos < queue_call_pos && queue_call_pos < settlement_pos,
+            "the reservation must be settled after the queue attempt"
+        );
+        // Bound the settlement block at the reply dispatch that follows it.
+        let settlement_end = source[settlement_pos..]
+            .find("match outcome {")
+            .map(|offset| settlement_pos + offset)
+            .expect("the settlement must precede the reply dispatch");
+        let settlement_block = &source[settlement_pos..settlement_end];
+        assert!(
+            settlement_block.contains("admission.rollback()"),
+            "a failed/refused queue write must release the reservation"
+        );
+        assert!(
+            settlement_block.contains("admission.commit()"),
+            "a queued write must commit the reservation"
+        );
     }
 
     // ── RFC 2920 pipelining ────────────────────────────────────────────────

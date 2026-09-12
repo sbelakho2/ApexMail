@@ -473,6 +473,12 @@ pub async fn create_credit_note(
         }
     };
 
+    // Statutory ledger: post the credit note (debt-reduction part against
+    // AR, refunded part against the wallet liability) in the same
+    // transaction. Idempotent on the credit note id, so retried creates
+    // post once.
+    crate::accounting_postings::post_credit_note_in(&mut tx, credit_note.id).await;
+
     tx.commit().await.map_err(CreditNoteError::Db)?;
 
     Ok(CreditNote {

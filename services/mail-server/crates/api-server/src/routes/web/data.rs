@@ -2201,235 +2201,78 @@ async fn control_plane_route_data(
     }
 }
 
-/// Load the sales-autopilot control surface from the canonical sales tables.
+/// Load the sales-autopilot control surface through the SAME typed read model
+/// the sales-autopilot service's `/control/*` admin API serializes
+/// ([`sales_autopilot::control_read`]).
 ///
-/// The control plane deliberately reads the canonical tables rather than
-/// re-deriving anything: this is a view over the one sales domain, not a
-/// second brain. Every section is independently `None`-able so a single
-/// missing table degrades to the page's explicit "unavailable" state instead
-/// of a zero-filled dashboard that would read as real activity.
+/// This page used to issue its own queries against the canonical sales tables
+/// while the admin read/mutation APIs proxied the control surface — two read
+/// contracts for one question, free to drift. It now consumes the shared
+/// snapshot: one engine, one read model, identical answers. Every section is
+/// independently `None`-able so a single failing table degrades to the page's
+/// explicit "unavailable" state instead of a zero-filled dashboard that would
+/// read as real activity.
 async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::SalesPageData {
+    use sales_autopilot::control_read;
     use ui_foundation::view_data::{
-        SalesActionStatsData, SalesAutonomyData, SalesDeadLetterData, SalesEnrollmentCountData,
-        SalesOverviewData, SalesPageData, SalesRevenueData,
+        SalesActionStatsData, SalesAutonomyData, SalesEnrollmentCountData, SalesOverviewData,
+        SalesPageData, SalesRevenueData,
     };
 
     const TENANT: &str = "system";
 
-    // ── Autonomy ──────────────────────────────────────────────────────
-    let autonomy = sqlx::query_as::<
-        _,
-        (
-            String,
-            bool,
-            Option<String>,
-            Option<chrono::DateTime<chrono::Utc>>,
-        ),
-    >(
-        "SELECT mode, kill_switch, last_action, last_action_at \
-         FROM sales_autonomy_state WHERE tenant_id = $1",
-    )
-    .bind(TENANT)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .map(|(mode, kill_switch, last_action, last_action_at)| {
-        let parsed = AutonomyModeView::parse(&mode);
-        SalesAutonomyData {
-            mode: parsed.mode.to_string(),
-            mode_description: String::new(),
-            kill_switch,
-            runs_brain: parsed.runs_brain,
-            may_execute: parsed.may_execute,
-            last_action,
-            last_action_at: last_action_at.map(|t| t.to_rfc3339()),
-        }
-    });
+    // One shared load for the whole page — exactly the read path the control
+    // API's handlers use.
+    let snapshot = control_read::load_sales_control_snapshot(&state.db, TENANT).await;
 
-    // ── Action queue ──────────────────────────────────────────────────
-    let action_stats = match sqlx::query_as::<_, (String, i64)>(
-        "SELECT state, COUNT(*)::bigint FROM sales_actions \
-         WHERE tenant_id = $1 GROUP BY state ORDER BY state",
-    )
-    .bind(TENANT)
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => {
-            let by_state: Vec<(String, i64)> = rows;
-            let total = by_state.iter().map(|(_, count)| *count).sum();
-            let dead_lettered = by_state
-                .iter()
-                .find(|(state, _)| state == "dead_letter")
-                .map(|(_, count)| *count)
-                .unwrap_or(0);
-            let due_now = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::bigint FROM sales_actions \
-                 WHERE tenant_id = $1 AND state = 'queued' AND due_at <= NOW()",
-            )
-            .bind(TENANT)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
-            Some(SalesActionStatsData {
-                total,
-                due_now,
-                dead_lettered,
-                by_state,
+    let overview = snapshot.overview.map(|snapshot| SalesOverviewData {
+        autonomy: SalesAutonomyData {
+            mode: snapshot.autonomy.mode,
+            mode_description: snapshot.autonomy.mode_description,
+            kill_switch: snapshot.autonomy.kill_switch,
+            runs_brain: snapshot.autonomy.runs_brain,
+            may_execute: snapshot.autonomy.may_execute,
+            last_action: snapshot.autonomy.last_action,
+            last_action_at: snapshot.autonomy.last_action_at.map(|t| t.to_rfc3339()),
+        },
+        action_stats: SalesActionStatsData {
+            total: snapshot.actions.total,
+            due_now: snapshot.actions.due_now,
+            dead_lettered: snapshot.actions.dead_lettered,
+            // `BTreeMap` iteration is the SQL's `ORDER BY state` ordering.
+            by_state: snapshot.actions.by_state.into_iter().collect(),
+        },
+        enrollments: snapshot
+            .enrollments
+            .into_iter()
+            .map(|row| SalesEnrollmentCountData {
+                state: row.state,
+                count: row.count,
             })
-        }
-        Err(_) => None,
-    };
-
-    // ── Enrollments by state ──────────────────────────────────────────
-    let enrollments = sqlx::query_as::<_, (String, i64)>(
-        "SELECT state, COUNT(*)::bigint FROM sales_enrollments \
-         WHERE tenant_id = $1 GROUP BY state ORDER BY state",
-    )
-    .bind(TENANT)
-    .fetch_all(&state.db)
-    .await
-    .ok()
-    .map(|rows| {
-        rows.into_iter()
-            .map(|(state, count)| SalesEnrollmentCountData { state, count })
-            .collect::<Vec<_>>()
+            .collect(),
+        decisions_last_24h: snapshot.decisions.last24h,
+        blocked_last_24h: snapshot.decisions.blocked_last24h,
+        meetings_booked: snapshot.outcomes30d.meetings_booked,
+        revenue: snapshot
+            .outcomes30d
+            .revenue_eur
+            .into_iter()
+            .map(|row| SalesRevenueData {
+                outcome: row.outcome,
+                eur: row.eur,
+            })
+            .collect(),
     });
 
-    // ── Decision counters ────────────────────────────────────────────
-    let decisions_last_24h = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM sales_decisions \
-         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '24 hours'",
-    )
-    .bind(TENANT)
-    .fetch_one(&state.db)
-    .await
-    .ok();
-
-    let blocked_last_24h = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM sales_decisions \
-         WHERE tenant_id = $1 AND blocked AND created_at >= NOW() - INTERVAL '24 hours'",
-    )
-    .bind(TENANT)
-    .fetch_one(&state.db)
-    .await
-    .ok();
-
-    let meetings_booked = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM sales_meetings \
-         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '30 days'",
-    )
-    .bind(TENANT)
-    .fetch_one(&state.db)
-    .await
-    .ok();
-
-    let revenue = sqlx::query_as::<_, (String, f64)>(
-        "SELECT outcome, COALESCE(SUM(value_eur), 0)::float8 FROM sales_outcomes \
-         WHERE tenant_id = $1 AND occurred_at >= NOW() - INTERVAL '30 days' \
-           AND outcome IN ('trial', 'paid_subscription', 'retained_mrr') \
-         GROUP BY outcome ORDER BY outcome",
-    )
-    .bind(TENANT)
-    .fetch_all(&state.db)
-    .await
-    .ok()
-    .map(|rows| {
-        rows.into_iter()
-            .map(|(outcome, eur)| SalesRevenueData { outcome, eur })
-            .collect::<Vec<_>>()
-    });
-
-    let overview = match (autonomy, action_stats) {
-        (Some(autonomy), Some(action_stats)) => Some(SalesOverviewData {
-            autonomy,
-            action_stats,
-            enrollments: enrollments.unwrap_or_default(),
-            decisions_last_24h: decisions_last_24h.unwrap_or(0),
-            blocked_last_24h: blocked_last_24h.unwrap_or(0),
-            meetings_booked: meetings_booked.unwrap_or(0),
-            revenue: revenue.unwrap_or_default(),
-        }),
-        _ => None,
-    };
-
-    // ── Decision rows ────────────────────────────────────────────────
-    let decisions = load_decision_rows(
-        state,
-        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
-                confidence::float8, selected_offer, selected_sequence, selected_variant, \
-                selected_sender, rationale, blocked, block_reasons, execute_after, created_at \
-         FROM sales_decisions WHERE tenant_id = $1 \
-         ORDER BY created_at DESC LIMIT 25",
-    )
-    .await;
-
-    let exceptions = load_decision_rows(
-        state,
-        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
-                confidence::float8, selected_offer, selected_sequence, selected_variant, \
-                selected_sender, rationale, blocked, block_reasons, execute_after, created_at \
-         FROM sales_decisions WHERE tenant_id = $1 \
-           AND (blocked OR autonomy_mode IN ('assisted', 'approval_required')) \
-         ORDER BY created_at DESC LIMIT 25",
-    )
-    .await;
-
-    // ── Dead letters ─────────────────────────────────────────────────
-    let dead_letters = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            String,
-            String,
-            i32,
-            i32,
-            Option<String>,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-        ),
-    >(
-        "SELECT id::text, action_type, entity_type, entity_id::text, state, attempt, \
-                max_attempts, last_error, due_at, created_at \
-         FROM sales_actions WHERE tenant_id = $1 AND state = 'dead_letter' \
-         ORDER BY created_at DESC LIMIT 25",
-    )
-    .bind(TENANT)
-    .fetch_all(&state.db)
-    .await
-    .ok()
-    .map(|rows| {
-        rows.into_iter()
-            .map(
-                |(
-                    id,
-                    action_type,
-                    entity_type,
-                    entity_id,
-                    state,
-                    attempt,
-                    max_attempts,
-                    last_error,
-                    due_at,
-                    created_at,
-                )| SalesDeadLetterData {
-                    id,
-                    action_type,
-                    entity_type,
-                    entity_id,
-                    state,
-                    attempt,
-                    max_attempts,
-                    last_error,
-                    due_at: Some(due_at.to_rfc3339()),
-                    created_at: Some(created_at.to_rfc3339()),
-                },
-            )
-            .collect::<Vec<_>>()
-    });
+    let decisions = snapshot
+        .decisions
+        .map(|rows| rows.into_iter().map(decision_data).collect());
+    let exceptions = snapshot
+        .exceptions
+        .map(|rows| rows.into_iter().map(decision_data).collect());
+    let dead_letters = snapshot
+        .dead_letters
+        .map(|rows| rows.into_iter().map(dead_letter_data).collect());
 
     SalesPageData {
         // The render pipeline injects hidden `_csrf` inputs into every
@@ -2442,128 +2285,62 @@ async fn cp_sales_autopilot(state: &AppState) -> ui_foundation::view_data::Sales
     }
 }
 
-/// Load and map decision rows for both the stream and the exceptions list.
-async fn load_decision_rows(
-    state: &AppState,
-    sql: &str,
-) -> Option<Vec<ui_foundation::view_data::SalesDecisionData>> {
+/// Map one shared control-model decision row onto the page's view model. All
+/// values come from the control API's own snapshot; the page neither queries
+/// nor re-derives them.
+fn decision_data(
+    row: sales_autopilot::control_read::DecisionSnapshot,
+) -> ui_foundation::view_data::SalesDecisionData {
     use ui_foundation::view_data::SalesDecisionData;
 
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            f64,
-            f64,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            bool,
-            serde_json::Value,
-            Option<chrono::DateTime<chrono::Utc>>,
-            chrono::DateTime<chrono::Utc>,
-        ),
-    >(sql)
-    .bind("system")
-    .fetch_all(&state.db)
-    .await
-    .ok()?;
-
-    Some(
-        rows.into_iter()
-            .map(
-                |(
-                    id,
-                    account_id,
-                    contact_id,
-                    action,
-                    expected_value_eur,
-                    confidence,
-                    selected_offer,
-                    selected_sequence,
-                    selected_variant,
-                    selected_sender,
-                    rationale,
-                    blocked,
-                    block_reasons,
-                    execute_after,
-                    created_at,
-                )| SalesDecisionData {
-                    id,
-                    account_id,
-                    contact_id,
-                    // Rendered as-is by the view; the engine's vocabulary is
-                    // already operator-facing.
-                    action,
-                    expected_value_eur: Some(expected_value_eur),
-                    confidence: Some(confidence),
-                    selected_offer,
-                    selected_sequence,
-                    selected_variant,
-                    selected_sender,
-                    rationale,
-                    blocked,
-                    block_reasons: block_reasons
-                        .as_array()
-                        .map(|values| {
-                            values
-                                .iter()
-                                .filter_map(|value| value.as_str().map(str::to_string))
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default(),
-                    execute_after: execute_after.map(|t| t.to_rfc3339()),
-                    created_at: Some(created_at.to_rfc3339()),
-                },
-            )
-            .collect(),
-    )
+    SalesDecisionData {
+        id: row.id.to_string(),
+        account_id: row.account_id.map(|id| id.to_string()),
+        contact_id: row.contact_id.map(|id| id.to_string()),
+        // Rendered as-is by the view; the engine's vocabulary is already
+        // operator-facing.
+        action: row.action,
+        expected_value_eur: Some(row.expected_value_eur),
+        confidence: Some(row.confidence),
+        selected_offer: row.selected_offer,
+        selected_sequence: row.selected_sequence,
+        selected_variant: row.selected_variant,
+        selected_sender: row.selected_sender,
+        rationale: row.rationale,
+        blocked: row.blocked,
+        block_reasons: row
+            .block_reasons
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        execute_after: row.execute_after.map(|t| t.to_rfc3339()),
+        created_at: Some(row.created_at.to_rfc3339()),
+    }
 }
 
-/// The autonomy semantics the CP renders, derived from the persisted mode
-/// string. Kept in the CP so a mode written by a newer engine still renders a
-/// truthful "runs brain / may execute" answer instead of a blank panel.
-struct AutonomyModeView {
-    mode: &'static str,
-    runs_brain: bool,
-    may_execute: bool,
-}
+/// Map one shared control-model action row onto the page's dead-letter view
+/// model (same source the control API's `deadLetters[]` is built from).
+fn dead_letter_data(
+    row: sales_autopilot::control_read::ActionSnapshot,
+) -> ui_foundation::view_data::SalesDeadLetterData {
+    use ui_foundation::view_data::SalesDeadLetterData;
 
-impl AutonomyModeView {
-    fn parse(mode: &str) -> Self {
-        match mode {
-            "shadow" => Self {
-                mode: "shadow",
-                runs_brain: true,
-                may_execute: false,
-            },
-            "assisted" => Self {
-                mode: "assisted",
-                runs_brain: true,
-                may_execute: false,
-            },
-            "approval_required" => Self {
-                mode: "approval_required",
-                runs_brain: true,
-                may_execute: false,
-            },
-            "autonomous_guarded" => Self {
-                mode: "autonomous_guarded",
-                runs_brain: true,
-                may_execute: true,
-            },
-            // "disabled" and anything unrecognised fail closed.
-            _ => Self {
-                mode: "disabled",
-                runs_brain: false,
-                may_execute: false,
-            },
-        }
+    SalesDeadLetterData {
+        id: row.id.to_string(),
+        action_type: row.action_type,
+        entity_type: row.entity_type,
+        entity_id: row.entity_id.to_string(),
+        state: row.state,
+        attempt: row.attempt,
+        max_attempts: row.max_attempts,
+        last_error: row.last_error,
+        due_at: Some(row.due_at.to_rfc3339()),
+        created_at: Some(row.created_at.to_rfc3339()),
     }
 }
 
@@ -5309,5 +5086,337 @@ mod tests {
         assert_ne!(first, second);
         assert!(second > first, "ids share a prefix and increase");
         assert!(first.starts_with("web-data-"));
+    }
+
+    // ─── One CP read contract: SSR consumes the shared control read model ──
+
+    /// The SSR page must go through the shared typed read model
+    /// (`sales_autopilot::control_read`), never its own sales queries — that
+    /// duplication is exactly what the finding removed. Pinned in source
+    /// because a reintroduced inline query could return coincidentally equal
+    /// values at runtime while silently forking the contract again.
+    #[test]
+    fn cp_sales_autopilot_uses_the_shared_control_read_model() {
+        let source = include_str!("data.rs");
+        let body = source
+            .split("async fn cp_sales_autopilot")
+            .nth(1)
+            .and_then(|rest| rest.split("fn decision_data").next())
+            .expect("cp_sales_autopilot body");
+        assert!(
+            body.contains("control_read::load_sales_control_snapshot"),
+            "the SSR page must load through the shared control read model"
+        );
+        assert!(
+            !body.contains("sqlx::"),
+            "cp_sales_autopilot must not issue its own SQL; found direct sqlx usage"
+        );
+
+        // The control API side of the proxy consumes the same module, so both
+        // answer from one contract.
+        let control_source = include_str!("../../../../sales-autopilot/src/control.rs");
+        for loader in [
+            "control_read::load_overview",
+            "control_read::load_decisions",
+            "control_read::load_exceptions",
+            "control_read::load_dead_letters",
+            "control_read::load_action_stats",
+            "control_read::load_actions",
+        ] {
+            assert!(
+                control_source.contains(loader),
+                "the control API must serve {loader}"
+            );
+        }
+    }
+
+    /// Seed the sales state both readers must answer from identically. A fresh
+    /// per-test database (`canonical_pool`) makes the fixture safe to write.
+    async fn seed_parity_fixture(pool: &sqlx::PgPool) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+             VALUES ('system', 'System', 'system-parity', 'free', 'active', NOW(), NOW()) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("seed system tenant");
+
+        sqlx::query(
+            "INSERT INTO sales_autonomy_state \
+                 (tenant_id, mode, kill_switch, last_action, last_action_at) \
+             VALUES ('system', 'shadow', FALSE, 'pause', NOW() - INTERVAL '2 minutes') \
+             ON CONFLICT (tenant_id) DO UPDATE SET mode = EXCLUDED.mode, \
+                 kill_switch = EXCLUDED.kill_switch, last_action = EXCLUDED.last_action, \
+                 last_action_at = EXCLUDED.last_action_at",
+        )
+        .execute(pool)
+        .await
+        .expect("seed autonomy state");
+
+        // One queued action, one dead letter; distinct timestamps keep the
+        // ORDER BY total so the two reads cannot disagree on ordering.
+        sqlx::query(
+            "INSERT INTO sales_actions \
+                 (id, tenant_id, action_type, entity_type, entity_id, due_at, state, \
+                  attempt, max_attempts, idempotency_key, created_at) \
+             VALUES ($1, 'system', 'enrich', 'account', $2, NOW() + INTERVAL '1 minute', \
+                     'queued', 0, 5, $3, NOW() - INTERVAL '2 minutes')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(uuid::Uuid::new_v4())
+        .bind(format!("parity-queued-{}", uuid::Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("seed queued action");
+
+        sqlx::query(
+            "INSERT INTO sales_actions \
+                 (id, tenant_id, action_type, entity_type, entity_id, due_at, state, \
+                  attempt, max_attempts, idempotency_key, last_error, created_at) \
+             VALUES ($1, 'system', 'research', 'account', $2, NOW() - INTERVAL '1 hour', \
+                     'dead_letter', 3, 5, $3, 'provider refused', NOW() - INTERVAL '3 minutes')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(uuid::Uuid::new_v4())
+        .bind(format!("parity-dead-{}", uuid::Uuid::new_v4()))
+        .execute(pool)
+        .await
+        .expect("seed dead-letter action");
+
+        // Decisions: one denied (exception), one awaiting approval
+        // (exception), and one BLOCKED decision that the OLD SSR predicate
+        // would have listed as an exception while the control API does not —
+        // the trap that proves SSR now uses the control predicate.
+        for (index, (enforcement, review_status, blocked, action, rationale)) in [
+            ("denied", "not_required", true, "enrich", "parity denied"),
+            (
+                "await_approval",
+                "pending",
+                false,
+                "contact",
+                "parity awaiting",
+            ),
+            (
+                "execute",
+                "not_required",
+                true,
+                "contact",
+                "parity blocked-but-not-an-exception",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO sales_decisions \
+                     (id, tenant_id, action, expected_value_eur, confidence, score_total, \
+                      selected_offer, evidence_ids, autonomy_mode, rationale, blocked, \
+                      block_reasons, enforcement, review_status, created_at) \
+                 VALUES ($1, 'system', $2, 1.5, 0.5, 2.5, 'parity-offer', '{}'::uuid[], \
+                         'assisted', $3, $4, '[\"suppression\"]'::jsonb, $5, $6, \
+                         NOW() - make_interval(secs => $7))",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(action)
+            .bind(rationale)
+            .bind(blocked)
+            .bind(enforcement)
+            .bind(review_status)
+            .bind((index as f64 + 1.0) * 10.0)
+            .execute(pool)
+            .await
+            .expect("seed decision");
+        }
+
+        sqlx::query(
+            "INSERT INTO sales_outcomes (id, tenant_id, outcome, value_eur, occurred_at) \
+             VALUES (gen_random_uuid(), 'system', 'paid_subscription', 250.0, \
+                     NOW() - INTERVAL '1 day')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed revenue outcome");
+
+        sqlx::query(
+            "INSERT INTO sales_meetings \
+                 (id, tenant_id, provider, start_at, end_at, status, created_at) \
+             VALUES (gen_random_uuid(), 'system', 'internal', NOW() + INTERVAL '1 day', \
+                     NOW() + INTERVAL '2 days', 'booked', NOW() - INTERVAL '1 hour')",
+        )
+        .execute(pool)
+        .await
+        .expect("seed meeting");
+    }
+
+    /// The regression guard for the duplication finding: for the SAME
+    /// database state, the SSR snapshot and the control read model agree
+    /// field-by-field. Any divergence (a re-added private query, a changed
+    /// predicate, a dropped field) fails here.
+    #[tokio::test]
+    async fn ssr_sales_snapshot_agrees_with_the_control_read_model_field_by_field() {
+        let Some(pool) = crate::test_db::canonical_pool("cp_sales_parity").await else {
+            return;
+        };
+        seed_parity_fixture(&pool).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        let ssr = cp_sales_autopilot(&state).await;
+        let shared =
+            sales_autopilot::control_read::load_sales_control_snapshot(&pool, "system").await;
+
+        // ── Overview: every field ─────────────────────────────────────
+        let overview = ssr.overview.expect("SSR overview must load");
+        let shared_overview = shared.overview.expect("shared overview must load");
+        assert_eq!(overview.autonomy.mode, shared_overview.autonomy.mode);
+        assert_eq!(
+            overview.autonomy.mode_description,
+            shared_overview.autonomy.mode_description
+        );
+        assert_eq!(
+            overview.autonomy.kill_switch,
+            shared_overview.autonomy.kill_switch
+        );
+        assert_eq!(
+            overview.autonomy.runs_brain,
+            shared_overview.autonomy.runs_brain
+        );
+        assert_eq!(
+            overview.autonomy.may_execute,
+            shared_overview.autonomy.may_execute
+        );
+        assert_eq!(
+            overview.autonomy.last_action,
+            shared_overview.autonomy.last_action
+        );
+        assert_eq!(
+            overview.autonomy.last_action_at,
+            shared_overview
+                .autonomy
+                .last_action_at
+                .map(|t| t.to_rfc3339())
+        );
+        assert_eq!(overview.action_stats.total, shared_overview.actions.total);
+        assert_eq!(
+            overview.action_stats.due_now,
+            shared_overview.actions.due_now
+        );
+        assert_eq!(
+            overview.action_stats.dead_lettered,
+            shared_overview.actions.dead_lettered
+        );
+        assert_eq!(
+            overview.action_stats.by_state,
+            shared_overview
+                .actions
+                .by_state
+                .iter()
+                .map(|(state, count)| (state.clone(), *count))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            overview.decisions_last_24h,
+            shared_overview.decisions.last24h
+        );
+        assert_eq!(
+            overview.blocked_last_24h,
+            shared_overview.decisions.blocked_last24h
+        );
+        assert_eq!(
+            overview.meetings_booked,
+            shared_overview.outcomes30d.meetings_booked
+        );
+        assert_eq!(
+            overview
+                .revenue
+                .iter()
+                .map(|row| (row.outcome.clone(), row.eur))
+                .collect::<Vec<_>>(),
+            shared_overview
+                .outcomes30d
+                .revenue_eur
+                .iter()
+                .map(|row| (row.outcome.clone(), row.eur))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            overview
+                .enrollments
+                .iter()
+                .map(|row| (row.state.clone(), row.count))
+                .collect::<Vec<_>>(),
+            shared_overview
+                .enrollments
+                .iter()
+                .map(|row| (row.state.clone(), row.count))
+                .collect::<Vec<_>>()
+        );
+
+        // ── Decisions: same rows, same fields ─────────────────────────
+        let decisions = ssr.decisions.expect("SSR decisions must load");
+        let shared_decisions = shared.decisions.expect("shared decisions must load");
+        assert_eq!(decisions.len(), shared_decisions.len());
+        for (row, shared_row) in decisions.iter().zip(&shared_decisions) {
+            assert_eq!(row.id, shared_row.id.to_string());
+            assert_eq!(
+                row.account_id,
+                shared_row.account_id.map(|id| id.to_string())
+            );
+            assert_eq!(
+                row.contact_id,
+                shared_row.contact_id.map(|id| id.to_string())
+            );
+            assert_eq!(row.action, shared_row.action);
+            assert_eq!(row.expected_value_eur, Some(shared_row.expected_value_eur));
+            assert_eq!(row.confidence, Some(shared_row.confidence));
+            assert_eq!(row.selected_offer, shared_row.selected_offer);
+            assert_eq!(row.selected_sequence, shared_row.selected_sequence);
+            assert_eq!(row.selected_variant, shared_row.selected_variant);
+            assert_eq!(row.selected_sender, shared_row.selected_sender);
+            assert_eq!(row.rationale, shared_row.rationale);
+            assert_eq!(row.blocked, shared_row.blocked);
+            assert_eq!(
+                row.execute_after,
+                shared_row.execute_after.map(|t| t.to_rfc3339())
+            );
+            assert_eq!(row.created_at, Some(shared_row.created_at.to_rfc3339()));
+        }
+
+        // ── Exceptions + dead letters: same rows through one predicate ─
+        let exceptions = ssr.exceptions.expect("SSR exceptions must load");
+        let shared_exceptions = shared.exceptions.expect("shared exceptions must load");
+        assert_eq!(exceptions.len(), shared_exceptions.len());
+        let exception_ids: Vec<&str> = exceptions.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            exception_ids,
+            shared_exceptions
+                .iter()
+                .map(|row| row.id.to_string())
+                .collect::<Vec<_>>()
+        );
+        // The control predicate governs both: the blocked-but-executed
+        // decision is NOT an exception even though the old SSR predicate
+        // would have listed it.
+        assert_eq!(
+            exceptions.len(),
+            2,
+            "only the denied and await_approval decisions are exceptions"
+        );
+
+        let dead_letters = ssr.dead_letters.expect("SSR dead letters must load");
+        let shared_dead_letters = shared.dead_letters.expect("shared dead letters must load");
+        assert_eq!(dead_letters.len(), shared_dead_letters.len());
+        for (row, shared_row) in dead_letters.iter().zip(&shared_dead_letters) {
+            assert_eq!(row.id, shared_row.id.to_string());
+            assert_eq!(row.action_type, shared_row.action_type);
+            assert_eq!(row.entity_type, shared_row.entity_type);
+            assert_eq!(row.entity_id, shared_row.entity_id.to_string());
+            assert_eq!(row.state, shared_row.state);
+            assert_eq!(row.attempt, shared_row.attempt);
+            assert_eq!(row.max_attempts, shared_row.max_attempts);
+            assert_eq!(row.last_error, shared_row.last_error);
+            assert_eq!(row.due_at, Some(shared_row.due_at.to_rfc3339()));
+            assert_eq!(row.created_at, Some(shared_row.created_at.to_rfc3339()));
+        }
     }
 }

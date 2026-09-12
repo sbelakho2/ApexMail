@@ -25,7 +25,7 @@ use super::transport::{create_transport_from_config, EmailTransport, HybridTrans
 use super::transport_router::{transport_kind_for, TransportKind};
 use super::types::{
     Attachment, CachedSuppression, DedicatedIp, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain,
-    EmailJob, Mailbox, PreparedEmail, SendOutcome,
+    EmailJob, Mailbox, PreparedEmail, SendOutcome, VerpBinding,
 };
 use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
@@ -3100,6 +3100,13 @@ impl EmailProcessor {
             headers,
             attachments,
             dkim,
+            // VERP v2 binding: queue row + tenant come exclusively from the
+            // persisted job; the transport mints the HMAC token (or emits no
+            // VERP at all when the secret is not configured).
+            verp: Some(VerpBinding {
+                queue_id: job.id.clone(),
+                tenant_id: job.tenant_id.clone(),
+            }),
         })
     }
 
@@ -8026,6 +8033,7 @@ mod tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
+            verp: None,
         }
     }
 
@@ -8862,6 +8870,7 @@ mod acceptance_ledger_db_tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
+            verp: None,
         }
     }
 

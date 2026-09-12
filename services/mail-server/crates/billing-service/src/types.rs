@@ -11,7 +11,9 @@ use uuid::Uuid;
 /// Pricing plan stored in the `plans` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
-    pub id: Uuid,
+    /// `plans.id` is VARCHAR(26) in the canonical schema (a 26-char generated
+    /// id), so this is a String rather than a Uuid.
+    pub id: String,
     pub name: String,
     pub display_name: String,
     pub description: String,
@@ -37,53 +39,85 @@ pub struct Plan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanFeatures {
     // Infrastructure
+    /// RuntimeEnforced — dedicated IP allocation requires this entitlement (`dedicated_ips::allocate_ip`).
     pub dedicated_ip: bool,
+    /// ContractualOnly capacity — included dedicated IPs (billing term: extras are charged, not refused).
     pub dedicated_ip_count: i32,
+    /// RuntimeEnforced capacity — domain creation checks the requested total.
     pub max_sending_domains: i32,
 
     // Auth & Security
+    /// RuntimeEnforced — enterprise SSO is gated at the SSO-enforced login path.
     pub sso_enabled: bool,
+    /// NotYetImplemented — no customer audit read/export surface exists in api-server; not sold.
     pub audit_logs: bool,
 
     // API & Integrations
+    /// RuntimeEnforced — API key minting requires this entitlement.
     pub api_access: bool,
+    /// RuntimeEnforced — webhook endpoint creation requires this entitlement.
     pub webhooks_enabled: bool,
+    /// RuntimeEnforced — inbound event consumption (webhook `inbound` subscriptions); raw SMTP acceptance is never gated.
     pub inbound_email: bool,
 
     // Analytics
+    /// RuntimeEnforced — engagement/deliverability analytics endpoints require this entitlement.
     pub advanced_analytics: bool,
+    /// RuntimeEnforced — the send-time recommendation endpoint requires this entitlement.
     pub send_time_optimization: bool,
+    /// NotYetImplemented — no experiment creation surface exists; not sold.
     pub ab_testing: bool,
+    /// NotYetImplemented — no runtime implementation; removed from pricing.
     pub time_travel_debugging: bool,
+    /// RuntimeEnforced — export handlers (analytics export/PDF/download, contacts CSV) require this entitlement.
     pub data_export: bool,
 
     // Customization
+    /// NotYetImplemented — no tracking-domain setup surface exists; not sold.
     pub custom_tracking_domain: bool,
+    /// RuntimeEnforced — template create/update requires this entitlement.
     pub custom_templates: bool,
+    /// NotYetImplemented — no approval-workflow state exists; removed from pricing.
     pub template_approval_workflow: bool,
+    /// ContractualOnly — renderer/deployment branding; never a request-path gate.
     pub white_label: bool,
+    /// ContractualOnly — central renderer presentation switch; never a request-path gate.
     pub powered_by_footer: bool,
 
     // Retention
+    /// NotYetImplemented — no retention-editing handler exists; not sold.
     pub custom_retention: bool,
+    /// NotYetImplemented capacity — advertised ceiling without a validated editing surface.
     pub max_retention_days: i32,
 
     // Team
+    /// RuntimeEnforced capacity — team invitations check seats transactionally.
     pub max_team_members: i32,
+    /// NotYetImplemented — no subaccount resource exists in the runtime; removed from pricing.
     pub subaccounts: bool,
+    /// NotYetImplemented capacity — no subaccount creation surface exists; removed from pricing.
     pub max_subaccounts: i32,
 
     // Support
+    /// ContractualOnly — support policy is process/contract-delivered (docs/enterprise/support.md).
     pub support_level: SupportLevel,
+    /// ContractualOnly — staffing commitment, not an access gate.
     pub dedicated_csm: bool,
+    /// ContractualOnly — onboarding process commitment, not an access gate.
     pub priority_onboarding: bool,
 
     // Enterprise
+    /// ContractualOnly — separate reviewed infrastructure flow, not an API gate.
     pub byoip: bool,
+    /// ContractualOnly — exists only in a signed contract.
     pub sla_guarantee: bool,
+    /// ContractualOnly — contract term used for credit calculation.
     pub sla_credit_percentage: i32,
+    /// ContractualOnly — BAA review fact; never certification and never a gate.
     pub hipaa_compliance: bool,
+    /// ContractualOnly — audit/report fact; never certification and never a gate.
     pub soc2_compliance: bool,
+    /// ContractualOnly — deployment fact chosen outside the request path.
     pub private_cloud: bool,
 }
 

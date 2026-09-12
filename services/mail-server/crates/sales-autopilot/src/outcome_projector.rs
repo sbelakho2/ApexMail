@@ -25,11 +25,10 @@
 //!
 //! # Claim protocol (mirrors [`crate::actions::ActionQueue`])
 //!
-//! The ledger schema is frozen (migrations are out of scope) and
 //! `sales_sender_events` carries no `lease_owner` / `lease_token` /
 //! `lease_expires_at` columns — only `processed_at`. The durable claim is
-//! therefore written into the ONE marker column the migration provides,
-//! following the same three properties as `ActionQueue::claim`:
+//! therefore written into that one column, following the same three
+//! properties as `ActionQueue::claim`:
 //!
 //! * **Claim** — one statement, `FOR UPDATE SKIP LOCKED` over
 //!   `processed_at IS NULL` rows ordered by `occurred_at`, then
@@ -40,46 +39,61 @@
 //!   and `worker_id` is the owner. The token is the fence any release/re-open
 //!   predicate matches (`WHERE id = $1 AND processed_at = $claimed_at`). Both
 //!   live in process memory rather than in columns because the ledger has no
-//!   lease columns and adding them is a migration (out of scope).
+//!   lease columns.
 //! * **Expiry recovery** — a worker that dies mid-application leaves the
 //!   durable claim behind. [`OutcomeProjector::recover_unapplied_claims`]
 //!   re-opens a claim whose lease has expired (`claimed_at` older than
-//!   `lease_secs`) **only when no `sales_sender_health` row for the sender was
-//!   written at or after the claim** (the SQL re-opens exactly the rows for
-//!   which `NOT EXISTS (h.updated_at >= e.processed_at)`). This is the
-//!   ActionQueue lease-expiry sweep adapted to
-//!   a one-column ledger, and it is what makes the projector safe under the
-//!   audit's adversarial replay: an event whose health update already landed
-//!   is never re-applied (no double count), and an event whose worker died
-//!   before the health update is re-opened and applied exactly once.
+//!   `lease_secs`) **only when the per-event applied marker for THIS event is
+//!   absent** (`NOT EXISTS (SELECT 1 FROM sales_sender_health_applied m WHERE
+//!   m.event_id = e.id)`), so an event whose aggregate update committed is
+//!   never re-applied while an unapplied one is retried.
 //!
-//! A failed `record_event` is deliberately left claimed: the recovery sweep
-//! re-opens it after the lease expires. Releasing immediately on error would
-//! re-apply an event whose counter UPDATE committed but whose assessment
-//! step failed — a real double count; the watermark rule above cannot happen
-//! because a successful health write bumps `updated_at`.
+//! ## Per-event applied marker (migration 205)
 //!
-//! ## Why the claim precedes the health update
+//! [`OutcomeProjector::apply_claimed_event`] applies an event as ONE
+//! transaction:
 //!
-//! The obvious ordering — apply [`sender_health::record_event`] first, write
-//! `processed_at = NOW()` after it succeeds — is exactly the ordering that
-//! double-counts: `record_event` runs on its own pooled connection, so a
-//! crash between its implicit commit and the marker write leaves a pending
-//! row whose aggregate has already moved; the next claim re-applies it.
-//! Because the ledger has no lease columns, the marker is the ONLY durable
-//! state that can distinguish "claimed and in flight" from "pending", so the
-//! claim must be durable BEFORE the health write and the re-open decision
-//! must be made from evidence (the health watermark) rather than from the
-//! marker alone. That is what this module implements, and it is why a
-//! replayed or crashed pass never double-counts a complaint or a bounce.
+//! ```text
+//! BEGIN;
+//!   INSERT INTO sales_sender_health_applied (event_id) VALUES ($event)
+//!     ON CONFLICT (event_id) DO NOTHING RETURNING event_id;
+//!   -- only when the INSERT returned a row:
+//!   <counter update + reassessment of sales_sender_health>;
+//! COMMIT;
+//! ```
 //!
-//! As with [`crate::actions::ActionQueue`], the lease is not a mutual
-//! exclusion guarantee against a live-but-slow worker: a worker that
-//! outlives `lease_secs` mid-`record_event` can have its claim recovered and
-//! re-applied by another projector. The window is bounded by
-//! `lease_secs` (120 s default, three orders of magnitude above a health
-//! round trip) and is the same at-least-once boundary the action queue
-//! documents for its handlers.
+//! The marker's primary key makes application idempotent: re-claiming an
+//! event that already has a marker hits `ON CONFLICT DO NOTHING`, returns no
+//! row, and moves no aggregate. Because the marker and the aggregate commit
+//! atomically, "the marker exists" is exactly equivalent to "this event's
+//! counters are in the aggregate" — no inference from any sender-wide
+//! watermark is needed or allowed. The previous implementation used
+//! `sales_sender_health.updated_at >= processed_at` as the proof, which
+//! **permanently undercounted** a crashed claim whenever a different event
+//! for the same sender happened to bump `updated_at` after the claim: the
+//! sweep concluded the crashed event had been applied. That heuristic and
+//! its comment are gone.
+//!
+//! A failed [`sender_health::record_event_tx`] rolls the marker back with the
+//! aggregate, and the claim is deliberately left in place: the recovery sweep
+//! re-opens it after the lease expires (marker absent) and it is applied
+//! exactly once. Releasing immediately on error is unnecessary now that the
+//! whole application is atomic.
+//!
+//! ## Why the claim precedes the aggregate update
+//!
+//! The claim is durable BEFORE the aggregate transaction so that a crash at
+//! any point leaves either (a) an unclaimed pending row, or (b) a claimed row
+//! with no marker — both of which are recoverable — and never a row whose
+//! aggregate moved without the ledger saying so. Recovery no longer needs to
+//! guess from the aggregate: it asks the marker.
+//!
+//! Unlike the old watermark scheme, the marker also closes the
+//! live-but-slow-worker window: if a worker outlives `lease_secs` mid-apply,
+//! its claim can be recovered and re-applied, but the second transaction's
+//! marker INSERT conflicts with the first's (waiting for it to commit or
+//! roll back), so the aggregate moves exactly once. The lease bounds how
+//! quickly a crashed claim is retried, not whether a retry can double-count.
 //!
 //! # Reward claim protocol (item 11)
 //!
@@ -252,6 +266,9 @@ pub struct SenderProjectionReport {
     pub claimed: u64,
     /// Health windows successfully advanced.
     pub applied: u64,
+    /// Claims whose per-event applied marker already existed: the aggregate
+    /// already contains the event, so nothing moved (idempotent re-claim).
+    pub already_applied: u64,
     /// Rows whose event vocabulary was unknown (CHECK guarantees this cannot
     /// happen; the row stays claimed and is logged loudly).
     pub unmapped: u64,
@@ -414,16 +431,11 @@ impl OutcomeProjector {
                 },
             };
 
-            match sender_health::record_event(
-                &self.db,
-                &claimed.tenant_id,
-                claimed.sender_identity_id,
-                claimed.event_type.health_event(),
-                &config.health_thresholds,
-            )
-            .await
+            match self
+                .apply_claimed_event(&claimed, &config.health_thresholds)
+                .await
             {
-                Ok(assessment) => {
+                Ok(Some(assessment)) => {
                     report.applied += 1;
                     metrics::counter!(
                         "sales_sender_events_projected_total",
@@ -439,11 +451,21 @@ impl OutcomeProjector {
                         "sender health window advanced from the delivery ledger"
                     );
                 }
+                Ok(None) => {
+                    // The per-event marker already existed: the aggregate
+                    // already contains this event. Move nothing.
+                    report.already_applied += 1;
+                    metrics::counter!("sales_sender_events_already_applied_total").increment(1);
+                    tracing::debug!(
+                        sender_event_id = %claimed.id,
+                        sender_identity_id = %claimed.sender_identity_id,
+                        "sender event already has an applied marker; re-claim is a no-op"
+                    );
+                }
                 Err(error) => {
-                    // Leave the durable claim in place: the recovery sweep
-                    // re-opens it once the lease expires AND the health
-                    // window proves no write landed. Releasing here would
-                    // double-count a partially applied record_event.
+                    // Marker + aggregate rolled back together, so the claim
+                    // is left in place and the recovery sweep re-opens it
+                    // once the lease expires (the marker is absent).
                     report.failed += 1;
                     metrics::counter!("sales_sender_events_projection_failures_total").increment(1);
                     tracing::error!(
@@ -470,23 +492,76 @@ impl OutcomeProjector {
         Ok(report)
     }
 
-    /// Re-open durable claims whose worker died before the health update
-    /// landed.
+    /// Apply one claimed event: insert its per-event applied marker and fold
+    /// the event into `sales_sender_health` in ONE transaction.
+    ///
+    /// Returns `Ok(Some(assessment))` when this call moved the aggregate,
+    /// `Ok(None)` when a marker for this event already existed (idempotent
+    /// re-claim: the aggregate already contains the event and is not touched
+    /// again). On error the transaction rolls back, leaving neither marker
+    /// nor aggregate movement, so lease-expiry recovery can retry safely.
+    async fn apply_claimed_event(
+        &self,
+        claimed: &ClaimedSenderEvent,
+        thresholds: &HealthThresholds,
+    ) -> Result<Option<sender_health::HealthAssessment>, SalesError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+
+        // The marker INSERT is the idempotency gate: its primary key makes a
+        // second application of the same event conflict, and
+        // `ON CONFLICT DO NOTHING` then returns no row. A concurrent
+        // transaction that inserted the same key blocks here until it
+        // commits or rolls back, so the aggregate below runs at most once
+        // even if two workers apply the same event concurrently.
+        let inserted: Option<Uuid> = sqlx::query_scalar(
+            "INSERT INTO sales_sender_health_applied (event_id) VALUES ($1) \
+             ON CONFLICT (event_id) DO NOTHING \
+             RETURNING event_id",
+        )
+        .bind(claimed.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| SalesError::Database(error.to_string()))?;
+
+        if inserted.is_none() {
+            tx.commit()
+                .await
+                .map_err(|error| SalesError::Database(error.to_string()))?;
+            return Ok(None);
+        }
+
+        let assessment = sender_health::record_event_tx(
+            &mut tx,
+            &claimed.tenant_id,
+            claimed.sender_identity_id,
+            claimed.event_type.health_event(),
+            thresholds,
+        )
+        .await?;
+
+        tx.commit()
+            .await
+            .map_err(|error| SalesError::Database(error.to_string()))?;
+        Ok(Some(assessment))
+    }
+
+    /// Re-open durable claims whose worker died before the application
+    /// transaction committed.
     ///
     /// A claim is expired (`processed_at <= NOW() - lease_secs`) and
-    /// unapplied (`NOT EXISTS` a `sales_sender_health` row for the sender
-    /// with `updated_at >= processed_at`). The watermark is exact: a
-    /// successful [`sender_health::record_event`] always writes
-    /// `sales_sender_health.updated_at = NOW()` (the counter UPDATE and the
-    /// assessment upsert both do), and that `NOW()` is necessarily after the
-    /// claim's `NOW()` because the claim statement committed first. An
-    /// applied claim therefore can never be re-opened — the aggregate is not
-    /// double-counted — while an unapplied one is retried.
-    ///
-    /// Residual race (documented, never a double count): another writer can
-    /// bump the same sender's `updated_at` after the claim but before the
-    /// crash, which masks the unapplied claim so the sweep does not re-open
-    /// it — the event is under-counted, not counted twice.
+    /// unapplied when the per-event applied marker for THIS event is absent
+    /// (`NOT EXISTS (SELECT 1 FROM sales_sender_health_applied m WHERE
+    /// m.event_id = e.id)`). Marker presence is the only evidence consulted:
+    /// the marker and the aggregate counter commit atomically, so an applied
+    /// claim can never be re-opened (no double count) and an unapplied one is
+    /// always retried (no undercount). The previous sender-wide
+    /// `sales_sender_health.updated_at` watermark is deliberately gone — a
+    /// different event for the same sender bumping `updated_at` used to mask
+    /// a crashed claim permanently.
     pub async fn recover_unapplied_claims(
         &self,
         lease_secs: i64,
@@ -499,10 +574,8 @@ impl OutcomeProjector {
                AND e.processed_at <= NOW() - make_interval(secs => $1::double precision) \
                AND e.processed_at > NOW() - make_interval(secs => $2::double precision) \
                AND NOT EXISTS ( \
-                   SELECT 1 FROM sales_sender_health h \
-                   WHERE h.tenant_id = e.tenant_id \
-                     AND h.sender_identity_id = e.sender_identity_id \
-                     AND h.updated_at >= e.processed_at \
+                   SELECT 1 FROM sales_sender_health_applied m \
+                   WHERE m.event_id = e.id \
                )",
         )
         .bind(lease_secs.max(0) as f64)
@@ -789,7 +862,7 @@ struct RewardCandidateRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sender_health::{self, HealthThresholds};
+    use crate::sender_health;
     use sqlx::PgPool;
 
     // -----------------------------------------------------------------------
@@ -1060,10 +1133,10 @@ mod tests {
     }
 
     /// Adversarial 2: a projector that dies between the durable claim and the
-    /// health update is recovered and applied exactly once; a projector that
-    /// dies after the health update (the audit's scenario) is NOT re-applied,
-    /// because the claim plus the `sales_sender_health.updated_at` watermark
-    /// prove the aggregate already moved.
+    /// application transaction is recovered and applied exactly once; a
+    /// projector that dies after the transaction committed is NOT re-applied,
+    /// because the per-event applied marker proves THIS event moved the
+    /// aggregate.
     #[tokio::test]
     async fn crashed_claims_never_double_count_and_unapplied_claims_are_recovered() {
         let Some(pool) = crate::test_db::canonical_test_pool("projector_crash_recovery").await
@@ -1071,42 +1144,44 @@ mod tests {
             return;
         };
         let tenant = insert_tenant(&pool, "proj-crash").await;
-        // Two senders: the watermark rule is per sender, so the two crash
-        // cases must not mask each other.
         let sender_applied = insert_sender(&pool, &tenant).await;
         let sender_unapplied = insert_sender(&pool, &tenant).await;
 
-        // Case A — crash AFTER the health update: the paper trail is
-        // "durable claim (old) + health write (new)". The aggregate is
-        // applied FIRST so the row never exists without its watermark, then
-        // the claimed row is inserted in one statement (no window in which a
-        // parallel projector could treat it as pending).
-        sender_health::record_event(
+        // Case A — crash AFTER the application transaction committed: the
+        // paper trail is "durable claim + marker + aggregate". Produce it
+        // through the REAL projector (marker and aggregate commit together),
+        // then age the claim to model a worker that died after commit.
+        let after_commit = insert_ledger_event(
             &pool,
             &tenant,
             sender_applied,
-            SenderHealthEvent::Complaint,
-            &HealthThresholds::default(),
+            "complaint",
+            "msg-a",
+            "a@x.test",
         )
-        .await
-        .expect("apply complaint directly");
-        let after_health: Uuid = sqlx::query_scalar(
-            "INSERT INTO sales_sender_events \
-                 (tenant_id, sender_identity_id, event_type, message_id, recipient, \
-                  occurred_at, processed_at) \
-             VALUES ($1, $2, 'complaint', 'msg-a', 'a@x.test', NOW(), \
-                     NOW() - INTERVAL '5 minutes') \
-             RETURNING id",
+        .await;
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-crash");
+        drain(&projector, 4).await;
+        let applied_marker: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = $1",
         )
-        .bind(&tenant)
-        .bind(sender_applied)
+        .bind(after_commit)
         .fetch_one(&pool)
         .await
-        .expect("insert applied claim");
+        .expect("count applied markers");
+        assert_eq!(applied_marker, 1, "the applied event must carry a marker");
+        sqlx::query(
+            "UPDATE sales_sender_events SET processed_at = NOW() - INTERVAL '5 minutes' \
+             WHERE id = $1",
+        )
+        .bind(after_commit)
+        .execute(&pool)
+        .await
+        .expect("age the applied claim past the lease");
 
-        // Case B — crash BEFORE the health update: an expired durable claim
-        // with no health write for this sender.
-        let before_health: Uuid = sqlx::query_scalar(
+        // Case B — crash BEFORE the application transaction committed: an
+        // expired durable claim with no marker and no aggregate movement.
+        let before_commit: Uuid = sqlx::query_scalar(
             "INSERT INTO sales_sender_events \
                  (tenant_id, sender_identity_id, event_type, message_id, recipient, \
                   occurred_at, processed_at) \
@@ -1120,36 +1195,35 @@ mod tests {
         .await
         .expect("insert unapplied claim");
 
-        let projector = OutcomeProjector::new(pool.clone(), "test-worker-crash");
         drain(&projector, 3).await;
 
-        // Case A: never re-opened, so the aggregate stays at exactly one.
+        // Case A: the marker keeps the applied claim closed — no re-open, no
+        // re-application, aggregate stays at exactly one.
         let (_, _, _, complaints_a, _, _, _, _) =
             health_counters(&pool, &tenant, sender_applied).await;
         assert_eq!(complaints_a, 1, "the applied complaint is counted once");
-        let marker_a: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT processed_at FROM sales_sender_events WHERE id = $1")
-                .bind(after_health)
-                .fetch_one(&pool)
-                .await
-                .expect("read applied claim");
-        assert!(
-            marker_a.is_some(),
-            "an applied claim must stay durable — never re-opened, never re-applied"
-        );
+        let remarker_a: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = $1",
+        )
+        .bind(after_commit)
+        .fetch_one(&pool)
+        .await
+        .expect("count applied markers");
+        assert_eq!(remarker_a, 1, "an applied marker must stay singular");
 
-        // Case B: recovered exactly once.
+        // Case B: recovered exactly once, and its marker is written.
         let (volume_b, hard_bounces_b, _, _, _, _, _, _) =
             health_counters(&pool, &tenant, sender_unapplied).await;
         assert_eq!(hard_bounces_b, 1, "the recovered bounce is applied once");
         assert_eq!(volume_b, 1, "volume moves exactly once (hard bounce)");
-        let marker_b: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT processed_at FROM sales_sender_events WHERE id = $1")
-                .bind(before_health)
-                .fetch_one(&pool)
-                .await
-                .expect("read recovered claim");
-        assert!(marker_b.is_some(), "the recovered event must be re-claimed");
+        let marker_b: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = $1",
+        )
+        .bind(before_commit)
+        .fetch_one(&pool)
+        .await
+        .expect("count recovered markers");
+        assert_eq!(marker_b, 1, "the recovered event must be marked applied");
 
         // Further passes change nothing (no replay, no double count).
         drain(&projector, 3).await;
@@ -1159,6 +1233,131 @@ mod tests {
         let (_, _, _, complaints_a, _, _, _, _) =
             health_counters(&pool, &tenant, sender_applied).await;
         assert_eq!(complaints_a, 1);
+    }
+
+    /// The exact residual race the old `updated_at` watermark lost: event A
+    /// is applied for a sender (bumping the sender-wide `updated_at`), a
+    /// second event B for the SAME sender is claimed by a worker that crashes
+    /// before its application transaction commits, and the recovery sweep
+    /// runs. The old heuristic compared B's claim against the sender-wide
+    /// `updated_at` written by A and concluded B was applied — permanently
+    /// undercounting B. The per-event marker answers for B alone, so B is
+    /// recovered and applied; neither event undercounts.
+    #[tokio::test]
+    async fn same_sender_crash_does_not_undercount_behind_another_event() {
+        let Some(pool) = crate::test_db::canonical_test_pool("projector_same_sender_race").await
+        else {
+            return;
+        };
+        let tenant = insert_tenant(&pool, "proj-race").await;
+        let sender = insert_sender(&pool, &tenant).await;
+
+        // Event A: applied through the real projector. This bumps
+        // `sales_sender_health.updated_at` to "now".
+        insert_ledger_event(&pool, &tenant, sender, "complaint", "msg-a", "a@x.test").await;
+        let projector = OutcomeProjector::new(pool.clone(), "test-worker-race");
+        drain(&projector, 4).await;
+
+        // Event B arrives for the SAME sender and is claimed, but its worker
+        // dies before the application transaction commits: an expired claim
+        // with no marker. Its claim predates A's `updated_at` bump, which is
+        // exactly what made the old sweep blind to it.
+        let event_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO sales_sender_events \
+                 (tenant_id, sender_identity_id, event_type, message_id, recipient, \
+                  occurred_at, processed_at) \
+             VALUES ($1, $2, 'hard_bounce', 'msg-b', 'b@x.test', NOW(), \
+                     NOW() - INTERVAL '5 minutes') \
+             RETURNING id",
+        )
+        .bind(&tenant)
+        .bind(sender)
+        .fetch_one(&pool)
+        .await
+        .expect("insert crashed claim");
+
+        // The sweep must recover B on the marker's evidence alone. The old
+        // watermark rule returned 0 here (A's health write was newer than
+        // B's claim), silently undercounting the bounce forever.
+        // The recovery sweep is global (the canonical test database is shared
+        // by parallel tests), so the counter is only a liveness check; the
+        // exact proof is B's own claim being re-opened.
+        let recovered = projector
+            .recover_unapplied_claims(DEFAULT_LEASE_SECS, DEFAULT_RECOVERY_WINDOW_SECS)
+            .await
+            .expect("recovery sweep");
+        assert!(recovered >= 1, "the sweep must re-open the crashed claim");
+        let reopened: bool = sqlx::query_scalar(
+            "SELECT processed_at IS NULL FROM sales_sender_events WHERE id = $1",
+        )
+        .bind(event_b)
+        .fetch_one(&pool)
+        .await
+        .expect("read B's claim");
+        assert!(
+            reopened,
+            "the crashed claim for the same sender must be re-opened even though \
+             another event wrote the aggregate after it"
+        );
+
+        // Apply the recovered event, then prove both events are counted once.
+        // Volume counts sends: the hard bounce adds 1, the complaint adds 0
+        // (it is an event about a send, not a send) — the undercount this test
+        // guards would show as complaints = 0.
+        drain(&projector, 3).await;
+        let (volume, hard_bounces, _, complaints, _, _, _, _) =
+            health_counters(&pool, &tenant, sender).await;
+        assert_eq!(
+            (volume, complaints, hard_bounces),
+            (1, 1, 1),
+            "neither the applied complaint nor the recovered bounce may undercount"
+        );
+
+        // Both events carry exactly one marker.
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied m \
+             JOIN sales_sender_events e ON e.id = m.event_id \
+             WHERE e.sender_identity_id = $1",
+        )
+        .bind(sender)
+        .fetch_one(&pool)
+        .await
+        .expect("count markers");
+        assert_eq!(markers, 2);
+
+        // Re-claiming an event that already has a marker is a no-op that
+        // moves no aggregate and writes no second marker.
+        sqlx::query("UPDATE sales_sender_events SET processed_at = NULL WHERE id = $1")
+            .bind(event_b)
+            .execute(&pool)
+            .await
+            .expect("force a re-claim of the marked event");
+        drain(&projector, 3).await;
+        let reclaimed: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT processed_at FROM sales_sender_events WHERE id = $1")
+                .bind(event_b)
+                .fetch_one(&pool)
+                .await
+                .expect("read B's re-claim");
+        assert!(
+            reclaimed.is_some(),
+            "the marked event must be re-claimed (and the application no-op)"
+        );
+        let (volume, hard_bounces, _, complaints, _, _, _, _) =
+            health_counters(&pool, &tenant, sender).await;
+        assert_eq!(
+            (volume, complaints, hard_bounces),
+            (1, 1, 1),
+            "a re-claim of a marked event must not move the aggregate"
+        );
+        let markers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_health_applied WHERE event_id = $1",
+        )
+        .bind(event_b)
+        .fetch_one(&pool)
+        .await
+        .expect("count markers");
+        assert_eq!(markers, 1, "the marker must remain singular");
     }
 
     /// Adversarial 3: hard bounces cross the pause threshold, the identity is

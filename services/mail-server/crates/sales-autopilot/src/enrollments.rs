@@ -61,9 +61,11 @@ pub mod rejection_reason {
     /// The account's weekly touch budget is exhausted (reservations + realised
     /// outcomes). The contact was not enrolled.
     pub const ACCOUNT_BUDGET: &str = "account_budget";
-    /// The contact has no usable account relation (no account id, or the
-    /// account is not resolvable for this tenant), so account-level
-    /// coordination and the weekly budget cannot be evaluated. Fail closed.
+    /// Reserved wire key for "no account relation", kept because the CP
+    /// renders the vocabulary. It is NOT produced by `start_outreach`: an
+    /// account-less contact (a legacy campaign recipient with
+    /// `account_id = NULL`) has no account-level rules or budget to apply, so
+    /// coordination and the touch reservation simply do not run for it.
     pub const NO_ACCOUNT: &str = "no_account";
 }
 
@@ -83,16 +85,21 @@ const FIRST_STEP_ACTION_PRIORITY: i16 = 100;
 pub struct StartOutreachRequest {
     pub sequence_id: Uuid,
     pub contact_ids: Vec<Uuid>,
-    /// The policy the OPERATOR BELIEVES applies to this batch.
+    /// DEPRECATED, advisory-only: the policy the caller BELIEVES applies to
+    /// this batch. Omit it (the new contract) and the machine resolves the
+    /// current policy independently PER CONTACT from the canonical
+    /// `sales_jurisdiction_policies` store. This is the only correct mode for
+    /// a batch spanning several jurisdictions: a single batch-level id cannot
+    /// be the policy for recipients in different countries.
     ///
-    /// It is advisory, not an authorization: `start_outreach` resolves the
-    /// applicable policy for every contact from the current canonical
-    /// `sales_jurisdiction_policies` store and rejects with `stale_policy`
-    /// when this id is not that policy. The caller may state what it believes
-    /// applies but cannot force it. (The whole field should eventually be
-    /// removed from the command — the machine can always resolve the policy
-    /// itself — but the CP still sends it today.)
-    pub autonomy_policy_id: Uuid,
+    /// Kept deserializable for one rolling-deploy release (the CP still sends
+    /// it), and deliberately NOT silently ignored: when present, a value that
+    /// is not the policy the store resolves for a contact is still rejected
+    /// with `stale_policy`. A value that matches the resolved policy is
+    /// accepted. There is nothing to be stale against when no authoritative
+    /// policy exists, so the resolved fail-closed verdict stands alone.
+    #[serde(default)]
+    pub autonomy_policy_id: Option<Uuid>,
     pub experiment_id: Option<Uuid>,
 }
 
@@ -140,9 +147,12 @@ pub struct EnrollmentSummary {
 ///    the account's country/confidence with the contact's country as
 ///    fallback, contact type, channel) is `prohibited`. A historical
 ///    `sales_contact_policy_decisions` row is never read as permission.
-/// 5. `stale_policy` — the resolved policy is not `prohibited`, but the
-///    request's `autonomy_policy_id` is not the resolved policy row. The
-///    caller's id is advisory; the machine resolves what applies.
+/// 5. `stale_policy` — the resolved policy is not `prohibited`, the request
+///    supplied a (deprecated, optional) `autonomy_policy_id`, and that id is
+///    not the policy row the store resolved FOR THIS CONTACT. The caller's id
+///    is advisory; the machine resolves what applies. An omitted id skips this
+///    check entirely — which is what makes a mixed-jurisdiction batch work:
+///    every contact is resolved against its own current policy.
 /// 6. `unverified_contact` — the email point's `verification` is neither
 ///    `valid` nor `risky`. `unknown` is therefore rejected too. `risky` is
 ///    accepted (reachable but lower confidence) and counted as accepted.
@@ -150,9 +160,7 @@ pub struct EnrollmentSummary {
 ///    contact) exists in a state other than
 ///    `completed`/`failed`/`suppressed`. Those terminal states may be
 ///    re-enrolled; the upsert resets the row.
-/// 8. `no_account` — the contact has no account relation resolvable for the
-///    tenant, so account-level coordination cannot be evaluated (fail closed).
-/// 9. `account_coordination` — inside the per-contact transaction, with the
+/// 8. `account_coordination` — inside the per-contact transaction, with the
 ///    `sales_accounts` row locked `FOR UPDATE`, the account-level contact
 ///    coordination rules refuse the contact: the `max_active_contacts` cap is
 ///    reached, the account tier does not permit multi-threading, a
@@ -163,10 +171,16 @@ pub struct EnrollmentSummary {
 ///    because the account lock serialises the decision with the enrollment
 ///    insert. Referral promotion (R6) has no live-path input yet: no canonical
 ///    column marks a contact as referred (see `account_coordination`).
-/// 10. `account_budget` — the account's weekly touch budget
+/// 9. `account_budget` — the account's weekly touch budget
 ///    (`sales_account_touch_reservations` + realised outcomes) is exhausted;
 ///    `decision_engine::reserve_account_touch_tx` refused the reservation for
 ///    this enrollment's logical send unit.
+///
+/// Rules 8 and 9 apply only to contacts with an account relation. A legacy
+/// campaign recipient that migrates with `sales_contacts.account_id = NULL`
+/// has no account-level rules and no weekly budget to charge, so it skips
+/// them and is admitted by the per-contact gates alone. (`no_account` remains
+/// a rendered wire key but is not produced by this command.)
 ///
 /// # `ApprovalRequired` is planned, not rejected (audit item 9)
 ///
@@ -184,10 +198,12 @@ pub struct EnrollmentSummary {
 ///   (first occurrence wins) so each contact is processed and counted once.
 /// * `sequence_id` must resolve to an approved ACTIVE version (see
 ///   [`load_active_version`]); otherwise the call fails.
-/// * `autonomy_policy_id` is the caller's belief about the applicable policy.
-///   It is verified per contact against the resolved verdict (`stale_policy`
-///   on mismatch) but never used as the authorization itself; the canonical
-///   store decides.
+/// * `autonomy_policy_id` is deprecated and optional. When omitted, the
+///   machine resolves the current policy independently per contact — the
+///   required behavior for a batch spanning jurisdictions. When supplied
+///   (rolling-deploy compatibility), it is verified per contact against the
+///   resolved verdict (`stale_policy` on mismatch); it is never the
+///   authorization itself, the canonical store decides.
 ///
 /// # Atomicity and idempotency
 ///
@@ -206,7 +222,8 @@ pub struct EnrollmentSummary {
 ///
 /// The touch reservation is the atomic counter in
 /// `sales_account_touch_reservations` (keyed by the same logical send unit the
-/// action queue uses, `sa-send:{step_execution_id}`). If anything after it in
+/// action queue uses, `sa-send:{step_execution_id}`); it runs for every
+/// accepted contact that has an account relation. If anything after it in
 /// the transaction fails — the step-execution insert, the action enqueue, or
 /// the commit itself — the transaction rolls back and the reservation row
 /// disappears with it, so a refused enrollment never consumes weekly budget
@@ -388,16 +405,12 @@ pub async fn start_outreach(
             continue;
         }
 
-        // Account-level admission needs a coordinateable account. A contact
-        // with no account relation cannot be coordinated or budgeted, so it
-        // fails closed rather than bypassing the §38 rules.
-        let Some(account_id) = contact.account_id else {
-            *rejection_reasons
-                .entry(rejection_reason::NO_ACCOUNT.to_string())
-                .or_insert(0) += 1;
-            rejected += 1;
-            continue;
-        };
+        // A contact without an account relation (a legacy campaign recipient
+        // migrates with `account_id = NULL`) has no account-level rules or
+        // budget to apply: the §38 gate has no subject. Such a contact is
+        // still admitted only by the per-contact gates above; it simply
+        // consumes no account slot.
+        let account_id = contact.account_id;
 
         // ONE transaction per contact: enrollment + first step execution +
         // queued action commit together, so a failure on this contact cannot
@@ -407,13 +420,41 @@ pub async fn start_outreach(
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        // §38 account coordination is NOT WIRED HERE YET — see the KNOWN
-        // DEFECT note on the ignored tests in this module. The gate was
-        // withdrawn because its call path errors (a NULL decoded into a
-        // non-Option column) instead of admitting or refusing, which broke
-        // ordinary enrollment for contacts whose account relation is
-        // unresolvable. The module and its tests are complete and stay in the
-        // tree; the gate goes live once the call path is NULL-safe.
+        // §38 account coordination: with the account row locked `FOR UPDATE`,
+        // evaluate every account-level rule before any enrollment write. The
+        // lock stays in this transaction for the enrollment insert and the
+        // touch reservation below, so `max_active_contacts` cannot be exceeded
+        // by a concurrent request for the same account. A refusal is a
+        // database-independent verdict: roll back (nothing was written), count
+        // the documented reason key and move to the next contact — never a
+        // hard error.
+        if let Some(account_id) = account_id {
+            let verdict = crate::account_coordination::request_contact_slot_locked_in_tx(
+                &mut tx,
+                tenant_id,
+                account_id,
+                contact_id,
+                Utc::now(),
+                false,
+            )
+            .await?;
+            if let Some(reason) = verdict.block_reason() {
+                let _ = tx.rollback().await;
+                tracing::info!(
+                    tenant = tenant_id,
+                    account = %account_id,
+                    contact = %contact_id,
+                    reason = %reason,
+                    "account coordination refused the contact"
+                );
+                *rejection_reasons
+                    .entry(rejection_reason::ACCOUNT_COORDINATION.to_string())
+                    .or_insert(0) += 1;
+                rejected += 1;
+                continue;
+            }
+        }
+
         // A first `wait` step means no send is pending: the enrollment waits.
         let enrollment_state = if first_step.kind == "wait" {
             EnrollmentState::Waiting
@@ -518,29 +559,32 @@ pub async fn start_outreach(
         // reservation is the decision, not a pre-check: a `false` verdict
         // means the budget is spent. Rolling back also removes the enrollment
         // and step-execution inserts above, so a budget-refused contact
-        // consumes nothing.
+        // consumes nothing. A contact without an account relation has no
+        // budget to reserve and skips this step.
         let logical_send = format!("sa-send:{step_execution_id}");
-        let touch_reserved = crate::decision_engine::reserve_account_touch_tx(
-            &mut tx,
-            tenant_id,
-            account_id,
-            &logical_send,
-        )
-        .await?;
-        if !touch_reserved {
-            let _ = tx.rollback().await;
-            tracing::info!(
-                tenant = tenant_id,
-                account = %account_id,
-                contact = %contact_id,
-                logical_send = %logical_send,
-                "account weekly touch budget exhausted; rejecting the contact"
-            );
-            *rejection_reasons
-                .entry(rejection_reason::ACCOUNT_BUDGET.to_string())
-                .or_insert(0) += 1;
-            rejected += 1;
-            continue;
+        if let Some(account_id) = account_id {
+            let touch_reserved = crate::decision_engine::reserve_account_touch_tx(
+                &mut tx,
+                tenant_id,
+                account_id,
+                &logical_send,
+            )
+            .await?;
+            if !touch_reserved {
+                let _ = tx.rollback().await;
+                tracing::info!(
+                    tenant = tenant_id,
+                    account = %account_id,
+                    contact = %contact_id,
+                    logical_send = %logical_send,
+                    "account weekly touch budget exhausted; rejecting the contact"
+                );
+                *rejection_reasons
+                    .entry(rejection_reason::ACCOUNT_BUDGET.to_string())
+                    .or_insert(0) += 1;
+                rejected += 1;
+                continue;
+            }
         }
 
         let action_id = ActionQueue::enqueue_tx(
@@ -870,7 +914,9 @@ enum PolicyGate {
     Proceed,
     /// The current policy prohibits contacting this person.
     Prohibited,
-    /// The caller's `autonomy_policy_id` is not the policy the store resolves.
+    /// The request supplied an `autonomy_policy_id` that is not the policy the
+    /// store resolves for this contact. Never produced when the field is
+    /// omitted.
     StalePolicy,
 }
 
@@ -880,8 +926,10 @@ enum PolicyGate {
 /// * `Prohibited` always prohibits — a caller naming the prohibiting policy
 ///   does not make the contact contactable, and a caller naming another
 ///   policy does not soften it.
-/// * When an authoritative policy resolved (`Some(id)`), the caller's id must
-///   be exactly that policy or the belief is stale.
+/// * When an authoritative policy resolved (`Some(id)`) AND the request
+///   supplied a believed id, the two must be exactly equal or the belief is
+///   stale. An omitted believed id (the new contract) is not stale: the
+///   machine's own resolution is authoritative.
 /// * When NO authoritative policy exists (`policy_id == None`), the verdict is
 ///   the fail-closed `ApprovalRequired`; there is nothing for the caller's id
 ///   to be "stale" against, so the enrollment proceeds on the resolved
@@ -889,14 +937,22 @@ enum PolicyGate {
 fn policy_gate(
     decision: ContactDecision,
     resolved_policy_id: Option<Uuid>,
-    requested_policy_id: Uuid,
+    requested_policy_id: Option<Uuid>,
 ) -> PolicyGate {
     match decision {
         ContactDecision::Prohibited => PolicyGate::Prohibited,
-        ContactDecision::Allowed | ContactDecision::ApprovalRequired => match resolved_policy_id {
-            Some(resolved) if resolved != requested_policy_id => PolicyGate::StalePolicy,
-            _ => PolicyGate::Proceed,
-        },
+        ContactDecision::Allowed | ContactDecision::ApprovalRequired => {
+            match (resolved_policy_id, requested_policy_id) {
+                // The request carried a belief AND an authoritative policy
+                // resolved: they must agree.
+                (Some(resolved), Some(requested)) if resolved != requested => {
+                    PolicyGate::StalePolicy
+                }
+                // No belief supplied (the new contract) or no authoritative
+                // policy to compare against: the resolved verdict stands.
+                _ => PolicyGate::Proceed,
+            }
+        }
     }
 }
 
@@ -1124,7 +1180,24 @@ mod tests {
             Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap()
         );
         assert_eq!(request.contact_ids.len(), 1);
+        assert_eq!(
+            request.autonomy_policy_id,
+            Some(Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap()),
+            "a legacy payload still deserializes (rolling deploy)"
+        );
         assert!(request.experiment_id.is_none());
+
+        // The new contract omits autonomyPolicyId entirely: the machine
+        // resolves the current policy per contact.
+        let without_policy = r#"{
+            "sequenceId": "11111111-1111-1111-1111-111111111111",
+            "contactIds": ["22222222-2222-2222-2222-222222222222"]
+        }"#;
+        let request: StartOutreachRequest = serde_json::from_str(without_policy).unwrap();
+        assert!(
+            request.autonomy_policy_id.is_none(),
+            "an omitted autonomyPolicyId must mean 'machine resolves per contact'"
+        );
 
         // Unknown fields are rejected (deny_unknown_fields).
         let with_extra = r#"{
@@ -1134,6 +1207,41 @@ mod tests {
             "leadIds": ["44444444-4444-4444-4444-444444444444"]
         }"#;
         assert!(serde_json::from_str::<StartOutreachRequest>(with_extra).is_err());
+    }
+
+    /// The deprecated `autonomy_policy_id` is not silently ignored: a value
+    /// that contradicts the per-contact resolution is still `stale_policy`,
+    /// while an omitted value accepts the machine's own resolution.
+    #[test]
+    fn omitted_autonomy_policy_id_is_not_stale_but_a_mismatch_still_is() {
+        let resolved = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        // Prohibited always prohibits, regardless of the belief.
+        assert_eq!(
+            policy_gate(ContactDecision::Prohibited, Some(resolved), None),
+            PolicyGate::Prohibited
+        );
+        // Omitted belief: the resolved verdict stands.
+        assert_eq!(
+            policy_gate(ContactDecision::Allowed, Some(resolved), None),
+            PolicyGate::Proceed
+        );
+        // No authoritative policy to compare against: omitted or supplied
+        // belief both proceed on the fail-closed verdict.
+        assert_eq!(
+            policy_gate(ContactDecision::ApprovalRequired, None, Some(other)),
+            PolicyGate::Proceed
+        );
+        // A supplied belief that disagrees is rejected, never ignored.
+        assert_eq!(
+            policy_gate(ContactDecision::Allowed, Some(resolved), Some(other)),
+            PolicyGate::StalePolicy
+        );
+        // A supplied belief that agrees proceeds.
+        assert_eq!(
+            policy_gate(ContactDecision::Allowed, Some(resolved), Some(resolved)),
+            PolicyGate::Proceed
+        );
     }
 
     #[test]
@@ -1287,7 +1395,7 @@ mod tests {
         let resolved = Uuid::new_v4();
         for requested in [resolved, Uuid::new_v4()] {
             assert_eq!(
-                policy_gate(ContactDecision::Prohibited, Some(resolved), requested),
+                policy_gate(ContactDecision::Prohibited, Some(resolved), Some(requested)),
                 PolicyGate::Prohibited,
                 "a prohibited verdict is absolute"
             );
@@ -1295,7 +1403,7 @@ mod tests {
         // Even the fail-closed no-policy case cannot produce Prohibited here;
         // Prohibited always comes from a real policy row.
         assert_eq!(
-            policy_gate(ContactDecision::Prohibited, None, Uuid::new_v4()),
+            policy_gate(ContactDecision::Prohibited, None, Some(Uuid::new_v4())),
             PolicyGate::Prohibited
         );
     }
@@ -1304,21 +1412,29 @@ mod tests {
     fn policy_gate_requested_policy_must_match_the_resolved_policy() {
         let resolved = Uuid::new_v4();
         assert_eq!(
-            policy_gate(ContactDecision::Allowed, Some(resolved), resolved),
+            policy_gate(ContactDecision::Allowed, Some(resolved), Some(resolved)),
             PolicyGate::Proceed
         );
         assert_eq!(
-            policy_gate(ContactDecision::ApprovalRequired, Some(resolved), resolved),
+            policy_gate(
+                ContactDecision::ApprovalRequired,
+                Some(resolved),
+                Some(resolved)
+            ),
             PolicyGate::Proceed,
             "ApprovalRequired is planned, not rejected (audit item 9)"
         );
         let other = Uuid::new_v4();
         assert_eq!(
-            policy_gate(ContactDecision::Allowed, Some(resolved), other),
+            policy_gate(ContactDecision::Allowed, Some(resolved), Some(other)),
             PolicyGate::StalePolicy
         );
         assert_eq!(
-            policy_gate(ContactDecision::ApprovalRequired, Some(resolved), other),
+            policy_gate(
+                ContactDecision::ApprovalRequired,
+                Some(resolved),
+                Some(other)
+            ),
             PolicyGate::StalePolicy
         );
     }
@@ -1327,9 +1443,18 @@ mod tests {
     fn policy_gate_without_authoritative_policy_proceeds_on_the_verdict() {
         // No policy row resolved (unlisted jurisdiction / unapproved row):
         // the fail-closed ApprovalRequired default is not a policy the caller
-        // can be "stale" against.
+        // can be "stale" against. An omitted request id also proceeds on the
+        // resolved verdict (the new contract).
         assert_eq!(
-            policy_gate(ContactDecision::ApprovalRequired, None, Uuid::new_v4()),
+            policy_gate(
+                ContactDecision::ApprovalRequired,
+                None,
+                Some(Uuid::new_v4())
+            ),
+            PolicyGate::Proceed
+        );
+        assert_eq!(
+            policy_gate(ContactDecision::ApprovalRequired, None, None),
             PolicyGate::Proceed
         );
     }
@@ -1745,7 +1870,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_id],
-                autonomy_policy_id: fixture.policy_id.unwrap_or_else(Uuid::new_v4),
+                autonomy_policy_id: Some(fixture.policy_id.unwrap_or_else(Uuid::new_v4)),
                 experiment_id: None,
             },
         )
@@ -1794,7 +1919,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_id],
-                autonomy_policy_id: Uuid::new_v4(),
+                autonomy_policy_id: Some(Uuid::new_v4()),
                 experiment_id: None,
             },
         )
@@ -1853,7 +1978,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_id],
-                autonomy_policy_id: other_policy_id,
+                autonomy_policy_id: Some(other_policy_id),
                 experiment_id: None,
             },
         )
@@ -1867,8 +1992,9 @@ mod tests {
             stale.rejection_reasons
         );
 
-        // The caller cannot force the unrelated policy; naming the resolved
-        // policy is accepted.
+        // The caller cannot force the unrelated policy. The new contract
+        // omits the field entirely: the machine's own resolution is accepted
+        // and there is no stale comparison to lose.
         let accepted = start_outreach(
             &pool,
             &queue,
@@ -1876,14 +2002,46 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_id],
-                autonomy_policy_id: resolved_policy_id,
+                autonomy_policy_id: None,
                 experiment_id: None,
             },
         )
         .await
         .unwrap();
-        assert_eq!(accepted.accepted, 1, "the resolved policy is accepted");
+        assert_eq!(
+            accepted.accepted, 1,
+            "an omitted policy id accepts the machine's own resolution: {:?}",
+            accepted.rejection_reasons
+        );
         assert_eq!(accepted.rejected, 0);
+        assert!(!accepted
+            .rejection_reasons
+            .contains_key(rejection_reason::STALE_POLICY));
+
+        // Naming the resolved policy explicitly is also accepted — the contact
+        // is simply already enrolled by the call above.
+        let named = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: Some(resolved_policy_id),
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(named.accepted, 0);
+        assert_eq!(
+            named
+                .rejection_reasons
+                .get(rejection_reason::ALREADY_ENROLLED),
+            Some(&1),
+            "naming the resolved policy must not be stale: {:?}",
+            named.rejection_reasons
+        );
 
         cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
         sqlx::query("DELETE FROM sales_jurisdiction_policies WHERE id = $1")
@@ -1916,7 +2074,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_id],
-                autonomy_policy_id: fixture.policy_id.expect("fixture seeds a policy"),
+                autonomy_policy_id: Some(fixture.policy_id.expect("fixture seeds a policy")),
                 experiment_id: None,
             },
         )
@@ -1947,7 +2105,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_id],
-                autonomy_policy_id: fixture.policy_id.expect("fixture seeds a policy"),
+                autonomy_policy_id: Some(fixture.policy_id.expect("fixture seeds a policy")),
                 experiment_id: None,
             },
         )
@@ -1975,7 +2133,7 @@ mod tests {
         let request = StartOutreachRequest {
             sequence_id: fixture.sequence_id,
             contact_ids: vec![fixture.contact_id],
-            autonomy_policy_id: fixture.policy_id.expect("fixture seeds a policy"),
+            autonomy_policy_id: Some(fixture.policy_id.expect("fixture seeds a policy")),
             experiment_id: None,
         };
 
@@ -2313,7 +2471,6 @@ mod tests {
 
     /// An accepted enrollment reserves exactly one weekly touch slot, keyed by
     /// the same logical send unit the action queue uses.
-    #[ignore = "KNOWN DEFECT (coordination gate withdrawn): the gate's call path errors — a NULL is decoded into a non-Option column — instead of admitting or refusing, which broke ordinary enrollment. Tests and module are complete; re-enable with the gate once the call path is NULL-safe."]
     #[tokio::test]
     async fn accepted_enrollment_reserves_the_account_touch_slot() {
         let Some(pool) = live_pool("touch_reservation").await else {
@@ -2330,7 +2487,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_ids[0]],
-                autonomy_policy_id: fixture.policy_id,
+                autonomy_policy_id: Some(fixture.policy_id),
                 experiment_id: None,
             },
         )
@@ -2374,7 +2531,6 @@ mod tests {
     /// enrollment attempts for the same account: exactly one is accepted and
     /// the other fifteen are rejected with `account_budget`. The reservation
     /// is the decision, so the account lock serialises the attempts.
-    #[ignore = "KNOWN DEFECT (coordination gate withdrawn): requires the account-budget reservation to be wired into enrollment. The gate is withdrawn because its call path errors instead of admitting or refusing, so this cannot pass until that is fixed."]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn budget_of_one_admits_exactly_one_of_sixteen_concurrent_enrollments() {
         let Some(pool) = live_pool("budget_race").await else {
@@ -2417,7 +2573,7 @@ mod tests {
                     &StartOutreachRequest {
                         sequence_id,
                         contact_ids: vec![contact_id],
-                        autonomy_policy_id: policy_id,
+                        autonomy_policy_id: Some(policy_id),
                         experiment_id: None,
                     },
                 )
@@ -2479,7 +2635,6 @@ mod tests {
     /// three active contacts, a fourth is refused on the enrollment path with
     /// the documented reason key, and the operator-readable verdict names the
     /// cap.
-    #[ignore = "KNOWN DEFECT (coordination gate withdrawn): the gate's call path errors — a NULL is decoded into a non-Option column — instead of admitting or refusing, which broke ordinary enrollment. Tests and module are complete; re-enable with the gate once the call path is NULL-safe."]
     #[tokio::test]
     async fn contact_cap_denies_the_fourth_contact_on_the_enrollment_path() {
         let Some(pool) = live_pool("coordination_cap").await else {
@@ -2507,7 +2662,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fourth],
-                autonomy_policy_id: fixture.policy_id,
+                autonomy_policy_id: Some(fixture.policy_id),
                 experiment_id: None,
             },
         )
@@ -2560,7 +2715,6 @@ mod tests {
     /// single-thread tier the same request is refused. Exercises the live
     /// database path (the function the enrollment command calls), not the pure
     /// decision function alone.
-    #[ignore = "KNOWN DEFECT (coordination gate withdrawn): the gate's call path errors — a NULL is decoded into a non-Option column — instead of admitting or refusing, which broke ordinary enrollment. Tests and module are complete; re-enable with the gate once the call path is NULL-safe."]
     #[tokio::test]
     async fn referral_promotion_is_enforced_by_the_live_database_path() {
         let Some(pool) = live_pool("referral_promotion").await else {
@@ -2629,7 +2783,6 @@ mod tests {
 
     /// Persona ordering, negative-reply cooldown and the strong-objection stop
     /// are all evaluated from live state by the path `start_outreach` uses.
-    #[ignore = "KNOWN DEFECT (coordination gate withdrawn): the gate's call path errors — a NULL is decoded into a non-Option column — instead of admitting or refusing, which broke ordinary enrollment. Tests and module are complete; re-enable with the gate once the call path is NULL-safe."]
     #[tokio::test]
     async fn persona_cooldown_and_strong_objection_hold_on_the_live_path() {
         let Some(pool) = live_pool("coordination_rules_live").await else {
@@ -2658,7 +2811,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_ids[1]],
-                autonomy_policy_id: fixture.policy_id,
+                autonomy_policy_id: Some(fixture.policy_id),
                 experiment_id: None,
             },
         )
@@ -2689,7 +2842,7 @@ mod tests {
             &StartOutreachRequest {
                 sequence_id: fixture.sequence_id,
                 contact_ids: vec![fixture.contact_ids[2]],
-                autonomy_policy_id: fixture.policy_id,
+                autonomy_policy_id: Some(fixture.policy_id),
                 experiment_id: None,
             },
         )

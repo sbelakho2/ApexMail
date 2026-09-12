@@ -15,6 +15,9 @@ moka.workspace = true
 apexmail-lib = { path = "../apexmail-lib" }
 mail-common = { path = "../mail-common" }
 billing-common = { path = "../billing-common" }
+billing-entitlements = { path = "../billing-entitlements" }
+# Statutory accounting ledger (migration 220) — posting hooks only.
+accounting-core.workspace = true
 
 # Async runtime
 tokio.workspace = true
@@ -58,6 +61,7 @@ hex.workspace = true
 # Error handling
 anyhow.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

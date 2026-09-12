@@ -12,6 +12,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
+use chrono::NaiveDate;
+use uuid::Uuid;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -250,11 +253,9 @@ pub static VAT_FALLBACK_COUNTRY: LazyLock<String> = LazyLock::new(|| {
         .unwrap_or_else(|| "EE".to_string())
 });
 
-/// Validate the structural shape of an EU VAT registration number before it
-/// is trusted for reverse charge (0 %) treatment.
+/// Validate the structural shape of an EU VAT registration number.
 ///
-/// Rules (conservative, purely structural — full VIES validation happens
-/// out-of-band in vat_emta):
+/// Rules (conservative, purely structural):
 ///
 /// - trimmed, non-empty, ASCII alphanumeric only (no spaces/dashes);
 /// - total length 5–15 characters;
@@ -263,9 +264,20 @@ pub static VAT_FALLBACK_COUNTRY: LazyLock<String> = LazyLock::new(|| {
 /// - when `country` (the billing country) is provided, the prefix must match
 ///   it — Greece's `EL` prefix is accepted for country `GR`.
 ///
+/// # Structural validity is NOT evidence
+///
+/// Passing this check says the string *looks like* a VAT number; it says
+/// nothing about whether the number is registered. It must never, by itself,
+/// authorise a 0 % reverse charge. Reverse charge requires authoritative
+/// evidence ([`reverse_charge_authorised`] with a [`VatValidationEvidence`]
+/// row recorded from VIES), and every invoice snapshots the evidence id it
+/// relied on. The previous behaviour — treating this structural check as
+/// sufficient, with a comment claiming VIES validation happened
+/// "out-of-band in vat_emta" where no such production validator existed —
+/// permitted under-collected VAT on every structurally-shaped fake number.
+///
 /// Returns `false` for anything that cannot be a VAT number ("", "1", "x",
-/// free-form text), which means the normal destination rate is charged
-/// instead of silently zero-rating the invoice.
+/// free-form text).
 pub fn is_valid_vat_number(vat: &str, country: Option<&str>) -> bool {
     let vat = vat.trim();
     if !(5..=15).contains(&vat.len()) {
@@ -303,27 +315,235 @@ pub fn is_valid_vat_number(vat: &str, country: Option<&str>) -> bool {
     true
 }
 
-/// Calculate the VAT rate and amount for a given subtotal, customer country
-/// and optional VAT number.
+// ---------------------------------------------------------------------------
+// Authoritative VAT-number evidence (VIES)
+// ---------------------------------------------------------------------------
+//
+// Structural checks above only prove a string has the right shape. A reverse
+// charge (0 % intra-Community supply) requires AUTHORITATIVE evidence: a dated
+// answer from VIES saying the number is registered and active for the
+// counterparty. Evidence is persisted in `vat_validation_evidence` (migration
+// 213) by the production validator in `compliance::vat_vies`; the invoice
+// records the evidence id it relied on (`invoices.vat_evidence_id`), so a
+// zero-rated invoice can always be traced back to the consultation that
+// justified it.
+
+/// Authoritative source of a VAT-number verification. Only authorities in
+/// this enum can authorise a reverse charge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VatValidationSource {
+    /// EU Commission VIES (or a member-state mirror of it).
+    Vies,
+}
+
+impl VatValidationSource {
+    /// The database discriminator (`vat_validation_evidence.source`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vies => "VIES",
+        }
+    }
+
+    /// Parse the database discriminator. Unknown sources are rejected —
+    /// a source we do not recognise cannot authorise a reverse charge.
+    pub fn from_db(value: &str) -> Option<Self> {
+        if value.trim().eq_ignore_ascii_case("VIES") {
+            Some(Self::Vies)
+        } else {
+            None
+        }
+    }
+}
+
+/// Outcome of an authoritative VAT-number consultation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VatValidationOutcome {
+    /// The authority answered: the number is registered and active.
+    Valid,
+    /// The authority answered: the number is not registered/active.
+    Invalid,
+    /// The authority could not answer (member state unavailable, timeout,
+    /// global concurrency limit, ...). Documented behaviour: an outage is
+    /// NEVER valid evidence — the charge falls back to the normal
+    /// destination/local VAT (fail closed), and the outage marker is stored
+    /// on the evidence row so it can be retried once VIES recovers.
+    Outage,
+}
+
+/// One dated, persisted piece of authoritative VAT-number evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VatValidationEvidence {
+    /// `vat_validation_evidence.id` — snapshotted onto the invoice.
+    pub id: Option<Uuid>,
+    /// The verified VAT number, as returned/normalised by the authority.
+    pub vat_number: String,
+    /// The member state the number belongs to (`EL` for Greece is normalised
+    /// to `GR` when comparing).
+    pub country: String,
+    pub source: VatValidationSource,
+    pub outcome: VatValidationOutcome,
+    /// Date the authoritative answer was obtained (VIES `requestDate`).
+    pub valid_from: NaiveDate,
+    /// Optional horizon after which the evidence must be refreshed. `None`
+    /// means open-ended (re-verify on a schedule, but not expired).
+    pub valid_until: Option<NaiveDate>,
+    /// Authority outage marker (`MS_UNAVAILABLE`, `SERVICE_UNAVAILABLE`,
+    /// `TIMEOUT`, `GLOBAL_MAX_CONCURRENT_REQ`, ...) when the outcome is
+    /// [`VatValidationOutcome::Outage`].
+    pub outage_state: Option<String>,
+}
+
+impl VatValidationEvidence {
+    /// Build evidence from a `vat_validation_evidence` row.
+    ///
+    /// Returns `None` only for an unknown/non-authoritative `source`; an
+    /// invalid or outage answer is represented as evidence with the matching
+    /// outcome so the audit trail shows what was consulted. Neither invalid
+    /// nor outage evidence authorises a reverse charge
+    /// ([`reverse_charge_authorised`] checks the outcome).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_authority_row(
+        id: Option<Uuid>,
+        vat_number: impl Into<String>,
+        country: impl Into<String>,
+        source: &str,
+        valid: bool,
+        valid_from: Option<NaiveDate>,
+        valid_until: Option<NaiveDate>,
+        outage_state: Option<String>,
+    ) -> Option<Self> {
+        let source = VatValidationSource::from_db(source)?;
+        let outage = outage_state
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let outcome = match (outage.is_some(), valid) {
+            (true, _) => VatValidationOutcome::Outage,
+            (false, true) => VatValidationOutcome::Valid,
+            (false, false) => VatValidationOutcome::Invalid,
+        };
+        Some(Self {
+            id,
+            vat_number: vat_number.into(),
+            country: country.into(),
+            source,
+            outcome,
+            // The consultation date is mandatory in the schema; a missing
+            // value here would make the evidence undated and unusable, so
+            // fall back to the current date only in the impossible case.
+            valid_from: valid_from.unwrap_or_else(|| chrono::Utc::now().date_naive()),
+            valid_until,
+            outage_state: outage,
+        })
+    }
+
+    /// Whether this evidence authorises a reverse charge on `at` for the
+    /// given country/VAT number. This is the entire rule; call sites must
+    /// not re-derive it from structural checks.
+    pub fn authorises_reverse_charge(
+        &self,
+        country: &str,
+        vat_number: &str,
+        at: NaiveDate,
+    ) -> bool {
+        self.source == VatValidationSource::Vies
+            && self.outcome == VatValidationOutcome::Valid
+            && self
+                .outage_state
+                .as_deref()
+                .map(str::trim)
+                .map_or(true, str::is_empty)
+            && vat_numbers_match(vat_number, &self.vat_number)
+            && countries_match(country, &self.country)
+            && at >= self.valid_from
+            && self.valid_until.map_or(true, |until| at <= until)
+    }
+}
+
+/// Normalise a VAT number for comparison: uppercase, no internal whitespace.
+pub fn normalise_vat_number(vat: &str) -> String {
+    vat.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_uppercase()
+}
+
+fn vat_numbers_match(left: &str, right: &str) -> bool {
+    normalise_vat_number(left) == normalise_vat_number(right)
+}
+
+/// Country comparison with the Greece exception: VIES answers use `EL`
+/// while ISO 3166-1 uses `GR`.
+pub fn countries_match(left: &str, right: &str) -> bool {
+    fn canonical(country: &str) -> String {
+        match country.trim().to_uppercase().as_str() {
+            "EL" => "GR".to_string(),
+            other => other.to_string(),
+        }
+    }
+    canonical(left) == canonical(right)
+}
+
+/// Decide whether a 0 % reverse charge is authorised for a sale to
+/// `country` with `vat_number`, on the basis of persisted, authoritative
+/// evidence.
+///
+/// Returns `false` — normal destination/local VAT is charged — when:
+/// - the sale is local (`EE`) or outside the EU;
+/// - the VAT number fails the structural shape check;
+/// - there is no evidence;
+/// - the evidence is not from VIES, is invalid, or is an outage;
+/// - the evidence is for a different number/country;
+/// - the evidence is dated after `at` or has expired.
+///
+/// The caller must snapshot `evidence.id` onto the invoice when this returns
+/// `true` (`invoices.vat_evidence_id`, migration 218).
+pub fn reverse_charge_authorised(
+    country: &str,
+    vat_number: &str,
+    evidence: Option<&VatValidationEvidence>,
+    at: NaiveDate,
+) -> bool {
+    let upper = country.trim().to_uppercase();
+    if upper == "EE" || !is_eu_country(&upper) {
+        return false;
+    }
+    if !is_valid_vat_number(vat_number, Some(&upper)) {
+        return false;
+    }
+    evidence.map_or(false, |evidence| {
+        evidence.authorises_reverse_charge(&upper, vat_number, at)
+    })
+}
+
+/// Calculate the VAT rate and amount for a given subtotal, customer country,
+/// optional VAT number and optional authoritative evidence.
 ///
 /// # VAT rules
 ///
 /// | Scenario | Rate |
 /// |---|---|
 /// | Estonia (`EE`) | 24 % (local) |
-/// | EU B2B with valid VAT number | 0 % (reverse charge) |
-/// | EU B2C (no/invalid VAT number) | Destination-country rate |
-/// | EU B2C, country missing from the rate map | [`VAT_MAP_MISS_POLICY`] (audit item 3d) |
+/// | EU B2B with VIES-verified VAT number **and** evidence | 0 % (reverse charge) |
+/// | EU B2B with a merely structural VAT number | destination-country rate |
+/// | EU B2C (no/invalid VAT number) | destination-country rate |
+/// | EU B2C, country missing from the rate map | [`VAT_MAP_MISS_POLICY`] |
 /// | Non-EU | 0 % |
 ///
-/// A map miss (an EU-listed country with no rate entry — only possible with
-/// custom `EU_COUNTRIES`/`EU_VAT_RATES` overrides) is resolved through the
-/// deployed policy: the fallback country's rate (default `EE`, logged) or,
-/// under `VAT_MAP_MISS_POLICY=error`, the historical silent-Estonia
-/// behaviour is replaced by the built-in Estonian rate **and** an explicit
-/// error log so the misconfiguration is visible. Use
-/// [`calculate_vat_strict`] when the caller must refuse on a miss.
-pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (f64, i64) {
+/// `evidence` is the row from `vat_validation_evidence` (see
+/// [`VatValidationEvidence`]) and `at` is the tax-point date the evidence
+/// must cover. Passing `None` never reverse-charges, no matter how
+/// well-formed the VAT number looks.
+pub fn calculate_vat_with_evidence(
+    subtotal: i64,
+    country: &str,
+    vat_number: Option<&str>,
+    evidence: Option<&VatValidationEvidence>,
+    at: NaiveDate,
+) -> (f64, i64) {
     if subtotal <= 0 {
         return (0.0, 0);
     }
@@ -335,16 +555,15 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
     }
 
     if EU_COUNTRIES.contains(&country) {
-        if vat_number
-            .map(|vat| is_valid_vat_number(vat, Some(&country)))
-            .unwrap_or(false)
-        {
-            // EU B2B — reverse charge (0 %)
+        if vat_number.map_or(false, |vat| {
+            reverse_charge_authorised(&country, vat, evidence, at)
+        }) {
+            // EU B2B — reverse charge (0 %) against authoritative evidence.
             return (0.0, 0);
         }
-        // EU B2C — destination-country VAT. An explicit map miss goes
-        // through the deployed policy (audit item 3d): never again a
-        // silent Estonian rate.
+        // EU B2C (or unverified B2B) — destination-country VAT. An explicit
+        // map miss goes through the deployed policy (audit item 3d): never
+        // again a silent Estonian rate.
         let rate = match EU_VAT_RATES.get(&country).copied() {
             Some(rate) => rate,
             None => {
@@ -382,14 +601,38 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
     (0.0, 0)
 }
 
-/// Strict variant of [`calculate_vat`] (audit item 3d): returns
-/// [`VatRateMapMissError`] instead of applying a fallback rate when an
-/// EU-listed country has no rate entry. Callers that must never silently
+/// Calculate the VAT rate and amount for a given subtotal, customer country
+/// and optional VAT number.
+///
+/// # Structural validity is not evidence
+///
+/// This convenience wrapper carries no authoritative evidence, so a
+/// well-formed EU VAT number does NOT trigger a 0 % reverse charge: the
+/// destination rate is charged. Callers that have evidence (the invoice
+/// writer, the Stripe reconciliation path) must use
+/// [`calculate_vat_with_evidence`]; reverse charge is only authorised there
+/// when a valid VIES evidence row is passed. This closes the previously
+/// possible "structurally valid ⇒ zero-rated" under-collection.
+pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (f64, i64) {
+    calculate_vat_with_evidence(
+        subtotal,
+        country,
+        vat_number,
+        None,
+        chrono::Utc::now().date_naive(),
+    )
+}
+
+/// Strict variant of [`calculate_vat_with_evidence`] (audit item 3d):
+/// returns [`VatRateMapMissError`] instead of applying a fallback rate when
+/// an EU-listed country has no rate entry. Callers that must never silently
 /// charge another country's rate (invoice issuance) should prefer this.
-pub fn calculate_vat_strict(
+pub fn calculate_vat_strict_with_evidence(
     subtotal: i64,
     country: &str,
     vat_number: Option<&str>,
+    evidence: Option<&VatValidationEvidence>,
+    at: NaiveDate,
 ) -> Result<(f64, i64), VatRateMapMissError> {
     if subtotal <= 0 {
         return Ok((0.0, 0));
@@ -397,14 +640,15 @@ pub fn calculate_vat_strict(
     let upper = country.to_uppercase();
 
     if upper == "EE" {
-        return Ok(calculate_vat(subtotal, &upper, vat_number));
+        return Ok(calculate_vat_with_evidence(
+            subtotal, &upper, vat_number, evidence, at,
+        ));
     }
 
     if EU_COUNTRIES.contains(&upper) {
-        if vat_number
-            .map(|vat| is_valid_vat_number(vat, Some(&upper)))
-            .unwrap_or(false)
-        {
+        if vat_number.map_or(false, |vat| {
+            reverse_charge_authorised(&upper, vat, evidence, at)
+        }) {
             return Ok((0.0, 0));
         }
         let rate = EU_VAT_RATES.get(&upper).copied().map_or_else(
@@ -416,6 +660,28 @@ pub fn calculate_vat_strict(
     }
 
     Ok((0.0, 0))
+}
+
+/// Strict variant of [`calculate_vat`] (audit item 3d): returns
+/// [`VatRateMapMissError`] instead of applying a fallback rate when an
+/// EU-listed country has no rate entry. Callers that must never silently
+/// charge another country's rate (invoice issuance) should prefer this.
+///
+/// Like [`calculate_vat`], this wrapper carries no authoritative evidence
+/// and therefore never authorises a reverse charge; use
+/// [`calculate_vat_strict_with_evidence`] when evidence is available.
+pub fn calculate_vat_strict(
+    subtotal: i64,
+    country: &str,
+    vat_number: Option<&str>,
+) -> Result<(f64, i64), VatRateMapMissError> {
+    calculate_vat_strict_with_evidence(
+        subtotal,
+        country,
+        vat_number,
+        None,
+        chrono::Utc::now().date_naive(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -518,9 +784,22 @@ mod tests {
     }
 
     #[test]
-    fn calculate_vat_eu_b2b_reverse_charge() {
+    fn calculate_vat_eu_b2b_reverse_charge_requires_evidence() {
         let subtotal = 1000_i64;
+        // No evidence — the well-formed VAT number does NOT zero-rate.
         let (rate, amount) = calculate_vat(subtotal, "DE", Some("DE123456789"));
+        assert_eq!(rate, 19.0, "reverse charge requires authoritative evidence");
+        assert_eq!(amount, 190);
+
+        // With valid VIES evidence the same sale is reverse-charged.
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        let (rate, amount) = calculate_vat_with_evidence(
+            subtotal,
+            "DE",
+            Some("DE123456789"),
+            Some(&evidence),
+            d(2026, 2, 1),
+        );
         assert_eq!(rate, 0.0, "reverse charge must be 0 %");
         assert_eq!(amount, 0);
     }
@@ -615,14 +894,211 @@ mod tests {
     }
 
     #[test]
-    fn calculate_vat_valid_vat_number_still_reverse_charges() {
+    fn calculate_vat_structurally_valid_but_unverified_vat_number_charges_normal_rate() {
+        // P0 tax-truth regression: a structurally perfect VAT number with no
+        // VIES evidence must NOT authorise a reverse charge.
         let (rate, amount) = calculate_vat(10_000, "DE", Some("DE123456789"));
+        assert_eq!(rate, 19.0);
+        assert_eq!(amount, 1_900);
+
+        let (rate, amount) = calculate_vat(10_000, "FR", Some("FRXX123456789"));
+        assert_eq!(rate, 20.0);
+        assert_eq!(amount, 2_000);
+    }
+
+    #[test]
+    fn calculate_vat_valid_vies_evidence_authorises_reverse_charge() {
+        let at = d(2026, 6, 15);
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 10), None);
+        let (rate, amount) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
         assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
 
-        let (rate, amount) = calculate_vat(10_000, "FR", Some("FRXX123456789"));
+        // A Greek number verified under EL is accepted for country GR.
+        let evidence = valid_vies_evidence("EL123456789", "EL", d(2026, 1, 10), None);
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "GR", Some("EL123456789"), Some(&evidence), at);
         assert_eq!(rate, 0.0);
-        assert_eq!(amount, 0);
+    }
+
+    #[test]
+    fn calculate_vat_invalid_or_expired_evidence_charges_normal_rate() {
+        let at = d(2026, 6, 15);
+
+        // Authority answered "not valid".
+        let evidence = VatValidationEvidence {
+            id: Some(Uuid::new_v4()),
+            vat_number: "DE123456789".into(),
+            country: "DE".into(),
+            source: VatValidationSource::Vies,
+            outcome: VatValidationOutcome::Invalid,
+            valid_from: d(2026, 1, 10),
+            valid_until: None,
+            outage_state: None,
+        };
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(rate, 19.0, "invalid evidence must not zero-rate");
+
+        // Expired evidence.
+        let evidence =
+            valid_vies_evidence("DE123456789", "DE", d(2026, 1, 10), Some(d(2026, 3, 31)));
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(rate, 19.0, "expired evidence must not zero-rate");
+
+        // Evidence obtained AFTER the tax point.
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 7, 1), None);
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(
+            rate, 19.0,
+            "future evidence must not zero-rate a past supply"
+        );
+
+        // Evidence for a different number/country.
+        let evidence = valid_vies_evidence("DE999999999", "DE", d(2026, 1, 10), None);
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(rate, 19.0, "wrong-number evidence must not zero-rate");
+
+        let evidence = valid_vies_evidence("FRXX123456789", "FR", d(2026, 1, 10), None);
+        let (rate, _) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(rate, 19.0, "wrong-country evidence must not zero-rate");
+    }
+
+    #[test]
+    fn calculate_vat_vies_outage_charges_normal_rate() {
+        // Documented outage behaviour: VIES being down is NOT silent
+        // validity — the sale fails to normal destination VAT.
+        let at = d(2026, 6, 15);
+        let evidence = VatValidationEvidence {
+            id: Some(Uuid::new_v4()),
+            vat_number: "DE123456789".into(),
+            country: "DE".into(),
+            source: VatValidationSource::Vies,
+            outcome: VatValidationOutcome::Outage,
+            valid_from: d(2026, 6, 15),
+            valid_until: None,
+            outage_state: Some("MS_UNAVAILABLE".into()),
+        };
+        assert!(!reverse_charge_authorised(
+            "DE",
+            "DE123456789",
+            Some(&evidence),
+            at
+        ));
+        let (rate, amount) =
+            calculate_vat_with_evidence(10_000, "DE", Some("DE123456789"), Some(&evidence), at);
+        assert_eq!(rate, 19.0);
+        assert_eq!(amount, 1_900);
+    }
+
+    #[test]
+    fn from_authority_row_classifies_valid_invalid_and_outage() {
+        let valid = VatValidationEvidence::from_authority_row(
+            Some(Uuid::new_v4()),
+            "DE123456789",
+            "DE",
+            "VIES",
+            true,
+            Some(d(2026, 1, 1)),
+            None,
+            None,
+        )
+        .expect("VIES is authoritative");
+        assert_eq!(valid.outcome, VatValidationOutcome::Valid);
+        assert!(valid.authorises_reverse_charge("DE", "DE123456789", d(2026, 2, 1)));
+
+        let invalid = VatValidationEvidence::from_authority_row(
+            None,
+            "DE123456789",
+            "DE",
+            "VIES",
+            false,
+            Some(d(2026, 1, 1)),
+            None,
+            None,
+        )
+        .expect("VIES is authoritative");
+        assert_eq!(invalid.outcome, VatValidationOutcome::Invalid);
+
+        let outage = VatValidationEvidence::from_authority_row(
+            None,
+            "DE123456789",
+            "DE",
+            "VIES",
+            false,
+            Some(d(2026, 1, 1)),
+            None,
+            Some("MS_UNAVAILABLE".into()),
+        )
+        .expect("VIES is authoritative");
+        assert_eq!(outage.outcome, VatValidationOutcome::Outage);
+        assert!(!outage.authorises_reverse_charge("DE", "DE123456789", d(2026, 2, 1)));
+
+        // A non-authoritative source cannot be loaded as evidence at all.
+        assert!(VatValidationEvidence::from_authority_row(
+            None,
+            "DE123456789",
+            "DE",
+            "MANUAL",
+            true,
+            Some(d(2026, 1, 1)),
+            None,
+            None,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn reverse_charge_authorised_rejects_non_eu_and_local() {
+        let at = d(2026, 6, 15);
+        let evidence = valid_vies_evidence("DE123456789", "DE", d(2026, 1, 1), None);
+        assert!(!reverse_charge_authorised(
+            "US",
+            "DE123456789",
+            Some(&evidence),
+            at
+        ));
+        assert!(!reverse_charge_authorised(
+            "EE",
+            "EE100591102",
+            Some(&evidence),
+            at
+        ));
+        // Structural garbage still never authorises, even with evidence
+        // present.
+        assert!(!reverse_charge_authorised(
+            "DE",
+            "nonsense",
+            Some(&evidence),
+            at
+        ));
+    }
+
+    fn valid_vies_evidence(
+        vat_number: &str,
+        country: &str,
+        from: NaiveDate,
+        until: Option<NaiveDate>,
+    ) -> VatValidationEvidence {
+        VatValidationEvidence {
+            id: Some(Uuid::new_v4()),
+            vat_number: vat_number.to_string(),
+            country: country.to_string(),
+            source: VatValidationSource::Vies,
+            outcome: VatValidationOutcome::Valid,
+            valid_from: from,
+            valid_until: until,
+            outage_state: None,
+        }
+    }
+
+    fn d(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
     }
 
     #[test]

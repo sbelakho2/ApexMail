@@ -145,14 +145,30 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // points here via export_base_url).
         .route("/gdpr/exports/:id", get(gdpr_download_export))
         // Internal breach-report workflow (GDPR 72h / HIPAA 60-day
-        // deadlines): audited lifecycle, signed notification documents.
+        // deadlines): audited state machine, exact submission evidence, a
+        // mandatory authenticated human task where no authority machine API
+        // exists, and a durable Art. 34 subject-notification outbox.
         .route("/breaches", post(breach_report))
         .route("/breaches/:tenant_id", get(breach_list))
-        .route("/breaches/:id/notify-dpa", post(breach_notify_dpa))
+        .route("/breaches/:id/triage", post(breach_triage))
         .route(
-            "/breaches/:id/notify-subjects",
-            post(breach_notify_subjects),
+            "/breaches/:id/queue-authority-notification",
+            post(breach_queue_authority_notification),
         )
+        .route(
+            "/breaches/:id/record-submission",
+            post(breach_record_submission),
+        )
+        .route("/breaches/:id/record-receipt", post(breach_record_receipt))
+        .route(
+            "/breaches/:id/queue-subject-notifications",
+            post(breach_queue_subject_notifications),
+        )
+        .route(
+            "/breaches/:id/record-subject-delivery",
+            post(breach_record_subject_delivery),
+        )
+        .route("/breaches/:id/tasks", get(breach_open_tasks))
         .route("/breaches/:id/resolve", post(breach_resolve))
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
@@ -945,6 +961,8 @@ async fn gdpr_submit_request(
                 status: request.status,
                 requested_at: request.requested_at,
                 expires_at: request.expires_at,
+                received_at: request.received_at,
+                statutory_due_at: request.statutory_due_at,
                 verification: serde_json::json!({
                     "method": "outbox_handoff",
                     "instructions": "The verification token has been queued in dsr_verification_outbox for delivery by the platform's mail services (api-server/worker). It is never returned by this API.",
@@ -1286,27 +1304,52 @@ async fn breach_list(
     }
 }
 
-/// POST /breaches/{id}/notify-dpa — record supervisory-authority notification.
-async fn breach_notify_dpa(
+/// Body for `POST /breaches/{id}/triage`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreachTriageBody {
+    pub notifiable: bool,
+    #[serde(default)]
+    pub risk_to_subjects: bool,
+    pub rationale: String,
+}
+
+/// POST /breaches/{id}/triage — decide notifiable / not_notifiable.
+async fn breach_triage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(breach_id): axum::extract::Path<String>,
+    Json(body): Json<BreachTriageBody>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
-    match state.breach.notify_dpa(&breach_id, "compliance-api").await {
+    if body.rationale.trim().is_empty() {
+        return Err(err_json(
+            StatusCode::BAD_REQUEST,
+            "triage requires a rationale",
+        ));
+    }
+    match state
+        .breach
+        .triage(
+            &breach_id,
+            body.notifiable,
+            body.risk_to_subjects,
+            &body.rationale,
+            "compliance-api",
+        )
+        .await
+    {
         Ok(report) => Ok(ok_json(report)),
         Err(e) => {
-            error!("Breach DPA notification failed: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to record DPA notification",
-            ))
+            error!("Breach triage failed: {e}");
+            Err(err_json(StatusCode::CONFLICT, "Breach triage failed"))
         }
     }
 }
 
-/// POST /breaches/{id}/notify-subjects — record data-subject notification.
-async fn breach_notify_subjects(
+/// POST /breaches/{id}/queue-authority-notification — generate the exact
+/// Art. 33(3) submission package and open the mandatory human task.
+async fn breach_queue_authority_notification(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(breach_id): axum::extract::Path<String>,
@@ -1314,15 +1357,200 @@ async fn breach_notify_subjects(
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
     match state
         .breach
-        .notify_subjects(&breach_id, "compliance-api")
+        .queue_authority_notification(&breach_id, "compliance-api")
+        .await
+    {
+        Ok(submission) => Ok(created_json(submission)),
+        Err(e) => {
+            error!("Breach authority queueing failed: {e}");
+            Err(err_json(
+                StatusCode::CONFLICT,
+                "Failed to queue authority notification",
+            ))
+        }
+    }
+}
+
+/// Body for `POST /breaches/{id}/record-submission`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreachSubmissionBody {
+    pub submission_id: String,
+    #[serde(default)]
+    pub submitted_notification: Option<String>,
+    pub authority_reference: String,
+    #[serde(default)]
+    pub channel: Option<String>,
+    pub submitted_by: String,
+}
+
+/// POST /breaches/{id}/record-submission — store the exact submitted
+/// notification, its hash, the timestamp and the authority reference.
+async fn breach_record_submission(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(breach_id): axum::extract::Path<String>,
+    Json(body): Json<BreachSubmissionBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    let channel = match body.channel.as_deref() {
+        None | Some("human_task") => crate::breach_notification::SubmissionChannel::HumanTask,
+        Some("machine_api") => crate::breach_notification::SubmissionChannel::MachineApi,
+        Some(other) => {
+            return Err(err_json(
+                StatusCode::BAD_REQUEST,
+                &format!("unknown submission channel {other:?}"),
+            ))
+        }
+    };
+    match state
+        .breach
+        .record_authority_submission(
+            &breach_id,
+            &body.submission_id,
+            body.submitted_notification.as_deref(),
+            &body.authority_reference,
+            channel,
+            &body.submitted_by,
+            "compliance-api",
+        )
         .await
     {
         Ok(report) => Ok(ok_json(report)),
         Err(e) => {
-            error!("Breach subject notification failed: {e}");
+            error!("Breach submission recording failed: {e}");
+            Err(err_json(
+                StatusCode::CONFLICT,
+                "Failed to record authority submission",
+            ))
+        }
+    }
+}
+
+/// Body for `POST /breaches/{id}/record-receipt`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreachReceiptBody {
+    pub receipt: String,
+    #[serde(default)]
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// POST /breaches/{id}/record-receipt — the ONLY path to
+/// `authority_acknowledged`; requires the authority's receipt.
+async fn breach_record_receipt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(breach_id): axum::extract::Path<String>,
+    Json(body): Json<BreachReceiptBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state
+        .breach
+        .record_authority_receipt(
+            &breach_id,
+            &body.receipt,
+            body.received_at,
+            "compliance-api",
+        )
+        .await
+    {
+        Ok(report) => Ok(ok_json(report)),
+        Err(e) => {
+            error!("Breach receipt recording failed: {e}");
+            Err(err_json(
+                StatusCode::CONFLICT,
+                "Failed to record authority receipt",
+            ))
+        }
+    }
+}
+
+/// Body for `POST /breaches/{id}/queue-subject-notifications`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreachSubjectNotificationBody {
+    pub recipients: Vec<String>,
+}
+
+/// POST /breaches/{id}/queue-subject-notifications — durable Art. 34 outbox.
+async fn breach_queue_subject_notifications(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(breach_id): axum::extract::Path<String>,
+    Json(body): Json<BreachSubjectNotificationBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state
+        .breach
+        .queue_subject_notifications(&breach_id, &body.recipients, "compliance-api")
+        .await
+    {
+        Ok(queued) => Ok(created_json(serde_json::json!({ "queued": queued }))),
+        Err(e) => {
+            error!("Breach subject notification queueing failed: {e}");
+            Err(err_json(
+                StatusCode::CONFLICT,
+                "Failed to queue subject notifications",
+            ))
+        }
+    }
+}
+
+/// Body for `POST /breaches/{id}/record-subject-delivery`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BreachSubjectDeliveryBody {
+    pub outbox_id: String,
+    #[serde(default)]
+    pub provider_message_id: Option<String>,
+    #[serde(default)]
+    pub delivery_evidence: Option<serde_json::Value>,
+}
+
+/// POST /breaches/{id}/record-subject-delivery — delivery evidence for one
+/// subject notification.
+async fn breach_record_subject_delivery(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(_breach_id): axum::extract::Path<String>,
+    Json(body): Json<BreachSubjectDeliveryBody>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state
+        .breach
+        .record_subject_notification_delivery(
+            &body.outbox_id,
+            body.provider_message_id.as_deref(),
+            body.delivery_evidence,
+        )
+        .await
+    {
+        Ok(row) => Ok(ok_json(row)),
+        Err(e) => {
+            error!("Breach subject delivery recording failed: {e}");
+            Err(err_json(
+                StatusCode::CONFLICT,
+                "Failed to record subject notification delivery",
+            ))
+        }
+    }
+}
+
+/// GET /breaches/{id}/tasks — open mandatory authority tasks.
+async fn breach_open_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(_breach_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    match state.breach.open_authority_tasks(100).await {
+        Ok(tasks) => Ok(ok_json(serde_json::json!({ "tasks": tasks }))),
+        Err(e) => {
+            error!("Breach task listing failed: {e}");
             Err(err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to record subject notification",
+                "Failed to list breach tasks",
             ))
         }
     }
@@ -2674,6 +2902,8 @@ mod tests {
             status: RequestStatus::PendingVerification,
             requested_at: chrono::Utc::now(),
             expires_at: chrono::Utc::now(),
+            received_at: Some(chrono::Utc::now()),
+            statutory_due_at: Some(chrono::Utc::now()),
             verification: serde_json::json!({"method": "token_delivery_pending"}),
             token_delivered: false,
         };
@@ -2882,14 +3112,16 @@ mod tests {
             }
         }
 
-        // The F56 conversion: 16 parameterised routes per file.
+        // The F56 conversion: parameterised routes in routes.rs + admin_routes.rs.
+        // 37 = the original 32 + the 7 breach state-machine routes added by the
+        // GDPR governance work - the 2 removed notify-dpa/notify-subjects routes.
         assert_eq!(
-            colon_routes, 32,
-            "expected 32 parameterised routes (16 per file), found {colon_routes}"
+            colon_routes, 37,
+            "expected 37 parameterised routes (16 in admin_routes + 21 here), found {colon_routes}"
         );
         assert_eq!(
-            colon_captures, 34,
-            "expected 34 captures (two 2-param routes), found {colon_captures}"
+            colon_captures, 39,
+            "expected 39 captures (two 2-param routes), found {colon_captures}"
         );
     }
 }

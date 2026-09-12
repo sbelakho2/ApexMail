@@ -3,6 +3,23 @@
 version = 4
 
 [[package]]
+name = "accounting-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "migrator",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,6 +366,7 @@ dependencies = [
  "base64 0.22.1",
  "bcrypt 0.15.1",
  "billing-common",
+ "billing-entitlements",
  "billing-service",
  "bytes",
  "calamine",
@@ -379,6 +397,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rsa",
+ "sales-autopilot",
  "serde",
  "serde_json",
  "sha1",
@@ -1279,6 +1298,7 @@ dependencies = [
 name = "billing-common"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hex",
  "hmac 0.12.1",
  "serde",
@@ -1289,13 +1309,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "billing-entitlements"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "billing-service"
 version = "0.1.0"
 dependencies = [
+ "accounting-core",
  "anyhow",
  "apexmail-lib",
+ "async-trait",
  "axum 0.7.9",
  "billing-common",
+ "billing-entitlements",
  "chrono",
  "chrono-tz",
  "clap",
@@ -4725,6 +4758,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
+ "billing-service",
  "bytes",
  "chrono",
  "clap",
@@ -5149,6 +5183,29 @@ checksum = "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79"
 dependencies = [
  "dlv-list",
  "hashbrown 0.14.5",
+]
+
+[[package]]
+name = "outbound-mta"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "apexmail-dns-resolver",
+ "async-trait",
+ "axum 0.7.9",
+ "chrono",
+ "mail-common",
+ "rustls 0.23.40",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

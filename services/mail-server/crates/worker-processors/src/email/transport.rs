@@ -215,6 +215,11 @@ fn single_mailbox(email: &str) -> Address<'_> {
 /// Return-Paths land on its parser even with zero configuration.
 const DEFAULT_VERP_DOMAIN: &str = "bounces.apexmail.ee";
 
+/// Default v2 VERP token lifetime: 30 days. Bounces may arrive long after
+/// the last retry, so the window is generous; it is bounded because an
+/// authenticated token is a standing capability to suppress its recipient.
+const DEFAULT_VERP_TOKEN_TTL_SECS: i64 = 30 * 24 * 3600;
+
 /// The platform-managed bounce domain for VERP Return-Paths (`VERP_DOMAIN`).
 ///
 /// "Platform-managed" is the point of the knob: the domain must be one the
@@ -232,48 +237,124 @@ fn verp_domain() -> Option<String> {
     (!domain.is_empty()).then_some(domain)
 }
 
-/// Build a VERP envelope Return-Path:
-/// `bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}`.
+/// Shared HMAC secret for v2 VERP tokens (`VERP_HMAC_SECRET`).
 ///
-/// This is the EXACT format the platform MTA's bounce parser decodes
-/// (crates/mta/src/servers/bounce.rs::`parse_verp_address`, comment
-/// "VERP format:bounces+{message_id}={recipient_domain}={recipient_local}"):
-/// it splits the local part on the first two `=`s into
-/// `[message_id, recipient_domain, recipient_local]` and reconstructs the
-/// original recipient as `{local}@{domain}`. Returns `None` when either side
-/// of the pair is malformed in a way that would not round-trip (a message id
-/// or recipient part containing `=`/`@`, or empty segments).
-pub fn verp_return_path(message_id: &str, recipient: &str, verp_domain: &str) -> Option<String> {
-    let message_id = message_id.trim().trim_matches(|c| c == '<' || c == '>');
-    if message_id.is_empty() || message_id.contains(['=', '@', ' ']) {
+/// MUST be identical in the worker (minting) and the MTA (verifying) and at
+/// least [`apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN`] bytes. When it is
+/// missing or too short this returns `None` and the send path emits NO VERP
+/// Return-Path at all — it never falls back to the unsigned v1 grammar,
+/// which is not suppression authority (a forged v1 bounce could otherwise
+/// suppress arbitrary recipients). Production startup rejects the
+/// configuration outright, so this branch is a development safety net.
+fn verp_hmac_secret() -> Option<Vec<u8>> {
+    static MISSING_SECRET_WARNED: std::sync::Once = std::sync::Once::new();
+    let secret = match std::env::var("VERP_HMAC_SECRET") {
+        Ok(value) if value.trim().len() >= apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN => value,
+        _ => {
+            MISSING_SECRET_WARNED.call_once(|| {
+                warn!(
+                    "VERP_HMAC_SECRET is unset or shorter than {} bytes: outbound mail will \
+                     carry NO VERP Return-Path (unsigned v1 VERP is no longer emitted because \
+                     it is not authentic)",
+                    apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN
+                );
+            });
+            return None;
+        }
+    };
+    Some(secret.trim().as_bytes().to_vec())
+}
+
+/// v2 token lifetime in seconds (`VERP_TOKEN_TTL_SECS`, default 30 days).
+fn verp_token_ttl_secs() -> i64 {
+    std::env::var("VERP_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|ttl| *ttl > 0)
+        .unwrap_or(DEFAULT_VERP_TOKEN_TTL_SECS)
+}
+
+/// Build a VERP v2 envelope Return-Path:
+/// `bounces+v2.<token>@{verp_domain}`.
+///
+/// The token is an HMAC-SHA256 over (queue/send id, tenant, recipient,
+/// expiry), minted by [`apexmail_lib::verp::mint_verp_v2_token`]. The
+/// platform MTA's bounce parser verifies the MAC and only then trusts the
+/// claims, so knowing a message id and recipient is no longer sufficient to
+/// manufacture the bounce address.
+///
+/// Returns `None` when the queue id, tenant, recipient or expiry is
+/// unusable, or when the secret is not configured (see
+/// [`verp_hmac_secret`]).
+pub fn verp_return_path(
+    queue_id: &str,
+    tenant_id: &str,
+    recipient: &str,
+    verp_domain: &str,
+    secret: &[u8],
+    now_unix: i64,
+    ttl_secs: i64,
+) -> Option<String> {
+    let queue_id = queue_id.trim();
+    let tenant_id = tenant_id.trim();
+    if queue_id.is_empty() || tenant_id.is_empty() || ttl_secs <= 0 {
+        return None;
+    }
+    if queue_id.contains(['@', ' ']) || tenant_id.contains(['@', ' ']) {
         return None;
     }
     let recipient = recipient.trim().trim_matches(|c| c == '<' || c == '>');
     // rsplit_once: a quoted local part containing '@' keeps the last '@' as
-    // the separator, which is also what the bounce parser's split('@').next()
-    // envelope handling assumes.
+    // the separator, which is also what the bounce parser's envelope
+    // handling assumes.
     let (local, domain) = recipient.rsplit_once('@')?;
-    if local.is_empty() || domain.is_empty() || local.contains('=') || domain.contains('=') {
+    if local.is_empty() || domain.is_empty() || recipient.contains(['\r', '\n']) {
         return None;
     }
-    Some(format!(
-        "bounces+{message_id}={domain}={local}@{verp_domain}"
+    let claims = apexmail_lib::verp::VerpV2Claims {
+        queue_id: queue_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        recipient: recipient.to_string(),
+        expires_at: now_unix.saturating_add(ttl_secs),
+    };
+    Some(apexmail_lib::verp::verp_v2_address(
+        secret,
+        &claims,
+        verp_domain,
     ))
 }
 
 /// VERP Return-Path for a prepared email, when enabled and fully attributable:
-/// requires the platform message id header and the platform-managed VERP
-/// domain. Applies to the SMTP transport only — SES owns the envelope on its
-/// API path (per-message MAIL FROM is not possible there; SES bounce routing
-/// goes through SNS notifications instead).
+/// requires the authenticated queue/tenant binding carried by
+/// [`PreparedEmail::verp`], the platform message id header, the platform-managed
+/// VERP domain, and the shared `VERP_HMAC_SECRET`. Applies to the SMTP
+/// transport only — SES owns the envelope on its API path (per-message MAIL
+/// FROM is not possible there; SES bounce routing goes through SNS
+/// notifications instead).
 fn verp_return_path_for(email: &PreparedEmail) -> Option<String> {
     let domain = verp_domain()?;
+    let secret = verp_hmac_secret()?;
+    let binding = email.verp.as_ref()?;
+    // The v2 token binds the message id as well: keeping the header check
+    // means mail without the platform Message-ID header (not attributable to
+    // a queue row by the bounce parser) never gets a VERP return path.
     let message_id = email
         .headers
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case(VERP_MESSAGE_ID_HEADER))
         .map(|(_, value)| value.as_str())?;
-    verp_return_path(message_id, &email.to, &domain)
+    if message_id.trim().is_empty() {
+        return None;
+    }
+    verp_return_path(
+        &binding.queue_id,
+        &binding.tenant_id,
+        &email.to,
+        &domain,
+        &secret,
+        chrono::Utc::now().timestamp(),
+        verp_token_ttl_secs(),
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -702,12 +783,15 @@ impl EmailTransport for SmtpTransport {
             None => None,
         };
 
-        // C: VERP envelope Return-Path. When the platform-managed bounce
-        // domain resolves and the message is attributable, the SMTP envelope
-        // sender becomes bounces+{message_id}=...@{verp_domain} so remote
-        // MTAs route bounces back to the platform MTA's bounce parser
-        // (which attributes them to this queue row and suppresses hard
-        // bounces). The From header is untouched; only MAIL FROM changes.
+        // C: VERP v2 envelope Return-Path. When the platform-managed bounce
+        // domain and the shared HMAC secret are configured and the message is
+        // attributable, the SMTP envelope sender becomes
+        // `bounces+v2.<hmac-token>@{verp_domain}` so remote MTAs route bounces
+        // back to the platform MTA's bounce parser (which authenticates the
+        // token, attributes it to this queue row, and only then suppresses
+        // hard bounces). The unsigned v1 grammar is no longer emitted: it is
+        // forgeable and has no suppression authority. The From header is
+        // untouched; only MAIL FROM changes.
         // The message is pre-serialized for the explicit-envelope path —
         // the legacy path hands the builder to mail-send so its From/To/Cc
         // envelope derivation stays byte-identical to before.
@@ -1395,6 +1479,7 @@ pub async fn create_transport_from_config(
 mod tests {
     use super::*;
     use crate::common::config::{SesConfig, TransportType};
+    use crate::email::types::VerpBinding;
 
     /// Serializes env-mutating tests against every other module in this
     /// crate (std::env is process-global; see `crate::test_support`).
@@ -1501,6 +1586,8 @@ mod tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
+
+            verp: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -1585,6 +1672,8 @@ mod tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
+
+            verp: None,
         };
         let raw = transport.build_message(&email).write_to_vec().unwrap();
         let raw_str = String::from_utf8_lossy(&raw);
@@ -1615,6 +1704,8 @@ mod tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
+
+            verp: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -1636,6 +1727,8 @@ mod tests {
             mime_to: vec![],
             mime_cc: vec![],
             reply_to: None,
+
+            verp: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -1660,6 +1753,8 @@ mod tests {
             mime_to: vec![],
             mime_cc: vec![],
             reply_to: None,
+
+            verp: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         // Should produce *something* even with no body
@@ -1685,6 +1780,8 @@ mod tests {
             mime_to: vec![],
             mime_cc: vec![],
             reply_to: None,
+
+            verp: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -2133,79 +2230,90 @@ mod tests {
         }
     }
 
-    // ── C: VERP envelope Return-Path ──────────────────────────────────────
+    // ── C: VERP v2 envelope Return-Path ───────────────────────────────────
 
-    /// Faithful mirror of the platform MTA bounce parser
-    /// (crates/mta/src/servers/bounce.rs::parse_verp_address) — the private
-    /// function cannot be imported across crates, so the test re-implements
-    /// its exact decoding to prove the generated address round-trips.
-    fn mta_parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)> {
-        let addr = addr.trim_matches(|c| c == '<' || c == '>');
-        if !addr.ends_with(&format!("@{verp_domain}")) {
-            return None;
-        }
-        let local = addr.split('@').next()?;
-        let rest = local.strip_prefix("bounces+")?;
-        let parts: Vec<&str> = rest.splitn(3, '=').collect();
-        if parts.len() >= 3 {
-            let message_id = parts[0].to_string();
-            let recip = format!("{}@{}", parts[2], parts[1]);
-            Some((message_id, recip))
-        } else {
-            None
-        }
+    /// The MTA verifies v2 tokens with `apexmail_lib::verp`; the generator
+    /// must round-trip through the SAME implementation (single source of
+    /// truth), so these tests call the shared verifier directly.
+    fn verify_generated(
+        address: &str,
+        secret: &[u8],
+        now: i64,
+    ) -> apexmail_lib::verp::VerpV2Claims {
+        let local = address.split('@').next().expect("generated address has @");
+        apexmail_lib::verp::verify_verp_v2_local(secret, local, now).expect("token must verify")
     }
 
     #[test]
-    fn verp_return_path_round_trips_through_mta_parser() {
+    fn verp_return_path_round_trips_through_v2_verifier() {
+        let secret = b"test-secret-test-secret-test-secret";
         let verp_domain = "bounces.apexmail.ee";
-        let message_id = "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89";
-        let recipient = "lead@example.com";
+        let now = 1_700_000_000i64;
 
-        let return_path =
-            verp_return_path(message_id, recipient, verp_domain).expect("valid VERP address");
-        assert_eq!(
-            return_path,
-            "bounces+0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89=example.com=lead@bounces.apexmail.ee"
+        let return_path = verp_return_path(
+            "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89",
+            "ten_abc",
+            "lead@example.com",
+            verp_domain,
+            secret,
+            now,
+            3600,
+        )
+        .expect("valid VERP address");
+        assert!(
+            return_path.starts_with("bounces+v2."),
+            "v2 grammar: {return_path}"
         );
+        assert!(return_path.ends_with("@bounces.apexmail.ee"));
 
-        let (parsed_id, parsed_recipient) =
-            mta_parse_verp_address(&return_path, verp_domain).expect("mta parser accepts it");
-        assert_eq!(parsed_id, message_id, "message id must round-trip");
-        assert_eq!(parsed_recipient, recipient, "recipient must round-trip");
+        let claims = verify_generated(&return_path, secret, now + 1);
+        assert_eq!(claims.queue_id, "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89");
+        assert_eq!(claims.tenant_id, "ten_abc");
+        assert_eq!(claims.recipient, "lead@example.com");
+        assert_eq!(claims.expires_at, now + 3600);
     }
 
     #[test]
     fn verp_return_path_handles_subdomain_and_edge_locals() {
+        let secret = b"test-secret-test-secret-test-secret";
         for recipient in [
             "a+b_tag@sub.domain.co",
             "UPPER@Example.COM",
             "first.last+x@mx.example.eu",
         ] {
-            let rp = verp_return_path("m-1", recipient, "bounces.apexmail.ee")
-                .unwrap_or_else(|| panic!("no VERP for {recipient}"));
-            let (mid, recip) =
-                mta_parse_verp_address(&rp, "bounces.apexmail.ee").expect("parses back");
-            assert_eq!(mid, "m-1");
-            assert_eq!(recip, recipient, "round-trip must be lossless");
+            let rp = verp_return_path(
+                "m-1",
+                "ten_abc",
+                recipient,
+                "bounces.apexmail.ee",
+                secret,
+                1_700_000_000,
+                3600,
+            )
+            .unwrap_or_else(|| panic!("no VERP for {recipient}"));
+            let claims = verify_generated(&rp, secret, 1_700_000_001);
+            assert_eq!(claims.queue_id, "m-1");
+            assert_eq!(claims.recipient, recipient, "round-trip must be lossless");
         }
     }
 
     #[test]
     fn verp_return_path_rejects_malformed_inputs() {
-        // Message ids containing the VERP separators would not round-trip.
-        assert!(verp_return_path("a=b", "x@y.z", "bounces.apexmail.ee").is_none());
-        assert!(verp_return_path("a@b", "x@y.z", "bounces.apexmail.ee").is_none());
-        assert!(verp_return_path("", "x@y.z", "bounces.apexmail.ee").is_none());
+        let secret = b"test-secret-test-secret-test-secret";
+        let domain = "bounces.apexmail.ee";
+        // Missing/blank binding identities.
+        assert!(verp_return_path("", "ten", "x@y.z", domain, secret, 0, 60).is_none());
+        assert!(verp_return_path("m", "", "x@y.z", domain, secret, 0, 60).is_none());
+        assert!(verp_return_path("m", "ten", "x@y.z", domain, secret, 0, 0).is_none());
         // Malformed recipients.
-        assert!(verp_return_path("m", "no-at-sign", "bounces.apexmail.ee").is_none());
-        assert!(verp_return_path("m", "@example.com", "bounces.apexmail.ee").is_none());
-        assert!(verp_return_path("m", "x=", "bounces.apexmail.ee").is_none());
-        // Angle-bracketed forms (as they appear in headers) are trimmed.
-        assert_eq!(
-            verp_return_path(" <m> ", " <x@y.z> ", "bounces.apexmail.ee").as_deref(),
-            Some("bounces+m=y.z=x@bounces.apexmail.ee")
+        assert!(verp_return_path("m", "ten", "no-at-sign", domain, secret, 0, 60).is_none());
+        assert!(verp_return_path("m", "ten", "@example.com", domain, secret, 0, 60).is_none());
+        assert!(
+            verp_return_path("m", "ten", "x@y.z\r\nBcc:v@e.com", domain, secret, 0, 60).is_none()
         );
+        // Angle-bracketed forms (as they appear in headers) are trimmed.
+        let rp = verp_return_path("m", "ten", " <x@y.z> ", domain, secret, 0, 60).unwrap();
+        assert_eq!(verify_generated(&rp, secret, 1).recipient, "x@y.z");
     }
 
     /// VERP enablement: absent env → platform default domain; explicit
@@ -2231,12 +2339,15 @@ mod tests {
         std::env::remove_var("VERP_DOMAIN");
     }
 
-    /// The VERP address is only derived when the message carries the platform
-    /// message id header — unattributable mail keeps the From-based envelope.
+    /// The v2 return path is derived only when the message carries the
+    /// authenticated queue/tenant binding AND the platform message id header
+    /// AND `VERP_HMAC_SECRET`. Missing secret => NO VERP at all (never the
+    /// unsigned v1 grammar).
     #[test]
-    fn verp_return_path_for_requires_message_id_header() {
+    fn verp_return_path_for_requires_binding_message_id_and_secret() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("VERP_DOMAIN");
+        std::env::set_var("VERP_HMAC_SECRET", "test-secret-test-secret-test-secret");
 
         let mut email = PreparedEmail {
             from: "sender@example.com".into(),
@@ -2244,29 +2355,58 @@ mod tests {
             subject: "Test".into(),
             html: None,
             text: Some("body".into()),
-            headers: vec![("X-Other".into(), "value".into())],
+            headers: vec![(
+                "x-apexmail-message-id".into(),
+                "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into(),
+            )],
             attachments: vec![],
             dkim: None,
             mime_to: vec![],
             mime_cc: vec![],
             reply_to: None,
+            verp: Some(VerpBinding {
+                queue_id: "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into(),
+                tenant_id: "ten_abc".into(),
+            }),
         };
-        assert!(
-            verp_return_path_for(&email).is_none(),
-            "no message id header => no VERP"
-        );
+        let rp = verp_return_path_for(&email).expect("attributable mail gets VERP");
+        assert!(rp.starts_with("bounces+v2."), "v2 grammar: {rp}");
+        assert!(rp.ends_with("@bounces.apexmail.ee"));
 
+        // No message id header => no attribution => no VERP.
+        email.headers.clear();
+        assert!(verp_return_path_for(&email).is_none());
+
+        // No authenticated binding => no VERP.
         email.headers.push((
             "x-apexmail-message-id".into(),
             "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into(),
         ));
-        let rp = verp_return_path_for(&email).expect("attributable mail gets VERP");
-        assert!(rp.starts_with("bounces+0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89="));
-        assert!(rp.ends_with("@bounces.apexmail.ee"));
+        email.verp = None;
+        assert!(verp_return_path_for(&email).is_none());
 
+        // Missing/short secret => no VERP (never an unsigned fallback).
+        email.verp = Some(VerpBinding {
+            queue_id: "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into(),
+            tenant_id: "ten_abc".into(),
+        });
+        std::env::remove_var("VERP_HMAC_SECRET");
+        assert!(
+            verp_return_path_for(&email).is_none(),
+            "a missing secret must disable VERP, not downgrade to v1"
+        );
+        std::env::set_var("VERP_HMAC_SECRET", "short");
+        assert!(
+            verp_return_path_for(&email).is_none(),
+            "a too-short secret must disable VERP"
+        );
+
+        std::env::set_var("VERP_HMAC_SECRET", "test-secret-test-secret-test-secret");
         std::env::set_var("VERP_DOMAIN", "");
         assert!(verp_return_path_for(&email).is_none(), "disabled via env");
+
         std::env::remove_var("VERP_DOMAIN");
+        std::env::remove_var("VERP_HMAC_SECRET");
     }
 
     // ── Dedicated route metadata (worker → relay MTA contract) ────────────
@@ -2284,6 +2424,7 @@ mod tests {
             headers,
             attachments: vec![],
             dkim: None,
+            verp: None,
         }
     }
 

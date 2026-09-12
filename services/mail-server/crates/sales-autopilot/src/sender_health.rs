@@ -53,7 +53,7 @@
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::types::SalesError;
@@ -404,8 +404,33 @@ fn rates_json(
 /// Persists `health_score` and `state` to `sales_sender_health` (creating the
 /// row on first assessment) and mirrors the state onto
 /// `sales_sender_identities.status` for identities in an active lifecycle.
+///
+/// The whole reassessment runs in one transaction so a caller (the outcome
+/// projector) can compose it with its own per-event applied marker.
 pub async fn assess_and_persist(
     db: &PgPool,
+    tenant_id: &str,
+    sender_identity_id: Uuid,
+    thresholds: &HealthThresholds,
+) -> Result<HealthAssessment, SalesError> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+    let assessment =
+        assess_and_persist_tx(&mut tx, tenant_id, sender_identity_id, thresholds).await?;
+    tx.commit()
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+    Ok(assessment)
+}
+
+/// [`assess_and_persist`] on a caller-owned transaction. The caller decides
+/// the commit boundary — the outcome projector commits it in the same
+/// transaction as the per-event applied marker, so the marker and the
+/// aggregate move together or not at all.
+pub async fn assess_and_persist_tx(
+    tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     sender_identity_id: Uuid,
     thresholds: &HealthThresholds,
@@ -418,7 +443,7 @@ pub async fn assess_and_persist(
     )
     .bind(tenant_id)
     .bind(sender_identity_id)
-    .fetch_optional(db)
+    .fetch_optional(&mut **tx)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
@@ -469,7 +494,7 @@ pub async fn assess_and_persist(
     .bind(sender_identity_id)
     .bind(health_score)
     .bind(&state)
-    .execute(db)
+    .execute(&mut **tx)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
@@ -484,7 +509,7 @@ pub async fn assess_and_persist(
     .bind(sender_identity_id)
     .bind(tenant_id)
     .bind(identity_status_for(&state))
-    .execute(db)
+    .execute(&mut **tx)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
@@ -519,8 +544,35 @@ pub async fn assess_and_persist(
 ///
 /// If the window has expired (`window_start + window_secs <= NOW()`), the
 /// counters restart at the event so rates always describe the current window.
+///
+/// The counter update and the reassessment run in one transaction, so the
+/// event is either fully folded in or not at all.
 pub async fn record_event(
     db: &PgPool,
+    tenant_id: &str,
+    sender_identity_id: Uuid,
+    event: SenderHealthEvent,
+    thresholds: &HealthThresholds,
+) -> Result<HealthAssessment, SalesError> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+    let assessment =
+        record_event_tx(&mut tx, tenant_id, sender_identity_id, event, thresholds).await?;
+    tx.commit()
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+    Ok(assessment)
+}
+
+/// [`record_event`] on a caller-owned transaction. The outcome projector
+/// commits it in the same transaction as the per-event applied marker, so the
+/// marker and the aggregate counter move together or not at all — that is
+/// what makes "was THIS event applied?" answerable without a sender-wide
+/// watermark.
+pub async fn record_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
     sender_identity_id: Uuid,
     event: SenderHealthEvent,
@@ -536,7 +588,7 @@ pub async fn record_event(
     )
     .bind(tenant_id)
     .bind(sender_identity_id)
-    .execute(db)
+    .execute(&mut **tx)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
 
@@ -567,11 +619,11 @@ pub async fn record_event(
         .bind(unsub_inc)
         .bind(deferral_inc)
         .bind(auth_inc)
-        .execute(db)
+        .execute(&mut **tx)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
 
-    assess_and_persist(db, tenant_id, sender_identity_id, thresholds).await
+    assess_and_persist_tx(tx, tenant_id, sender_identity_id, thresholds).await
 }
 
 /// The pre-send gate: `Err(PolicyDenied)` when this sender must not send.

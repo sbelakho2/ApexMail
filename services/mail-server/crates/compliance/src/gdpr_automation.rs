@@ -12,7 +12,7 @@
 //! Consent:Upsert on (tenant_id, subscriber_id, consent_type). Marketing
 //! cascade:withdrawing marketing revokes analytics and profiling.
 
-use chrono::{Duration, TimeDelta, Utc};
+use chrono::{DateTime, Duration, Months, TimeDelta, Utc};
 use deadpool_redis::Pool as RedisPool;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -23,31 +23,53 @@ use uuid::Uuid;
 /// HMAC-SHA256 type for consent certificate signing.
 type HmacSha256 = Hmac<Sha256>;
 
-/// DDL for the DSR verification outbox — the handoff point between request
-/// intake (this module writes the raw token transactionally) and delivery
-/// (the crate's outbox flush job, `dsr_outbox_flush`, queues it as system
-/// email via `email_queue`; the delivery worker sends it). Applied by
-/// [`GdprAutomation::apply_outbox_migration`].
-pub const DSR_VERIFICATION_OUTBOX_MIGRATION: &str = r#"
-CREATE TABLE IF NOT EXISTS dsr_verification_outbox (
-    id TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    -- Raw token is required for delivery; data_subject_requests stores only
-    -- the SHA-256 hash. Rows are purged by the retention sweep once the
-    -- request window (request_expiration_days) has passed.
-    verification_token TEXT NOT NULL,
-    verify_url TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    sent_at TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS idx_dsr_outbox_pending
-    ON dsr_verification_outbox (status, created_at)
-    WHERE status = 'pending';
-"#;
+use crate::legal_archive;
+use crate::retention_classes;
+
+/// The maximum extension authorised by GDPR Art. 12(3): two further months.
+pub const MAX_EXTENSION_MONTHS: u32 = 2;
+
+/// Statutory response deadline: ONE CALENDAR MONTH from receipt (Art. 12(3)).
+///
+/// Calendar arithmetic, not a fixed number of days: 2026-01-31 must fall due
+/// on 2026-02-28, and a fixed 30x24h interval would disagree across month
+/// boundaries. The persisted `statutory_due_at` column is authoritative for a
+/// stored request; this is the computation that produced it.
+pub fn statutory_due_at(received_at: DateTime<Utc>) -> DateTime<Utc> {
+    received_at
+        .checked_add_months(Months::new(1))
+        .unwrap_or(received_at + Duration::days(30))
+}
+
+/// Extended deadline: the statutory deadline plus up to two further months.
+pub fn extended_due_at(statutory_due_at: DateTime<Utc>) -> DateTime<Utc> {
+    statutory_due_at
+        .checked_add_months(Months::new(MAX_EXTENSION_MONTHS))
+        .unwrap_or(statutory_due_at + Duration::days(60))
+}
+
+/// Validate an extension request. An extension must be JUSTIFIED (a real
+/// reason) and NOTIFIED (the timestamp at which the subject was informed);
+/// a bare "extended" flag is exactly the defect this replaces.
+pub fn validate_extension(
+    reason: &str,
+    notified_at: DateTime<Utc>,
+    received_at: DateTime<Utc>,
+) -> Result<(), String> {
+    if reason.trim().is_empty() {
+        return Err("an extension requires a recorded reason (Art. 12(3))".into());
+    }
+    if reason.trim().len() < 10 {
+        return Err("the extension reason is too short to be a justification".into());
+    }
+    if notified_at < received_at {
+        return Err("the extension notification cannot precede the request's receipt".into());
+    }
+    if notified_at > Utc::now() + Duration::minutes(5) {
+        return Err("the extension notification timestamp cannot be in the future".into());
+    }
+    Ok(())
+}
 
 /// One pending verification-token delivery in the outbox.
 #[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
@@ -79,18 +101,6 @@ impl GdprAutomation {
     }
 
     // ── Request Lifecycle ────────────────────────────────────
-
-    /// Ensure the `dsr_verification_outbox` table exists (idempotent).
-    /// Called at server startup; the compliance crate owns no numbered
-    /// migration files.
-    pub async fn apply_outbox_migration(&self) -> Result<(), String> {
-        sqlx::raw_sql(DSR_VERIFICATION_OUTBOX_MIGRATION)
-            .execute(&self.db)
-            .await
-            .map_err(|e| format!("dsr_verification_outbox migration error: {e}"))?;
-        info!("dsr_verification_outbox table ensured");
-        Ok(())
-    }
 
     /// Pending verification-token deliveries, oldest first — the queue the
     /// crate's outbox flush job (`dsr_outbox_flush`) drains into
@@ -161,11 +171,16 @@ impl GdprAutomation {
             .await
             .map_err(|e| format!("DB error: {e}"))?;
 
+        // GDPR Art. 12(3): the response clock starts at RECEIPT. The due date
+        // is persisted at intake (one calendar month), so a later config
+        // change cannot move it, and identity verification is recorded as its
+        // own event without restarting the clock.
+        let statutory_due = statutory_due_at(now);
         sqlx::query(
             "INSERT INTO data_subject_requests
                (id, tenant_id, request_type, email, verification_token_hash,
-                verified, status, requested_at, expires_at)
-             VALUES ($1,$2,$3,$4,$5,false,'pending_verification',$6,$7)",
+                verified, status, requested_at, expires_at, received_at, statutory_due_at)
+             VALUES ($1,$2,$3,$4,$5,false,'pending_verification',$6,$7,$6,$8)",
         )
         .bind(&id)
         .bind(tenant_id)
@@ -174,6 +189,7 @@ impl GdprAutomation {
         .bind(&token_hash)
         .bind(now)
         .bind(expires_at)
+        .bind(statutory_due)
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
@@ -243,6 +259,12 @@ impl GdprAutomation {
             completed_at: None,
             expires_at,
             result: None,
+            received_at: Some(now),
+            identity_verified_at: None,
+            statutory_due_at: Some(statutory_due),
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
         };
 
         info!(request_id = %request.id, %request_type, "GDPR request submitted");
@@ -278,9 +300,12 @@ impl GdprAutomation {
             return Ok(false);
         }
 
+        // `identity_verified_at` is its own clock event: verification proves
+        // who is asking, it does not restart the Art. 12(3) response period.
         let updated = sqlx::query(
             "UPDATE data_subject_requests
-             SET status = 'verified', verified = true, verified_at = NOW()
+             SET status = 'verified', verified = true, verified_at = NOW(),
+                 identity_verified_at = NOW()
              WHERE id = $1 AND status = 'pending_verification'",
         )
         .bind(request_id)
@@ -299,6 +324,73 @@ impl GdprAutomation {
 
         info!(request_id, "GDPR request verified");
         Ok(true)
+    }
+
+    /// Extend a request's statutory deadline (Art. 12(3): up to two further
+    /// months for complex requests). The extension MUST be justified and the
+    /// subject MUST have been notified: an empty reason or a missing
+    /// notification timestamp is refused, and the DB CHECK constraint
+    /// (migration 213) rejects a direct SQL extension without both.
+    pub async fn extend_request(
+        &self,
+        request_id: &str,
+        reason: &str,
+        extension_notified_at: DateTime<Utc>,
+    ) -> Result<DataSubjectRequest, String> {
+        let request = self
+            .fetch_request(request_id)
+            .await?
+            .ok_or("Request not found")?;
+        let received_at = request
+            .received_at
+            .ok_or("Request has no receipt timestamp — cannot compute the statutory clock")?;
+        validate_extension(reason, extension_notified_at, received_at)?;
+        let statutory_due = request
+            .statutory_due_at
+            .unwrap_or_else(|| statutory_due_at(received_at));
+        let extension_due = extended_due_at(statutory_due);
+
+        sqlx::query(
+            "UPDATE data_subject_requests
+                SET extension_due_at = $2, extension_reason = $3, extension_notified_at = $4
+              WHERE id = $1",
+        )
+        .bind(request_id)
+        .bind(extension_due)
+        .bind(reason.trim())
+        .bind(extension_notified_at)
+        .execute(&self.db)
+        .await
+        .map_err(|e| format!("DB error recording extension: {e}"))?;
+
+        info!(
+            request_id,
+            extension_due = %extension_due,
+            "GDPR request extended (justified and notified)"
+        );
+        self.fetch_request(request_id)
+            .await?
+            .ok_or_else(|| "Request missing after extension".into())
+    }
+
+    /// Whether an open request is past its statutory deadline (extended
+    /// deadline when an extension was recorded). Pure decision on the stored
+    /// clock — no configuration is consulted.
+    pub fn is_statutorily_overdue(request: &DataSubjectRequest, now: DateTime<Utc>) -> bool {
+        let due = request.extension_due_at.or(request.statutory_due_at);
+        match due {
+            Some(due) => {
+                now > due
+                    && !matches!(
+                        request.status,
+                        RequestStatus::Completed
+                            | RequestStatus::Rejected
+                            | RequestStatus::Expired
+                            | RequestStatus::Failed
+                    )
+            }
+            None => false,
+        }
     }
 
     /// Process a single request (called from queue worker).
@@ -401,6 +493,7 @@ impl GdprAutomation {
                             rejection_reason: None,
                             partial: None,
                             review_required: false,
+                            retained_disclosure: None,
                         });
                     }
                     RetryStatus::Failed => {
@@ -425,6 +518,7 @@ impl GdprAutomation {
                             rejection_reason: None,
                             partial: None,
                             review_required: false,
+                            retained_disclosure: None,
                         });
                     }
                 }
@@ -746,6 +840,7 @@ impl GdprAutomation {
             rejection_reason: None,
             partial: Some(partial),
             review_required: false,
+            retained_disclosure: None,
         })
     }
 
@@ -787,6 +882,14 @@ impl GdprAutomation {
         &self,
         request: &DataSubjectRequest,
     ) -> Result<DataSubjectRequestResult, String> {
+        // A statutory-retention decision (invoices) needs the retention-class
+        // registry; seed it idempotently before any store evaluates it.
+        // Without the registry the erasure must fail loudly rather than guess
+        // that a statutory record is deletable.
+        retention_classes::ensure_seeded(&self.db)
+            .await
+            .map_err(|e| format!("retention class registry unavailable: {e}"))?;
+
         let stores = erasure_stores();
         let mut results = Vec::with_capacity(stores.len());
 
@@ -816,10 +919,45 @@ impl GdprAutomation {
             summarize_erasure(&results),
             ErasureOverall::Partial | ErasureOverall::Failed
         );
-        let confirmation =
-            build_deletion_confirmation(&request.id, &request.tenant_id, &request.email, &results);
+        // Art. 17 + statutory retention: the result DISCLOSES what was kept
+        // because an independent legal obligation (Estonian accounting
+        // evidence, seven years) outranks an ordinary account erasure — with
+        // the reason and the exact date it may be deleted.
+        let retained =
+            legal_archive::disclosure_for_subject(&self.db, &request.tenant_id, &request.email)
+                .await
+                .map_err(|e| format!("DB error reading retention disclosure: {e}"))?;
+        let disclosure = if retained.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({
+                "policy": "Records with an independent statutory retention obligation \
+                           (Estonian accounting evidence, seven years) are not deleted by an \
+                           ordinary erasure. They were redacted of the subject's data and moved \
+                           to the legally-restricted archive until the statutory expiry, after \
+                           which they are deleted.",
+                "retained": retained,
+            }))
+        };
 
-        info!(request_id = %request.id, records = total_deleted, partial, "Erasure request processed");
+        let mut confirmation =
+            build_deletion_confirmation(&request.id, &request.tenant_id, &request.email, &results);
+        if let Some(disclosure) = &disclosure {
+            if let Some(obj) = confirmation.as_object_mut() {
+                obj.insert("retained_disclosure".into(), disclosure.clone());
+                obj.insert(
+                    "confirmation".into(),
+                    serde_json::json!(
+                        "All in-scope personal data has been erased or anonymized as detailed per \
+                         store, per GDPR Article 17. Records listed under retained_disclosure are \
+                         kept under an independent statutory retention obligation and will be \
+                         deleted at the stated expiry."
+                    ),
+                );
+            }
+        }
+
+        info!(request_id = %request.id, records = total_deleted, partial, retained = retained.len(), "Erasure request processed");
         Ok(DataSubjectRequestResult {
             data: None,
             export_url: None,
@@ -830,6 +968,7 @@ impl GdprAutomation {
             rejection_reason: None,
             partial: Some(partial),
             review_required: false,
+            retained_disclosure: disclosure,
         })
     }
 
@@ -921,8 +1060,9 @@ impl GdprAutomation {
                 // actually addressed to the subject are rewritten. The
                 // financial record itself is RETAINED (statutory).
                 let email_lower = email.to_lowercase();
-                let rows: Vec<(String, Option<String>)> = match sqlx::query_as(
-                    "SELECT id::text, billing_address FROM invoices WHERE tenant_id = $1",
+                let rows: Vec<(String, Option<String>, DateTime<Utc>)> = match sqlx::query_as(
+                    "SELECT id::text, billing_address, COALESCE(issued_at, created_at) \
+                     FROM invoices WHERE tenant_id = $1",
                 )
                 .bind(tid)
                 .fetch_all(&self.db)
@@ -941,10 +1081,36 @@ impl GdprAutomation {
                         };
                     }
                 };
+
+                // The statutory accounting class grounds the retention: no
+                // registry entry, no retention decision (fail loudly). Seed
+                // the catalogue idempotently so a store-level call is
+                // self-sufficient too (the full erasure seeds once up front).
+                if let Err(e) = retention_classes::ensure_seeded(&self.db).await {
+                    return StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::Failed,
+                        rows_affected: 0,
+                        error: Some(format!("statutory retention registry unavailable: {e}")),
+                    };
+                }
+                let class = match retention_classes::statutory_accounting_class(&self.db).await {
+                    Ok(class) => class,
+                    Err(e) => {
+                        return StoreErasureResult {
+                            store: store.name(),
+                            status: StoreErasureStatus::Failed,
+                            rows_affected: 0,
+                            error: Some(format!("statutory retention registry: {e}")),
+                        };
+                    }
+                };
+
                 let marker = redact_marker(email);
+                let subject_hash = legal_archive::subject_email_hash(email);
                 let mut updated: u64 = 0;
                 let mut failure: Option<sqlx::Error> = None;
-                for (invoice_id, snapshot_raw) in rows {
+                for (invoice_id, snapshot_raw, issued_at) in rows {
                     let Some(raw) = snapshot_raw.as_deref() else {
                         continue;
                     };
@@ -965,7 +1131,7 @@ impl GdprAutomation {
                         "UPDATE invoices SET billing_address = $2, updated_at = NOW() \
                          WHERE id::text = $1",
                     )
-                    .bind(invoice_id)
+                    .bind(&invoice_id)
                     .bind(snapshot.to_string())
                     .execute(&self.db)
                     .await
@@ -975,6 +1141,37 @@ impl GdprAutomation {
                             failure = Some(e);
                             break;
                         }
+                    }
+
+                    // product-active → legally-restricted archive: the record
+                    // survives, its subject data is redacted, and the archive
+                    // row records why and until when.
+                    let expiry = class.expiry_for(issued_at);
+                    let disclosure = serde_json::json!({
+                        "source_table": "invoices",
+                        "record_id": invoice_id,
+                        "retention_class_id": class.id,
+                        "legal_reference": class.legal_basis_reference,
+                        "reason": "Statutory accounting retention (EE, seven years): the \
+                                   invoice is retained as accounting evidence after the \
+                                   subject's erasure; the subject's PII was redacted.",
+                        "retain_until": expiry.to_rfc3339(),
+                    });
+                    let input = legal_archive::ArchiveRecordInput {
+                        tenant_id: tid.clone(),
+                        subject_email_hash: subject_hash.clone(),
+                        source_table: "invoices".into(),
+                        source_record_id: invoice_id.clone(),
+                        retention_class_id: class.id.clone(),
+                        reason: "Statutory accounting retention (EE, seven years) — Art. 17(3)(b) \
+                                 legal obligation"
+                            .into(),
+                        statutory_expiry_at: expiry,
+                        disclosure,
+                    };
+                    if let Err(e) = legal_archive::archive_record(&self.db, &input).await {
+                        failure = Some(sqlx::Error::Protocol(e));
+                        break;
                     }
                 }
                 if let Some(e) = failure {
@@ -1245,6 +1442,7 @@ impl GdprAutomation {
             rejection_reason: None,
             partial: None,
             review_required: true,
+            retained_disclosure: None,
         })
     }
 
@@ -1278,6 +1476,7 @@ impl GdprAutomation {
             rejection_reason: None,
             partial: None,
             review_required: false,
+            retained_disclosure: None,
         })
     }
 
@@ -1325,6 +1524,7 @@ impl GdprAutomation {
             rejection_reason: None,
             partial: None,
             review_required: false,
+            retained_disclosure: None,
         })
     }
 
@@ -1883,7 +2083,9 @@ impl GdprAutomation {
         let row: Option<RequestRow> = sqlx::query_as(
             "SELECT id, tenant_id, request_type, email, verification_token_hash,
                     verified, verified_at, status, requested_at, processed_at,
-                    completed_at, expires_at, result
+                    completed_at, expires_at, result, received_at, identity_verified_at,
+                    statutory_due_at, extension_due_at, extension_reason,
+                    extension_notified_at
              FROM data_subject_requests WHERE id = $1",
         )
         .bind(request_id)
@@ -2646,6 +2848,12 @@ struct RequestRow {
     completed_at: Option<chrono::DateTime<Utc>>,
     expires_at: chrono::DateTime<Utc>,
     result: Option<serde_json::Value>,
+    received_at: Option<chrono::DateTime<Utc>>,
+    identity_verified_at: Option<chrono::DateTime<Utc>>,
+    statutory_due_at: Option<chrono::DateTime<Utc>>,
+    extension_due_at: Option<chrono::DateTime<Utc>>,
+    extension_reason: Option<String>,
+    extension_notified_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl RequestRow {
@@ -2688,6 +2896,12 @@ impl RequestRow {
             completed_at: self.completed_at,
             expires_at: self.expires_at,
             result: self.result,
+            received_at: self.received_at,
+            identity_verified_at: self.identity_verified_at,
+            statutory_due_at: self.statutory_due_at,
+            extension_due_at: self.extension_due_at,
+            extension_reason: self.extension_reason,
+            extension_notified_at: self.extension_notified_at,
         })
     }
 }
@@ -2824,6 +3038,12 @@ mod tests {
             completed_at: None,
             expires_at: now,
             result: None,
+            received_at: Some(now),
+            identity_verified_at: None,
+            statutory_due_at: Some(now),
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
         };
         let req = row.into_request().unwrap();
         assert_eq!(req.request_type, DataSubjectRequestType::Erasure);
@@ -2848,6 +3068,12 @@ mod tests {
             completed_at: None,
             expires_at: now,
             result: None,
+            received_at: Some(now),
+            identity_verified_at: None,
+            statutory_due_at: Some(now),
+            extension_due_at: None,
+            extension_reason: None,
+            extension_notified_at: None,
         };
         assert!(row.into_request().is_err());
     }
@@ -2927,6 +3153,12 @@ mod tests {
                 completed_at: None,
                 expires_at: now,
                 result: None,
+                received_at: Some(now),
+                identity_verified_at: None,
+                statutory_due_at: Some(now),
+                extension_due_at: None,
+                extension_reason: None,
+                extension_notified_at: None,
             };
             assert!(
                 row.into_request().is_ok(),
@@ -3002,6 +3234,12 @@ mod tests {
                 completed_at: None,
                 expires_at: now,
                 result: None,
+                received_at: Some(now),
+                identity_verified_at: None,
+                statutory_due_at: Some(now),
+                extension_due_at: None,
+                extension_reason: None,
+                extension_notified_at: None,
             };
             assert!(row.into_request().is_ok(), "Failed to parse status: {}", s);
         }

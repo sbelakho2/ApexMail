@@ -26,6 +26,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::actions::ActionQueue;
+use crate::control_read;
 use crate::enrollments;
 use crate::routes::AppState;
 use crate::types::{AutonomyMode, EnrollmentState, SalesError};
@@ -74,100 +75,15 @@ pub async fn overview(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let tenant = tenant_of(&headers)?;
-    let autonomy = crate::autonomy::load(&state.db, &tenant).await?;
-    let queue = queue_for(&state, "control-read");
-
-    let actions = queue.stats(&tenant).await?;
-
-    let enrollments_by_state: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT state, COUNT(*)::bigint FROM sales_enrollments \
-         WHERE tenant_id = $1 GROUP BY state ORDER BY state",
-    )
-    .bind(&tenant)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    let decisions_24h: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM sales_decisions \
-         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '24 hours'",
-    )
-    .bind(&tenant)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    let blocked_24h: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM sales_decisions \
-         WHERE tenant_id = $1 AND blocked AND created_at >= NOW() - INTERVAL '24 hours'",
-    )
-    .bind(&tenant)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    // Revenue is the objective. Activities (sends) are context, not the goal.
-    let revenue: Vec<(String, f64)> = sqlx::query_as(
-        "SELECT outcome, COALESCE(SUM(value_eur), 0)::float8 FROM sales_outcomes \
-         WHERE tenant_id = $1 AND occurred_at >= NOW() - INTERVAL '30 days' \
-           AND outcome IN ('paid_subscription', 'retained_mrr', 'trial') \
-         GROUP BY outcome",
-    )
-    .bind(&tenant)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    let meetings_booked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM sales_meetings \
-         WHERE tenant_id = $1 AND created_at >= NOW() - INTERVAL '30 days'",
-    )
-    .bind(&tenant)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    Ok(Json(serde_json::json!({
-        "autonomy": {
-            "mode": autonomy.mode.as_str(),
-            "modeDescription": mode_description(autonomy.mode),
-            "killSwitch": autonomy.kill_switch,
-            "runsBrain": autonomy.mode.runs_brain(),
-            "mayExecute": autonomy.permits_execution(),
-            "lastAction": autonomy.last_action,
-            "lastActionAt": autonomy.last_action_at.map(|t| t.to_rfc3339()),
-        },
-        "actions": actions,
-        "enrollments": enrollments_by_state
-            .into_iter()
-            .map(|(state, count)| serde_json::json!({ "state": state, "count": count }))
-            .collect::<Vec<_>>(),
-        "decisions": {
-            "last24h": decisions_24h,
-            "blockedLast24h": blocked_24h,
-        },
-        "outcomes30d": {
-            "meetingsBooked": meetings_booked,
-            "revenueEur": revenue
-                .into_iter()
-                .map(|(outcome, sum)| serde_json::json!({ "outcome": outcome, "eur": sum }))
-                .collect::<Vec<_>>(),
-        },
-    })))
+    let snapshot = control_read::load_overview(&state.db, &tenant).await?;
+    Ok(Json(control_json(snapshot)?))
 }
 
-fn mode_description(mode: AutonomyMode) -> &'static str {
-    match mode {
-        AutonomyMode::Disabled => "The engine does nothing: no thinking, no generation, no sending.",
-        AutonomyMode::Shadow => {
-            "The engine runs the whole brain and records what it would have done, but sends nothing."
-        }
-        AutonomyMode::Assisted => "The engine plans and drafts; an operator sends.",
-        AutonomyMode::ApprovalRequired => "The engine executes only decisions an operator approved.",
-        AutonomyMode::AutonomousGuarded => {
-            "The engine executes automatically when every policy and confidence constraint passes."
-        }
-    }
+/// Serialize a typed control snapshot into the response JSON. Serialization
+/// of these plain structs cannot realistically fail, but a failure must
+/// surface as an error rather than an empty payload.
+fn control_json<T: serde::Serialize>(snapshot: T) -> Result<serde_json::Value, SalesError> {
+    serde_json::to_value(snapshot).map_err(|error| SalesError::Internal(error.into()))
 }
 
 /// `GET /control/decisions` — what did it decide, and why?
@@ -180,25 +96,10 @@ pub async fn decisions(
     let limit = paging.limit.clamp(1, 200);
     let offset = paging.offset.max(0);
 
-    let rows: Vec<DecisionRow> = sqlx::query_as(
-        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
-                confidence::float8, score_total::float8, selected_offer, selected_sequence, \
-                selected_variant, selected_sender, evidence_ids::text[] AS evidence_ids, \
-                policy_id, model_version, autonomy_mode, rationale, blocked, block_reasons, \
-                execute_after, created_at \
-         FROM sales_decisions \
-         WHERE tenant_id = $1 \
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(&tenant)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    let rows = control_read::load_decisions(&state.db, &tenant, limit, offset).await?;
 
     Ok(Json(serde_json::json!({
-        "decisions": rows.into_iter().map(DecisionRow::into_json).collect::<Vec<_>>(),
+        "decisions": rows,
         "limit": limit,
         "offset": offset,
     })))
@@ -221,58 +122,18 @@ pub async fn exceptions(
     let limit = paging.limit.clamp(1, 200);
     let offset = paging.offset.max(0);
 
-    let rows = exception_decisions(&state.db, &tenant, limit, offset).await?;
+    let rows = control_read::load_exceptions(&state.db, &tenant, limit, offset).await?;
 
     // Dead letters are the other class of thing a human must see: work the
     // engine could not complete on its own.
-    let dead_letters: Vec<ActionRow> = sqlx::query_as(
-        "SELECT id, action_type, entity_type, entity_id, state, attempt, max_attempts, \
-                last_error, due_at, lease_expires_at, created_at \
-         FROM sales_actions \
-         WHERE tenant_id = $1 AND state = 'dead_letter' \
-         ORDER BY created_at DESC LIMIT 100",
-    )
-    .bind(&tenant)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    let dead_letters = control_read::load_dead_letters(&state.db, &tenant, 100).await?;
 
     Ok(Json(serde_json::json!({
-        "exceptions": rows.into_iter().map(DecisionRow::into_json).collect::<Vec<_>>(),
-        "deadLetters": dead_letters.into_iter().map(ActionRow::into_json).collect::<Vec<_>>(),
+        "exceptions": rows,
+        "deadLetters": dead_letters,
         "limit": limit,
         "offset": offset,
     })))
-}
-
-/// Decisions that qualify as exceptions: refused by a hard gate, waiting for
-/// approval, or with a review that was never decided.
-///
-/// Extracted from the handler so the predicate is testable against a real
-/// database without HTTP plumbing.
-async fn exception_decisions(
-    db: &PgPool,
-    tenant: &str,
-    limit: i64,
-    offset: i64,
-) -> Result<Vec<DecisionRow>, SalesError> {
-    sqlx::query_as(
-        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
-                confidence::float8, score_total::float8, selected_offer, selected_sequence, \
-                selected_variant, selected_sender, evidence_ids::text[] AS evidence_ids, \
-                policy_id, model_version, autonomy_mode, rationale, blocked, block_reasons, \
-                execute_after, created_at \
-         FROM sales_decisions \
-         WHERE tenant_id = $1 \
-           AND (enforcement IN ('denied', 'await_approval') OR review_status = 'pending') \
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(tenant)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))
 }
 
 /// `GET /control/actions` — the durable queue's visible state.
@@ -282,111 +143,15 @@ pub async fn actions(
     Query(paging): Query<PagingQuery>,
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let tenant = tenant_of(&headers)?;
-    let queue = queue_for(&state, "control-read");
-    let stats = queue.stats(&tenant).await?;
+    let stats = control_read::load_action_stats(&state.db, &tenant).await?;
     let limit = paging.limit.clamp(1, 200);
 
-    let rows: Vec<ActionRow> = sqlx::query_as(
-        "SELECT id, action_type, entity_type, entity_id, state, attempt, max_attempts, \
-                last_error, due_at, lease_expires_at, created_at \
-         FROM sales_actions \
-         WHERE tenant_id = $1 AND state <> 'succeeded' \
-         ORDER BY due_at ASC LIMIT $2",
-    )
-    .bind(&tenant)
-    .bind(limit)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    let rows = control_read::load_actions(&state.db, &tenant, limit).await?;
 
     Ok(Json(serde_json::json!({
         "stats": stats,
-        "actions": rows.into_iter().map(ActionRow::into_json).collect::<Vec<_>>(),
+        "actions": rows,
     })))
-}
-
-#[derive(sqlx::FromRow)]
-struct DecisionRow {
-    id: Uuid,
-    account_id: Option<Uuid>,
-    contact_id: Option<Uuid>,
-    action: String,
-    expected_value_eur: f64,
-    confidence: f64,
-    score_total: f64,
-    selected_offer: Option<String>,
-    selected_sequence: Option<String>,
-    selected_variant: Option<String>,
-    selected_sender: Option<String>,
-    evidence_ids: Vec<String>,
-    policy_id: Option<String>,
-    model_version: Option<String>,
-    autonomy_mode: String,
-    rationale: String,
-    blocked: bool,
-    block_reasons: serde_json::Value,
-    execute_after: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl DecisionRow {
-    fn into_json(self) -> serde_json::Value {
-        serde_json::json!({
-            "id": self.id,
-            "accountId": self.account_id,
-            "contactId": self.contact_id,
-            "action": self.action,
-            "expectedValueEur": self.expected_value_eur,
-            "confidence": self.confidence,
-            "scoreTotal": self.score_total,
-            "selectedOffer": self.selected_offer,
-            "selectedSequence": self.selected_sequence,
-            "selectedVariant": self.selected_variant,
-            "selectedSender": self.selected_sender,
-            "evidenceIds": self.evidence_ids,
-            "policyId": self.policy_id,
-            "modelVersion": self.model_version,
-            "autonomyMode": self.autonomy_mode,
-            "rationale": self.rationale,
-            "blocked": self.blocked,
-            "blockReasons": self.block_reasons,
-            "executeAfter": self.execute_after.map(|t| t.to_rfc3339()),
-            "createdAt": self.created_at.to_rfc3339(),
-        })
-    }
-}
-
-#[derive(sqlx::FromRow)]
-struct ActionRow {
-    id: Uuid,
-    action_type: String,
-    entity_type: String,
-    entity_id: Uuid,
-    state: String,
-    attempt: i32,
-    max_attempts: i32,
-    last_error: Option<String>,
-    due_at: chrono::DateTime<chrono::Utc>,
-    lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl ActionRow {
-    fn into_json(self) -> serde_json::Value {
-        serde_json::json!({
-            "id": self.id,
-            "actionType": self.action_type,
-            "entityType": self.entity_type,
-            "entityId": self.entity_id,
-            "state": self.state,
-            "attempt": self.attempt,
-            "maxAttempts": self.max_attempts,
-            "lastError": self.last_error,
-            "dueAt": self.due_at.to_rfc3339(),
-            "leaseExpiresAt": self.lease_expires_at.map(|t| t.to_rfc3339()),
-            "createdAt": self.created_at.to_rfc3339(),
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,16 +942,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_description_is_specific_for_every_mode() {
-        for mode in AutonomyMode::all() {
-            let text = mode_description(mode);
-            assert!(!text.is_empty(), "mode {mode} needs a description");
-        }
-        // Shadow must be described in a way that makes clear the brain runs.
-        assert!(mode_description(AutonomyMode::Shadow).contains("whole brain"));
-    }
-
-    #[test]
     fn invalid_uuid_is_rejected_with_the_field_named() {
         let err = parse_uuid("not-a-uuid", "decision id").unwrap_err();
         assert!(err.to_string().contains("decision id"));
@@ -1853,7 +1608,7 @@ mod tests {
         )
         .await;
 
-        let rows = exception_decisions(&pool, &tenant, 50, 0)
+        let rows = control_read::load_exceptions(&pool, &tenant, 50, 0)
             .await
             .expect("exceptions query");
         let ids: Vec<Uuid> = rows.into_iter().map(|row| row.id).collect();

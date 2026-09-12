@@ -7,6 +7,7 @@ pub mod crypto;
 pub mod dkim;
 pub mod email_headers;
 pub mod error_codes;
+pub mod heartbeat;
 pub mod http_client;
 pub mod http_error;
 pub mod id;
@@ -17,6 +18,7 @@ pub mod secret_at_rest;
 pub mod time;
 pub mod transport;
 pub mod validation;
+pub mod verp;
 
 pub use crypto::{
     create_hmac_signature, detect_api_key_hash_version, hash_api_key, hash_api_key_argon2,

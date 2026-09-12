@@ -30,6 +30,7 @@ use crate::error::ApiError;
 use crate::ip_provider::{non_occupying_status_list_sql, IpProviderError};
 use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
+use billing_entitlements::FeatureKey;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -146,6 +147,12 @@ async fn allocate_ip(
     body: Option<Json<AllocateIpRequest>>,
 ) -> Result<(StatusCode, Json<DedicatedIpResponse>), ApiError> {
     require_scopes(&auth, &["dedicated_ips:write"])?;
+
+    // Entitlement gate: dedicated IPs are a plan capability (403 Forbidden
+    // without `dedicated_ip`). `dedicated_ip_count` is NOT a hard limit — it
+    // is a billing inclusion count (extras are charged) — so it is not used
+    // as a capacity gate here.
+    crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DedicatedIp).await?;
 
     let region = body.and_then(|b| b.0.region);
 

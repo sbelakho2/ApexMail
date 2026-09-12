@@ -4,7 +4,6 @@
 //! managing VAT rate lookups for EU member states, and providing the core
 //! data structures used by the e-MTA filing client.
 
-use billing_common::vat_rates;
 use chrono::{DateTime, Datelike, LocalResult, NaiveDate, TimeZone, Utc};
 use chrono_tz::Europe::Tallinn;
 use serde::{Deserialize, Serialize};
@@ -18,13 +17,27 @@ pub const KMD_PERIOD_TIMEZONE: &str = "Europe/Tallinn";
 /// Fix B — KMD (Estonian VAT) returns may only aggregate EUR invoices.
 /// Every invoice-selection query in this module applies this filter;
 /// non-EUR invoices are reported in `excluded_other_currency` instead.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const EUR_INVOICE_FILTER: &str = "UPPER(currency) = 'EUR'";
 
-/// Filed KMD returns count only COLLECTED output VAT: `paid` invoices.
-/// The previous `('paid', 'pending')` filter booked uncollected overage and
-/// dunning invoices as remitted VAT — a filed return must not include
-/// output VAT that was never collected.
-pub(crate) const PAID_INVOICE_FILTER: &str = "status = 'paid'";
+/// KMD no longer aggregates `invoices` at all.
+///
+/// The previous `PAID_INVOICE_FILTER = "status = 'paid'"` used invoice status
+/// as the taxable event. That is not a generally correct VAT model: the
+/// default rule recognises output VAT when the supply is made, and even the
+/// Estonian special cash-accounting scheme has additional timing rules (an
+/// unpaid supply becomes taxable on the first day of the third calendar
+/// month following supply). Output VAT is now recognised in
+/// `vat_recognition_entries` (migration 218, materialized by
+/// [`crate::vat_recognition`]) and this module consumes that ledger.
+///
+/// The constants below exist so tests can assert the ledger — not invoice
+/// status — is the source.
+#[allow(unused_imports)]
+pub(crate) use crate::vat_recognition::{
+    KMD_RECOGNITION_EXCLUDED_SQL, KMD_RECOGNITION_RATES_SQL, KMD_RECOGNITION_TOTALS_SQL,
+    RECOGNITION_TABLE,
+};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -277,71 +290,28 @@ pub(crate) fn is_eur_currency(currency: &str) -> bool {
     currency.trim().eq_ignore_ascii_case("EUR")
 }
 
-/// Resolve the KMD bucket (rate + reason) for one invoice aggregate.
-///
-/// Fix I4 — when the invoice row carries the rate/country captured at
-/// creation (migration 101), those values win over the tenant's *current*
-/// billing address, so an invoice charged 24 % EE VAT stays in the EE bucket
-/// even if the address is later re-filed under a VAT-number-bearing country.
-/// Rows created before migration 101 (NULL stored values) fall back to the
-/// legacy current-address derivation.
-/// TODO(vat-history): backfill billing_country/vat_rate for pre-101 invoices.
-pub(crate) fn effective_vat_bucket(
-    stored_country: Option<&str>,
-    stored_rate: Option<f64>,
-    current_country: Option<&str>,
-    has_vat_number: bool,
-) -> (f64, Option<&'static str>) {
-    if let Some(rate) = stored_rate {
-        let country = stored_country
-            .or(current_country)
-            .unwrap_or("EE")
-            .to_uppercase();
-        let is_eu = vat_rates::is_eu_country(&country);
-        let reason = if country == "EE" {
-            None
-        } else if is_eu && rate == 0.0 {
-            Some("reverse_charge")
-        } else if is_eu {
-            Some("eu_b2c")
-        } else {
-            Some("non_eu")
-        };
-        return (rate, reason);
-    }
-
-    // Legacy path: derive from the current billing address.
-    let country = current_country
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("EE")
-        .to_uppercase();
-    let is_eu = vat_rates::is_eu_country(&country);
-
-    if country == "EE" {
-        return (vat_rates::ESTONIA_VAT_RATE, None);
-    }
-    if is_eu && has_vat_number {
-        return (0.0, Some("reverse_charge"));
-    }
-    if is_eu {
-        return (
-            vat_rates::get_eu_vat_rate(&country).unwrap_or(0.0),
-            Some("eu_b2c"),
-        );
-    }
-    (0.0, Some("non_eu"))
+/// Format (and validate) the KMD recognition-period key for a filing month.
+/// The ledger stores `recognition_period` as `YYYY-MM` in Europe/Tallinn;
+/// the calendar bounds are validated with the same Tallinn conversion the
+/// filing period uses.
+pub(crate) fn kmd_period_key(tax_year: i32, tax_month: u32) -> Result<String, String> {
+    let _ = kmd_period_bounds_utc(tax_year, tax_month)?;
+    Ok(format!("{tax_year:04}-{tax_month:02}"))
 }
 
-/// Generate a KMD VAT return for the given year/month by aggregating invoice
-/// data from the database.
+/// Generate a KMD VAT return for the given year/month by aggregating the
+/// VAT recognition ledger (`vat_recognition_entries`).
 ///
-/// Fix B — only EUR invoices feed the Estonian VAT return; non-EUR invoices
+/// The ledger recognises output VAT at the taxable event under each
+/// tenant's accounting basis: the general scheme on supply, and the
+/// explicitly-authorised cash-accounting scheme on payment or on the first
+/// day of the third calendar month following supply, whichever is earlier.
+/// Invoice status (`paid`/`pending`/`draft`) is never consulted — it was the
+/// wrong abstraction (see the module-level note on `PAID_INVOICE_FILTER`).
+///
+/// Fix B — only EUR entries feed the Estonian VAT return; non-EUR entries
 /// are aggregated into `excluded_other_currency` so they stay visible to
 /// finance without corrupting the EUR figures.
-///
-/// Only `paid` invoices are counted: a filed VAT return must not include
-/// output VAT that was never collected (the previous `('paid', 'pending')`
-/// filter booked uncollected overage/dunning invoices as VAT liability).
 ///
 /// Concurrency: generation is serialized per (year, month) with a
 /// `pg_advisory_xact_lock` and backed by the
@@ -352,7 +322,7 @@ pub async fn generate_kmd_return(
     tax_year: i32,
     tax_month: u32,
 ) -> Result<VatKmdResult, String> {
-    let (period_start, period_end) = kmd_period_bounds_utc(tax_year, tax_month)?;
+    let period_key = kmd_period_key(tax_year, tax_month)?;
 
     // Serialize per period: the fetch-aggregate-insert sequence below is
     // otherwise a check-then-insert race across maintenance replicas.
@@ -366,141 +336,37 @@ pub async fn generate_kmd_return(
         .await
         .map_err(|e| format!("Failed to acquire KMD generation lock: {e}"))?;
 
-    // Query invoice totals for the period (EUR only — Fix B; paid only —
-    // filed returns must not include uncollected output VAT).
-    let totals: (i64, i64, i64, i64) = sqlx::query_as(&format!(
-        r#"
-        SELECT
-            COUNT(*)::bigint,
-            COUNT(DISTINCT tenant_id)::bigint,
-            COALESCE(SUM(subtotal), 0)::bigint,
-            COALESCE(SUM(vat_total), 0)::bigint
-        FROM invoices
-        WHERE issued_at >= $1
-          AND issued_at < $2
-          AND {PAID_INVOICE_FILTER}
-          AND {EUR_INVOICE_FILTER}
-        "#
-    ))
-    .bind(period_start)
-    .bind(period_end)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to query invoice totals: {e}"))?
-    .unwrap_or((0, 0, 0, 0));
+    // Totals from the recognition ledger for the filing period (EUR only).
+    let totals: (i64, i64, i64, i64) = sqlx::query_as(KMD_RECOGNITION_TOTALS_SQL)
+        .bind(&period_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to query recognition totals: {e}"))?
+        .unwrap_or((0, 0, 0, 0));
 
     let (invoice_count, tenant_count, total_taxable_cents, total_vat_cents) = totals;
 
-    // Non-EUR invoices excluded from the EUR return, grouped per currency.
-    let excluded_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(&format!(
-        r#"
-        SELECT
-            UPPER(currency) AS currency,
-            COUNT(*)::bigint,
-            COALESCE(SUM(subtotal), 0)::bigint,
-            COALESCE(SUM(vat_total), 0)::bigint
-        FROM invoices
-        WHERE issued_at >= $1
-          AND issued_at < $2
-          AND {PAID_INVOICE_FILTER}
-          AND NOT ({EUR_INVOICE_FILTER})
-        GROUP BY UPPER(currency)
-        ORDER BY currency
-        "#
-    ))
-    .bind(period_start)
-    .bind(period_end)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to query excluded-currency invoices: {e}"))?;
+    // Non-EUR recognition entries excluded from the EUR return, per currency.
+    let excluded_rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(KMD_RECOGNITION_EXCLUDED_SQL)
+        .bind(&period_key)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to query excluded-currency recognition entries: {e}"))?;
 
-    let excluded_other_currency: Vec<ExcludedCurrencyBucket> = excluded_rows
-        .into_iter()
-        .map(|(currency, count, taxable, vat)| ExcludedCurrencyBucket {
-            currency,
-            invoice_count: count,
-            taxable_amount_cents: taxable,
-            vat_amount_cents: vat,
-        })
-        .collect();
+    let excluded_other_currency =
+        crate::vat_recognition::excluded_from_recognition_rows(&excluded_rows);
 
-    // Query rate breakdown. Fix I4 — prefer the country + VAT rate captured
-    // on the invoice row at creation; fall back to the current billing
-    // address only for pre-migration-101 rows (both stored values NULL).
-    // Local alias for the rate-breakdown row shape (clippy::type_complexity).
-    type RateRow = (i64, i64, Option<String>, Option<f64>, Option<bool>, i64);
-    let rate_rows: Vec<RateRow> = sqlx::query_as(
-        r#"
-        SELECT
-            COALESCE(SUM(i.subtotal), 0)::bigint,
-            COALESCE(SUM(i.vat_total), 0)::bigint,
-            COALESCE(i.billing_country, ba.country, 'EE') AS country,
-            i.vat_rate AS stored_vat_rate,
-            (ba.vat_number IS NOT NULL AND ba.vat_number <> '') AS has_vat_number,
-            COUNT(DISTINCT i.id)::bigint AS invoice_count
-        FROM invoices i
-        -- LATERAL picks exactly ONE address row per tenant (newest first):
-        -- a plain LEFT JOIN fans out when a tenant ever had two billing
-        -- addresses, counting each invoice once per row and overstating the
-        -- per-rate buckets relative to the header totals. Migration 116
-        -- added UNIQUE(tenant_id) for the future; this also holds for
-        -- historical multi-row databases.
-        LEFT JOIN LATERAL (
-            SELECT country, vat_number
-            FROM billing_addresses ba
-            WHERE ba.tenant_id = i.tenant_id
-            ORDER BY ba.updated_at DESC, ba.created_at DESC, ba.id
-            LIMIT 1
-        ) ba ON true
-        WHERE i.issued_at >= $1
-          AND i.issued_at < $2
-          AND {PAID_INVOICE_FILTER}
-          AND UPPER(i.currency) = 'EUR'
-        GROUP BY COALESCE(i.billing_country, ba.country, 'EE'), i.vat_rate,
-                 (ba.vat_number IS NOT NULL AND ba.vat_number <> '')
-        "#,
-    )
-    .bind(period_start)
-    .bind(period_end)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to query rate breakdown: {e}"))?;
+    // Rate breakdown straight from the ledger: stored rate and reason win,
+    // so re-filing an old period can never re-derive a bucket from the
+    // tenant's current (mutable) address.
+    let rate_rows: Vec<(f64, Option<String>, i64, i64, i64)> =
+        sqlx::query_as(KMD_RECOGNITION_RATES_SQL)
+            .bind(&period_key)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to query recognition rate breakdown: {e}"))?;
 
-    let mut rates: Vec<VatRateBucket> = Vec::new();
-    for (taxable, vat, country, stored_rate, has_vat_number, invoice_count) in &rate_rows {
-        // When a stored rate exists it wins over the current-address
-        // derivation; `has_vat_number` only matters for legacy rows.
-        let (vat_rate, reason) = effective_vat_bucket(
-            country.as_deref().filter(|_| stored_rate.is_some()),
-            *stored_rate,
-            country.as_deref(),
-            has_vat_number.unwrap_or(false),
-        );
-
-        // Merge with existing bucket for the same rate+reason
-        if let Some(bucket) = rates
-            .iter_mut()
-            .find(|b: &&mut VatRateBucket| b.rate == vat_rate && b.reason.as_deref() == reason)
-        {
-            bucket.taxable_amount_cents += taxable;
-            bucket.vat_amount_cents += vat;
-            // Counts INVOICES (COUNT(DISTINCT i.id) per group), not grouped
-            // rows — several countries can share one rate bucket.
-            bucket.invoice_count += invoice_count;
-        } else {
-            rates.push(VatRateBucket {
-                rate: vat_rate,
-                taxable_amount_cents: *taxable,
-                vat_amount_cents: *vat,
-                reason: reason.map(|s| s.to_string()),
-                // Fix F7 — initialize consistently with the merge branch:
-                // start at 0 and add the group's OWN invoice count. The
-                // previous hardcoded `1` overstated single-invoice groups
-                // (and multi-row groups) whenever the count itself wasn't 1.
-                invoice_count: *invoice_count,
-            });
-        }
-    }
+    let rates = crate::vat_recognition::buckets_from_recognition_rows(&rate_rows);
 
     // Insert the KMD return into the database
     let now = Utc::now();
@@ -607,6 +473,7 @@ fn tallinn_midnight_to_utc(date: NaiveDate) -> Result<DateTime<Utc>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use billing_common::vat_rates;
     use chrono::{Datelike, Timelike};
 
     #[test]
@@ -785,15 +652,33 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Filed returns count only collected output VAT — `pending` (dunning)
-    // and `draft` invoices must stay out of the KMD aggregate.
+    // Tax-truth P0: KMD derives from the recognition ledger, never from
+    // invoice status. `status = 'paid'` was the wrong taxable-event model.
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_kmd_invoice_queries_count_only_paid() {
-        assert_eq!(PAID_INVOICE_FILTER, "status = 'paid'");
-        assert!(!PAID_INVOICE_FILTER.contains("pending"));
-        assert!(!PAID_INVOICE_FILTER.contains("draft"));
+    fn test_kmd_invoice_queries_count_recognized_entries_not_paid_status() {
+        for sql in [
+            KMD_RECOGNITION_TOTALS_SQL,
+            KMD_RECOGNITION_EXCLUDED_SQL,
+            KMD_RECOGNITION_RATES_SQL,
+        ] {
+            assert!(
+                sql.contains(RECOGNITION_TABLE),
+                "KMD must aggregate the recognition ledger"
+            );
+            assert!(
+                !sql.contains("status = 'paid'") && !sql.contains("FROM invoices"),
+                "invoice status must not drive VAT recognition"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kmd_period_key_formats_and_validates() {
+        assert_eq!(kmd_period_key(2026, 1).unwrap(), "2026-01");
+        assert_eq!(kmd_period_key(2026, 12).unwrap(), "2026-12");
+        assert!(kmd_period_key(2026, 13).is_err());
     }
 
     #[test]
@@ -826,44 +711,12 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fix I4 — buckets derive from the invoice's own charged rate/country.
+    // Fix I4 was replaced by ledger-side classification: each recognition
+    // entry stores the rate/reason that was actually recognized, so a
+    // re-filed period can never re-derive a bucket from the tenant's
+    // current (mutable) address. The mapping is tested in
+    // `crate::vat_recognition` and the SQL shape above.
     // ------------------------------------------------------------------
-
-    #[test]
-    fn test_invoice_charged_ee_24_stays_in_ee_bucket_after_address_change() {
-        // Invoice charged 24 % EE VAT; the tenant later files a VAT-number
-        // bearing DE address. The KMD bucket must stay EE/24 %, not flip to
-        // reverse charge.
-        let (rate, reason) = effective_vat_bucket(Some("EE"), Some(24.0), Some("DE"), true);
-        assert_eq!(rate, 24.0);
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn test_stored_rate_zero_keeps_reverse_charge_bucket() {
-        let (rate, reason) = effective_vat_bucket(Some("DE"), Some(0.0), Some("DE"), true);
-        assert_eq!(rate, 0.0);
-        assert_eq!(reason, Some("reverse_charge"));
-    }
-
-    #[test]
-    fn test_stored_eu_b2c_rate_uses_eu_b2c_reason() {
-        let (rate, reason) = effective_vat_bucket(Some("FR"), Some(20.0), Some("FR"), false);
-        assert_eq!(rate, 20.0);
-        assert_eq!(reason, Some("eu_b2c"));
-    }
-
-    #[test]
-    fn test_missing_stored_values_fall_back_to_current_address() {
-        // Pre-migration rows: NULL stored rate/country — old behaviour.
-        let (rate, reason) = effective_vat_bucket(None, None, Some("DE"), true);
-        assert_eq!(rate, 0.0);
-        assert_eq!(reason, Some("reverse_charge"));
-
-        let (rate, reason) = effective_vat_bucket(None, None, None, false);
-        assert_eq!(rate, vat_rates::ESTONIA_VAT_RATE);
-        assert_eq!(reason, None);
-    }
 
     // ------------------------------------------------------------------
     // Fix I14 — due date is 23:59:59 Europe/Tallinn, not UTC.

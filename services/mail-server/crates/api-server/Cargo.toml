@@ -68,6 +68,7 @@ email-grader = { path = "../email-grader" }
 threat-intel = { path = "../threat-intel" }
 billing-service = { path = "../billing-service" }
 billing-common = { path = "../billing-common" }
+billing-entitlements = { path = "../billing-entitlements" }
 ui-foundation = { path = "../ui-foundation" }
 mail-common = { path = "../mail-common" }
 ddos-protection = { path = "../ddos-protection" }
@@ -75,6 +76,10 @@ waf-engine = { path = "../waf-engine" }
 apexmail-analytics = { path = "../analytics", package = "analytics" }
 observability-service = { path = "../observability-service" }
 inbox-placement = { path = "../inbox-placement" }
+# The CP read contract: the SSR sales-autopilot page consumes the SAME typed
+# read model (`sales_autopilot::control_read`) the sales-autopilot service's
+# `/control/*` admin API serializes, instead of duplicating its SQL.
+sales-autopilot = { path = "../sales-autopilot" }
 kiwicaptcha = { path = "../../../../packages/kiwicaptcha" }
 
 [features]

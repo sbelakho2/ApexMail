@@ -8,6 +8,8 @@
 /// This module is retained for backward compatibility only. All new code should
 /// use `api_server::ip_provider::DedicatedIpProvider`.
 pub mod accounting_export;
+/// Posting hooks into the statutory accounting ledger (migration 220).
+pub mod accounting_postings;
 pub mod config;
 pub mod credit_notes;
 pub mod hetzner_ip_provider;
@@ -27,6 +29,7 @@ mod money_invariants;
 pub mod overage;
 pub mod plans;
 pub mod routes;
+pub mod send_admission;
 pub mod stripe_webhooks;
 pub mod subscriptions;
 pub mod types;
@@ -34,6 +37,7 @@ pub mod usage;
 pub mod usage_ingest;
 pub mod vat_emta;
 pub mod vat_kmd;
+pub mod vat_recognition;
 
 use std::sync::Arc;
 

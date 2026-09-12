@@ -136,6 +136,23 @@ async fn main() -> anyhow::Result<()> {
         "resilience layer initialised — circuit breakers (db, redis, clickhouse) and bulkheads active"
     );
 
+    // ── Process heartbeat (real liveness for the control plane) ──
+    // The control plane's system_health reads service_heartbeats and must not
+    // infer process health from queue traffic. Beats start immediately and
+    // refresh every HEARTBEAT_INTERVAL_SECS (default 30s); failures are
+    // logged and retried, never fatal.
+    let heartbeat_config =
+        apexmail_lib::heartbeat::HeartbeatConfig::new("api-server", env!("CARGO_PKG_VERSION"))
+            .with_capabilities(vec!["http-api".to_string(), "control-plane".to_string()])
+            .with_interval_from_env()
+            .with_region_from_env();
+    tracing::info!(
+        instance_id = %heartbeat_config.instance_id,
+        "api-server heartbeat emitter started"
+    );
+    let heartbeat =
+        apexmail_lib::heartbeat::spawn_service_heartbeat(state.db.clone(), heartbeat_config);
+
     // The migration only creates a pending platform domain. Provisioning is
     // opt-in so a deployment never invents DNS state, but operators can safely
     // request encrypted per-domain key material during a controlled rollout.
@@ -206,6 +223,10 @@ async fn main() -> anyhow::Result<()> {
         scheduler.shutdown().await;
         tracing::info!("inbox-placement scheduler shut down");
     }
+
+    // Stop beating before the pool closes; the last lease goes stale on its
+    // own, which is exactly what the control plane should observe.
+    heartbeat.abort();
 
     shutdown_state.db.close().await;
     tracing::info!("database pool closed");

@@ -251,7 +251,8 @@ impl From<LegacyPlanFeaturesPayload> for PlanFeatures {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyPlanDto {
-    id: Uuid,
+    /// Mirrors `plans.id VARCHAR(26)`.
+    id: String,
     name: String,
     display_name: String,
     description: String,
@@ -2856,7 +2857,7 @@ mod tests {
     fn legacy_proration_preview_matches_ts_contract() {
         let now = chrono::Utc::now();
         let current_plan = Plan {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             name: "starter".into(),
             display_name: "Starter".into(),
             description: String::new(),
@@ -2873,7 +2874,7 @@ mod tests {
             updated_at: now,
         };
         let new_plan = Plan {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             name: "growth".into(),
             display_name: "Growth".into(),
             description: String::new(),
@@ -2921,7 +2922,7 @@ mod tests {
     fn yearly_proration_uses_full_year_price_for_remaining_period() {
         let now = chrono::Utc::now();
         let current_plan = Plan {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             name: "starter".into(),
             display_name: "Starter".into(),
             description: String::new(),
@@ -2938,7 +2939,7 @@ mod tests {
             updated_at: now,
         };
         let new_plan = Plan {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             name: "growth".into(),
             display_name: "Growth".into(),
             description: String::new(),
@@ -3139,7 +3140,7 @@ mod tests {
     fn sample_proration_inputs() -> (Plan, Plan, RouteSubscription) {
         let now = chrono::Utc::now();
         let current_plan = Plan {
-            id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
             name: "starter".into(),
             display_name: "Starter".into(),
             description: String::new(),

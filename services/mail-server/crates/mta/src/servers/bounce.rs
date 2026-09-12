@@ -17,6 +17,8 @@ use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use apexmail_lib::verp::{VerpV2Claims, VerpV2Error};
+
 use crate::config::BounceConfig;
 
 use super::util::{
@@ -86,6 +88,14 @@ pub struct BounceServer {
     connections: Arc<DashMap<IpAddr, u32>>,
     /// Rolling per-IP message counter — enforces `max_messages_per_ip_per_hour`.
     per_ip_msgs: moka::sync::Cache<IpAddr, u64>,
+    /// Shared HMAC secret for VERP v2 tokens (`VERP_HMAC_SECRET`). `None`
+    /// means v2 tokens cannot be authenticated: every bounce is recorded as
+    /// a non-authoritative observation and nothing suppresses (production
+    /// startup rejects this configuration — see `MtaConfig::validate`).
+    verp_secret: Option<Vec<u8>>,
+    /// `verp.v2_enabled`: when false, v2-shaped addresses are treated as
+    /// unverifiable observations.
+    verp_v2_enabled: bool,
 }
 
 impl BounceServer {
@@ -94,6 +104,8 @@ impl BounceServer {
         pool: PgPool,
         redis: deadpool_redis::Pool,
         hostname: String,
+        verp_secret: Option<Vec<u8>>,
+        verp_v2_enabled: bool,
     ) -> Self {
         Self {
             config,
@@ -106,6 +118,8 @@ impl BounceServer {
                 .max_capacity(100_000)
                 .time_to_live(Duration::from_secs(PER_IP_RATE_WINDOW_SECS))
                 .build(),
+            verp_secret,
+            verp_v2_enabled,
         }
     }
 
@@ -514,24 +528,70 @@ impl BounceServer {
         // itself, not its String form.
         let bounce_id = Uuid::new_v4();
         let message = String::from_utf8_lossy(raw);
+        let now_unix = chrono::Utc::now().timestamp();
 
-        // 1. Try to match via VERP address
-        let mut original_message_id = None;
-        let mut original_recipient = None;
+        // 1. Resolve VERP recipients. An AUTHENTICATED v2 token (MAC
+        //    recomputed successfully, not expired) is authoritative; every
+        //    other recognisable VERP address — unsigned v1, bad-MAC v2,
+        //    expired v2 — is kept as a non-suppressive observation only.
+        let mut authoritative: Option<VerpV2Claims> = None;
+        let mut observation: Option<VerpResolution> = None;
         for addr in rcpt_to {
-            if let Some((oid, recip)) = parse_verp_address(addr, &self.config.verp_domain) {
-                // C3: never trust an unvalidated VERP payload — a malformed
-                // recipient (header injection, control chars) is dropped.
-                if is_valid_email_addr(&recip) {
-                    original_message_id = Some(oid);
-                    original_recipient = Some(recip);
+            match resolve_verp_address(
+                addr,
+                &self.config.verp_domain,
+                self.verp_secret.as_deref().filter(|_| self.verp_v2_enabled),
+                now_unix,
+            ) {
+                Some(VerpResolution::V2Authoritative(claims)) => {
+                    authoritative = Some(claims);
+                    break;
                 }
-                break;
+                Some(other) => {
+                    if observation.is_none() {
+                        observation = Some(other);
+                    }
+                }
+                None => {}
             }
         }
 
+        // Observation-only rows deliberately keep the natural-key columns
+        // NULL: if an unsigned/forged claim could occupy the
+        // (original_message_id, original_recipient) dedupe slot, an attacker
+        // who knows a sent message id + recipient could pre-insert a row and
+        // make the genuine authoritative bounce a no-op. The claimed linkage
+        // is preserved in `observation_detail` instead, for audit.
+        let (record_message_id, record_recipient, verp_version, observation_detail) =
+            match &authoritative {
+                Some(claims) => (
+                    Some(claims.queue_id.clone()),
+                    Some(claims.recipient.clone()),
+                    "v2",
+                    None,
+                ),
+                None => match &observation {
+                    Some(VerpResolution::V1 { message_id, .. }) => (
+                        None,
+                        None,
+                        "v1",
+                        Some(format!(
+                            "unsigned v1 claim message_id={}",
+                            sanitize_observation_value(message_id)
+                        )),
+                    ),
+                    Some(VerpResolution::V2Rejected(reason)) => (
+                        None,
+                        None,
+                        "v2-rejected",
+                        Some(format!("v2 rejected: {reason}")),
+                    ),
+                    _ => (None, None, "none", None),
+                },
+            };
+
         // O-1.7:Sanitize VERP-derived recipient data in logs and error messages
-        let log_recipient = original_recipient.as_ref().map(|r| {
+        let log_recipient = record_recipient.as_ref().map(|r| {
             if self.config.verp_sanitize {
                 mail_common::pii::redact_email(r).to_string()
             } else {
@@ -539,117 +599,126 @@ impl BounceServer {
             }
         });
 
-        // 2. If no VERP match, try to parse DSN
-        if original_message_id.is_none() {
-            if let Some(mid) = extract_original_message_id(&message) {
-                original_message_id = Some(mid);
-            }
-        }
-
-        // 3. Classify bounce
+        // 2. Classify bounce
         let bounce_info = classify_bounce(&message);
 
-        // 4. Record bounce event — dedupe on (original_message_id, original_recipient).
-        //    A retry that already produced a row must not run side effects again.
+        // 3. Record bounce event. Authoritative v2 rows dedupe on the natural
+        //    key; observations have NULL keys and are always recorded.
         let inserted = sqlx::query(
             r#"INSERT INTO bounce_events (
                 id, original_message_id, original_recipient,
                 bounce_type, bounce_subtype, diagnostic_code,
-                status_code, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                status_code, verp_version, authoritative, observation_detail, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
             ON CONFLICT (original_message_id, original_recipient)
             WHERE original_message_id IS NOT NULL AND original_recipient IS NOT NULL
             DO NOTHING"#,
         )
         .bind(bounce_id)
-        .bind(&original_message_id)
-        .bind(&original_recipient)
+        .bind(&record_message_id)
+        .bind(&record_recipient)
         .bind(format!("{:?}", bounce_info.bounce_type))
         .bind(&bounce_info.bounce_subtype)
         .bind(&bounce_info.diagnostic_code)
         .bind(&bounce_info.status)
+        .bind(verp_version)
+        .bind(authoritative.is_some())
+        .bind(&observation_detail)
         .execute(&self.pool)
         .await?
         .rows_affected()
             > 0;
 
         if !inserted {
-            debug!(msg_id = ?original_message_id, "Duplicate bounce event, skipping side effects");
+            debug!(msg_id = ?record_message_id, "Duplicate bounce event, skipping side effects");
             return Ok(bounce_id.to_string());
         }
 
+        // 4. Observation (v1 / failed v2): recorded, never suppression and
+        //    never a webhook that would imply authenticity.
+        let Some(claims) = authoritative else {
+            warn!(
+                verp_version = %verp_version,
+                observation = ?observation_detail,
+                bounce_type = ?bounce_info.bounce_type,
+                "Non-authoritative bounce recorded as observation (no suppression)"
+            );
+            metric_message("bounce", "observed_non_authoritative");
+            return Ok(bounce_id.to_string());
+        };
+
         // 5. C3: only act on bounces that reference a message this system sent.
-        //    Resolve the tenant from email_queue and cross-check the VERP
-        //    recipient against the queued recipient — a mismatch means the
-        //    VERP address was forged and must not poison suppression.
-        let (tenant_id, queued_recipient) = match original_message_id.as_deref() {
-            Some(mid) => match self.lookup_sent_message(mid).await? {
-                Some(v) => v,
-                None => {
-                    warn!(msg_id = %mid, "Bounce references unknown message — skipping suppression and webhook");
-                    return Ok(bounce_id.to_string());
-                }
-            },
-            None => {
-                warn!("Bounce carries no original message id — skipping suppression and webhook");
-                return Ok(bounce_id.to_string());
-            }
+        //    The token's (queue id, tenant, recipient) claims are authenticated
+        //    but still cross-checked against the queue row — a mismatch means
+        //    the row changed underneath the token (or the minting context was
+        //    wrong) and must not poison suppression.
+        self.record_verp_token_observation(&claims).await;
+        let Some((tenant_id, queued_recipient)) =
+            self.lookup_sent_message(&claims.queue_id).await?
+        else {
+            warn!(
+                queue_id = %claims.queue_id,
+                "Authoritative bounce references unknown message — recorded, no suppression"
+            );
+            return Ok(bounce_id.to_string());
         };
 
         let suppression_recipient =
-            suppression_target(original_recipient.as_deref(), &queued_recipient);
-        if let Some(verp_recip) = original_recipient.as_deref() {
-            if suppression_recipient.is_none() {
-                // F-23: both addresses are PII — redact before logging.
-                warn!(
-                    verp_recipient = %mail_common::pii::redact_email(verp_recip),
-                    queued_recipient = %mail_common::pii::redact_email(&queued_recipient),
-                    msg_id = ?original_message_id,
-                    "VERP recipient does not match queued recipient — dropping forged bounce"
-                );
-            }
+            authoritative_suppression_target(Some(&claims), Some((&tenant_id, &queued_recipient)));
+        if suppression_recipient.is_none() {
+            // F-23: both addresses are PII — redact before logging.
+            warn!(
+                verp_recipient = %mail_common::pii::redact_email(&claims.recipient),
+                queued_recipient = %mail_common::pii::redact_email(&queued_recipient),
+                queue_id = %claims.queue_id,
+                "Authoritative VERP claims do not match the queued message — dropping stale/forged bounce"
+            );
+            return Ok(bounce_id.to_string());
         }
+        let suppression_recipient = suppression_recipient.expect("checked above");
 
         // 6. Hard bounces → suppression list (canonical `suppressions` table).
+        //    The target is the recipient recorded on the queue row, not the
+        //    (merely authenticated-as-ours) token claim.
         if bounce_info.bounce_type == BounceType::Hard {
-            if let Some(ref recip) = suppression_recipient {
-                let log_recip = log_recipient.as_deref().unwrap_or("redacted");
-                let res = sqlx::query(
-                    r#"INSERT INTO suppressions
-                       (id, tenant_id, email, reason, subtype, source, created_at)
-                       VALUES ($1, $2, $3, 'hard_bounce', 'mta', 'mta', NOW())
-                       ON CONFLICT (tenant_id, email) DO NOTHING"#,
-                )
-                .bind(suppression_row_id())
-                .bind(&tenant_id)
-                .bind(recip)
-                .execute(&self.pool)
-                .await;
-                match res {
-                    Ok(_) => info!(email = %log_recip, "Added to suppression list (hard bounce)"),
-                    Err(e) => {
-                        // C4: a suppression write failure must never abort bounce
-                        // processing (that used to trigger endless retry loops).
-                        warn!(error = %e, "Suppression write failed; continuing bounce processing")
-                    }
+            let log_recip = log_recipient.as_deref().unwrap_or("redacted");
+            let res = sqlx::query(
+                r#"INSERT INTO suppressions
+                   (id, tenant_id, email, reason, subtype, source, created_at)
+                   VALUES ($1, $2, $3, 'hard_bounce', 'mta', 'mta', NOW())
+                   ON CONFLICT (tenant_id, email) DO NOTHING"#,
+            )
+            .bind(suppression_row_id())
+            .bind(&tenant_id)
+            .bind(&suppression_recipient)
+            .execute(&self.pool)
+            .await;
+            match res {
+                Ok(_) => info!(email = %log_recip, "Added to suppression list (hard bounce)"),
+                Err(e) => {
+                    // C4: a suppression write failure must never abort bounce
+                    // processing (that used to trigger endless retry loops).
+                    warn!(error = %e, "Suppression write failed; continuing bounce processing")
                 }
             }
         }
 
-        // 7. Queue webhook (only for verified messages)
+        // 7. Queue webhook (only for authenticated, queue-verified messages)
         // O-1.7:Use sanitized recipient in webhook when verp_sanitize is enabled
         let webhook_recipient = if self.config.verp_sanitize {
             log_recipient.clone()
         } else {
-            original_recipient.clone()
+            Some(suppression_recipient.clone())
         };
         let payload = serde_json::json!({
             "event": "bounce",
             "bounce_id": bounce_id,
-            "original_message_id": original_message_id,
+            "original_message_id": claims.queue_id,
             "original_recipient": webhook_recipient,
             "bounce_type": format!("{:?}", bounce_info.bounce_type),
             "subtype": bounce_info.bounce_subtype,
+            "authoritative": true,
+            "verp_version": "v2",
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 
@@ -665,13 +734,48 @@ impl BounceServer {
 
         info!(
             bounce_id = %bounce_id,
-            msg_id = ?original_message_id,
+            msg_id = %claims.queue_id,
             bounce_type = ?bounce_info.bounce_type,
             "Bounce processed"
         );
         metric_message("bounce", "accepted");
 
         Ok(bounce_id.to_string())
+    }
+
+    /// Best-effort audit record for a successfully authenticated v2 token.
+    ///
+    /// Only the SHA-256 hash of the token is written (never the token or its
+    /// secret). MAC tokens are deterministic over the authenticated claims, so
+    /// re-minting reproduces the exact token bytes that were received; the
+    /// row is the observation ledger that proves when v1 traffic ceased (see
+    /// the retirement condition in `parse_verp_v1_address`).
+    async fn record_verp_token_observation(&self, claims: &VerpV2Claims) {
+        let Some(secret) = self.verp_secret.as_deref() else {
+            return;
+        };
+        use sha2::Digest as _;
+        let token = apexmail_lib::verp::mint_verp_v2_token(secret, claims);
+        let token_hash = sha2::Sha256::digest(token.as_bytes()).to_vec();
+        let expires_at = chrono::DateTime::from_timestamp(claims.expires_at, 0);
+        let result = sqlx::query(
+            r#"INSERT INTO verp_tokens
+                   (token_hash, token_kind, queue_id, tenant_id, recipient, expires_at)
+               VALUES ($1, 'mac', $2, $3, $4, $5)
+               ON CONFLICT (token_hash) DO UPDATE
+               SET last_seen_at = NOW(),
+                   observations = verp_tokens.observations + 1"#,
+        )
+        .bind(token_hash)
+        .bind(&claims.queue_id)
+        .bind(&claims.tenant_id)
+        .bind(&claims.recipient)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await;
+        if let Err(error) = result {
+            debug!(error = %error, "Failed to record VERP token observation");
+        }
     }
 
     /// Resolve the tenant and recipient of a message this system sent.
@@ -913,16 +1017,24 @@ pub(crate) fn null_sender_ok(addr: &str) -> bool {
 /// server: a VERP address for the configured domain, or a legacy
 /// `bounce@`/`bounces@`/`mailer-daemon@` address on the same domain.
 ///
-/// C3: previously any address merely *containing* `bounces+` was accepted;
-/// the VERP payload is now fully parsed and validated against `verp_domain`,
-/// and legacy addresses must be on the VERP domain itself.
+/// The RCPT phase only checks GRAMMAR. Authentication happens in
+/// [`resolve_verp_address`] at DATA time, so a forged v2 token is still
+/// accepted and recorded as a non-authoritative observation instead of being
+/// silently dropped.
 fn bounce_rcpt_ok(addr: &str, verp_domain: &str) -> bool {
     let inner = addr.trim_matches(|c| c == '<' || c == '>');
     if inner.is_empty() {
         return false;
     }
-    if let Some((_, recipient)) = parse_verp_address(inner, verp_domain) {
-        return is_valid_email_addr(&recipient);
+    if inner.ends_with(&format!("@{verp_domain}")) {
+        if let Some(local) = inner.split('@').next() {
+            if apexmail_lib::verp::verp_v2_token_from_local(local).is_some() {
+                return true;
+            }
+        }
+        if let Some((_, recipient)) = parse_verp_v1_address(inner, verp_domain) {
+            return is_valid_email_addr(&recipient);
+        }
     }
     for prefix in ["bounce@", "bounces@", "mailer-daemon@"] {
         if inner.starts_with(prefix) && inner.ends_with(&format!("@{verp_domain}")) {
@@ -977,25 +1089,78 @@ pub(crate) fn suppression_row_id() -> String {
     format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18])
 }
 
-/// Decide which address (if any) a bounce may place on the suppression list.
-///
-/// `verp_recipient` is the recipient parsed from the bounce's VERP envelope
-/// address (whose local part already resolved to the queued message);
-/// `queued_recipient` is the recipient recorded on that queued message.
-fn suppression_target(verp_recipient: Option<&str>, queued_recipient: &str) -> Option<String> {
-    match verp_recipient {
-        Some(verp) if verp == queued_recipient => Some(verp.to_string()),
-        // No VERP recipient: the bounce's only linkage to the queued message
-        // is the attacker-writable Original-Message-ID header. Such a bounce
-        // may be classified and logged, but must never suppress.
-        None => None,
-        // VERP present but pointing at a different address than the queued
-        // message's recipient: forged or replayed VERP — never suppress.
-        Some(_) => None,
-    }
+/// Resolution of a bounce recipient's VERP local part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerpResolution {
+    /// v2 MAC verified and unexpired. Authoritative for suppression only
+    /// after the queue-row cross-check in
+    /// [`authoritative_suppression_target`].
+    V2Authoritative(VerpV2Claims),
+    /// v2-shaped but unverifiable (bad MAC, expired, or no secret
+    /// configured). The claims are deliberately NOT returned: a failed
+    /// verification must not leak attacker-controlled claims into any
+    /// decision.
+    V2Rejected(VerpV2Error),
+    /// Legacy unsigned grammar, retained for READ compatibility only.
+    /// Recorded as an observation; never suppression authority. Retirement
+    /// condition documented at [`parse_verp_v1_address`].
+    V1 {
+        message_id: String,
+        recipient: String,
+    },
 }
 
-fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)> {
+/// Parse and authenticate a bounce recipient's VERP local part.
+///
+/// v2 addresses are verified by recomputing the token MAC over the exact
+/// payload bytes; v1 addresses are parsed but carry no authentication. A
+/// `None` secret means v2 cannot be authenticated at all
+/// ([`VerpV2Error::Unconfigured`]).
+pub(crate) fn resolve_verp_address(
+    addr: &str,
+    verp_domain: &str,
+    verp_secret: Option<&[u8]>,
+    now_unix: i64,
+) -> Option<VerpResolution> {
+    let addr = addr.trim_matches(|c| c == '<' || c == '>');
+    if !addr.ends_with(&format!("@{verp_domain}")) {
+        return None;
+    }
+    let local = addr.split('@').next()?;
+    if apexmail_lib::verp::verp_v2_token_from_local(local).is_some() {
+        let Some(secret) = verp_secret else {
+            return Some(VerpResolution::V2Rejected(VerpV2Error::Unconfigured));
+        };
+        return Some(
+            match apexmail_lib::verp::verify_verp_v2_local(secret, local, now_unix) {
+                Ok(claims) => VerpResolution::V2Authoritative(claims),
+                Err(reason) => VerpResolution::V2Rejected(reason),
+            },
+        );
+    }
+    parse_verp_v1_address(addr, verp_domain).map(|(message_id, recipient)| VerpResolution::V1 {
+        message_id,
+        recipient,
+    })
+}
+
+/// Legacy (v1) VERP parser kept for read-compatibility with addresses
+/// emitted before the v2 rollout:
+/// `bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}`.
+///
+/// ## Retirement condition
+///
+/// v1 is unsigned and therefore never suppression authority. The parser can
+/// be deleted once BOTH hold:
+/// 1. `SELECT max(created_at) FROM bounce_events WHERE verp_version = 'v1'`
+///    is older than the bounce retention window (v1 mail is no longer being
+///    delivered — allow at least one full queue-retention cycle after the
+///    migration 210 deploy);
+/// 2. `rg 'verp_return_path\(' crates/` shows no v1-grammar caller (the
+///    worker emits v2 only).
+/// Until then, keep parsing v1 so those bounces are still recorded as
+/// observations instead of vanishing from the pipeline.
+fn parse_verp_v1_address(addr: &str, verp_domain: &str) -> Option<(String, String)> {
     // VERP format:bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}
     let addr = addr.trim_matches(|c| c == '<' || c == '>');
     if !addr.ends_with(&format!("@{verp_domain}")) {
@@ -1009,10 +1174,49 @@ fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)>
     if parts.len() >= 3 {
         let message_id = parts[0].to_string();
         let recip = format!("{}@{}", parts[2], parts[1]);
-        Some((message_id, recip))
-    } else {
-        None
+        if !message_id.is_empty() && is_valid_email_addr(&recip) {
+            return Some((message_id, recip));
+        }
     }
+    None
+}
+
+/// Best-effort sanitization of attacker-supplied observation text before it
+/// is stored: printable ASCII only, 128 characters max.
+pub(crate) fn sanitize_observation_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(128)
+        .collect()
+}
+
+/// Decide which address (if any) an AUTHENTICATED v2 bounce may place on the
+/// suppression list.
+///
+/// * `claims` must come from a successfully verified v2 token — a `None`
+///   here means the bounce is an unsigned/failed observation and can never
+///   suppress (a DSN `Original-Message-ID` header alone is attacker-writable
+///   and is never suppression authority).
+/// * `queued` is the `(tenant_id, recipient)` pair the `email_queue` lookup
+///   returned for the token's queue/send id. An unknown message, or any
+///   disagreement with the authenticated claims, means NO suppression: the
+///   token may have been minted for a queue row that has since changed.
+/// * The returned address is the QUEUED recipient (canonical state), never
+///   the token's embedded claim.
+fn authoritative_suppression_target(
+    claims: Option<&VerpV2Claims>,
+    queued: Option<(&str, &str)>,
+) -> Option<String> {
+    let claims = claims?;
+    let (queued_tenant, queued_recipient) = queued?;
+    if !claims.tenant_id.eq_ignore_ascii_case(queued_tenant) {
+        return None;
+    }
+    if claims.recipient != queued_recipient {
+        return None;
+    }
+    Some(queued_recipient.to_string())
 }
 
 fn extract_status_code(message: &str) -> String {
@@ -1253,58 +1457,221 @@ mod tests {
         assert_eq!(info.bounce_subtype, "mailbox-full");
     }
 
+    // ── VERP v2 authentication ────────────────────────────────────────────
+
+    const VERP_TEST_SECRET: &[u8] = b"verp-test-secret-verp-test-secret";
+
+    fn verp_v2_claims(recipient: &str, expires_at: i64) -> VerpV2Claims {
+        VerpV2Claims {
+            queue_id: "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into(),
+            tenant_id: "ten_abc".into(),
+            recipient: recipient.into(),
+            expires_at,
+        }
+    }
+
     #[test]
-    fn test_verp_round_trip_matches_documented_format() {
-        // The VERP return-path format generated by the outbound pipeline is
-        // `bounces+{message_id}={recipient_domain}={recipient_local}@{verp_domain}`;
-        // the bounce parser must round-trip exactly that shape, and the
-        // inbound server's VERP-reply detection (local part starts with
-        // "bounces+") must be a superset of the parseable addresses.
-        let verp_domain = "bounces.apexmail.ee";
-        let message_id = "0192f0a4-abc";
-        let recip_local = "user+tag";
-        let recip_domain = "example.com";
-        let addr = format!("bounces+{message_id}={recip_domain}={recip_local}@{verp_domain}");
+    fn v2_generated_address_verifies_against_the_mta_resolver() {
+        // The outbound worker mints with `apexmail_lib::verp`; the MTA
+        // resolves with the same code. A freshly minted token must come back
+        // as authoritative with all four claims intact.
+        let claims = verp_v2_claims("user+tag@example.com", 2_000_000_000);
+        let address =
+            apexmail_lib::verp::verp_v2_address(VERP_TEST_SECRET, &claims, "bounces.apexmail.ee");
+        let resolved = resolve_verp_address(
+            &address,
+            "bounces.apexmail.ee",
+            Some(VERP_TEST_SECRET),
+            1_000_000_000,
+        );
+        match resolved {
+            Some(VerpResolution::V2Authoritative(verified)) => {
+                assert_eq!(verified, claims, "all four authenticated claims survive");
+            }
+            other => panic!("expected an authoritative v2 resolution, got {other:?}"),
+        }
+    }
 
+    #[test]
+    fn forged_v2_token_never_suppresses() {
+        // Tamper with the payload of a genuine token: the MAC no longer
+        // matches and the resolver must NOT return any claims.
+        let claims = verp_v2_claims("victim@example.com", 2_000_000_000);
+        let address =
+            apexmail_lib::verp::verp_v2_address(VERP_TEST_SECRET, &claims, "bounces.apexmail.ee");
+        let token = address
+            .split('@')
+            .next()
+            .unwrap()
+            .strip_prefix("bounces+v2.")
+            .unwrap()
+            .to_string();
+        let (payload, sig) = token.split_once('.').unwrap();
+        let mut tampered = payload.to_string();
+        let last = tampered.pop().unwrap();
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+        let forged = format!("bounces+v2.{tampered}.{sig}@bounces.apexmail.ee");
+
+        let resolved = resolve_verp_address(
+            &forged,
+            "bounces.apexmail.ee",
+            Some(VERP_TEST_SECRET),
+            1_000_000_000,
+        );
+        assert_eq!(
+            resolved,
+            Some(VerpResolution::V2Rejected(VerpV2Error::BadSignature)),
+            "a bad MAC must be rejected, not returned as claims"
+        );
         assert!(
-            addr.starts_with("bounces+"),
-            "inbound is_verp prefix matches"
+            authoritative_suppression_target(
+                match resolved {
+                    Some(VerpResolution::V2Authoritative(ref claims)) => Some(claims),
+                    _ => None,
+                },
+                Some(("ten_abc", "victim@example.com")),
+            )
+            .is_none(),
+            "a forged token can never authorize suppression"
         );
-        assert_eq!(
-            parse_verp_address(&addr, verp_domain),
-            Some((
-                message_id.to_string(),
-                format!("{recip_local}@{recip_domain}")
-            ))
-        );
+    }
 
-        // Tricky locals (embedded '=' allowed after the second field) still
-        // round-trip; the message id itself must not contain '='.
-        let tricky = format!("bounces+{message_id}={recip_domain}=a=b=c@{verp_domain}");
+    #[test]
+    fn expired_v2_token_never_suppresses() {
+        let claims = verp_v2_claims("user@example.com", 1_000);
+        let address =
+            apexmail_lib::verp::verp_v2_address(VERP_TEST_SECRET, &claims, "bounces.apexmail.ee");
+        let resolved = resolve_verp_address(
+            &address,
+            "bounces.apexmail.ee",
+            Some(VERP_TEST_SECRET),
+            1_000,
+        );
         assert_eq!(
-            parse_verp_address(&tricky, verp_domain).map(|(_, recip)| recip),
+            resolved,
+            Some(VerpResolution::V2Rejected(VerpV2Error::Expired)),
+            "a valid MAC with an elapsed expiry must not be authoritative"
+        );
+        assert!(
+            authoritative_suppression_target(None, Some(("ten_abc", "user@example.com"))).is_none()
+        );
+    }
+
+    #[test]
+    fn v2_token_without_configured_secret_is_never_authoritative() {
+        let claims = verp_v2_claims("user@example.com", 2_000_000_000);
+        let address =
+            apexmail_lib::verp::verp_v2_address(VERP_TEST_SECRET, &claims, "bounces.apexmail.ee");
+        // No secret on the server: the token cannot be authenticated at all.
+        let resolved = resolve_verp_address(&address, "bounces.apexmail.ee", None, 1_000_000_000);
+        assert_eq!(
+            resolved,
+            Some(VerpResolution::V2Rejected(VerpV2Error::Unconfigured))
+        );
+    }
+
+    #[test]
+    fn valid_v2_token_with_matching_queue_row_suppresses() {
+        let claims = verp_v2_claims("user@example.com", 2_000_000_000);
+        assert_eq!(
+            authoritative_suppression_target(Some(&claims), Some(("ten_abc", "user@example.com")),),
+            Some("user@example.com".to_string()),
+            "authenticated claims + matching queue row authorize suppression"
+        );
+        // Tenant may differ in case (UUID text); the recipient must match.
+        assert_eq!(
+            authoritative_suppression_target(Some(&claims), Some(("TEN_ABC", "user@example.com")),),
+            Some("user@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn v2_claims_mismatching_the_queue_row_never_suppress() {
+        let claims = verp_v2_claims("user@example.com", 2_000_000_000);
+        assert!(
+            authoritative_suppression_target(
+                Some(&claims),
+                Some(("other_tenant", "user@example.com")),
+            )
+            .is_none(),
+            "tenant mismatch (stale/replayed token) must not suppress"
+        );
+        assert!(
+            authoritative_suppression_target(
+                Some(&claims),
+                Some(("ten_abc", "other@example.com")),
+            )
+            .is_none(),
+            "recipient mismatch must not suppress"
+        );
+        assert!(
+            authoritative_suppression_target(Some(&claims), None).is_none(),
+            "an unknown queue row must not suppress"
+        );
+    }
+
+    #[test]
+    fn unsigned_v1_bounce_is_an_observation_never_suppression_authority() {
+        // Legacy v1 addresses stay parseable for read-compatibility, but the
+        // resolver must never classify them as authoritative — the plaintext
+        // message-id/recipient pair is forgeable by anyone.
+        let addr = "bounces+msg123=example.com=user@bounces.apexmail.ee";
+        let resolved = resolve_verp_address(
+            addr,
+            "bounces.apexmail.ee",
+            Some(VERP_TEST_SECRET),
+            1_000_000_000,
+        );
+        match resolved {
+            Some(VerpResolution::V1 {
+                message_id,
+                recipient,
+            }) => {
+                assert_eq!(message_id, "msg123");
+                assert_eq!(recipient, "user@example.com");
+            }
+            other => panic!("expected a v1 observation, got {other:?}"),
+        }
+        // Even if the unsigned claim happens to match a real queue row, the
+        // suppression gate requires authenticated claims (None here).
+        assert!(
+            authoritative_suppression_target(None, Some(("ten_abc", "user@example.com"))).is_none(),
+            "unsigned v1 must never suppress"
+        );
+    }
+
+    #[test]
+    fn v1_tricky_locals_still_round_trip_for_read_compatibility() {
+        let addr = "bounces+0192f0a4-abc=example.com=a=b=c@bounces.apexmail.ee";
+        assert_eq!(
+            resolve_verp_address(addr, "bounces.apexmail.ee", None, 0).map(|r| match r {
+                VerpResolution::V1 { recipient, .. } => recipient,
+                _ => String::new(),
+            }),
             Some("a=b=c@example.com".to_string())
         );
     }
 
     #[test]
-    fn test_parse_verp_address() {
-        let result = parse_verp_address(
-            "bounces+msg123=example.com=user@bounces.apexmail.ee",
+    fn v1_wrong_domain_is_not_a_verp_recipient() {
+        assert!(resolve_verp_address(
+            "bounces+msg123=example.com=user@wrong.domain",
             "bounces.apexmail.ee",
-        );
-        let (mid, recip) = result.expect("expected valid VERP address");
-        assert_eq!(mid, "msg123");
-        assert_eq!(recip, "user@example.com");
+            None,
+            0,
+        )
+        .is_none());
     }
 
     #[test]
-    fn test_parse_verp_address_wrong_domain() {
-        let result = parse_verp_address(
-            "bounces+msg123=example.com=user@wrong.domain",
-            "bounces.apexmail.ee",
+    fn v2_observation_records_are_sanitized() {
+        assert_eq!(
+            sanitize_observation_value("msg\r\nX-Evil: 1"),
+            "msgX-Evil: 1"
         );
-        assert!(result.is_none());
+        assert_eq!(sanitize_observation_value(""), "");
+        let long = "a".repeat(300);
+        assert_eq!(sanitize_observation_value(&long).len(), 128);
     }
 
     #[test]
@@ -1392,27 +1759,32 @@ mod tests {
         // A bounce carrying only an attacker-writable Original-Message-ID
         // (no valid VERP envelope) must never land the queued recipient on
         // the suppression list — otherwise anyone can suppress any victim
-        // by forging one header referencing a sent message.
+        // by forging one header referencing a sent message. The suppression
+        // gate requires authenticated v2 claims; a DSN header is not one.
         assert!(
-            suppression_target(None, "victim@example.com").is_none(),
-            "no VERP recipient => no suppression target"
+            authoritative_suppression_target(None, Some(("ten_abc", "victim@example.com")))
+                .is_none(),
+            "no authenticated VERP claims => no suppression target"
         );
     }
 
     #[test]
-    fn genuine_verp_bounce_still_suppresses() {
+    fn genuine_v2_bounce_still_suppresses() {
+        let claims = verp_v2_claims("user@example.com", 2_000_000_000);
         assert_eq!(
-            suppression_target(Some("user@example.com"), "user@example.com"),
+            authoritative_suppression_target(Some(&claims), Some(("ten_abc", "user@example.com"))),
             Some("user@example.com".to_string()),
-            "a VERP recipient matching the queued recipient is suppressible"
+            "authenticated v2 claims matching the queued recipient are suppressible"
         );
     }
 
     #[test]
-    fn mismatched_verp_recipient_never_suppresses() {
+    fn mismatched_v2_recipient_never_suppresses() {
+        let claims = verp_v2_claims("other@example.com", 2_000_000_000);
         assert!(
-            suppression_target(Some("other@example.com"), "user@example.com").is_none(),
-            "a VERP recipient that differs from the queued recipient is a forged/replayed VERP"
+            authoritative_suppression_target(Some(&claims), Some(("ten_abc", "user@example.com")))
+                .is_none(),
+            "authenticated claims that differ from the queued recipient are stale/forged"
         );
     }
 
@@ -1675,7 +2047,7 @@ mod tests {
             max_messages_per_connection: 100,
             max_messages_per_ip_per_hour: 2000,
         };
-        BounceServer::new(config, pool, redis, "bounce.test".into())
+        BounceServer::new(config, pool, redis, "bounce.test".into(), None, true)
     }
 
     async fn read_reply(
@@ -2000,8 +2372,14 @@ mod tests {
         let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap();
-        let server =
-            std::sync::Arc::new(BounceServer::new(config, pool, redis, "bounce.test".into()));
+        let server = std::sync::Arc::new(BounceServer::new(
+            config,
+            pool,
+            redis,
+            "bounce.test".into(),
+            None,
+            true,
+        ));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let srv = server.clone();

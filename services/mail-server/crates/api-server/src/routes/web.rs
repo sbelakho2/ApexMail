@@ -3115,6 +3115,16 @@ async fn form_api_key_create(
     if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/settings/api-keys", &state.config);
     }
+    // Entitlement gate: programmatic access requires `api_access`.
+    if let Err(error) = crate::entitlements::require_feature(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::ApiAccess,
+    )
+    .await
+    {
+        return redirect_error(&error.to_string(), "/settings/api-keys", &state.config);
+    }
     let form_map: HashMap<String, String> = form.pairs.iter().cloned().collect();
     let name = field_truncated(&form_map, "name", 100);
     if name.is_empty() {
@@ -3214,6 +3224,18 @@ async fn form_webhook_create(
     if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/settings/webhooks", &state.config);
     }
+    // Entitlement gates (403-equivalent flash): webhook creation requires
+    // `webhooks_enabled`; the inbound event subscription additionally
+    // requires `inbound_email`.
+    if let Err(error) = crate::entitlements::require_feature(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::Webhooks,
+    )
+    .await
+    {
+        return redirect_error(&error.to_string(), "/settings/webhooks", &state.config);
+    }
     let mut fields = FormFieldMap::new("webhook-create");
     let url = form.field("url").trim().to_string();
     fields.set("url", &url);
@@ -3257,6 +3279,22 @@ async fn form_webhook_create(
     if let Some(message) = validate_webhook_events(&events) {
         fields.error("events", &message);
         return redirect_with_field_map(&fields, &message, "/settings/webhooks", &state.config);
+    }
+    if events.iter().any(|event| event == "inbound") {
+        if let Err(error) = crate::entitlements::require_feature(
+            &state,
+            &user.tenant_id,
+            billing_entitlements::FeatureKey::InboundEmail,
+        )
+        .await
+        {
+            return redirect_with_field_map(
+                &fields,
+                &error.to_string(),
+                "/settings/webhooks",
+                &state.config,
+            );
+        }
     }
     // webhooks schema (075/065): id VARCHAR(26) ULID, secret NOT NULL
     // (dual-rotation capable), enabled BOOLEAN + status VARCHAR — there is
@@ -3384,6 +3422,67 @@ async fn form_team_invite(
             &state.config,
         );
     }
+    // Entitlement capacity gate (transactional): seats are consumed by this
+    // handler, so the check, the open-invitation cap, and the INSERT all run
+    // in ONE transaction with the tenant row locked — two concurrent invites
+    // can never both pass a stale seat count. `seat_count + 1` is the total
+    // after this invitation; the snapshot is override-aware.
+    let entitlement = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return redirect_error(&error.to_string(), "/settings/team", &state.config);
+        }
+    };
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            tracing::error!(error = %error, "team invite transaction begin failed");
+            return redirect_error(
+                "Could not create the invitation. Try again.",
+                "/settings/team",
+                &state.config,
+            );
+        }
+    };
+    if let Err(error) = sqlx::query("SELECT id FROM tenants WHERE id = $1 FOR UPDATE")
+        .bind(user.tenant_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+    {
+        tracing::error!(error = %error, "team invite tenant lock failed");
+        let _ = tx.rollback().await;
+        return redirect_error(
+            "Could not create the invitation. Try again.",
+            "/settings/team",
+            &state.config,
+        );
+    }
+    let seat_count: i64 =
+        match sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
+            .bind(user.tenant_id.as_str())
+            .fetch_one(&mut *tx)
+            .await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::error!(error = %error, "team seat count failed");
+                let _ = tx.rollback().await;
+                return redirect_error(
+                    "Could not create the invitation. Try again.",
+                    "/settings/team",
+                    &state.config,
+                );
+            }
+        };
+    if let Err(error) = crate::entitlements::gate_capacity(
+        &entitlement,
+        billing_entitlements::CapacityKey::TeamMembers,
+        seat_count + 1,
+    ) {
+        let _ = tx.rollback().await;
+        return redirect_error(&error.to_string(), "/settings/team", &state.config);
+    }
+
     // Outstanding-invitation cap: at most MAX_OPEN_INVITATIONS_PER_TENANT
     // un-accepted invitations may exist per tenant. Count failures fail
     // CLOSED.
@@ -3391,10 +3490,11 @@ async fn form_team_invite(
         "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
     )
     .bind(user.tenant_id.as_str())
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await;
     match open_invites {
         Ok(count) if count >= MAX_OPEN_INVITATIONS_PER_TENANT => {
+            let _ = tx.rollback().await;
             return redirect_error(
                 "Invitation limit reached: clear outstanding invitations before sending more.",
                 "/settings/team",
@@ -3403,6 +3503,7 @@ async fn form_team_invite(
         }
         Err(error) => {
             tracing::error!(error = %error, "team invite count check failed");
+            let _ = tx.rollback().await;
             return redirect_error(
                 "Could not create the invitation. Try again.",
                 "/settings/team",
@@ -3423,15 +3524,29 @@ async fn form_team_invite(
     .bind(&email)
     .bind("!invited-pending-activation") // cannot authenticate until they set a password
     .bind(role)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await;
     match result {
-        Ok(_) => redirect_success("Invitation created.", "/settings/team", &state.config),
-        Err(_) => redirect_error(
-            "Could not create the invitation. Try again.",
-            "/settings/team",
-            &state.config,
-        ),
+        Ok(_) => match tx.commit().await {
+            Ok(()) => redirect_success("Invitation created.", "/settings/team", &state.config),
+            Err(error) => {
+                tracing::error!(error = %error, "team invite commit failed");
+                redirect_error(
+                    "Could not create the invitation. Try again.",
+                    "/settings/team",
+                    &state.config,
+                )
+            }
+        },
+        Err(error) => {
+            tracing::error!(error = %error, "team invite insert failed");
+            let _ = tx.rollback().await;
+            redirect_error(
+                "Could not create the invitation. Try again.",
+                "/settings/team",
+                &state.config,
+            )
+        }
     }
 }
 
@@ -3614,6 +3729,39 @@ async fn form_domain_create(
             &state.config,
         );
     }
+    // Entitlement capacity gate: the console path enforces the SAME
+    // `max_sending_domains` limit as the JSON API (-1 = unlimited), as
+    // count + 1 (the total after this creation).
+    let snapshot = match crate::entitlements::snapshot(&state, &user.tenant_id).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return redirect_error(&error.to_string(), "/domains/new", &state.config);
+        }
+    };
+    let domain_count: i64 =
+        match sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE tenant_id = $1")
+            .bind(user.tenant_id.as_str())
+            .fetch_one(&state.db)
+            .await
+        {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::error!(error = %error, "domain count check failed");
+                return redirect_error(
+                    "Could not add the domain. Try again.",
+                    "/domains/new",
+                    &state.config,
+                );
+            }
+        };
+    if let Err(error) = crate::entitlements::gate_capacity(
+        &snapshot,
+        billing_entitlements::CapacityKey::SendingDomains,
+        domain_count + 1,
+    ) {
+        return redirect_error(&error.to_string(), "/domains/new", &state.config);
+    }
+
     // domains.id is a UUID column (both schema lineages) — bind a UUID.
     let id = Uuid::new_v4();
     let result = sqlx::query(
@@ -3653,6 +3801,16 @@ async fn form_template_create(
 ) -> Response {
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/templates/new", &state.config);
+    }
+    // Entitlement gate: template customization requires `custom_templates`.
+    if let Err(error) = crate::entitlements::require_feature(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::CustomTemplates,
+    )
+    .await
+    {
+        return redirect_error(&error.to_string(), "/templates/new", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
     let subject = field_truncated(&form, "subject", 200);
@@ -4689,6 +4847,16 @@ async fn form_template_update(
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
+    // Entitlement gate: template customization requires `custom_templates`.
+    if let Err(error) = crate::entitlements::require_feature(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::CustomTemplates,
+    )
+    .await
+    {
+        return redirect_error(&error.to_string(), &back, &state.config);
+    }
     let mut fields = FormFieldMap::new("template-update");
     fields.set("id", &id);
     fields.set("name", &name);
@@ -5132,6 +5300,16 @@ async fn form_contacts_export(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
 ) -> Response {
+    // Entitlement gate: exporting customer data is the `data_export` feature.
+    if let Err(error) = crate::entitlements::require_feature(
+        &state,
+        &user.tenant_id,
+        billing_entitlements::FeatureKey::DataExport,
+    )
+    .await
+    {
+        return redirect_error(&error.to_string(), "/contacts", &state.config);
+    }
     let rows = sqlx::query_as::<_, (String, Option<String>, String)>(
         "SELECT email, name, status FROM contacts WHERE tenant_id = $1 AND status != 'deleted' ORDER BY created_at DESC LIMIT 10000",
     )
@@ -7688,7 +7866,81 @@ mod tests {
             .expect("seed tenant");
         }
 
+        /// Point a test tenant at an ACTIVE plan row that grants `features`.
+        ///
+        /// Entitlement-safe fixture: production resolution reads
+        /// `plans.features`, so tests exercising an entitled path must seed
+        /// a plan rather than bypassing `require_feature`.
+        async fn entitle_tenant(state: &AppState, tenant: &str, features: serde_json::Value) {
+            // `PlanFeatures` derives `Deserialize` WITHOUT `#[serde(default)]`:
+            // a partial object such as `{"webhooks_enabled": true}` fails to
+            // deserialize, and `get_entitlement_snapshot` swallows that error
+            // (`.and_then(|value| serde_json::from_value(value).ok())`) and
+            // falls back to the builtin free-plan seed — so the gate refuses
+            // even though the fixture believed it had entitled the tenant.
+            // Build the row from the canonical defaults and overlay the
+            // requested fields so the JSONB always carries every field the
+            // resolver requires.
+            let defaults = serde_json::to_value(billing_service::types::PlanFeatures::default())
+                .expect("default PlanFeatures serializes");
+            let (Some(defaults), Some(overrides)) = (defaults.as_object(), features.as_object())
+            else {
+                panic!("entitle_tenant features must be a JSON object");
+            };
+            let mut merged = defaults.clone();
+            for (key, value) in overrides {
+                merged.insert(key.clone(), value.clone());
+            }
+            let features = serde_json::Value::Object(merged);
+            // A typo'd override key or a wrongly-typed value would otherwise
+            // surface far away as an entitlement denial; fail here instead.
+            serde_json::from_value::<billing_service::types::PlanFeatures>(features.clone())
+                .expect("fixture features must deserialize as PlanFeatures");
+
+            // `plans.name` is VARCHAR(26) and the tenant id is already ~26
+            // chars, so the name is derived from a hash of the FULL tenant id:
+            // truncating the id instead made distinct tenants share a plan row,
+            // so parallel tests overwrote each other's features.
+            let plan_name = fixture_plan_name(tenant);
+            sqlx::query(
+                "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly, \
+                 email_limit, api_call_limit, features, is_active, sort_order, created_at, updated_at) \
+                 VALUES ('pln_' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 22), $1, 'Test Entitled', 'test fixture', 0, 0, 1000000, 1000000, \
+                 $2, true, 999, NOW(), NOW()) \
+                 ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features, is_active = true",
+            )
+            .bind(&plan_name)
+            .bind(&features)
+            .execute(&state.db)
+            .await
+            .expect("seed entitled test plan");
+            sqlx::query("UPDATE tenants SET plan = $1, updated_at = NOW() WHERE id = $2")
+                .bind(&plan_name)
+                .bind(tenant)
+                .execute(&state.db)
+                .await
+                .expect("point test tenant at entitled plan");
+        }
+
+        /// The fixture plan name for a tenant: unique per tenant, within the
+        /// `plans.name VARCHAR(26)` bound. Deterministic so seeding and cleanup
+        /// agree.
+        fn fixture_plan_name(tenant: &str) -> String {
+            // FNV-1a over the full tenant id; 16 hex chars + prefix = 19 chars.
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in tenant.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            format!("te-{hash:016x}")
+        }
+
         async fn cleanup_tenant(state: &AppState, tenant: &str) {
+            // Entitlement fixture plans are keyed by the same derivation.
+            let _ = sqlx::query("DELETE FROM plans WHERE name = $1")
+                .bind(fixture_plan_name(tenant))
+                .execute(&state.db)
+                .await;
             // Cascade-clean the tenant's rows (contacts FK-cascade; the
             // rest explicitly).
             let _ = sqlx::query("DELETE FROM campaign_jobs WHERE tenant_id = $1")
@@ -7969,6 +8221,12 @@ mod tests {
             };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            entitle_tenant(
+                &state,
+                &tenant,
+                serde_json::json!({"webhooks_enabled": true}),
+            )
+            .await;
             let app = web_handlers(state.clone(), session_user(&tenant));
 
             // Repeated `events` keys (a checkbox group) all bind; the
@@ -8062,6 +8320,12 @@ mod tests {
             };
             let tenant = apexmail_lib::id::generate_id("webssrf", 18);
             seed_tenant(&state, &tenant).await;
+            entitle_tenant(
+                &state,
+                &tenant,
+                serde_json::json!({"webhooks_enabled": true}),
+            )
+            .await;
             let app = web_handlers(state.clone(), session_user(&tenant));
 
             for url in [
@@ -8110,6 +8374,12 @@ mod tests {
             };
             let tenant = apexmail_lib::id::generate_id("webcap", 18);
             seed_tenant(&state, &tenant).await;
+            entitle_tenant(
+                &state,
+                &tenant,
+                serde_json::json!({"webhooks_enabled": true}),
+            )
+            .await;
             // webhooks.id is VARCHAR(26) NOT NULL with NO default
             // (migrations/075_create_missing_tables.sql:139) — mint it with
             // generate_id("", 26); a 36-char UUID string is a 22001 "value
@@ -8172,6 +8442,7 @@ mod tests {
             };
             let tenant = apexmail_lib::id::generate_id("tgate", 18);
             seed_tenant(&state, &tenant).await;
+            entitle_tenant(&state, &tenant, serde_json::json!({"max_team_members": 10})).await;
             // Seed the caller rows the gate re-reads.
             let (member_id, admin_id) = (Uuid::new_v4(), Uuid::new_v4());
             for (id, role) in [(member_id, "member"), (admin_id, "admin")] {
@@ -8298,6 +8569,7 @@ mod tests {
             };
             let tenant = apexmail_lib::id::generate_id("teamcap", 18);
             seed_tenant(&state, &tenant).await;
+            entitle_tenant(&state, &tenant, serde_json::json!({"max_team_members": -1})).await;
             let admin_id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
@@ -8755,6 +9027,12 @@ mod tests {
             };
             let tenant = apexmail_lib::id::generate_id("webflow", 18);
             seed_tenant(&state, &tenant).await;
+            entitle_tenant(
+                &state,
+                &tenant,
+                serde_json::json!({"custom_templates": true}),
+            )
+            .await;
             // templates.id is VARCHAR(26) PRIMARY KEY with no default
             // (migrations/075_create_missing_tables.sql:12) — generate_id("", 26).
             let template = apexmail_lib::id::generate_id("", 26);
@@ -9615,6 +9893,7 @@ mod tests {
 
             // ── Case 1: profile update (UPDATE users ... WHERE id = $2) ──
             let (tenant, user_id, _hash) = seed_canonical_user(&db, "0ld#SweepPassw0rd").await;
+            entitle_tenant(&state, &tenant, serde_json::json!({"max_team_members": 10})).await;
             let app = canonical_handlers(state.clone(), session_user_for(&tenant, &user_id));
             let response = app
                 .clone()

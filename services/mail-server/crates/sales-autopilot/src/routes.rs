@@ -1250,24 +1250,48 @@ async fn start_campaign(
         // dispatcher requirement here any more — the old 503 guard existed only
         // because this route used to flip the campaign to 'active' and send
         // from its own loop.
-        let (campaign, outreach) = state
+        //
+        // The start is a durable operation with an idempotent retry. An
+        // operator must be able to see that: when the campaign was NOT
+        // activated (mid-materialization failure resumed later, or enrollment
+        // accepted zero contacts), the response carries the durable
+        // start-operation phase and its operator message in addition to the
+        // per-recipient enrollment outcome.
+        let (campaign, report) = state
             .campaigns
-            .start_campaign_with_outreach(&tenant_id, id)
+            .start_campaign_operation(&tenant_id, id)
             .await?;
         let mut body = serde_json::to_value(&campaign)
             .map_err(|e| SalesError::Internal(anyhow::anyhow!("serialize campaign: {e}")))?;
-        if let Some(outreach) = outreach {
+        if let Some(object) = body.as_object_mut() {
             // Surfacing the enrollment outcome is the point: an operator must
             // see which recipients could not be enrolled and why, rather than a
-            // bare 'active' status hiding a partial start.
-            if let Some(object) = body.as_object_mut() {
+            // bare status hiding a partial start.
+            if let Some(outreach) = &report.outreach {
                 object.insert(
                     "enrollment".to_string(),
-                    serde_json::to_value(&outreach).map_err(|e| {
+                    serde_json::to_value(outreach).map_err(|e| {
                         SalesError::Internal(anyhow::anyhow!("serialize enrollment: {e}"))
                     })?,
                 );
             }
+            object.insert(
+                "start".to_string(),
+                serde_json::json!({
+                    "operationId": report.operation_id,
+                    "state": report.phase.as_str(),
+                    "message": report.message,
+                }),
+            );
+        }
+        if !matches!(report.phase, crate::campaigns::CampaignStartPhase::Active) {
+            tracing::warn!(
+                campaign_id = %id,
+                operation_id = %report.operation_id,
+                start_state = report.phase.as_str(),
+                message = report.message.as_deref().unwrap_or_default(),
+                "campaign start did not activate the campaign"
+            );
         }
         json_response(&body)
     }
@@ -2232,6 +2256,43 @@ mod tests {
             return;
         };
         let tenant = crate::test_db::unique_test_tenant("routes-campaign");
+
+        // Campaign start activates only when at least one recipient can be
+        // sent to, so seed canonical verified email points for the recipients
+        // used below (the route harness exposes only the Router, so this test
+        // takes its own pool on the same shared database).
+        let Some(seed_pool) = crate::test_db::canonical_test_pool(
+            "routes::tests::test_campaign_lifecycle_endpoints::seed",
+        )
+        .await
+        else {
+            return;
+        };
+        for email in ["alice@acme.com", "bob@beta.io"] {
+            let contact_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, '')",
+            )
+            .bind(contact_id)
+            .bind(&tenant)
+            .execute(&seed_pool)
+            .await
+            .expect("seed contact");
+            sqlx::query(
+                "INSERT INTO sales_contact_points \
+                     (id, tenant_id, contact_id, channel, value, normalized_value, \
+                      verification, confidence) \
+                 VALUES ($1, $2, $3, 'email', $4, LOWER($4), 'valid', 0.9)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(contact_id)
+            .bind(email)
+            .execute(&seed_pool)
+            .await
+            .expect("seed verified point");
+        }
+
         let create_body = serde_json::json!({
             "name": "Migration wave",
             "template_id": "tmpl_competitor_migration",
@@ -2299,6 +2360,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(started["status"], "active");
+        // The response exposes the durable start operation that activated it.
+        assert_eq!(started["start"]["state"], "active");
+        assert!(
+            started["start"]["operationId"].as_str().is_some(),
+            "the activation must report its durable operation id: {started}"
+        );
+        assert!(started["start"]["message"].is_null());
 
         let pause_resp = app
             .oneshot(

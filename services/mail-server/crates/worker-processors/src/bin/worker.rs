@@ -159,6 +159,70 @@ async fn main() -> Result<()> {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true);
 
+    // ── Process heartbeat (real liveness for the control plane) ──
+    // system_health reads service_heartbeats; queue activity is NOT a
+    // liveness signal. Capabilities list the processors this process runs.
+    // Beats start immediately; failures are logged, never fatal.
+    let mut capabilities = vec!["postgres".to_string(), "redis".to_string()];
+    if run_analytics {
+        capabilities.push("analytics".to_string());
+    }
+    if run_email {
+        capabilities.push("email".to_string());
+    }
+    if run_reply_handler {
+        capabilities.push("reply-handler".to_string());
+    }
+    if run_webhook {
+        capabilities.push("webhook".to_string());
+    }
+    let heartbeat_config =
+        apexmail_lib::heartbeat::HeartbeatConfig::new("worker", env!("CARGO_PKG_VERSION"))
+            .with_capabilities(capabilities)
+            .with_interval_from_env()
+            .with_region_from_env();
+    info!(
+        instance_id = %heartbeat_config.instance_id,
+        "worker heartbeat emitter started"
+    );
+    let heartbeat = apexmail_lib::heartbeat::spawn_service_heartbeat(db.clone(), heartbeat_config);
+
+    // VERP v2 secret requirement (mirrors the MTA's production gate):
+    // outbound mail may only carry an AUTHENTICATED bounce Return-Path.
+    // Without the shared secret the worker emits NO VERP at all — it never
+    // falls back to the unsigned v1 grammar — and production startup refuses
+    // the configuration when the email processor is enabled.
+    let verp_domain_enabled = env::var("VERP_DOMAIN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(true);
+    let verp_secret_ok = env::var("VERP_HMAC_SECRET")
+        .map(|v| v.trim().len() >= apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN)
+        .unwrap_or(false);
+    if verp_domain_enabled && !verp_secret_ok {
+        let production = env::var("NODE_ENV")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "production" | "prod"
+                )
+            })
+            .unwrap_or(false);
+        if production && run_email {
+            anyhow::bail!(
+                "VERP_HMAC_SECRET must be set (>= {} bytes) when running the email processor in \
+                 production: unsigned v1 VERP is no longer emitted and bounces cannot be \
+                 authenticated without the shared secret",
+                apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN
+            );
+        }
+        warn!(
+            "VERP_HMAC_SECRET is unset or shorter than {} bytes: outbound mail will carry NO \
+             VERP Return-Path (unsigned v1 is not emitted); set the shared secret to enable \
+             authenticated bounce routing",
+            apexmail_lib::verp::VERP_V2_MIN_SECRET_LEN
+        );
+    }
+
     let mut handles = vec![];
     let mut analytics_processor: Option<Arc<AnalyticsProcessor>> = None;
     let mut email_processor: Option<Arc<EmailProcessor>> = None;
@@ -452,6 +516,9 @@ async fn main() -> Result<()> {
     {
         warn!("Shutdown timed out; some processor tasks may still be running");
     }
+
+    // Stop beating; the control plane sees the lease go stale on its own.
+    heartbeat.abort();
 
     info!("Worker stopped");
     Ok(())

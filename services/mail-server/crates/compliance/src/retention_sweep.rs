@@ -43,23 +43,11 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::audit_logger::AuditLogger;
+use crate::legal_archive;
 use crate::retention::{seed_retention_registry, RetentionRegistry};
-
-/// DDL for the per-run retention report. Applied by [`RetentionSweeper::apply_migration`]
-/// (the compliance crate owns no numbered migration files).
-pub const RETENTION_REPORT_MIGRATION: &str = r#"
-CREATE TABLE IF NOT EXISTS retention_report (
-    id TEXT PRIMARY KEY,
-    ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    plan_tier TEXT NOT NULL DEFAULT 'default',
-    report JSONB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_retention_report_ran_at
-    ON retention_report (ran_at DESC);
-"#;
 
 /// Rows deleted per batch statement (F11) — bounded work per lock window.
 const DELETE_BATCH_ROWS: i64 = 5_000;
@@ -233,6 +221,16 @@ pub struct RetentionSweepReport {
     pub dsr_outbox_purged: u64,
     pub audit_logs_considered: i64,
     pub audit_logs_archived: i64,
+    /// Legally-restricted archive rows that reached statutory expiry this run
+    /// (`legally_restricted → statutory_expired`).
+    pub archive_expired: u64,
+    /// Archive rows deleted this run (`statutory_expired → deleted`).
+    pub archive_deleted: u64,
+    /// Source records (invoices) removed after their statutory expiry.
+    pub archive_source_records_deleted: u64,
+    /// Rows past expiry whose source table is not owned/purgeable — reported,
+    /// never silently dropped.
+    pub archive_stuck_unpurgeable: u64,
     pub out_of_scope: Vec<OutOfScopeStore>,
 }
 
@@ -258,16 +256,6 @@ impl RetentionSweeper {
             request_expiration_days,
             audit_retention_days,
         }
-    }
-
-    /// Ensure the `retention_report` table exists (idempotent).
-    pub async fn apply_migration(&self) -> Result<(), String> {
-        sqlx::raw_sql(RETENTION_REPORT_MIGRATION)
-            .execute(&self.db)
-            .await
-            .map_err(|e| format!("retention_report migration error: {e}"))?;
-        info!("retention_report table ensured");
-        Ok(())
     }
 
     /// Run one full sweep and persist a `retention_report` row.
@@ -339,6 +327,17 @@ impl RetentionSweeper {
                 -1
             });
 
+        // Legally-restricted archive: advance due rows through the monotonic
+        // lifecycle (legally_restricted → statutory_expired → deleted). The
+        // source record is deleted only after the statutory expiry, and only
+        // when the DB trigger accepts the transition.
+        let archive = legal_archive::advance_due_archives(&self.db, now)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "retention sweep: legal archive advance failed");
+                legal_archive::ArchiveSweepOutcome::default()
+            });
+
         let report = RetentionSweepReport {
             ran_at: now,
             plan_tier: if overrides_seen {
@@ -351,6 +350,10 @@ impl RetentionSweeper {
             dsr_outbox_purged: outbox_purged.0,
             audit_logs_considered: audit_considered,
             audit_logs_archived: audit_archived,
+            archive_expired: archive.expired,
+            archive_deleted: archive.deleted,
+            archive_source_records_deleted: archive.source_records_deleted,
+            archive_stuck_unpurgeable: archive.stuck_unpurgeable,
             out_of_scope: out_of_scope_stores(&self.registry),
         };
 

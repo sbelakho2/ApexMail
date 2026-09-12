@@ -14,6 +14,9 @@ path = "src/bin/mta.rs"
 mail-common = { path = "../mail-common" }
 mail-proto = { path = "../mail-proto" }
 apexmail-lib = { path = "../apexmail-lib" }
+# Unified send admission (P0): SMTP submission reserves the same EmailsSent
+# quota / category / suppression gate as the REST send path.
+billing-service = { path = "../billing-service" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
