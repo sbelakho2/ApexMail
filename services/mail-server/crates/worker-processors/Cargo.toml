@@ -82,7 +82,7 @@ regex.workspace = true
 moka.workspace = true
 
 # Email protocols (for email processor)
-mail-send = "0.4"
+mail-send = "0.6"
 rustls.workspace = true
 hex = "0.4"
 
