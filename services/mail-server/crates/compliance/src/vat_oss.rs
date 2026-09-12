@@ -16,14 +16,26 @@
 //! * Recording of amendments ([`create_oss_return_adjustment`]) and of
 //!   payments ([`record_oss_payment`]) — recording only.
 //!
-//! # What is NOT implemented (explicitly, no fake successes)
+//! # Submission transport (implemented behind a configuration gate)
 //!
-//! * **Submission transport.** There is no EMTA/OSS portal client here:
-//!   [`submit_oss_return`] and [`submit_vd_return`] return
-//!   [`SUBMISSION_NOT_IMPLEMENTED`]. A return can be generated/validated and
-//!   then marked submitted only by an operator action that records the real
-//!   portal reference; the code never fabricates an acknowledgement.
-//! * **Acknowledgement ingestion.** No polling/parsing of portal replies.
+//! [`submit_oss_return`] / [`submit_vd_return`] now delegate to
+//! [`crate::filing_transport`]:
+//!
+//! * If the deployment configured a machine endpoint + credential
+//!   (`APEXMAIL_FILING_TRANSPORT=http`, `APEXMAIL_FILING_ENDPOINT`,
+//!   `APEXMAIL_FILING_TOKEN`), the exact submission package is POSTed over
+//!   the documented protocol and the return moves to `submitted` ONLY when
+//!   the endpoint returned a receipt reference.
+//! * Otherwise the exact package is persisted and a MANDATORY authenticated
+//!   human task is opened ([`SubmissionOutcome::HumanTaskRequired`]); the
+//!   return stays `validated`, and a human records the real portal reference
+//!   via [`crate::filing_transport::record_manual_submission`].
+//! * Acknowledgement is receipt-driven: only
+//!   [`crate::filing_transport::ingest_acknowledgement`] with a real receipt
+//!   reference can move a return to `acknowledged`.
+//!
+//! # What is still NOT implemented (explicitly, no fake successes)
+//!
 //! * **Payment execution.** [`record_oss_payment`] persists remittance facts
 //!   (operator/bank input); it does not move money.
 //! * **Place-of-supply adjudication.** `customer_location_evidence` is
@@ -37,19 +49,28 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Error returned by the unimplemented submission transports.
-pub const SUBMISSION_NOT_IMPLEMENTED: &str =
-    "submission transport is not implemented in this build: generate and validate the return, \
-     then record the portal submission reference manually — no acknowledgement is fabricated";
+use crate::filing_transport::{
+    FilingTransport, FilingTransportConfig, ReturnKind, SubmissionOutcome,
+};
 
-/// Whether OSS submission is implemented (false: see module docs).
+/// Documented gate for the machine transport. When this condition is not
+/// met, the exact package is generated and a mandatory authenticated human
+/// task is opened — the return is never marked submitted.
+pub const SUBMISSION_REQUIRES_CONFIGURATION: &str =
+    "a machine submission requires APEXMAIL_FILING_TRANSPORT=http plus APEXMAIL_FILING_ENDPOINT \
+     and APEXMAIL_FILING_TOKEN; otherwise the exact package is generated and a MANDATORY \
+     authenticated human task must record the real portal reference";
+
+/// Whether the submission transport is implemented in this build (true: it
+/// is gated on runtime configuration, see [`SUBMISSION_REQUIRES_CONFIGURATION`]).
 pub fn oss_submission_is_implemented() -> bool {
-    false
+    true
 }
 
-/// Whether VD submission is implemented (false: see module docs).
+/// Whether the VD submission transport is implemented in this build (true:
+/// gated on runtime configuration).
 pub fn vd_submission_is_implemented() -> bool {
-    false
+    true
 }
 
 /// Filing lifecycle shared by OSS returns and VD returns.
@@ -404,8 +425,15 @@ pub async fn generate_vd_return(db: &PgPool, period: &str) -> Result<Uuid, Strin
 // Status transitions
 // ---------------------------------------------------------------------------
 
-async fn transition_return(
-    db: &PgPool,
+/// The state-machine transition, executed on an existing connection so
+/// callers can commit the transition together with the evidence
+/// (submission package / receipt / human task) in ONE transaction.
+///
+/// An `Acknowledged` transition requires a non-empty receipt reference: the
+/// state machine refuses a receipt-less acknowledgement even if a caller
+/// bypasses [`crate::filing_transport::ingest_acknowledgement`].
+pub(crate) async fn transition_return_in(
+    conn: &mut sqlx::PgConnection,
     table: &str,
     return_id: Uuid,
     to: FilingStatus,
@@ -422,16 +450,11 @@ async fn transition_return(
         }
     }
 
-    let mut tx = db
-        .begin()
-        .await
-        .map_err(|error| format!("failed to begin status transition: {error}"))?;
-
     let current: Option<String> = sqlx::query_scalar(&format!(
         "SELECT status FROM {table} WHERE id = $1 FOR UPDATE"
     ))
     .bind(return_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|error| format!("failed to lock return: {error}"))?;
     let Some(current) = current else {
@@ -463,10 +486,25 @@ async fn transition_return(
     .bind(return_id)
     .bind(to.as_str())
     .bind(acknowledgement_reference)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(|error| format!("failed to transition return: {error}"))?;
 
+    Ok(())
+}
+
+async fn transition_return(
+    db: &PgPool,
+    table: &str,
+    return_id: Uuid,
+    to: FilingStatus,
+    acknowledgement_reference: Option<&str>,
+) -> Result<(), String> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| format!("failed to begin status transition: {error}"))?;
+    transition_return_in(&mut tx, table, return_id, to, acknowledgement_reference).await?;
     tx.commit()
         .await
         .map_err(|error| format!("failed to commit status transition: {error}"))?;
@@ -493,16 +531,29 @@ pub async fn transition_vd_return(
     transition_return(db, "vd_returns", return_id, to, acknowledgement_reference).await
 }
 
-/// OSS submission is NOT implemented: this returns the documented error
-/// instead of pretending to file.
-pub async fn submit_oss_return(_db: &PgPool, _return_id: Uuid) -> Result<(), String> {
-    Err(SUBMISSION_NOT_IMPLEMENTED.to_string())
+/// Submit a validated OSS return.
+///
+/// With a configured machine transport the return moves to `submitted` only
+/// after a receipt was actually received; without one the exact package is
+/// persisted and a mandatory authenticated human task is opened (the return
+/// remains `validated`). Acknowledgement is never implied.
+pub async fn submit_oss_return(
+    db: &PgPool,
+    return_id: Uuid,
+    config: &FilingTransportConfig,
+    transport: Option<&dyn FilingTransport>,
+) -> Result<SubmissionOutcome, String> {
+    crate::filing_transport::submit_filing(db, ReturnKind::Oss, return_id, config, transport).await
 }
 
-/// VD submission is NOT implemented: this returns the documented error
-/// instead of pretending to file.
-pub async fn submit_vd_return(_db: &PgPool, _return_id: Uuid) -> Result<(), String> {
-    Err(SUBMISSION_NOT_IMPLEMENTED.to_string())
+/// Submit a validated VD return (same contract as [`submit_oss_return`]).
+pub async fn submit_vd_return(
+    db: &PgPool,
+    return_id: Uuid,
+    config: &FilingTransportConfig,
+    transport: Option<&dyn FilingTransport>,
+) -> Result<SubmissionOutcome, String> {
+    crate::filing_transport::submit_filing(db, ReturnKind::Vd, return_id, config, transport).await
 }
 
 // ---------------------------------------------------------------------------
@@ -727,11 +778,13 @@ mod tests {
     }
 
     #[test]
-    fn submission_transports_are_explicitly_not_implemented() {
-        assert!(!oss_submission_is_implemented());
-        assert!(!vd_submission_is_implemented());
-        assert!(SUBMISSION_NOT_IMPLEMENTED.contains("not implemented"));
-        assert!(SUBMISSION_NOT_IMPLEMENTED.contains("no acknowledgement is fabricated"));
+    fn submission_transport_is_gated_on_configuration() {
+        assert!(oss_submission_is_implemented());
+        assert!(vd_submission_is_implemented());
+        assert!(SUBMISSION_REQUIRES_CONFIGURATION.contains("APEXMAIL_FILING_ENDPOINT"));
+        assert!(SUBMISSION_REQUIRES_CONFIGURATION.contains("MANDATORY"));
+        // An unconfigured transport never produces a machine readiness claim.
+        assert!(!crate::filing_transport::FilingTransportConfig::disabled().machine_ready());
     }
 
     #[test]

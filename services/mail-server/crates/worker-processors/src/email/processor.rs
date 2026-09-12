@@ -21,7 +21,7 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
-use super::transport::{create_transport_from_config, EmailTransport, HybridTransport};
+use super::transport::{create_transport_from_config_with_db, EmailTransport, HybridTransport};
 use super::transport_router::{transport_kind_for, TransportKind};
 use super::types::{
     Attachment, CachedSuppression, DedicatedIp, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain,
@@ -1386,6 +1386,26 @@ fn route_receipt_contract_note(route: &DeliveryRoute, receipt: &DeliveryReceipt)
     }
 }
 
+/// Warmup accounting for ONE finished send attempt: whether the reservation
+/// taken for `route` must be RELEASED.
+///
+/// Capacity is CONSUMED only by a receipt that proves the reserved IP
+/// actually carried the message ([`route_receipt_contract_note`] is `None`);
+/// every other outcome — a transport error (no acceptance at all), or an
+/// accepted receipt whose `actual_source_ip` is missing or differs — releases
+/// the reservation. This is an accounting correction, never a retry trigger:
+/// release does not resubmit anything, and the delivery decision was already
+/// made above it.
+pub(crate) fn warmup_reservation_must_be_released(
+    route: &DeliveryRoute,
+    result: &ProcessorResult<DeliveryReceipt>,
+) -> bool {
+    match result {
+        Ok(receipt) => route_receipt_contract_note(route, receipt).is_some(),
+        Err(_) => route.is_dedicated(),
+    }
+}
+
 /// One `email_queue` row as decoded by `fetch_jobs`, before per-recipient
 /// expansion (FIX-8).
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -1485,7 +1505,7 @@ fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob
 
 /// F-21: disposition class for a failed send attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SendFailureClass {
+pub(crate) enum SendFailureClass {
     /// Temporary failure (4xx reply, or a "Soft bounce"/"temporary" marker) —
     /// retried via `handle_soft_bounce` with the existing exponential backoff.
     Soft,
@@ -1505,13 +1525,20 @@ enum SendFailureClass {
 /// into a redacted, truncated string): 4xx is temporary, 5xx is permanent.
 /// Legacy string markers keep working for messages that already carry them
 /// so other error paths (and the SES transport) are unaffected.
-fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
+pub(crate) fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
     if let ProcessorError::Smtp { code, .. } = err {
         return match code {
             400..=499 => SendFailureClass::Soft,
             500..=599 => SendFailureClass::Hard,
             _ => SendFailureClass::Unknown,
         };
+    }
+    // A dedicated-route acceptance whose source-IP binding did not verify is
+    // HARD: the relay already completed the post-DATA acceptance, so a retry
+    // could duplicate an externally accepted message. It is never
+    // address-proving, so the recipient is not suppressed.
+    if let ProcessorError::SourceBindingUnverified(_) = err {
+        return SendFailureClass::Hard;
     }
     // Audit-4: the SES transport classifies at the source (typed SDK error)
     // and threads the disposition through the structured Ses variant.
@@ -1544,7 +1571,7 @@ fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
 /// phrase) proves address invalidity. SES dispositions carry the
 /// address-proving verdict from the transport source (typed SDK error);
 /// account/configuration refusals dead-letter without suppressing.
-fn is_recipient_invalid(error: &ProcessorError) -> bool {
+pub(crate) fn is_recipient_invalid(error: &ProcessorError) -> bool {
     match error {
         ProcessorError::Smtp {
             enhanced, message, ..
@@ -1617,7 +1644,10 @@ impl EmailProcessor {
     /// Create a new email processor.
     /// This is async because SES transport requires AWS SDK initialisation.
     pub async fn new(db: PgPool, redis: RedisPool, config: EmailConfig) -> ProcessorResult<Self> {
-        let transport = create_transport_from_config(&config).await?;
+        // The database pool builds the in-process outbound-MTA transport for
+        // dedicated routes: its durable ledger and the worker's exactly-once
+        // acceptance ledger share the send_unit identity (migration 212).
+        let transport = create_transport_from_config_with_db(&config, Some(&db)).await?;
         Self::with_transport(db, redis, config, transport).await
     }
 
@@ -2562,26 +2592,12 @@ impl EmailProcessor {
                         "dedicated route contract violation on an ACCEPTED send — recording it; \
                          the message is not retried"
                     );
-                    // Accounting correction only: the selected IP did not
-                    // (per the confirmed receipt) carry this message, so its
-                    // quota must not count it. The send itself is accepted
-                    // and stays accepted on the ledger.
-                    if let Some(reservation) = reserved
-                        .as_ref()
-                        .and_then(|reserved| reserved.reservation.as_ref())
-                    {
-                        if let Err(release_error) =
-                            release_warmup_reservation(&self.redis, reservation).await
-                        {
-                            warn!(
-                                ip = %reservation.source_ip,
-                                dedicated_ip_id = %reservation.dedicated_ip_id,
-                                error = %release_error,
-                                "failed to release warmup reservation after route contract violation"
-                            );
-                        }
-                    }
                 }
+                // Accounting correction only: warmup capacity counts only a
+                // receipt that proved the reserved IP carried the message.
+                // The send itself is accepted and stays accepted on the ledger.
+                self.release_unverified_warmup_reservation(&reserved, &route, &send_result)
+                    .await;
                 if let Err(record_error) = record_acceptance_accepted(
                     &self.db,
                     &send_unit,
@@ -2603,6 +2619,15 @@ impl EmailProcessor {
                 }
             }
             Err(error) => {
+                // No verified acceptance was produced, so the reserved
+                // capacity must not count. (For the outbound-MTA path a
+                // mismatched/missing source-IP report arrives HERE as a hard
+                // contract failure; a retry of a merely transient error is
+                // safe because the relay ledger is keyed on the same
+                // send_unit and returns the stored acceptance instead of
+                // delivering again.)
+                self.release_unverified_warmup_reservation(&reserved, &route, &send_result)
+                    .await;
                 if let Err(record_error) =
                     record_acceptance_failed(&self.db, &send_unit, &error.to_string()).await
                 {
@@ -2659,6 +2684,35 @@ impl EmailProcessor {
         };
 
         outcome
+    }
+
+    /// Release the reserved warmup slot when the finished attempt did NOT
+    /// produce a verified acceptance (see
+    /// [`warmup_reservation_must_be_released`]). Accounting correction only:
+    /// nothing is resubmitted here.
+    async fn release_unverified_warmup_reservation(
+        &self,
+        reserved: &Option<ReservedDeliveryIp>,
+        route: &DeliveryRoute,
+        result: &ProcessorResult<DeliveryReceipt>,
+    ) {
+        if !warmup_reservation_must_be_released(route, result) {
+            return;
+        }
+        let Some(reservation) = reserved
+            .as_ref()
+            .and_then(|reserved| reserved.reservation.as_ref())
+        else {
+            return;
+        };
+        if let Err(release_error) = release_warmup_reservation(&self.redis, reservation).await {
+            warn!(
+                ip = %reservation.source_ip,
+                dedicated_ip_id = %reservation.dedicated_ip_id,
+                error = %release_error,
+                "failed to release warmup reservation for an unverified dedicated send"
+            );
+        }
     }
 
     /// F18: the dispatch-time tenant policy decision. Only a CONFIRMED
@@ -3089,6 +3143,11 @@ impl EmailProcessor {
             .unwrap_or_default();
 
         Ok(PreparedEmail {
+            // The stable logical send identity: the same value the acceptance
+            // reservation (`claim_acceptance`) and the outbound MTA's
+            // `outbound_relay_ledger` PRIMARY KEY use, so a retried submit is
+            // idempotent on both sides (migration 212).
+            send_unit: send_unit_of(job),
             from: job.from.clone(),
             to: job.to.clone(),
             mime_to,
@@ -8022,6 +8081,7 @@ mod tests {
 
     fn test_email() -> PreparedEmail {
         PreparedEmail {
+            send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
             to: "recipient@example.com".into(),
             mime_to: vec![],
@@ -8258,6 +8318,271 @@ mod tests {
             .await
             .expect("second release");
         assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
+    }
+
+    /// The warmup settlement rule: capacity is CONSUMED only by a receipt
+    /// that proves the reserved IP actually carried the message; every other
+    /// outcome (transport error, mismatched report, missing report) releases
+    /// it. Shared routes have no dedicated reservation to settle.
+    #[test]
+    fn warmup_settlement_consumes_only_a_verified_dedicated_receipt() {
+        let receipt = |ip: Option<&str>| DeliveryReceipt {
+            transport: TransportType::Smtp,
+            transport_message_id: None,
+            actual_source_ip: ip.map(|value| value.parse().expect("test IP")),
+            recipient_provider: None,
+            provider_source: None,
+        };
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+
+        // Verified acceptance: CONSUMED (no release).
+        assert!(!warmup_reservation_must_be_released(
+            &dedicated,
+            &Ok(receipt(Some("203.0.113.9")))
+        ));
+        // Mismatch / missing report: released.
+        assert!(warmup_reservation_must_be_released(
+            &dedicated,
+            &Ok(receipt(Some("198.51.100.7")))
+        ));
+        assert!(warmup_reservation_must_be_released(
+            &dedicated,
+            &Ok(receipt(None))
+        ));
+        // Transport error: released (nothing was verified).
+        assert!(warmup_reservation_must_be_released(
+            &dedicated,
+            &Err(ProcessorError::Transport("relay down".into()))
+        ));
+        // Shared route: there is no dedicated reservation to release.
+        assert!(!warmup_reservation_must_be_released(
+            &DeliveryRoute::SesShared,
+            &Ok(receipt(None))
+        ));
+        assert!(!warmup_reservation_must_be_released(
+            &DeliveryRoute::SesShared,
+            &Err(ProcessorError::Transport("SES down".into()))
+        ));
+    }
+
+    /// The prepared message carries EXACTLY the send unit the acceptance
+    /// ledger reserves (both queue mail and sales mail), so the outbound MTA
+    /// ledger (migration 212) and the worker ledger key the same identity.
+    #[tokio::test]
+    async fn prepared_email_carries_the_reserved_send_unit_identity() {
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: false,
+            ..crate::common::TrackingConfig::default()
+        })
+        .await;
+
+        let job = tracking_gate_job();
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .expect("queue mail prepared");
+        assert_eq!(prepared.send_unit, send_unit_of(&job));
+        assert_eq!(
+            prepared.send_unit,
+            "email_queue:job-1:recipient@example.com"
+        );
+
+        let mut sales_job = tracking_gate_job();
+        sales_job.sales_step_execution_id = Some("step-9".into());
+        let prepared = processor
+            .prepare_email(
+                &sales_job,
+                &tracking_gate_domain(),
+                &DeliveryRoute::SesShared,
+            )
+            .expect("sales mail prepared");
+        assert_eq!(
+            prepared.send_unit, "sa-send:step-9",
+            "sales mail keys on the dispatcher idempotency key"
+        );
+    }
+
+    /// A verified outbound-MTA acceptance CONSUMES the reserved warmup slot:
+    /// reserve → real relay accepts and reports the requested IP → the counter
+    /// and marker stay in place.
+    #[tokio::test]
+    async fn verified_outbound_mta_send_consumes_the_warmup_reservation() {
+        use crate::email::OutboundMtaTransport;
+        use outbound_mta::test_support::{
+            FakeSmtpConfig, FakeSmtpServer, MemoryLedger, StaticMxResolver,
+        };
+        use outbound_mta::{Relay, RelayConfig};
+        use std::sync::Arc as StdArc;
+
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+        let job = tracking_gate_job();
+        let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "127.0.0.1", true, 3)])
+            .expect("candidate pool");
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("below the cap");
+        let reservation = reserved.reservation.clone().expect("warming reservation");
+        let route = reserved.route();
+
+        let server = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let ledger = StdArc::new(MemoryLedger::new());
+        let resolver =
+            StdArc::new(StaticMxResolver::new().with_target("example.com", vec![server.addr()]));
+        let relay = StdArc::new(Relay::new(ledger, resolver, RelayConfig::default()));
+        let transport = OutboundMtaTransport::new(relay);
+
+        let email = PreparedEmail {
+            send_unit: send_unit_of(&job),
+            from: job.from.clone(),
+            to: job.to.clone(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: job.subject.clone(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+            verp: None,
+        };
+        let result = transport.send(&email, &route).await;
+        assert!(
+            result.is_ok(),
+            "the real relay must accept the dedicated send: {result:?}"
+        );
+        assert_eq!(
+            result.as_ref().expect("receipt").actual_source_ip,
+            Some("127.0.0.1".parse().expect("test IP"))
+        );
+        assert!(
+            !warmup_reservation_must_be_released(&route, &result),
+            "a verified dedicated acceptance consumes the reservation"
+        );
+
+        // The reservation is still held: counter 1, marker present.
+        let mut conn = redis.get().await.expect("redis connection");
+        let count: Option<i64> = redis::cmd("GET")
+            .arg(&reservation.counter_key)
+            .query_async(&mut *conn)
+            .await
+            .expect("counter read");
+        assert_eq!(count, Some(1), "the capacity must stay consumed");
+        let marker: Option<String> = redis::cmd("GET")
+            .arg(&reservation.marker_key)
+            .query_async(&mut *conn)
+            .await
+            .expect("marker read");
+        assert_eq!(marker, Some("1".into()));
+        assert_eq!(server.messages().len(), 1);
+    }
+
+    /// An acceptance whose actual IP differs from the reserved one is a hard
+    /// failure AND the reserved capacity is released (never refund-then-retry:
+    /// the failure is hard, and the release is the same accounting correction
+    /// the dispatch path performs).
+    #[tokio::test]
+    async fn mismatched_source_ip_report_releases_the_warmup_reservation() {
+        use crate::email::{OutboundMtaTransport, RelaySubmitter};
+        use outbound_mta::{AcceptanceRecord, RelayError, SubmitRequest};
+        use std::sync::Arc as StdArc;
+
+        struct MismatchRelay {
+            record: AcceptanceRecord,
+        }
+
+        #[async_trait::async_trait]
+        impl RelaySubmitter for MismatchRelay {
+            async fn submit(
+                &self,
+                _request: SubmitRequest,
+            ) -> Result<AcceptanceRecord, RelayError> {
+                Ok(self.record.clone())
+            }
+
+            async fn ready(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+        let job = tracking_gate_job();
+        let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
+            .expect("candidate pool");
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("below the cap");
+        let reservation = reserved.reservation.clone().expect("warming reservation");
+        let route = reserved.route();
+
+        let send_unit = send_unit_of(&job);
+        let stub = StdArc::new(MismatchRelay {
+            record: AcceptanceRecord {
+                send_unit: send_unit.clone(),
+                state: "accepted".into(),
+                accepted_at: Utc::now(),
+                attempt: 1,
+                remote_mx: Some("mx.example.com".into()),
+                tls_used: false,
+                requested_source_ip: Some("203.0.113.9".parse().expect("test IP")),
+                actual_source_ip: Some("198.51.100.7".parse().expect("test IP")),
+                recipients: vec![],
+                dsn_send_units: vec![],
+            },
+        });
+        let transport = OutboundMtaTransport::new(stub);
+
+        let email = PreparedEmail {
+            send_unit: send_unit.clone(),
+            from: job.from.clone(),
+            to: job.to.clone(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: job.subject.clone(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+            verp: None,
+        };
+        let result = transport.send(&email, &route).await;
+        assert!(
+            matches!(result, Err(ProcessorError::SourceBindingUnverified(_))),
+            "a mismatched actual IP must be a hard failure: {result:?}"
+        );
+        let error = result.as_ref().err().expect("error");
+        assert_eq!(classify_send_failure(error), SendFailureClass::Hard);
+        assert!(warmup_reservation_must_be_released(&route, &result));
+
+        // Dispatch-path accounting: release the exact reserved slot.
+        release_warmup_reservation(&redis, &reservation)
+            .await
+            .expect("release");
+        let mut conn = redis.get().await.expect("redis connection");
+        let count: Option<i64> = redis::cmd("GET")
+            .arg(&reservation.counter_key)
+            .query_async(&mut *conn)
+            .await
+            .expect("counter read");
+        assert_eq!(count, Some(0), "the unverified capacity must be released");
+        let marker: Option<String> = redis::cmd("GET")
+            .arg(&reservation.marker_key)
+            .query_async(&mut *conn)
+            .await
+            .expect("marker read");
+        assert_eq!(marker, None);
     }
 
     // ---------------------------------------------------------------------------
@@ -8859,6 +9184,7 @@ mod acceptance_ledger_db_tests {
 
     fn acceptance_email() -> PreparedEmail {
         PreparedEmail {
+            send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
             to: "recipient@example.com".into(),
             mime_to: vec![],

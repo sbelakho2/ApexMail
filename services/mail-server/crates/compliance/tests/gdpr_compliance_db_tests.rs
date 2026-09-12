@@ -2281,8 +2281,11 @@ async fn audit_archive_respects_legal_holds() {
 /// Missing canonical stores are reported as skipped — never silently counted.
 #[tokio::test]
 async fn retention_sweep_reports_missing_stores() {
-    // MAIN_SCHEMA has events; a deployment without the messages store.
-    let Some(pool) = test_pool("sweep_missing", MAIN_SCHEMA).await else {
+    // MAIN_SCHEMA has events; a deployment without the messages store. The
+    // sweep writes retention_report, which lives in SWEEP_EXTRA_SCHEMA, so
+    // this must provision through sweep_pool (a plain test_pool here made the
+    // sweep fail with "relation retention_report does not exist").
+    let Some(pool) = sweep_pool("sweep_missing").await else {
         return;
     };
     sqlx::query("DROP TABLE messages")

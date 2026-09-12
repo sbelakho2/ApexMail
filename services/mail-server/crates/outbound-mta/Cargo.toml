@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "Recipient-facing outbound MTA: durable queueing, MX resolution, retry/TLS/source-IP policy, DSNs, idempotent acceptance"
 
+[features]
+# Exposes the in-memory ledger, the static MX resolver and the scripted SMTP
+# server so dependent test suites (worker-processors) can exercise the
+# submission/acceptance contract end to end without Postgres or real DNS.
+# Never enabled for production binaries.
+test-support = []
+
 [lib]
 name = "outbound_mta"
 path = "src/lib.rs"

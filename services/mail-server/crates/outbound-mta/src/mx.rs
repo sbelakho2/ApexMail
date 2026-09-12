@@ -253,8 +253,10 @@ fn is_usable_address(ip: &IpAddr) -> bool {
 }
 
 /// In-memory resolver for tests: static domain -> targets (or error) map.
-#[cfg(test)]
-pub(crate) mod test_support {
+/// Public under `test-support` so dependent crates can run the real
+/// [`crate::Relay`] against it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;

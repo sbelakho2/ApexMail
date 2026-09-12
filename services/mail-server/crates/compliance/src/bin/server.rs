@@ -1,5 +1,5 @@
 //! Compliance server binary — a long-running service: HTTP API on port 3011
-//! (liveness `GET /health`, readiness `GET /health/ready`), 7 background
+//! (liveness `GET /health`, readiness `GET /health/ready`), 8 background
 //! cron jobs and graceful shutdown (SIGTERM/SIGINT → in-flight requests
 //! drain, DB pool closes).
 //!
@@ -38,6 +38,7 @@
 //! 5. Data retention enforcement (consents/exports) — daily
 //! 6. Retention sweep (registry-driven canonical-store purges + report) — daily
 //! 7. DSR verification-outbox flush — every 60s
+//! 8. Statutory ledger sweeps (payroll/expenses unposted → accounting-core) — every 5min
 
 use clap::Parser;
 use observability_service::otlp_exporter::{
@@ -182,7 +183,7 @@ async fn shutdown_signal() {
     info!("Shutdown signal received");
 }
 
-/// 7 background cron jobs:
+/// 8 background cron jobs:
 /// 1. GDPR queue processing — every 30s
 /// 2. Secret auto-rotation — every 60min
 /// 3. GDPR request expiry — every 5min
@@ -190,6 +191,7 @@ async fn shutdown_signal() {
 /// 5. Data retention enforcement (consents/exports) — daily (every 24h)
 /// 6. Retention sweep (H-6: registry-driven event-store purges + report) — daily
 /// 7. DSR verification-outbox flush (D: queue tokens as system email) — every 60s
+/// 8. Statutory ledger sweeps (payroll/expenses) — every 5min
 async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     let mut gdpr_ticker = interval(Duration::from_secs(30));
     let mut rotation_ticker = interval(Duration::from_secs(3600));
@@ -198,6 +200,9 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
     let mut retention_ticker = interval(Duration::from_secs(86400));
     let mut sweep_ticker = interval(Duration::from_secs(86400));
     let mut outbox_flush_ticker = interval(Duration::from_secs(60));
+    // Interim host for the payroll/expense sweeps: there is no accounting
+    // service or payroll-run writer yet; see compliance::ledger_sweep.
+    let mut ledger_ticker = interval(Duration::from_secs(300));
 
     loop {
         tokio::select! {
@@ -302,6 +307,30 @@ async fn run_cron_jobs(state: Arc<AppState>, outbox_flusher: DsrOutboxFlusher) {
                                 );
                             }
                             Err(e) => error!(error = %e, "Retention sweep failed"),
+                        }
+                    }
+                    _ = ledger_ticker.tick() => {
+                        // Follow-up: the payroll/expense adapters had no
+                        // production writer. The sweeps post every unposted
+                        // source row idempotently (SKIP LOCKED claim + post in
+                        // one transaction), so a payroll run / expense entry
+                        // written by any future writer (or psql) reaches the
+                        // statutory ledger with no further wiring.
+                        match compliance::ledger_sweep::sweep_payroll_and_expenses(&state.db).await {
+                            Ok(report) if report.total_posted() > 0 => {
+                                info!(
+                                    payroll_posted = report.payroll.posted,
+                                    payroll_failed = report.payroll.failed,
+                                    payroll_unpostable = report.payroll.unpostable,
+                                    expenses_posted = report.expenses.posted,
+                                    expenses_failed = report.expenses.failed,
+                                    expenses_source_table_missing =
+                                        report.expenses.source_table_missing,
+                                    "Statutory ledger sweep posted source documents"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => error!(error = %e, "Statutory ledger sweep failed"),
                         }
                     }
                 }

@@ -107,8 +107,8 @@ use sales_autopilot::actions::{
 };
 use sales_autopilot::decision_engine::{self, ContactPolicyInputOwned, DecisionContext};
 use sales_autopilot::dispatcher::{
-    send_idempotency_key, EnqueueOutcome, ProductionCampaignDispatcher, QuotaGateway,
-    RenderedMessage, SendIdentity,
+    send_idempotency_key, EnqueueOutcome, ProductionCampaignDispatcher, RenderedMessage,
+    SendIdentity,
 };
 use sales_autopilot::outcome_projector::{OutcomeProjector, ProjectorConfig};
 use sales_autopilot::sender_pool;
@@ -126,7 +126,7 @@ type Fixture = (
 );
 
 /// The canonical sequence fixture plus a production dispatcher on its own
-/// unique verified domain, with an allow-all quota gateway.
+/// unique verified domain, with an allow-all admission backend.
 async fn fixture(test_name: &str, opts: common::SequenceFixtureOptions) -> Option<Fixture> {
     let db = common::test_pool(test_name).await?;
     let tenant_id = common::insert_test_tenant(&db, test_name).await;
@@ -135,7 +135,7 @@ async fn fixture(test_name: &str, opts: common::SequenceFixtureOptions) -> Optio
         ProductionCampaignDispatcher::new(
             common::test_dispatch_config_for(&seq.domain),
             db.clone(),
-            Arc::new(common::AllowAllQuotaGateway) as Arc<dyn QuotaGateway>,
+            Arc::new(common::AllowAllAdmissionBackend),
         )
         .expect("test dispatch config must be valid"),
     );

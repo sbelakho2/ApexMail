@@ -522,7 +522,27 @@ impl ComplianceCalendar {
     }
 
     /// Calculate the due date for a filing type in a given period.
+    ///
+    /// The legal date is routed through the ONE shared Estonian business
+    /// calendar ([`crate::statutory_calendar::statutory_due_date`]): a
+    /// deadline falling on a public holiday or weekend moves to the next
+    /// working day. The obligation scheduler
+    /// ([`crate::obligations`]) is the preferred entry point for new code;
+    /// this method is kept for the existing KMD/TSD/statistical call sites.
     pub fn calculate_due_date(
+        deadline_type: SubmissionType,
+        year: i32,
+        month: Option<u32>,
+    ) -> NaiveDate {
+        crate::statutory_calendar::statutory_due_date(Self::calculate_legal_due_date(
+            deadline_type,
+            year,
+            month,
+        ))
+    }
+
+    /// The raw legal due date before the working-day adjustment.
+    pub fn calculate_legal_due_date(
         deadline_type: SubmissionType,
         year: i32,
         month: Option<u32>,

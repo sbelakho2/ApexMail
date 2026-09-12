@@ -10,9 +10,9 @@
 //! | [`post_invoice_issued`] | invoice finalization — `billing-service/src/overage.rs:1966` (`finalize_collection`, draft→paid/pending) and `billing-service/src/stripe_webhooks.rs:1608` (`handle_invoice_paid`) |
 //! | [`post_payment_allocation`] | Stripe settlement / wallet settlement — allocation rows written at `billing-service/src/stripe_webhooks.rs:1741` and `billing-service/src/overage.rs:1918` (`invoice_payment_allocations`) |
 //! | [`post_credit_note`] | credit notes / refunds — `billing-service/src/credit_notes.rs:172` (`create_credit_note`, `credit_notes` rows) |
-//! | [`post_operating_cost`] | expenses — deployment-optional `operating_costs`, read by `compliance/src/estonia_ou.rs:973` (there is no canonical expense table; the adapter reports `SourceTableMissing` when absent) |
-//! | [`post_payroll_record`] | payroll — `payroll_records` (migration `199_payroll_tax_inputs.sql:26`, read by `compliance/src/estonia_ou.rs:1026`) |
-//! | [`post_bank_statement_line`] | bank receipts/payments — `bank_statement_lines` (created by migration 220; no pre-existing bank feed/table exists in the repo) |
+//! | [`post_operating_cost`] | expenses — deployment-optional `operating_costs`, read by `compliance/src/estonia_ou.rs:973` (there is no canonical expense table; the adapter reports `SourceTableMissing` when absent). NO production writer exists: [`crate::sweeps::sweep_unposted_expenses`] posts any row a future expense feature (or psql) creates. |
+//! | [`post_payroll_record`] | payroll — `payroll_records` (migration `199_payroll_tax_inputs.sql:26`, read by `compliance/src/estonia_ou.rs:1026`). NO production writer exists: no payroll-run/admin path inserts rows; [`crate::sweeps::sweep_unposted_payroll`] posts every unposted record once the payroll-run feature (or psql) creates one. |
+//! | [`post_bank_statement_line`] | bank receipts/payments — `bank_statement_lines` (created by migration 220; no bank feed/import writer exists in the repo). [`crate::sweeps::sweep_unposted_bank_statement_lines`] posts any line a future feed creates. |
 //!
 //! `invoices` also carries rows inserted directly as paid by
 //! `stripe_webhooks.rs:1875` (`insert_paid_invoice_from_stripe`); that path
@@ -690,16 +690,30 @@ pub async fn post_credit_note_in(
 /// expenses, Cr accounts payable. Returns `SourceTableMissing` when the
 /// deployment has no expense store, so the caller can surface the gap
 /// instead of silently omitting costs from the ledger.
+///
+/// The transaction-scoped variant is [`post_operating_cost_in`]; the sweep
+/// [`crate::sweeps::sweep_unposted_expenses`] uses it to claim and post in
+/// one transaction.
 pub async fn post_operating_cost(
     pool: &PgPool,
     legal_entity_id: Uuid,
     cost_id: Uuid,
 ) -> Result<PostOutcome> {
     let mut tx = pool.begin().await?;
+    let outcome = post_operating_cost_in(&mut tx, legal_entity_id, cost_id).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
 
+/// [`post_operating_cost`] on a caller-owned connection/transaction.
+pub async fn post_operating_cost_in(
+    conn: &mut PgConnection,
+    legal_entity_id: Uuid,
+    cost_id: Uuid,
+) -> Result<PostOutcome> {
     let exists: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('public.operating_costs')::text")
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
     if exists.is_none() {
         return Err(AccountingError::SourceTableMissing(
@@ -711,7 +725,7 @@ pub async fn post_operating_cost(
         "SELECT category, amount_cents, incurred_at FROM operating_costs WHERE id = $1",
     )
     .bind(cost_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let Some((category, amount_cents, incurred_at)) = row else {
@@ -727,11 +741,13 @@ pub async fn post_operating_cost(
 
     let document_date = incurred_at.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(&mut tx, legal_entity_id, document_date).await?;
+        crate::periods::find_open_period_for_date(&mut *conn, legal_entity_id, document_date)
+            .await?;
 
     let expense =
-        crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_EXPENSE_DEFAULT).await?;
-    let ap = crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_AP).await?;
+        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_EXPENSE_DEFAULT)
+            .await?;
+    let ap = crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_AP).await?;
 
     let payload = serde_json::json!({
         "operating_cost_id": cost_id,
@@ -768,9 +784,7 @@ pub async fn post_operating_cost(
         ],
     };
 
-    let outcome = post_journal_entry_in(&mut tx, &request).await?;
-    tx.commit().await?;
-    Ok(outcome)
+    post_journal_entry_in(&mut *conn, &request).await
 }
 
 // ===========================================================================
@@ -785,6 +799,10 @@ pub async fn post_operating_cost(
 /// supplies the amounts computed by the date-effective tax policy; the
 /// adapter validates `gross = net + income tax + employee unemployment +
 /// pension` so an inconsistent payroll can never enter the ledger.
+///
+/// The transaction-scoped variant is [`post_payroll_record_in`]; the sweep
+/// [`crate::sweeps::sweep_unposted_payroll`] uses it to claim and post in
+/// one transaction.
 pub async fn post_payroll_record(
     pool: &PgPool,
     legal_entity_id: Uuid,
@@ -792,13 +810,25 @@ pub async fn post_payroll_record(
     amounts: PayrollAmounts,
 ) -> Result<PostOutcome> {
     let mut tx = pool.begin().await?;
+    let outcome =
+        post_payroll_record_in(&mut tx, legal_entity_id, payroll_record_id, amounts).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
 
+/// [`post_payroll_record`] on a caller-owned connection/transaction.
+pub async fn post_payroll_record_in(
+    conn: &mut PgConnection,
+    legal_entity_id: Uuid,
+    payroll_record_id: Uuid,
+    amounts: PayrollAmounts,
+) -> Result<PostOutcome> {
     let record: Option<(Option<String>, i64, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT employee_name, gross_salary_cents, pay_period \
          FROM payroll_records WHERE id = $1",
     )
     .bind(payroll_record_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let Some((employee_name, gross_cents, pay_period)) = record else {
@@ -822,15 +852,17 @@ pub async fn post_payroll_record(
 
     let document_date = pay_period.date_naive();
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(&mut tx, legal_entity_id, document_date).await?;
+        crate::periods::find_open_period_for_date(&mut *conn, legal_entity_id, document_date)
+            .await?;
 
     let expense =
-        crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_PAYROLL_EXPENSE).await?;
+        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_PAYROLL_EXPENSE)
+            .await?;
     let net_wages =
-        crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_NET_WAGES_PAYABLE)
+        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_NET_WAGES_PAYABLE)
             .await?;
     let income_tax = crate::chart::resolve_tax_account(
-        &mut tx,
+        &mut *conn,
         legal_entity_id,
         "income_tax",
         ROLE_INCOME_TAX_PAYABLE,
@@ -838,7 +870,7 @@ pub async fn post_payroll_record(
     )
     .await?;
     let social_tax = crate::chart::resolve_tax_account(
-        &mut tx,
+        &mut *conn,
         legal_entity_id,
         "social_tax",
         ROLE_SOCIAL_TAX_PAYABLE,
@@ -846,10 +878,11 @@ pub async fn post_payroll_record(
     )
     .await?;
     let unemployment =
-        crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_UNEMPLOYMENT_PAYABLE)
+        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_UNEMPLOYMENT_PAYABLE)
             .await?;
     let pension =
-        crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_PENSION_PAYABLE).await?;
+        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_PENSION_PAYABLE)
+            .await?;
 
     let employer_cost = gross_cents
         .saturating_add(amounts.social_tax_cents)
@@ -928,7 +961,7 @@ pub async fn post_payroll_record(
         lines,
     };
 
-    let outcome = post_journal_entry_in(&mut tx, &request).await?;
+    let outcome = post_journal_entry_in(&mut *conn, &request).await?;
 
     sqlx::query(
         r#"
@@ -962,10 +995,9 @@ pub async fn post_payroll_record(
     .bind(amounts.net_cents)
     .bind(outcome.entry_id)
     .bind(payroll_record_id.to_string())
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
 
-    tx.commit().await?;
     Ok(outcome)
 }
 
@@ -977,9 +1009,22 @@ pub async fn post_payroll_record(
 /// negative amounts (payments) Dr operating expenses, Cr bank. The line's
 /// `journal_entry_id` is stamped, and `bank_reconciliations` can later match
 /// a receipt against the specific invoice entry.
+///
+/// The transaction-scoped variant is [`post_bank_statement_line_in`]; the
+/// sweep [`crate::sweeps::sweep_unposted_bank_statement_lines`] uses it to
+/// claim and post in one transaction.
 pub async fn post_bank_statement_line(pool: &PgPool, line_id: Uuid) -> Result<PostOutcome> {
     let mut tx = pool.begin().await?;
+    let outcome = post_bank_statement_line_in(&mut tx, line_id).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
 
+/// [`post_bank_statement_line`] on a caller-owned connection/transaction.
+pub async fn post_bank_statement_line_in(
+    conn: &mut PgConnection,
+    line_id: Uuid,
+) -> Result<PostOutcome> {
     let row: Option<(
         Uuid,
         Uuid,
@@ -999,7 +1044,7 @@ pub async fn post_bank_statement_line(pool: &PgPool, line_id: Uuid) -> Result<Po
             "#,
     )
     .bind(line_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
 
     let Some((
@@ -1027,11 +1072,13 @@ pub async fn post_bank_statement_line(pool: &PgPool, line_id: Uuid) -> Result<Po
 
     let currency = upper(&currency);
     let fiscal_period_id =
-        crate::periods::find_open_period_for_date(&mut tx, legal_entity_id, statement_date).await?;
+        crate::periods::find_open_period_for_date(&mut *conn, legal_entity_id, statement_date)
+            .await?;
 
-    let ar = crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_AR).await?;
+    let ar = crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_AR).await?;
     let expense =
-        crate::chart::resolve_account_role(&mut tx, legal_entity_id, ROLE_EXPENSE_DEFAULT).await?;
+        crate::chart::resolve_account_role(&mut *conn, legal_entity_id, ROLE_EXPENSE_DEFAULT)
+            .await?;
 
     let magnitude = amount_cents.unsigned_abs() as i64;
     let lines = if amount_cents > 0 {
@@ -1080,7 +1127,7 @@ pub async fn post_bank_statement_line(pool: &PgPool, line_id: Uuid) -> Result<Po
         lines,
     };
 
-    let outcome = post_journal_entry_in(&mut tx, &request).await?;
+    let outcome = post_journal_entry_in(&mut *conn, &request).await?;
 
     sqlx::query(
         "UPDATE bank_statement_lines SET journal_entry_id = $2 \
@@ -1088,10 +1135,9 @@ pub async fn post_bank_statement_line(pool: &PgPool, line_id: Uuid) -> Result<Po
     )
     .bind(line_id)
     .bind(outcome.entry_id)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
 
-    tx.commit().await?;
     Ok(outcome)
 }
 

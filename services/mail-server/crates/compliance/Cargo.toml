@@ -12,6 +12,9 @@ path = "src/bin/server.rs"
 [dependencies]
 mail-common = { path = "../mail-common" }
 
+# Statutory accounting ledger (migrations 220/222) — payroll/expense sweeps.
+accounting-core.workspace = true
+
 tokio      = { workspace = true }
 sqlx       = { workspace = true }
 serde      = { workspace = true }
@@ -48,3 +51,6 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 # carrying the REAL production migration chain through the production
 # migrator's test_support, instead of hand-written schema subsets.
 migrator = { path = "../migrator" }
+# A real XML parser for the annual-report XBRL well-formedness test (the
+# same parser version the mta/enterprise crates use).
+quick-xml = "0.41"

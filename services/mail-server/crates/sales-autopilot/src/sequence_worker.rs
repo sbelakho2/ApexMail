@@ -2437,6 +2437,11 @@ impl SequenceStepHandler {
             EnqueueOutcome::DuplicateIdempotency => ("sent", None),
             // Suppressed between decision and send.
             EnqueueOutcome::AlreadyClaimed => ("cancelled", None),
+            // Admission refused the recipient permanently (the canonical
+            // suppression list): a NON-RETRYABLE skip. Retrying a suppression
+            // is the loop the release gates forbid, so this is a terminal
+            // state — never `ActionOutcome::Retry`.
+            EnqueueOutcome::Suppressed => ("cancelled", None),
             // The lease was recovered by another worker between the decision
             // and the enqueue: no external effect was produced, and this worker
             // must not report success for work it no longer owns.
@@ -2797,7 +2802,6 @@ mod tests {
     // Audit item 13 — adversarial tests for the grounded planning pipeline
     // =====================================================================
 
-    use crate::dispatcher::{QuotaFuture, QuotaGateway, QuotaReservation};
     use crate::intelligence::{
         AngleSelection, DraftRequest, DraftedMessage, IntelligenceError, NextActionRequest,
         ReplyClassification, ReplyRequest, ResearchClaim, ResearchFindings, ResearchRequest,
@@ -2807,30 +2811,44 @@ mod tests {
 
     const TEMPLATE_SENTINEL: &str = "STATIC TEMPLATE FALLBACK SENTINEL";
 
-    /// A quota gateway that permits every send (the DB fixture's billing
-    /// tables are not the subject of these tests).
+    /// An admission backend that permits every send and reports no
+    /// suppression (the DB fixture's billing tables are not the subject of
+    /// these tests).
     #[derive(Debug)]
-    struct AllowAllQuota;
+    struct AllowAllAdmission;
 
-    impl QuotaGateway for AllowAllQuota {
-        fn reserve(
+    #[async_trait::async_trait]
+    impl billing_service::send_admission::SendAdmissionBackend for AllowAllAdmission {
+        async fn record_send_usage(
             &self,
             _tenant_id: &str,
-        ) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>> {
-            Box::pin(async {
-                Ok(QuotaReservation {
-                    event_id: Uuid::new_v4(),
-                    recorded_at: Utc::now(),
-                })
+            _quantity: i64,
+            _event_id: Uuid,
+        ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError>
+        {
+            Ok(billing_service::usage::QuotaRecordResult {
+                allowed: true,
+                current: 0,
+                duplicate: false,
             })
         }
 
-        fn rollback(
+        async fn rollback_send_usage(
             &self,
             _tenant_id: &str,
-            _reservation: &QuotaReservation,
-        ) -> QuotaFuture<'_, Result<(), SalesError>> {
-            Box::pin(async { Ok(()) })
+            _quantity: i64,
+            _event_id: Uuid,
+            _recorded_at: DateTime<Utc>,
+        ) -> Result<(), billing_service::usage::UsageError> {
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            _canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            Ok(Vec::new())
         }
     }
 
@@ -3239,7 +3257,7 @@ mod tests {
             dispatch_concurrency: 4,
         };
         let dispatcher = Arc::new(
-            ProductionCampaignDispatcher::new(dispatch, db.clone(), Arc::new(AllowAllQuota))
+            ProductionCampaignDispatcher::new(dispatch, db.clone(), Arc::new(AllowAllAdmission))
                 .expect("lib dispatch config is valid"),
         );
 

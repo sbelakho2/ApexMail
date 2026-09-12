@@ -98,6 +98,18 @@ pub enum ProcessorError {
         message: String,
     },
 
+    /// The outbound-MTA acceptance record did not VERIFY the dedicated
+    /// source-IP binding the route reserved: the report was missing, or the
+    /// requested/actual IP disagreed with the route.
+    ///
+    /// This is a HARD failure for this message — the relay already completed
+    /// the external effect (post-DATA acceptance), so retrying would risk a
+    /// duplicate; and it is deliberately NOT address-proving, so the
+    /// recipient is never suppressed. The processor releases the warmup
+    /// reservation (capacity may only count a VERIFIED binding).
+    #[error("source binding unverified: {0}")]
+    SourceBindingUnverified(String),
+
     /// DKIM signing error.
     #[error("dkim error: {0}")]
     Dkim(String),

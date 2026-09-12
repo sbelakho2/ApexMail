@@ -8,18 +8,20 @@
 //! - Per-IP rate limiting
 //! - Circuit breakers for SMTP endpoints
 
+mod outbound_mta;
 mod processor;
 mod tracking;
 mod transport;
 mod transport_router;
 mod types;
 
+pub use outbound_mta::{OutboundMtaTransport, RelaySubmitter};
 pub use processor::EmailProcessor;
 pub use tracking::{add_tracking_pixel, encode_tracking_id, rewrite_links, TrackingPayload};
 pub use transport::{
-    create_transport, create_transport_from_config, EmailTransport, HybridTransport, SesTransport,
-    SmtpTransport, APEXMAIL_ROUTE_HEADER, APEXMAIL_ROUTE_VALUE_PREFIX,
-    APEXMAIL_SOURCE_IP_REPLY_HEADER,
+    create_transport, create_transport_from_config, create_transport_from_config_with_db,
+    EmailTransport, HybridTransport, SesTransport, SmtpTransport, APEXMAIL_ROUTE_HEADER,
+    APEXMAIL_ROUTE_VALUE_PREFIX, APEXMAIL_SOURCE_IP_REPLY_HEADER,
 };
 pub use transport_router::{transport_kind_for, TransportKind};
 pub use types::{

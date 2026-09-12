@@ -250,7 +250,7 @@ async fn campaign_lifecycle_draft_active_paused() {
     };
     // No dispatcher is attached: campaign start materializes canonical
     // enrollments rather than dispatching, so the manager needs none.
-    let mgr = CampaignManager::new(10, db);
+    let mgr = CampaignManager::new(10, db.clone());
     let tenant_id = unique_tenant("tenant-campaign-lifecycle");
     let c = mgr
         .create_campaign(
@@ -263,8 +263,73 @@ async fn campaign_lifecycle_draft_active_paused() {
         .unwrap();
     assert_eq!(c.status, CampaignStatus::Draft);
 
+    // A campaign with no enrollable recipient must NOT go active: activation is
+    // gated on enrollment having accepted at least one contact (a legacy
+    // recipient materializes an UNVERIFIED contact point, which canonical
+    // enrollment refuses). The campaign parks as `verification_pending` so an
+    // operator sees why, rather than showing an active campaign that can never
+    // send.
     let started = mgr.start_campaign(&tenant_id, c.id).await.unwrap();
-    assert_eq!(started.status, CampaignStatus::Active);
+    assert_eq!(
+        started.status,
+        CampaignStatus::Draft,
+        "a start with zero eligible recipients must not activate"
+    );
+
+    // With one VERIFIED recipient the same lifecycle activates normally. The
+    // campaign materializes a compatibility contact for the legacy recipient;
+    // the verified point seeded here is what enrollment accepts.
+    let recipient = format!("enrolled-{}@example.com", uuid::Uuid::new_v4().simple());
+    let account_id = uuid::Uuid::new_v4();
+    let contact_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO sales_accounts (id, tenant_id, company, domain, country, country_confidence) \
+         VALUES ($1, $2, 'Lifecycle Co', $3, 'QZ', 0.95)",
+    )
+    .bind(account_id)
+    .bind(&tenant_id)
+    .bind(format!("{account_id}.example"))
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+         VALUES ($1, $2, $3, 'Enrolled Prospect')",
+    )
+    .bind(contact_id)
+    .bind(&tenant_id)
+    .bind(account_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sales_contact_points \
+             (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+         VALUES ($1, $2, $3, 'email', $4, LOWER($4), 'valid')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(&tenant_id)
+    .bind(contact_id)
+    .bind(&recipient)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(c.id)
+    .bind(&recipient)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let started = mgr.start_campaign(&tenant_id, c.id).await.unwrap();
+    assert_eq!(
+        started.status,
+        CampaignStatus::Active,
+        "a verified recipient must let the campaign activate"
+    );
 
     let paused = mgr.pause_campaign(&tenant_id, c.id).await.unwrap();
     assert_eq!(paused.status, CampaignStatus::Paused);

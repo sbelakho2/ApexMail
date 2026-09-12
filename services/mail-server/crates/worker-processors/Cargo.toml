@@ -90,9 +90,17 @@ hex = "0.4"
 aws-config.workspace = true
 aws-sdk-sesv2.workspace = true
 
+# Recipient-facing outbound MTA (dedicated-IP binding + idempotent
+# acceptance; its ledger shares the send_unit identity with the worker's
+# sales_delivery_acceptances — migration 212).
+outbound-mta = { path = "../outbound-mta" }
+
 [dev-dependencies]
 # F67 DB-backed handoff test: canonical schema via the production migrator.
 migrator = { path = "../migrator" }
 # C: cross-crate round-trip tests — worker-encoded tracking tokens must
 # decode with the tracking-service codec under the same secret.
 tracking-service = { path = "../tracking-service" }
+# Dedicated-route contract tests run the REAL outbound MTA relay against its
+# in-memory ledger, static MX resolver and scripted SMTP server.
+outbound-mta = { path = "../outbound-mta", features = ["test-support"] }

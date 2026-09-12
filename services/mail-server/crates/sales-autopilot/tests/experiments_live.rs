@@ -22,11 +22,9 @@ use chrono::{Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use sales_autopilot::actions::{ActionHandler, ActionOutcome, LeasedAction, SalesAction};
+use sales_autopilot::actions::{ActionHandler, ActionOutcome};
 use sales_autopilot::attribution::{OutcomeKind, OutcomeRecord};
-use sales_autopilot::dispatcher::{
-    ProductionCampaignDispatcher, QuotaFuture, QuotaGateway, QuotaReservation,
-};
+use sales_autopilot::dispatcher::ProductionCampaignDispatcher;
 use sales_autopilot::experiments::{
     next_best_action, ArmSpec, EmailState, ExperimentContext, ExperimentEngine, NextActionInput,
     ReplyState, RewardKind, VariantContext, MIN_CONTEXT_SAMPLES,
@@ -262,24 +260,40 @@ async fn set_autonomy(pool: &PgPool, tenant_id: &str, mode: &str) {
     .expect("set autonomy state");
 }
 
+/// Admission backend that fails every reservation with an infrastructure
+/// error (a simulated billing outage before enqueue).
 #[derive(Debug)]
-struct FailingQuotaGateway;
+struct FailingAdmissionBackend;
 
-impl QuotaGateway for FailingQuotaGateway {
-    fn reserve(&self, _tenant_id: &str) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>> {
-        Box::pin(async {
-            Err(SalesError::ServiceUnavailable(
-                "simulated billing outage before enqueue".into(),
-            ))
-        })
-    }
-
-    fn rollback(
+#[async_trait::async_trait]
+impl billing_service::send_admission::SendAdmissionBackend for FailingAdmissionBackend {
+    async fn record_send_usage(
         &self,
         _tenant_id: &str,
-        _reservation: &QuotaReservation,
-    ) -> QuotaFuture<'_, Result<(), SalesError>> {
-        Box::pin(async { Ok(()) })
+        _quantity: i64,
+        _event_id: Uuid,
+    ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError> {
+        Err(billing_service::usage::UsageError::Audit(
+            "simulated billing outage before enqueue".into(),
+        ))
+    }
+
+    async fn rollback_send_usage(
+        &self,
+        _tenant_id: &str,
+        _quantity: i64,
+        _event_id: Uuid,
+        _recorded_at: chrono::DateTime<Utc>,
+    ) -> Result<(), billing_service::usage::UsageError> {
+        Ok(())
+    }
+
+    async fn suppressed_recipients(
+        &self,
+        _tenant_id: &str,
+        _canonical_recipients: &[String],
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
 }
 
@@ -752,6 +766,28 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
     let tenant = common::insert_test_tenant(&pool, "variant-persist").await;
     let domain = common::unique_test_domain();
     common::insert_verified_domain(&pool, &tenant, &domain).await;
+    // The send path resolves a real sales sender identity before it claims the
+    // step; without one the handler defers (retry) before the attempt and the
+    // variant-persistence subject is never exercised. The identity also needs
+    // a healthy sender-health row or the decision engine denies the send.
+    let sender_id = common::insert_sender_identity(
+        &pool,
+        &tenant,
+        "sales_outbound",
+        &format!("sales@{domain}"),
+        &domain,
+        "active",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO sales_sender_health (id, tenant_id, sender_identity_id, health_score, state) \
+         VALUES (gen_random_uuid(), $1, $2, 0.99, 'healthy')",
+    )
+    .bind(&tenant)
+    .bind(sender_id)
+    .execute(&pool)
+    .await
+    .expect("insert sales_sender_health fixture");
     let template_id = common::insert_template(
         &pool,
         &tenant,
@@ -760,7 +796,11 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
         Some("Hello {{first_name}}"),
     )
     .await;
-    let account = insert_account(&pool, &tenant, "saas", "DE", 30).await;
+    // A jurisdiction whose policy permits an autonomous send (the fail-closed
+    // migration defaults make every EU/EEA recipient approval-required, which
+    // would park the work before the variant-persistence assertion).
+    let account = insert_account(&pool, &tenant, "saas", common::TEST_JURISDICTION, 30).await;
+    common::ensure_allowed_jurisdiction_policy(&pool).await;
     let contact = insert_contact(&pool, &tenant, account).await;
     insert_contact_point(&pool, &tenant, contact, "cto@example.com").await;
     let key = format!("send-{}", unique_suffix());
@@ -790,39 +830,22 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
         ProductionCampaignDispatcher::new(
             common::test_dispatch_config_for(&domain),
             pool.clone(),
-            Arc::new(FailingQuotaGateway) as Arc<dyn QuotaGateway>,
+            Arc::new(FailingAdmissionBackend),
         )
         .expect("dispatcher config valid"),
     );
     let handler = SequenceStepHandler::new(pool.clone(), dispatcher);
-    let outcome = handler
-        .handle(&LeasedAction {
-            action: SalesAction {
-                id: Uuid::new_v4(),
-                tenant_id: tenant.clone(),
-                action_type: "send_step".into(),
-                entity_type: "step_execution".into(),
-                entity_id: step_execution,
-                due_at: Utc::now(),
-                priority: 100,
-                state: "leased".into(),
-                attempt: 0,
-                max_attempts: 5,
-                lease_owner: Some("test-worker".into()),
-                lease_expires_at: Some(Utc::now() + Duration::minutes(2)),
-                idempotency_key: format!("sa-send:{step_execution}"),
-                payload: serde_json::json!({}),
-                decision_id: None,
-                last_error: None,
-                created_at: Utc::now(),
-                completed_at: None,
-            },
-            lease_owner: "test-worker".into(),
-            // Post-201 the claim carries a per-row token; the handler does not
-            // read it, but the struct requires it.
-            lease_token: Uuid::new_v4(),
-        })
-        .await;
+    // The handler attaches the decision packet through the action fence, so
+    // the action must be a REAL leased row (enqueued + claimed exactly like
+    // the production worker claim) rather than a synthetic struct: a
+    // synthetic fence is not verifiable and the handler would retry before
+    // ever reaching the send attempt.
+    let action = common::enqueue_send_step_action(&pool, &tenant, step_execution).await;
+    let worker_id = format!("variant-persist-worker-{}", Uuid::new_v4().simple());
+    let leased = common::claim_specific_action(&pool, &worker_id, action.id)
+        .await
+        .expect("the enqueued send action must be claimable");
+    let outcome = handler.handle(&leased).await;
     assert!(
         matches!(outcome, ActionOutcome::Retry(_)),
         "the simulated quota outage must surface as a retry, got {outcome:?}"
@@ -851,6 +874,8 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
         "enrollment must carry the experiment id"
     );
     assert_eq!(experiment_variant.as_deref(), Some(variant.as_str()));
+
+    common::cleanup_tenant(&pool, &tenant).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,9 +1097,11 @@ async fn replay_cases_compare_proposed_actions_with_realised_outcomes() {
     sqlx::query(
         "INSERT INTO sales_decisions (
             id, tenant_id, account_id, contact_id, action, expected_value_eur, confidence,
-            score_total, autonomy_mode, rationale, blocked, block_reasons, created_at
+            score_total, autonomy_mode, rationale, blocked, block_reasons, created_at,
+            enforcement, review_status
          ) VALUES (gen_random_uuid(), $1, $2, $3, 'contact', 100, 0.6, 50, 'autonomous_guarded',
-                   'integration replay fixture', FALSE, '[]'::jsonb, $4)",
+                   'integration replay fixture', FALSE, '[]'::jsonb, $4,
+                   'execute', 'not_required')",
     )
     .bind(&tenant)
     .bind(account)
@@ -1125,6 +1152,8 @@ async fn replay_cases_compare_proposed_actions_with_realised_outcomes() {
 
     // The scoring version used for the replay is the production version.
     assert!(!scoring::SCORING_VERSION.is_empty());
+
+    common::cleanup_tenant(&pool, &tenant).await;
 }
 
 // ---------------------------------------------------------------------------

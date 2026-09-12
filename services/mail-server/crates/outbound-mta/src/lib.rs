@@ -50,8 +50,23 @@ pub mod smtp;
 pub mod source_ip;
 pub mod tls;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_smtp;
+
+/// Test doubles for dependent crates (enabled by the `test-support` feature).
+///
+/// The worker's dedicated-route tests run the REAL [`relay::Relay`] against
+/// these doubles: an in-memory [`RelayLedger`](ledger::RelayLedger) with the
+/// same claim semantics as `PgLedger`, a static MX resolver, and a scripted
+/// SMTP server. Nothing here is compiled into production binaries.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    pub use crate::ledger::test_support::MemoryLedger;
+    pub use crate::mx::test_support::StaticMxResolver;
+    pub use crate::test_smtp::{
+        FakeSmtpConfig, FakeSmtpServer, ReceivedMessage, ReplySpec, ScriptedReply,
+    };
+}
 
 use std::net::IpAddr;
 

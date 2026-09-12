@@ -209,34 +209,44 @@ pub fn test_dispatch_config() -> sales_autopilot::config::DispatchConfig {
     test_dispatch_config_for("example.com")
 }
 
-/// A quota gateway that allows every reservation and records nothing. Used by
-/// fixtures whose subject is not quota accounting.
+/// An admission backend that allows every send, reports no suppression and
+/// records nothing. Used by fixtures whose subject is not admission
+/// accounting. `duplicate = false` is deliberate: these fixtures never replay
+/// a send identity.
 #[derive(Debug)]
-pub struct AllowAllQuotaGateway;
+pub struct AllowAllAdmissionBackend;
 
-impl sales_autopilot::dispatcher::QuotaGateway for AllowAllQuotaGateway {
-    fn reserve(
+#[async_trait::async_trait]
+impl billing_service::send_admission::SendAdmissionBackend for AllowAllAdmissionBackend {
+    async fn record_send_usage(
         &self,
         _tenant_id: &str,
-    ) -> sales_autopilot::dispatcher::QuotaFuture<
-        '_,
-        Result<sales_autopilot::dispatcher::QuotaReservation, sales_autopilot::types::SalesError>,
-    > {
-        Box::pin(async {
-            Ok(sales_autopilot::dispatcher::QuotaReservation {
-                event_id: Uuid::new_v4(),
-                recorded_at: chrono::Utc::now(),
-            })
+        _quantity: i64,
+        _event_id: Uuid,
+    ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError> {
+        Ok(billing_service::usage::QuotaRecordResult {
+            allowed: true,
+            current: 0,
+            duplicate: false,
         })
     }
 
-    fn rollback(
+    async fn rollback_send_usage(
         &self,
         _tenant_id: &str,
-        _reservation: &sales_autopilot::dispatcher::QuotaReservation,
-    ) -> sales_autopilot::dispatcher::QuotaFuture<'_, Result<(), sales_autopilot::types::SalesError>>
-    {
-        Box::pin(async { Ok(()) })
+        _quantity: i64,
+        _event_id: Uuid,
+        _recorded_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), billing_service::usage::UsageError> {
+        Ok(())
+    }
+
+    async fn suppressed_recipients(
+        &self,
+        _tenant_id: &str,
+        _canonical_recipients: &[String],
+    ) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
 }
 

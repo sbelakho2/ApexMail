@@ -48,6 +48,13 @@
 //! flow that already records the event (see
 //! `billing-service/src/accounting_postings.rs`).
 //!
+//! Payroll, expenses and bank statements have NO production writer in the
+//! repository (no payroll run, no expense entry, no bank feed). For those,
+//! [`sweeps`] posts every unposted source row with the same `FOR UPDATE SKIP
+//! LOCKED` discipline as the projectors, so a future writer — or `psql` — is
+//! posted with no further wiring; see the module docs for the exact claim
+//! protocol and the per-source gap statement.
+//!
 //! # Guarantees of this crate
 //!
 //! * `#![deny(unsafe_code)]`
@@ -68,6 +75,7 @@ pub mod hash;
 pub mod periods;
 pub mod posting;
 pub mod retention;
+pub mod sweeps;
 pub mod types;
 
 pub use error::{AccountingError, Result};

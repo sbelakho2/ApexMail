@@ -9,7 +9,7 @@ use sales_autopilot::{
     campaigns::CampaignManager,
     config::SalesConfig,
     crm::CrmBackend,
-    dispatcher::{BillingQuotaGateway, ProductionCampaignDispatcher},
+    dispatcher::ProductionCampaignDispatcher,
     enrichment::{EnrichmentService, HttpEnrichmentProvider},
     inbox::InboxManager,
     intelligence,
@@ -97,10 +97,19 @@ async fn main() -> anyhow::Result<()> {
     // ⇒ real sending through the platform pipeline. Unconfigured ⇒ None ⇒
     // campaign start keeps failing loudly with 503 (fix I-1 preserved).
     let dispatcher: Option<Arc<ProductionCampaignDispatcher>> = if cfg.dispatch.is_configured() {
+        // The SAME admission backend the REST and SMTP submission paths use:
+        // sales quota/entitlement/suppression/category are enforced by the
+        // one shared `SendAdmissionService` (audit implementation-order
+        // item 3).
         match ProductionCampaignDispatcher::new(
             cfg.dispatch.clone(),
             db.clone(),
-            Arc::new(BillingQuotaGateway::new(db.clone(), redis.clone())),
+            Arc::new(
+                billing_service::send_admission::PostgresAdmissionBackend::new(
+                    db.clone(),
+                    redis.clone(),
+                ),
+            ),
         ) {
             Ok(d) => {
                 tracing::info!(

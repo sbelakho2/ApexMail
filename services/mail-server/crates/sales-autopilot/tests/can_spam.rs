@@ -177,7 +177,7 @@ fn dispatcher_for(db: &sqlx::PgPool, domain: &str) -> Arc<ProductionCampaignDisp
         ProductionCampaignDispatcher::new(
             common::test_dispatch_config_for(domain),
             db.clone(),
-            Arc::new(common::AllowAllQuotaGateway),
+            Arc::new(common::AllowAllAdmissionBackend),
         )
         .expect("test dispatch config must be valid"),
     )

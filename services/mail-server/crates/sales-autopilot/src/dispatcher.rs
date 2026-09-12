@@ -9,8 +9,10 @@
 //!
 //! * sender-domain resolution (`FOR SHARE` row lock, DKIM-ready + SES/SMTP
 //!   transport gate),
-//! * quota reservation via `billing_service::usage::record_with_quota_check`
-//!   (behind the [`QuotaGateway`] trait so tests can fake it),
+//! * admission via the ONE shared
+//!   [`billing_service::send_admission::SendAdmissionService`] (category,
+//!   canonical suppression, plan entitlement and `EmailsSent` quota) — the
+//!   same gate the REST and SMTP submission paths use,
 //! * `messages` insert with `ON CONFLICT (tenant_id, idempotency_key) DO
 //!   NOTHING` and a deterministic key `sacmp:{campaign_id}:{recipient}` —
 //!   a crash/restart can never double-send,
@@ -39,134 +41,138 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use apexmail_lib::email_headers::message_category;
+use billing_service::send_admission::{
+    AdmissionMeter, SendAdmission, SendAdmissionBackend, SendAdmissionError, SendAdmissionRequest,
+    SendAdmissionService,
+};
+
 use crate::campaigns::DispatchRecipient;
 use crate::config::DispatchConfig;
 use crate::types::SalesError;
 
 // ---------------------------------------------------------------------------
-// Quota gateway — thin seam over billing_service::usage
+// Unified send admission — the ONE gate in front of every outbound send
 // ---------------------------------------------------------------------------
+//
+// Audit implementation-order item 3: sales sends used to reserve quota
+// through a local `QuotaGateway` seam. The quota functions were canonical
+// (billing_service::usage::record_with_quota_check), but sales still ran its
+// OWN category policy and its OWN suppression checks, and its reservation
+// identity was a random UUID — a retried logical send could reserve twice.
+// Every sales send path now calls the SAME
+// [`billing_service::send_admission::SendAdmissionService::admit`] the REST
+// and SMTP submission paths call:
+//
+// * category — validated/normalized by the ONE shared helper and written
+//   EXPLICITLY into `messages.message_category` / `email_queue.
+//   message_category` (never left to the schema default);
+// * suppression — the canonical tenant suppression lookup shared with REST
+//   and SMTP, applied BEFORE the enqueue transaction;
+// * entitlement + quota — the plan gate and the `EmailsSent` reservation
+//   keyed by the sales send's deterministic logical identity
+//   (`sa-send:{step_execution_id}`, `sacmp:{campaign}:{recipient}`, or
+//   `sareply:{inbox_message_id}`), so a retry cannot double-reserve;
+// * settlement — committed only after the enqueue transaction committed,
+//   rolled back on every refusal/error, exactly like the REST path.
+//
+// The decision engine's gates, the action fence, the message idempotency
+// key, the typed provenance columns and the truthful footer are unchanged:
+// admission is an ADDITIONAL gate in front of them, never a replacement.
 
-/// A reserved unit of email quota that can be released again.
-#[derive(Debug, Clone)]
-pub struct QuotaReservation {
-    pub event_id: Uuid,
-    pub recorded_at: DateTime<Utc>,
-}
-
-/// Reserve/release one unit of email quota for a tenant.
+/// Category of every sales sequence/campaign send.
 ///
-/// The production implementation ([`BillingQuotaGateway`]) calls the very
-/// same billing functions the REST send path calls; the trait exists so
-/// tests (and un-billed deployments) can substitute deterministic fakes.
-pub trait QuotaGateway: Send + Sync + std::fmt::Debug {
-    fn reserve(&self, tenant_id: &str) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>>;
-    fn rollback(
-        &self,
-        tenant_id: &str,
-        reservation: &QuotaReservation,
-    ) -> QuotaFuture<'_, Result<(), SalesError>>;
-}
+/// Sales outreach is commercial mail: it is `marketing`-class under the
+/// platform's suppression semantics and deliberately NOT preference-exempt
+/// (`message_category::PREFERENCE_EXEMPT` covers only transactional/service).
+/// The value is passed to admission EXPLICITLY — a sales send must not be
+/// able to acquire an opt-out exemption through a missing field.
+pub const SALES_MARKETING_CATEGORY: &str = message_category::MARKETING;
 
-/// Boxed future type for [`QuotaGateway`] (keeps the trait object-safe).
-pub type QuotaFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-
-/// Production quota gateway.
+/// Category of a 1:1 inbox reply.
 ///
-/// Calls the REAL billing gate — `billing_service::usage::
-/// record_with_quota_check` / `rollback_usage_record` — the exact functions
-/// api-server's REST send path (crates/api-server/src/routes/messages.rs)
-/// uses. (This block used to be a local mirror of those functions, kept
-/// only while billing-service did not compile; the mirror's UTC
-/// calendar-month counter key diverged from the billing gate's
-/// billing-cycle-anchored key, silently doubling the effective email limit
-/// for subscribed tenants — audit F1. Depending on the real implementation
-/// means one quota gate for the whole platform: anchored counter keys,
-/// override-aware plan limits with per-plan builtin fallbacks,
-/// `metering_events` persistence, the per-event audit-log append and
-/// reservation compensation on failure.)
-#[derive(Debug, Clone)]
-pub struct BillingQuotaGateway {
-    db: PgPool,
-    redis: deadpool_redis::Pool,
+/// A reply answers a message the recipient sent us: that is transactional
+/// correspondence, not bulk commercial mail, and it is preference-exempt for
+/// exactly that reason. Global suppression still applies (admission checks
+/// the canonical suppression list for every category).
+pub const SALES_REPLY_CATEGORY: &str = message_category::TRANSACTIONAL;
+
+/// Why admission refused one sales recipient, classified for the sales
+/// worker's retry contract.
+enum SalesAdmissionRefusal {
+    /// Non-retryable, terminal refusal: the recipient is on the canonical
+    /// suppression list (or the server-owned category failed validation).
+    /// Returned as an `EnqueueOutcome`, never as an error, so the worker
+    /// marks the action finished instead of requeueing it — retrying a
+    /// suppression is the forbidden loop.
+    Skip(EnqueueOutcome),
+    /// Retryable deferral: quota exhausted, or the metering/suppression
+    /// infrastructure is unavailable (fail closed, never send unscreened).
+    /// The worker's error path requeues the action with backoff.
+    Retry(SalesError),
 }
 
-impl BillingQuotaGateway {
-    pub fn new(db: PgPool, redis: deadpool_redis::Pool) -> Self {
-        Self { db, redis }
+/// Classify an admission refusal for the sales path. See
+/// [`SalesAdmissionRefusal`] for the retryable-vs-skip contract.
+fn classify_admission_refusal(error: SendAdmissionError, tenant_id: &str) -> SalesAdmissionRefusal {
+    match error {
+        SendAdmissionError::Suppressed(recipients) => {
+            tracing::info!(
+                tenant_id = %tenant_id,
+                suppressed = recipients.len(),
+                "sales send refused admission: recipient is suppressed (non-retryable skip)"
+            );
+            SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
+        }
+        SendAdmissionError::InvalidCategory { raw } => {
+            // The category is a server-owned constant, so this is a
+            // programming error, not a transient condition. Refuse the send
+            // loudly and terminally rather than retrying forever.
+            tracing::error!(
+                tenant_id = %tenant_id,
+                category = %raw,
+                "server-owned sales category failed validation — refusing the send (non-retryable)"
+            );
+            SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
+        }
+        SendAdmissionError::QuotaExceeded => {
+            SalesAdmissionRefusal::Retry(SalesError::QuotaExhausted(tenant_id.to_string()))
+        }
+        SendAdmissionError::MeteringUnavailable(error) => {
+            tracing::error!(
+                error = %error,
+                tenant_id = %tenant_id,
+                "sales quota reservation failed (retryable)"
+            );
+            SalesAdmissionRefusal::Retry(SalesError::ServiceUnavailable(
+                "billing quota enforcement is temporarily unavailable".into(),
+            ))
+        }
+        SendAdmissionError::SuppressionUnavailable(error) => {
+            tracing::error!(
+                error = %error,
+                tenant_id = %tenant_id,
+                "sales suppression lookup failed — failing closed (retryable)"
+            );
+            SalesAdmissionRefusal::Retry(SalesError::ServiceUnavailable(
+                "suppression lookup is temporarily unavailable".into(),
+            ))
+        }
     }
 }
 
-impl QuotaGateway for BillingQuotaGateway {
-    fn reserve(&self, tenant_id: &str) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>> {
-        let tenant_id = tenant_id.to_string();
-        Box::pin(async move {
-            let event_id = Uuid::new_v4();
-            let recorded_at = Utc::now();
-
-            // The real billing gate: billing-cycle-anchored counter key,
-            // override-aware plan limits (NULL limits fall back to the
-            // per-plan builtin seeds — billing_service::usage::
-            // resolve_plan_limits / plans::builtin_quota_limits, replacing
-            // this crate's old hard-coded 30 000 fallback), atomic
-            // check-and-increment reservation, `metering_events` persistence
-            // WITH the per-event audit-log append, and compensation when
-            // persistence fails. Unknown tenants are denied (limit 0).
-            let result = billing_service::usage::record_with_quota_check(
-                &self.db,
-                &self.redis,
-                &tenant_id,
-                billing_service::types::MeterEventType::EmailsSent,
-                1,
-                Some(event_id),
-                Some(serde_json::json!({ "source": "sales-autopilot" })),
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, tenant_id = %tenant_id, "quota reservation failed");
-                SalesError::ServiceUnavailable(
-                    "billing quota enforcement is temporarily unavailable".into(),
-                )
-            })?;
-
-            if !result.allowed {
-                // Counter NOT incremented on denial (billing's Lua gate).
-                return Err(SalesError::QuotaExhausted(tenant_id));
-            }
-
-            Ok(QuotaReservation {
-                event_id,
-                recorded_at,
-            })
-        })
-    }
-
-    fn rollback(
-        &self,
-        tenant_id: &str,
-        reservation: &QuotaReservation,
-    ) -> QuotaFuture<'_, Result<(), SalesError>> {
-        let tenant_id = tenant_id.to_string();
-        let reservation = reservation.clone();
-        Box::pin(async move {
-            // The real billing rollback: deletes the metering event, appends
-            // the rollback audit record, decrements the anchored counter and
-            // drops the dedup key.
-            billing_service::usage::rollback_usage_record(
-                &self.db,
-                &self.redis,
-                &tenant_id,
-                billing_service::types::MeterEventType::EmailsSent,
-                1,
-                reservation.event_id,
-                reservation.recorded_at,
-            )
-            .await
-            .map_err(|e| {
-                SalesError::ServiceUnavailable(format!("failed to release quota reservation: {e}"))
-            })
-        })
-    }
+/// Per-call sales admission request (one recipient is one queue row, so one
+/// logical send).
+struct SalesSendAdmission<'a> {
+    tenant_id: &'a str,
+    recipient_email: &'a str,
+    /// The send's stable logical identity. Same derivation as the REST
+    /// path's idempotency key: the usage event id is a pure function of
+    /// (tenant, key), so a retry re-derives the SAME metering event.
+    idempotency_key: &'a str,
+    /// Explicit server-owned category (never `None`: a sales send always
+    /// declares its class).
+    category: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -935,18 +941,30 @@ pub enum EnqueueOutcome {
     /// nothing was inserted into `messages` or `email_queue` — and the
     /// recovered worker owns the retry.
     LeaseLost,
+    /// Admission refused the recipient permanently: the canonical tenant
+    /// suppression list contains them (or the server-owned category failed
+    /// validation). NON-RETRYABLE — the caller must terminate the work
+    /// (skip/cancel), never requeue it: retrying a suppression is the loop
+    /// the release gates forbid. Nothing was inserted into `messages` or
+    /// `email_queue` and no quota was consumed.
+    Suppressed,
 }
 
 /// `email_queue` insert for campaign mail. `campaign_id` is set on the COLUMN
 /// (not just metadata) so the delivery worker attributes every event it
 /// records (sent/bounced) back to the campaign — see D.
+///
+/// `message_category` is bound EXPLICITLY from the admission handle
+/// (`$16` = the category admission validated), never left to the schema
+/// default.
 const CAMPAIGN_EMAIL_QUEUE_INSERT_SQL: &str = r#"
             INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, campaign_id, from_address, to_addresses, subject,
-                "from", "to", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at
+                "from", "to", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at,
+                message_category
              ) VALUES (
                 $1::uuid, $2::uuid, $3, $4::uuid, $5::uuid, $6, ARRAY[$7], $8,
-                $6, $7, $9, $10, $11, $12, $13, $14, 5, 'pending', $15, $15
+                $6, $7, $9, $10, $11, $12, $13, $14, 5, 'pending', $15, $15, $16
              )
         "#;
 
@@ -965,11 +983,12 @@ const SEQUENCE_MESSAGES_INSERT_SQL: &str = r#"
                 subject, html_body, text_body, status, tags, metadata,
                 scheduled_at, created_at, idempotency_key,
                 sales_decision_id, sales_sender_identity_id,
-                sales_step_execution_id, sales_enrollment_id
+                sales_step_execution_id, sales_enrollment_id, message_category
              ) VALUES (
                 $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                 $13, $14, $15,
-                $16::uuid, $17::uuid, $18::uuid, $19::uuid
+                $16::uuid, $17::uuid, $18::uuid, $19::uuid,
+                $20
              )
              ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
         "#;
@@ -977,17 +996,18 @@ const SEQUENCE_MESSAGES_INSERT_SQL: &str = r#"
 /// `email_queue` insert for a sequenced send: the same four typed provenance
 /// columns as [`SEQUENCE_MESSAGES_INSERT_SQL`], so delivery events are
 /// attributable at the queue row too. `campaign_id` stays NULL — sequence mail
-/// is attributed to a step execution, not a campaign.
+/// is attributed to a step execution, not a campaign. `message_category`
+/// (`$18`) is bound explicitly from the admission handle.
 const SEQUENCE_EMAIL_QUEUE_INSERT_SQL: &str = r#"
             INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, campaign_id, from_address, to_addresses, subject,
                 "from", "to", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at,
                 sales_decision_id, sales_sender_identity_id,
-                sales_step_execution_id, sales_enrollment_id
+                sales_step_execution_id, sales_enrollment_id, message_category
              ) VALUES (
                 $1::uuid, $2::uuid, $3, $4::uuid, NULL, $5, ARRAY[$6], $7,
                 $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $13, $13,
-                $14::uuid, $15::uuid, $16::uuid, $17::uuid
+                $14::uuid, $15::uuid, $16::uuid, $17::uuid, $18
              )
         "#;
 
@@ -1060,21 +1080,38 @@ fn ensure_sequenced_sender(
 
 /// The production dispatcher: enqueues campaign mail through the platform's
 /// own pipeline (messages + email_queue), mirroring api-server's REST send.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProductionCampaignDispatcher {
     db: PgPool,
-    quota: Arc<dyn QuotaGateway>,
+    /// The ONE shared admission gate (quota + entitlement + suppression +
+    /// category), over the caller-supplied backend.
+    admission: SendAdmissionService,
     cfg: DispatchConfig,
+}
+
+impl std::fmt::Debug for ProductionCampaignDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProductionCampaignDispatcher")
+            .field("db", &self.db)
+            .field("cfg", &self.cfg)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProductionCampaignDispatcher {
     /// Construct the production dispatcher. Fails unless the mandatory
     /// configuration is present — an unconfigured deployment must NOT get a
     /// half-working dispatcher (campaign start stays 503).
+    ///
+    /// `admission_backend` is the shared [`SendAdmissionBackend`] the REST
+    /// send path uses in production
+    /// ([`billing_service::send_admission::PostgresAdmissionBackend`]); tests
+    /// substitute an in-memory backend to exercise the cross-path
+    /// quota/suppression contract without live billing storage.
     pub fn new(
         cfg: DispatchConfig,
         db: PgPool,
-        quota: Arc<dyn QuotaGateway>,
+        admission_backend: Arc<dyn SendAdmissionBackend>,
     ) -> anyhow::Result<Self> {
         if !cfg.is_configured() {
             anyhow::bail!(
@@ -1084,7 +1121,7 @@ impl ProductionCampaignDispatcher {
         }
         Ok(Self {
             db,
-            quota,
+            admission: SendAdmissionService::new(admission_backend),
             cfg: DispatchConfig {
                 from_email: cfg.from_email.trim().to_string(),
                 ..cfg
@@ -1094,6 +1131,48 @@ impl ProductionCampaignDispatcher {
 
     pub fn config(&self) -> &DispatchConfig {
         &self.cfg
+    }
+
+    /// Admit ONE sales recipient through the shared gate, BEFORE the enqueue
+    /// transaction begins. Uses [`AdmissionMeter::FilteredRecipients`] so the
+    /// canonical suppression list is applied here (a suppressed recipient is
+    /// refused with no quota consumed) and the metered quantity is exactly
+    /// the number of rows the enqueue will write (one).
+    ///
+    /// `idempotency_key` is the send's stable logical identity, so a retry
+    /// re-derives the same metering event and cannot double-reserve.
+    async fn admit_sales_recipient(
+        &self,
+        request: SalesSendAdmission<'_>,
+    ) -> Result<SendAdmission, SalesAdmissionRefusal> {
+        let recipients = [request.recipient_email.to_string()];
+        self.admission
+            .admit(SendAdmissionRequest {
+                tenant_id: request.tenant_id,
+                meter: AdmissionMeter::FilteredRecipients(&recipients),
+                idempotency_key: Some(request.idempotency_key),
+                idempotency_item: None,
+                category: Some(request.category),
+            })
+            .await
+            .map_err(|error| classify_admission_refusal(error, request.tenant_id))
+    }
+
+    /// Settle an admission after the enqueue attempt: the reservation stands
+    /// ONLY when this attempt is the one that committed the message. A
+    /// skipped/refused/failed enqueue releases it (idempotently, and a
+    /// duplicate admission that owns no metering state is a no-op).
+    async fn settle_sales_admission(admission: SendAdmission, enqueued: bool) {
+        if enqueued {
+            admission.commit();
+        } else if let Err(error) = admission.rollback().await {
+            tracing::error!(
+                error = %error,
+                event_id = %admission.event_id(),
+                tenant_id = admission.tenant_id(),
+                "failed to release sales quota reservation"
+            );
+        }
     }
 
     /// Suppress (tenant, recipient) in both suppression stores. Used by the
@@ -1146,8 +1225,8 @@ impl ProductionCampaignDispatcher {
     }
 
     /// Enqueue ONE recipient. Steps 2–5 of the README pipeline run in a
-    /// single transaction; the quota reservation is released on any failure
-    /// path that does not enqueue.
+    /// single transaction; the admission reservation is released on any
+    /// failure path that does not enqueue.
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue_recipient(
         &self,
@@ -1157,9 +1236,25 @@ impl ProductionCampaignDispatcher {
         recipient_email: &str,
         unsubscribe_link: &str,
     ) -> Result<EnqueueOutcome, SalesError> {
-        // 1. Quota reservation (outside the enqueue transaction, exactly like
-        //    the REST path — rolled back on every non-enqueue exit).
-        let reservation = self.quota.reserve(tenant_id).await?;
+        // 1. Unified admission (outside the enqueue transaction, exactly like
+        //    the REST path — released on every non-enqueue exit). The
+        //    logical identity is the campaign idempotency key, so a retry of
+        //    the same (campaign, recipient) re-derives the same metering
+        //    event and cannot double-reserve.
+        let idempotency_key = campaign_idempotency_key(campaign_id, recipient_email);
+        let admission = match self
+            .admit_sales_recipient(SalesSendAdmission {
+                tenant_id,
+                recipient_email,
+                idempotency_key: &idempotency_key,
+                category: SALES_MARKETING_CATEGORY,
+            })
+            .await
+        {
+            Ok(admission) => admission,
+            Err(SalesAdmissionRefusal::Skip(outcome)) => return Ok(outcome),
+            Err(SalesAdmissionRefusal::Retry(error)) => return Err(error),
+        };
 
         let outcome = self
             .enqueue_recipient_tx(
@@ -1168,29 +1263,12 @@ impl ProductionCampaignDispatcher {
                 rendered,
                 recipient_email,
                 unsubscribe_link,
-                &reservation,
+                &admission,
             )
             .await;
 
-        match &outcome {
-            Ok(EnqueueOutcome::Enqueued) => {}
-            // `LeaseLost` is unreachable on the campaign path (no action lease
-            // is involved) but is handled as a no-send so the reservation is
-            // always released when nothing was enqueued.
-            Ok(EnqueueOutcome::AlreadyClaimed)
-            | Ok(EnqueueOutcome::DuplicateIdempotency)
-            | Ok(EnqueueOutcome::LeaseLost) => {
-                // Nothing will be delivered for this reservation — release it.
-                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "failed to release quota for skipped recipient");
-                }
-            }
-            Err(_) => {
-                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "failed to roll back quota after enqueue failure");
-                }
-            }
-        }
+        Self::settle_sales_admission(admission, matches!(outcome, Ok(EnqueueOutcome::Enqueued)))
+            .await;
 
         outcome
     }
@@ -1203,7 +1281,7 @@ impl ProductionCampaignDispatcher {
         rendered: &RenderedMessage,
         recipient_email: &str,
         unsubscribe_link: &str,
-        reservation: &QuotaReservation,
+        admission: &SendAdmission,
     ) -> Result<EnqueueOutcome, SalesError> {
         let message_id = Uuid::new_v4();
         let created_at = Utc::now();
@@ -1213,13 +1291,16 @@ impl ProductionCampaignDispatcher {
         // instead — see `enqueue_sequenced`.
         let from = self.cfg.from_email.clone();
         let idempotency_key = campaign_idempotency_key(campaign_id, recipient_email);
+        // The category admission validated (never the schema default) is
+        // written into both rows.
+        let category = admission.category();
 
         let metadata = serde_json::json!({
             "source": "sales-autopilot",
             "campaign_id": campaign_id.to_string(),
             "sales_tenant_id": tenant_id,
             "from_name": self.cfg.from_name,
-            "quota_event_id": reservation.event_id.to_string(),
+            "quota_event_id": admission.event_id().to_string(),
         });
         let headers = serde_json::json!({
             // RFC 2369 angle-bracket form; the delivery worker forwards
@@ -1287,11 +1368,13 @@ impl ProductionCampaignDispatcher {
         }
 
         // 3. `messages` insert with idempotency (same statement as the REST
-        //    path, key = sacmp:{campaign}:{recipient}).
+        //    path, key = sacmp:{campaign}:{recipient}) and the admission-
+        //    validated category written explicitly ($16).
         let result = sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
-             subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key)
-             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key,
+             message_category)
+             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
              ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
         )
         .bind(message_id)
@@ -1309,6 +1392,7 @@ impl ProductionCampaignDispatcher {
         .bind(None::<DateTime<Utc>>)
         .bind(created_at)
         .bind(&idempotency_key)
+        .bind(category)
         .execute(&mut *tx)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1352,6 +1436,7 @@ impl ProductionCampaignDispatcher {
             .bind(&headers)
             .bind(None::<DateTime<Utc>>)
             .bind(created_at)
+            .bind(category)
             .execute(&mut *tx)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1397,6 +1482,17 @@ impl ProductionCampaignDispatcher {
     /// the send ledger. Suppression is still re-checked inside the transaction,
     /// because an unsubscribe that landed between the decision and this send
     /// must win.
+    ///
+    /// # Admission (audit implementation-order item 3)
+    ///
+    /// Before the transaction, the send passes the ONE shared
+    /// [`SendAdmissionService`]: the category is `marketing`-class (explicit,
+    /// validated, written to both rows), the recipient is checked against the
+    /// canonical suppression list, and `EmailsSent` quota is reserved under
+    /// the logical identity `sa-send:{step_execution_id}`. A quota refusal is
+    /// a retryable deferral; a suppression refusal is a non-retryable
+    /// [`EnqueueOutcome::Suppressed`]. The reservation is committed only
+    /// after this transaction commits.
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue_sequenced(
         &self,
@@ -1417,7 +1513,26 @@ impl ProductionCampaignDispatcher {
         // refuses again rather than trusting an arbitrary caller.
         ensure_sequenced_sender(sender, tenant_id)?;
 
-        let reservation = self.quota.reserve(tenant_id).await?;
+        // Unified admission (outside the enqueue transaction, exactly like
+        // the REST path). The logical send unit `sa-send:{step_execution_id}`
+        // is the quota identity the action queue, the acceptance ledger and
+        // `enrollments::start_outreach` already use, so a retry of this step
+        // execution re-derives the SAME metering event instead of reserving
+        // a second unit.
+        let quota_identity = format!("sa-send:{step_execution_id}");
+        let admission = match self
+            .admit_sales_recipient(SalesSendAdmission {
+                tenant_id,
+                recipient_email,
+                idempotency_key: &quota_identity,
+                category: SALES_MARKETING_CATEGORY,
+            })
+            .await
+        {
+            Ok(admission) => admission,
+            Err(SalesAdmissionRefusal::Skip(outcome)) => return Ok(outcome),
+            Err(SalesAdmissionRefusal::Retry(error)) => return Err(error),
+        };
 
         let outcome = self
             .enqueue_sequenced_tx(
@@ -1432,28 +1547,12 @@ impl ProductionCampaignDispatcher {
                 enrollment_id,
                 action_fence,
                 metadata_extra,
-                &reservation,
+                &admission,
             )
             .await;
 
-        match &outcome {
-            Ok(EnqueueOutcome::Enqueued) => {}
-            Ok(EnqueueOutcome::AlreadyClaimed)
-            | Ok(EnqueueOutcome::DuplicateIdempotency)
-            | Ok(EnqueueOutcome::LeaseLost) => {
-                // Nothing will be delivered for this reservation — release it.
-                // LeaseLost in particular aborts before any insert, so the
-                // reservation bought nothing.
-                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "failed to release quota for skipped step send");
-                }
-            }
-            Err(_) => {
-                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "failed to roll back quota after step send failure");
-                }
-            }
-        }
+        Self::settle_sales_admission(admission, matches!(outcome, Ok(EnqueueOutcome::Enqueued)))
+            .await;
 
         outcome
     }
@@ -1472,7 +1571,7 @@ impl ProductionCampaignDispatcher {
         enrollment_id: Uuid,
         action_fence: &crate::actions::ActionFence,
         metadata_extra: serde_json::Value,
-        reservation: &QuotaReservation,
+        admission: &SendAdmission,
     ) -> Result<EnqueueOutcome, SalesError> {
         let message_id = Uuid::new_v4();
         let created_at = Utc::now();
@@ -1480,12 +1579,15 @@ impl ProductionCampaignDispatcher {
         // deployment-wide default (see the method doc comment).
         let envelope = sequenced_envelope(sender, &self.cfg);
         let from = envelope.from_email.clone();
+        // The category admission validated (never the schema default) is
+        // written into both rows.
+        let category = admission.category();
 
         let mut metadata = serde_json::json!({
             "source": "sales-autopilot",
             "sales_tenant_id": tenant_id,
             "from_name": envelope.from_name,
-            "quota_event_id": reservation.event_id.to_string(),
+            "quota_event_id": admission.event_id().to_string(),
             // Belt and braces: the typed columns below are authoritative, but
             // the same provenance is also visible in metadata for consumers
             // that only read JSON.
@@ -1581,6 +1683,7 @@ impl ProductionCampaignDispatcher {
             .bind(sender.id)
             .bind(step_execution_id)
             .bind(enrollment_id)
+            .bind(category)
             .execute(&mut *tx)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1621,6 +1724,7 @@ impl ProductionCampaignDispatcher {
             .bind(sender.id)
             .bind(step_execution_id)
             .bind(enrollment_id)
+            .bind(category)
             .execute(&mut *tx)
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1684,6 +1788,13 @@ impl ProductionCampaignDispatcher {
                 // lease loss never enqueued anything, so the batch continues.
                 Ok(EnqueueOutcome::LeaseLost) => {
                     metrics::counter!("sales_campaign_dispatch_skipped_total", "reason" => "lease_lost")
+                        .increment(1);
+                }
+                // Admission refused the recipient permanently (canonical
+                // suppression list). No message, no quota; the batch
+                // continues with the next recipient.
+                Ok(EnqueueOutcome::Suppressed) => {
+                    metrics::counter!("sales_campaign_dispatch_skipped_total", "reason" => "suppressed")
                         .increment(1);
                 }
                 // Quota exhaustion and hard configuration errors abort the
@@ -1803,9 +1914,43 @@ impl ProductionCampaignDispatcher {
         html: Option<&str>,
         text: &str,
     ) -> Result<ReplyOutcome, SalesError> {
-        // Quota reservation outside the enqueue transaction (same as the
-        // campaign path); released on every non-enqueue exit.
-        let reservation = self.quota.reserve(tenant_id).await?;
+        // Unified admission outside the enqueue transaction (same as the
+        // campaign path). A reply is transactional correspondence, so the
+        // category is passed EXPLICITLY as `transactional`; the suppression
+        // check is the canonical platform list, which preserves the
+        // documented 1:1-reply semantics (a `sales_unsubscribes` marketing
+        // opt-out never blocks a personal reply — see the method docs).
+        let idempotency_key = reply_idempotency_key(inbox_message_id);
+        let admission = match self
+            .admit_sales_recipient(SalesSendAdmission {
+                tenant_id,
+                recipient_email: to_email,
+                idempotency_key: &idempotency_key,
+                category: SALES_REPLY_CATEGORY,
+            })
+            .await
+        {
+            Ok(admission) => admission,
+            Err(SalesAdmissionRefusal::Skip(_outcome)) => {
+                // A suppressed correspondent on a 1:1 reply is terminal. The
+                // reply route is synchronous HTTP (no retry loop), so this
+                // keeps the route's existing refusal contract (400 with the
+                // same message the in-transaction check produced) instead of
+                // claiming the message was answered. Nothing was enqueued and
+                // no quota was consumed.
+                tracing::info!(
+                    tenant_id = %tenant_id,
+                    inbox_message_id = %inbox_message_id,
+                    recipient = %to_email,
+                    "inbox reply refused admission (recipient suppressed)"
+                );
+                return Err(SalesError::InvalidInput(format!(
+                    "recipient is suppressed: {}",
+                    to_email.trim().to_ascii_lowercase()
+                )));
+            }
+            Err(SalesAdmissionRefusal::Retry(error)) => return Err(error),
+        };
 
         let outcome = self
             .enqueue_reply_tx(
@@ -1815,24 +1960,15 @@ impl ProductionCampaignDispatcher {
                 subject,
                 html,
                 text,
-                &reservation,
+                &admission,
             )
             .await;
 
-        match &outcome {
-            Ok(ReplyOutcome::Enqueued { .. }) => {}
-            Ok(ReplyOutcome::AlreadyReplied { .. }) | Err(_) => {
-                // Nothing will be delivered for this reservation — release it.
-                if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
-                    tracing::error!(
-                        error = %e,
-                        tenant_id = %tenant_id,
-                        inbox_message_id = %inbox_message_id,
-                        "failed to release quota for skipped inbox reply"
-                    );
-                }
-            }
-        }
+        Self::settle_sales_admission(
+            admission,
+            matches!(outcome, Ok(ReplyOutcome::Enqueued { .. })),
+        )
+        .await;
 
         outcome
     }
@@ -1846,7 +1982,7 @@ impl ProductionCampaignDispatcher {
         subject: &str,
         html: Option<&str>,
         text: &str,
-        reservation: &QuotaReservation,
+        admission: &SendAdmission,
     ) -> Result<ReplyOutcome, SalesError> {
         let message_id = Uuid::new_v4();
         let created_at = Utc::now();
@@ -1856,6 +1992,9 @@ impl ProductionCampaignDispatcher {
         // the resolved sender identity — see `enqueue_sequenced`.
         let from = self.cfg.from_email.clone();
         let idempotency_key = reply_idempotency_key(inbox_message_id);
+        // The category admission validated (never the schema default) is
+        // written into both rows.
+        let category = admission.category();
 
         let metadata = serde_json::json!({
             "source": "sales-autopilot",
@@ -1863,7 +2002,7 @@ impl ProductionCampaignDispatcher {
             "inbox_message_id": inbox_message_id.to_string(),
             "sales_tenant_id": tenant_id,
             "from_name": self.cfg.from_name,
-            "quota_event_id": reservation.event_id.to_string(),
+            "quota_event_id": admission.event_id().to_string(),
         });
         let tags = vec!["sales-inbox-reply".to_string()];
 
@@ -1938,11 +2077,13 @@ impl ProductionCampaignDispatcher {
         }
 
         // `messages` insert with the deterministic reply key
-        // (ON CONFLICT DO NOTHING — same statement as the REST path).
+        // (ON CONFLICT DO NOTHING — same statement as the REST path) and the
+        // admission-validated category written explicitly.
         let result = sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
-             subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key)
-             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+             subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key,
+             message_category)
+             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
              ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
         )
         .bind(message_id)
@@ -1960,6 +2101,7 @@ impl ProductionCampaignDispatcher {
         .bind(None::<DateTime<Utc>>)
         .bind(created_at)
         .bind(&idempotency_key)
+        .bind(category)
         .execute(&mut *tx)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1997,10 +2139,11 @@ impl ProductionCampaignDispatcher {
         sqlx::query(
             "INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
-                \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at
+                \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at,
+                message_category
              ) VALUES (
                 $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
-                $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $14, $14
+                $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $14, $14, $15
              )",
         )
         .bind(Uuid::new_v4())
@@ -2017,6 +2160,7 @@ impl ProductionCampaignDispatcher {
         .bind(None::<serde_json::Value>)
         .bind(None::<DateTime<Utc>>)
         .bind(created_at)
+        .bind(category)
         .execute(&mut *tx)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -3034,40 +3178,222 @@ mod tests {
             .contains("ON CONFLICT (tenant_id, idempotency_key) DO NOTHING"));
     }
 
+    /// Audit item 3: the admission-validated category is a BOUND PARAMETER on
+    /// every sales insert, so the row can never fall back to the
+    /// `message_category` schema default.
+    #[test]
+    fn sales_inserts_bind_the_admission_category_explicitly() {
+        for sql in [
+            SEQUENCE_MESSAGES_INSERT_SQL,
+            SEQUENCE_EMAIL_QUEUE_INSERT_SQL,
+            CAMPAIGN_EMAIL_QUEUE_INSERT_SQL,
+        ] {
+            assert!(
+                sql.contains("message_category"),
+                "message_category must be written explicitly: {sql}"
+            );
+        }
+        assert!(SEQUENCE_MESSAGES_INSERT_SQL.contains("$20"));
+        assert!(SEQUENCE_EMAIL_QUEUE_INSERT_SQL.contains("$18"));
+        assert!(CAMPAIGN_EMAIL_QUEUE_INSERT_SQL.contains("$16"));
+
+        // The two documented sales classes, validated through the ONE shared
+        // helper admission uses, with the marketing class deliberately
+        // non-exempt and the reply class exempt.
+        assert_eq!(SALES_MARKETING_CATEGORY, "marketing");
+        assert_eq!(SALES_REPLY_CATEGORY, "transactional");
+        assert_eq!(
+            billing_service::send_admission::normalize_category(Some(SALES_MARKETING_CATEGORY))
+                .expect("the sales category must validate"),
+            "marketing"
+        );
+        assert_eq!(
+            billing_service::send_admission::normalize_category(Some(SALES_REPLY_CATEGORY))
+                .expect("the reply category must validate"),
+            "transactional"
+        );
+        assert!(!message_category::is_preference_exempt(
+            SALES_MARKETING_CATEGORY
+        ));
+        assert!(message_category::is_preference_exempt(SALES_REPLY_CATEGORY));
+    }
+
+    /// Audit item 3: the refusal classification enforces the required
+    /// retryable-vs-skip contract — a quota refusal must DEFER (retryable),
+    /// a suppression refusal must SKIP (terminal).
+    #[test]
+    fn admission_refusals_classify_as_retryable_deferrals_or_terminal_skips() {
+        let quota = classify_admission_refusal(SendAdmissionError::QuotaExceeded, "ten_classify");
+        assert!(
+            matches!(&quota, SalesAdmissionRefusal::Retry(SalesError::QuotaExhausted(t)) if t == "ten_classify"),
+            "quota refusal must be a retryable deferral"
+        );
+
+        let suppressed = classify_admission_refusal(
+            SendAdmissionError::Suppressed(vec!["blocked@example.com".into()]),
+            "ten_classify",
+        );
+        assert!(
+            matches!(
+                suppressed,
+                SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
+            ),
+            "suppression refusal must be a terminal skip"
+        );
+
+        // Infrastructure outages are retryable (fail closed, never send
+        // unscreened); an invalid server-owned category is a programming
+        // error and terminally skips instead of retrying forever.
+        for error in [
+            SendAdmissionError::MeteringUnavailable(billing_service::usage::UsageError::Audit(
+                "redis down".into(),
+            )),
+            SendAdmissionError::SuppressionUnavailable("db down".into()),
+        ] {
+            assert!(
+                matches!(
+                    classify_admission_refusal(error, "ten_classify"),
+                    SalesAdmissionRefusal::Retry(SalesError::ServiceUnavailable(_))
+                ),
+                "an infrastructure outage must be a retryable deferral"
+            );
+        }
+        assert!(matches!(
+            classify_admission_refusal(
+                SendAdmissionError::InvalidCategory {
+                    raw: "bad\ncat".into(),
+                },
+                "ten_classify",
+            ),
+            SalesAdmissionRefusal::Skip(EnqueueOutcome::Suppressed)
+        ));
+    }
+
     // -----------------------------------------------------------------------
     // Live-DB proofs (ignored by default)
     // -----------------------------------------------------------------------
 
-    /// Deterministic quota gateway: records reserve/release without billing.
-    #[derive(Debug, Default)]
-    struct FakeQuota {
+    /// In-memory [`SendAdmissionBackend`] for the dispatcher's live tests:
+    /// the same contract as billing's canonical
+    /// `record_with_quota_check` / `rollback_usage_record` — one shared
+    /// counter per tenant, all-or-nothing reservation, usage-event-id
+    /// de-duplication, event-id keyed rollback — plus a suppression set, so
+    /// the sales path is exercised against the SHARED admission semantics
+    /// without touching billing storage.
+    #[derive(Debug)]
+    struct FakeAdmissionBackend {
+        state: std::sync::Mutex<FakeAdmissionState>,
         reserved: std::sync::atomic::AtomicUsize,
         released: std::sync::atomic::AtomicUsize,
     }
 
-    impl QuotaGateway for FakeQuota {
-        fn reserve(
+    /// Deliberately NOT derived: a derived `Default` would set `limit = 0`
+    /// (deny everything). The default is unlimited (billing's -1).
+    impl Default for FakeAdmissionBackend {
+        fn default() -> Self {
+            Self {
+                state: std::sync::Mutex::new(FakeAdmissionState {
+                    limit: -1,
+                    ..FakeAdmissionState::default()
+                }),
+                reserved: std::sync::atomic::AtomicUsize::new(0),
+                released: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeAdmissionState {
+        /// -1 = unlimited (the billing layer's convention).
+        limit: i64,
+        used: i64,
+        events: std::collections::HashMap<Uuid, i64>,
+        suppressed: std::collections::HashSet<String>,
+    }
+
+    impl FakeAdmissionBackend {
+        fn used(&self) -> i64 {
+            self.state.lock().unwrap().used
+        }
+
+        fn reserved(&self) -> usize {
+            self.reserved.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn released(&self) -> usize {
+            self.released.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SendAdmissionBackend for FakeAdmissionBackend {
+        async fn record_send_usage(
             &self,
             _tenant_id: &str,
-        ) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>> {
+            quantity: i64,
+            event_id: Uuid,
+        ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError>
+        {
             self.reserved
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async move {
-                Ok(QuotaReservation {
-                    event_id: Uuid::new_v4(),
-                    recorded_at: Utc::now(),
-                })
+            let mut state = self.state.lock().unwrap();
+            // Duplicates are recognized BEFORE the limit, exactly like the
+            // canonical Lua gate: a replayed logical send is admitted even
+            // when the counter is full.
+            if let Some(previous) = state.events.get(&event_id) {
+                assert_eq!(*previous, quantity, "duplicate must carry same quantity");
+                return Ok(billing_service::usage::QuotaRecordResult {
+                    allowed: true,
+                    current: state.used,
+                    duplicate: true,
+                });
+            }
+            if state.limit >= 0 && state.used + quantity > state.limit {
+                return Ok(billing_service::usage::QuotaRecordResult {
+                    allowed: false,
+                    current: state.used,
+                    duplicate: false,
+                });
+            }
+            state.used += quantity;
+            state.events.insert(event_id, quantity);
+            Ok(billing_service::usage::QuotaRecordResult {
+                allowed: true,
+                current: state.used,
+                duplicate: false,
             })
         }
 
-        fn rollback(
+        async fn rollback_send_usage(
             &self,
             _tenant_id: &str,
-            _reservation: &QuotaReservation,
-        ) -> QuotaFuture<'_, Result<(), SalesError>> {
+            quantity: i64,
+            event_id: Uuid,
+            _recorded_at: DateTime<Utc>,
+        ) -> Result<(), billing_service::usage::UsageError> {
             self.released
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Box::pin(async { Ok(()) })
+            let mut state = self.state.lock().unwrap();
+            if state.events.remove(&event_id).is_some() {
+                state.used -= quantity;
+            }
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            let state = self.state.lock().unwrap();
+            let mut suppressed: Vec<String> = canonical_recipients
+                .iter()
+                .filter(|email| state.suppressed.contains(email.as_str()))
+                .cloned()
+                .collect();
+            suppressed.sort();
+            suppressed.dedup();
+            Ok(suppressed)
         }
     }
 
@@ -3346,16 +3672,20 @@ mod tests {
     /// envelope sender is the resolved identity (never
     /// `SALES_CAMPAIGN_FROM_EMAIL`).
     #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[allow(clippy::type_complexity)]
     #[tokio::test]
     async fn sequenced_send_binds_typed_provenance_and_the_resolved_sender() {
         let Some(pool) = crate::test_db::canonical_test_pool("sequenced_binding").await else {
             return;
         };
         let fx = seed_sequenced_fixture(&pool, "seqbind", true).await;
-        let quota = Arc::new(FakeQuota::default());
-        let dispatcher =
-            ProductionCampaignDispatcher::new(test_dispatch_config(), pool.clone(), quota.clone())
-                .expect("the test dispatch config is configured");
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = ProductionCampaignDispatcher::new(
+            test_dispatch_config(),
+            pool.clone(),
+            admission.clone(),
+        )
+        .expect("the test dispatch config is configured");
 
         let outcome = dispatcher
             .enqueue_sequenced(
@@ -3375,16 +3705,17 @@ mod tests {
             .expect("a fenced sequenced send must succeed");
         assert_eq!(outcome, EnqueueOutcome::Enqueued);
 
-        let (decision, sender_id, step_id, enrollment, from_email, metadata): (
+        let (decision, sender_id, step_id, enrollment, from_email, metadata, category): (
             Option<Uuid>,
             Option<Uuid>,
             Option<Uuid>,
             Option<Uuid>,
             String,
             serde_json::Value,
+            String,
         ) = sqlx::query_as(
             "SELECT sales_decision_id, sales_sender_identity_id, sales_step_execution_id, \
-                    sales_enrollment_id, from_email, metadata \
+                    sales_enrollment_id, from_email, metadata, message_category \
              FROM messages WHERE tenant_id = $1 AND idempotency_key = $2",
         )
         .bind(&fx.tenant)
@@ -3423,17 +3754,26 @@ mod tests {
         assert_eq!(metadata["sales_sender_pool"], "sales_outbound");
         assert_eq!(metadata["sales_sender_source_ip"], "203.0.113.7");
 
-        // The queue row carries the same typed provenance, and its
-        // from_address is the identity's address.
-        let (q_decision, q_sender, q_step, q_enrollment, q_from): (
+        // The category recorded on the message is the explicit sales class
+        // admission validated — the schema default is never consulted.
+        assert_eq!(
+            category, SALES_MARKETING_CATEGORY,
+            "the messages row must carry the admission-validated category"
+        );
+        assert_eq!(category, message_category::MARKETING);
+
+        // The queue row carries the same typed provenance, the same
+        // category, and its from_address is the identity's address.
+        let (q_decision, q_sender, q_step, q_enrollment, q_from, q_category): (
             Option<Uuid>,
             Option<Uuid>,
             Option<Uuid>,
             Option<Uuid>,
             String,
+            String,
         ) = sqlx::query_as(
             "SELECT sales_decision_id, sales_sender_identity_id, sales_step_execution_id, \
-                    sales_enrollment_id, from_address \
+                    sales_enrollment_id, from_address, message_category \
              FROM email_queue WHERE tenant_id = $1 AND message_id = \
                  (SELECT id FROM messages WHERE tenant_id = $1 AND idempotency_key = $2)",
         )
@@ -3448,16 +3788,22 @@ mod tests {
         assert_eq!(q_step, Some(fx.step_execution_id));
         assert_eq!(q_enrollment, Some(fx.enrollment_id));
         assert_eq!(q_from, fx.sender.from_email);
+        assert_eq!(q_category, SALES_MARKETING_CATEGORY);
 
         assert_eq!(
-            quota.reserved.load(std::sync::atomic::Ordering::SeqCst),
+            admission.reserved(),
             1,
             "the send reserves quota exactly once"
         );
         assert_eq!(
-            quota.released.load(std::sync::atomic::Ordering::SeqCst),
+            admission.released(),
             0,
             "an enqueued send keeps its reservation"
+        );
+        assert_eq!(
+            admission.used(),
+            1,
+            "one EmailsSent unit is consumed on the shared counter"
         );
 
         cleanup_sequenced_fixture(&pool, &fx.tenant).await;
@@ -3474,10 +3820,13 @@ mod tests {
             return;
         };
         let fx = seed_sequenced_fixture(&pool, "stalefence", false).await;
-        let quota = Arc::new(FakeQuota::default());
-        let dispatcher =
-            ProductionCampaignDispatcher::new(test_dispatch_config(), pool.clone(), quota.clone())
-                .expect("the test dispatch config is configured");
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = ProductionCampaignDispatcher::new(
+            test_dispatch_config(),
+            pool.clone(),
+            admission.clone(),
+        )
+        .expect("the test dispatch config is configured");
 
         let outcome = dispatcher
             .enqueue_sequenced(
@@ -3518,14 +3867,19 @@ mod tests {
         assert_eq!(queued, 0, "a stale worker must not insert into email_queue");
 
         assert_eq!(
-            quota.reserved.load(std::sync::atomic::Ordering::SeqCst),
+            admission.reserved(),
             1,
             "the reservation is taken before the fence check"
         );
         assert_eq!(
-            quota.released.load(std::sync::atomic::Ordering::SeqCst),
+            admission.released(),
             1,
             "a refused send must release its quota reservation"
+        );
+        assert_eq!(
+            admission.used(),
+            0,
+            "the rolled-back reservation consumes no shared quota"
         );
 
         cleanup_sequenced_fixture(&pool, &fx.tenant).await;

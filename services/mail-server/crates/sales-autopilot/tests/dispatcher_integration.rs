@@ -43,11 +43,15 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use billing_service::send_admission::{
+    AdmissionMeter, SendAdmissionError, SendAdmissionRequest, SendAdmissionService,
+};
+
 use sales_autopilot::actions::{ActionOutcome, ActionQueue, LeasedAction};
 use sales_autopilot::campaigns::CampaignManager;
 use sales_autopilot::dispatcher::{
-    send_idempotency_key, EnqueueOutcome, ProductionCampaignDispatcher, QuotaFuture, QuotaGateway,
-    QuotaReservation, RenderedMessage, SendIdentity,
+    send_idempotency_key, EnqueueOutcome, ProductionCampaignDispatcher, RenderedMessage,
+    SendIdentity,
 };
 use sales_autopilot::sender_pool;
 use sales_autopilot::types::{SalesError, SenderIdentity, SenderPool};
@@ -56,27 +60,34 @@ use sales_autopilot::types::{SalesError, SenderIdentity, SenderPool};
 // Fakes
 // ---------------------------------------------------------------------------
 
-/// Deterministic test double for the billing quota gateway.
+/// Deterministic in-memory [`billing_service::send_admission::
+/// SendAdmissionBackend`] — the SHARED admission contract (one counter per
+/// tenant, usage-event-id de-duplication, all-or-nothing reservation,
+/// event-id keyed rollback) with the knobs these tests need.
 ///
 /// Modes:
-/// * new() — allow everything (limit = -1, billing's "unlimited"),
-/// * `with_limit(n)` — allow exactly n reservations, then [`SalesError::QuotaExhausted`],
-/// * `with_transient_failure_at(call)` — the given reserve call (1-based)
-///   fails with a ServiceUnavailable, simulating a billing/DB hiccup.
+/// * `new()` — allow everything (limit = -1, billing's "unlimited"),
+/// * `with_limit(n)` — allow exactly n reserved units, then quota denial,
+/// * `with_transient_failure_at(call)` — the given record call (1-based)
+///   fails with an infrastructure error, simulating a billing/DB hiccup,
+/// * `suppress(email)` — put an address on the tenant suppression list.
 ///
 /// NOTE: deliberately not `Default` — a derived Default would set limit=0
-/// (deny everything); construct via [`FakeQuotaGateway::new`].
+/// (deny everything); construct via [`FakeAdmissionBackend::new`].
 #[derive(Debug)]
-struct FakeQuotaGateway {
+struct FakeAdmissionBackend {
     /// -1 = unlimited (billing convention).
     limit: AtomicI64,
     used: AtomicI64,
     transient_fail_at: AtomicI64,
     reserves: AtomicUsize,
     rollbacks: AtomicUsize,
+    /// Usage-event-id → reserved quantity (the de-duplication ledger).
+    events: std::sync::Mutex<std::collections::HashMap<Uuid, i64>>,
+    suppressed: std::sync::Mutex<Vec<String>>,
 }
 
-impl FakeQuotaGateway {
+impl FakeAdmissionBackend {
     fn new() -> Self {
         Self {
             limit: AtomicI64::new(-1),
@@ -84,6 +95,8 @@ impl FakeQuotaGateway {
             transient_fail_at: AtomicI64::new(0),
             reserves: AtomicUsize::new(0),
             rollbacks: AtomicUsize::new(0),
+            events: std::sync::Mutex::new(std::collections::HashMap::new()),
+            suppressed: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -108,39 +121,92 @@ impl FakeQuotaGateway {
     fn reserves(&self) -> usize {
         self.reserves.load(Ordering::SeqCst)
     }
+
+    fn used(&self) -> i64 {
+        self.used.load(Ordering::SeqCst)
+    }
+
+    fn suppress(&self, email: &str) {
+        self.suppressed
+            .lock()
+            .unwrap()
+            .push(email.trim().to_ascii_lowercase());
+    }
 }
 
-impl QuotaGateway for FakeQuotaGateway {
-    fn reserve(&self, tenant_id: &str) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>> {
-        let tenant_id = tenant_id.to_string();
+#[async_trait::async_trait]
+impl billing_service::send_admission::SendAdmissionBackend for FakeAdmissionBackend {
+    async fn record_send_usage(
+        &self,
+        _tenant_id: &str,
+        quantity: i64,
+        event_id: Uuid,
+    ) -> Result<billing_service::usage::QuotaRecordResult, billing_service::usage::UsageError> {
         let n = self.reserves.fetch_add(1, Ordering::SeqCst) as i64 + 1;
-        Box::pin(async move {
-            if self.transient_fail_at.load(Ordering::SeqCst) == n {
-                return Err(SalesError::ServiceUnavailable(
-                    "billing quota enforcement is temporarily unavailable".into(),
-                ));
-            }
-            let used = self.used.fetch_add(1, Ordering::SeqCst) + 1;
-            let limit = self.limit.load(Ordering::SeqCst);
-            if limit >= 0 && used > limit {
-                // Mirror the Lua semantics: denial does not consume quota.
-                self.used.fetch_sub(1, Ordering::SeqCst);
-                return Err(SalesError::QuotaExhausted(tenant_id));
-            }
-            Ok(QuotaReservation {
-                event_id: Uuid::new_v4(),
-                recorded_at: chrono::Utc::now(),
-            })
+        if self.transient_fail_at.load(Ordering::SeqCst) == n {
+            return Err(billing_service::usage::UsageError::Audit(
+                "simulated billing outage".into(),
+            ));
+        }
+        // The canonical gate de-duplicates by event id BEFORE the limit: a
+        // replayed logical send is admitted even at a full counter.
+        let mut events = self.events.lock().unwrap();
+        if let Some(previous) = events.get(&event_id) {
+            assert_eq!(*previous, quantity, "duplicate must carry same quantity");
+            return Ok(billing_service::usage::QuotaRecordResult {
+                allowed: true,
+                current: self.used.load(Ordering::SeqCst),
+                duplicate: true,
+            });
+        }
+        let limit = self.limit.load(Ordering::SeqCst);
+        let used = self.used.load(Ordering::SeqCst);
+        if limit >= 0 && used + quantity > limit {
+            // Mirror the Lua semantics: denial does not consume quota.
+            return Ok(billing_service::usage::QuotaRecordResult {
+                allowed: false,
+                current: used,
+                duplicate: false,
+            });
+        }
+        self.used.fetch_add(quantity, Ordering::SeqCst);
+        events.insert(event_id, quantity);
+        Ok(billing_service::usage::QuotaRecordResult {
+            allowed: true,
+            current: used + quantity,
+            duplicate: false,
         })
     }
 
-    fn rollback(
+    async fn rollback_send_usage(
         &self,
         _tenant_id: &str,
-        _reservation: &QuotaReservation,
-    ) -> QuotaFuture<'_, Result<(), SalesError>> {
+        quantity: i64,
+        event_id: Uuid,
+        _recorded_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), billing_service::usage::UsageError> {
         self.rollbacks.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { Ok(()) })
+        let mut events = self.events.lock().unwrap();
+        if events.remove(&event_id).is_some() {
+            self.used.fetch_sub(quantity, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    async fn suppressed_recipients(
+        &self,
+        _tenant_id: &str,
+        canonical_recipients: &[String],
+    ) -> Result<Vec<String>, String> {
+        let suppressed = self.suppressed.lock().unwrap();
+        let mut matches: Vec<String> = canonical_recipients
+            .iter()
+            .filter(|email| suppressed.contains(email))
+            .cloned()
+            .collect();
+        matches.sort();
+        matches.dedup();
+        Ok(matches)
     }
 }
 
@@ -154,20 +220,20 @@ struct Fixture {
     tenant_id: String,
     seq: common::SequenceFixture,
     dispatcher: Arc<ProductionCampaignDispatcher>,
-    quota: Arc<FakeQuotaGateway>,
+    admission: Arc<FakeAdmissionBackend>,
 }
 
 impl Fixture {
-    /// Rebuild the dispatcher around a different quota gateway (the tests that
-    /// exercise quota accounting replace it mid-test, exactly like the old
-    /// suite did).
-    fn set_quota(&mut self, quota: Arc<FakeQuotaGateway>) {
-        self.quota = quota;
+    /// Rebuild the dispatcher around a different admission backend (the tests
+    /// that exercise admission accounting replace it mid-test, exactly like
+    /// the old suite did).
+    fn set_admission(&mut self, admission: Arc<FakeAdmissionBackend>) {
+        self.admission = admission;
         self.dispatcher = Arc::new(
             ProductionCampaignDispatcher::new(
                 common::test_dispatch_config_for(&self.seq.domain),
                 self.db.clone(),
-                self.quota.clone() as Arc<dyn QuotaGateway>,
+                self.admission.clone(),
             )
             .expect("test dispatch config must be valid"),
         );
@@ -178,12 +244,12 @@ async fn fixture(test_name: &str, opts: common::SequenceFixtureOptions) -> Optio
     let db = common::test_pool(test_name).await?;
     let tenant_id = common::insert_test_tenant(&db, test_name).await;
     let seq = common::seed_sequence_fixture(&db, &tenant_id, opts).await;
-    let quota = Arc::new(FakeQuotaGateway::new());
+    let admission = Arc::new(FakeAdmissionBackend::new());
     let dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
             common::test_dispatch_config_for(&seq.domain),
             db.clone(),
-            quota.clone() as Arc<dyn QuotaGateway>,
+            admission.clone(),
         )
         .expect("test dispatch config must be valid"),
     );
@@ -192,7 +258,7 @@ async fn fixture(test_name: &str, opts: common::SequenceFixtureOptions) -> Optio
         tenant_id,
         seq,
         dispatcher,
-        quota,
+        admission,
     })
 }
 
@@ -330,7 +396,12 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     let step_execution_id = seq.step_execution_id.expect("fixture enrolls");
     let enrollment_id = seq.enrollment_id.expect("fixture enrolls");
 
-    // Hostile personalization data on the canonical contact/account.
+    // Hostile personalization data on the canonical contact/account. The
+    // rendered body now comes from the strategy planner, whose personalization
+    // sink is the account's `company` (the contact name is not interpolated):
+    // a live hiring signal makes `derive_problem_hypothesis` use that field,
+    // so the hostile value actually reaches the body and the escaping gate is
+    // genuinely exercised rather than asserted vacuously.
     sqlx::query("UPDATE sales_contacts SET full_name = $2 WHERE id = $1")
         .bind(seq.contact_id)
         .bind("<script>alert('xss')</script>")
@@ -339,10 +410,20 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
         .unwrap();
     sqlx::query("UPDATE sales_accounts SET company = $2 WHERE id = $1")
         .bind(seq.account_id)
-        .bind("ACME & Sons")
+        .bind("ACME & Sons <script>alert('xss')</script>")
         .execute(&db)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO sales_signals (id, tenant_id, account_id, signal_type, strength, \
+         observed_at, payload) \
+         VALUES (gen_random_uuid(), $1, $2, 'hiring_growth', 0.95, NOW(), '{}'::jsonb)",
+    )
+    .bind(&tenant)
+    .bind(seq.account_id)
+    .execute(&db)
+    .await
+    .unwrap();
 
     let outcome =
         common::run_send_step(&db, fx.dispatcher.clone(), &tenant, step_execution_id).await;
@@ -453,8 +534,9 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     assert_eq!(q_decision, msg_decision);
     assert_eq!(campaign_id, &None);
 
-    // Personalization is HTML-escaped in subject + html; the compliance footer
-    // rides along.
+    // The strategy body is plain text rendered through `compose_reply_html`:
+    // every interpolated lead/account value must be HTML-escaped, and raw
+    // markup must never appear. The compliance footer rides along.
     let (subject, html): (String, Option<String>) = sqlx::query_as(
         "SELECT subject, html_body FROM messages WHERE idempotency_key = $1 AND tenant_id = $2",
     )
@@ -465,8 +547,8 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     .unwrap();
     let html = html.expect("html part");
     assert!(
-        html.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"),
-        "contact name must be HTML-escaped: {html}"
+        html.contains("ACME &amp; Sons &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"),
+        "hostile account personalization must be HTML-escaped: {html}"
     );
     assert!(
         !html.contains("<script>alert"),
@@ -477,9 +559,12 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
         "company ampersand escaped"
     );
     assert!(html.contains("Unsubscribe</a>"), "footer unsubscribe link");
+    // The strategy subject is composed from server-owned constants and never
+    // interpolates lead data, so hostile markup (raw or entity-encoded) must
+    // not be able to ride out in it.
     assert!(
-        subject.contains("&lt;script&gt;"),
-        "subject is escaped too: {subject}"
+        !subject.contains("<script") && !subject.contains("&lt;script"),
+        "subject must not carry hostile personalization: {subject}"
     );
 
     // The send ledger is the step execution; the enrollment advanced to
@@ -631,7 +716,10 @@ async fn suppression_landing_between_decision_and_enqueue_is_refused() {
         EnqueueOutcome::AlreadyClaimed,
         "the in-transaction recheck must refuse the suppressed recipient"
     );
-    assert!(fx.quota.rollbacks() >= 1, "no quota may leak on a refusal");
+    assert!(
+        fx.admission.rollbacks() >= 1,
+        "no quota may leak on a refusal"
+    );
     assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
     assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
     finish_leased(&fx.db, &leased, ActionOutcome::Succeeded).await;
@@ -647,7 +735,10 @@ async fn suppression_landing_between_decision_and_enqueue_is_refused() {
 /// 1. a crashed worker that left the step in `executing` cannot enqueue again
 ///    when its action is replayed (the step-claim guard);
 /// 2. replaying the same logical step execution through the dispatcher hits
-///    the idempotency key and is a no-op that releases its reservation;
+///    the idempotency key and is a no-op that consumes no additional quota
+///    (the deterministic `sa-send:{step_execution_id}` usage identity is
+///    recognized as a duplicate, and a duplicate owns no reservation to
+///    release — releasing it would delete the winner's);
 /// 3. a DIFFERENT step for the same recipient is a different logical send and
 ///    does produce a second message — the regression the key change exists
 ///    for.
@@ -661,6 +752,15 @@ async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
     let enrollment_id = fx.seq.enrollment_id.expect("fixture enrolls");
     let template_id = fx.seq.template_id.clone().expect("fixture template");
     let key = fixture_key(&fx);
+
+    // A real economic basis for the account: the first handler run persists a
+    // score, and without an open pipeline amount plus live evidence that
+    // stored score has a negative expected value, so the SECOND step would be
+    // refused by the §28 next-best-action gate before it could be a send.
+    // This test's subject is crash/restart exactly-once, not the economic
+    // gate, so seed the basis the planner docs require.
+    common::seed_open_opportunity(&fx.db, &fx.tenant_id, fx.seq.account_id, 100_000.0).await;
+    common::seed_live_evidence(&fx.db, &fx.tenant_id, fx.seq.account_id, 3).await;
 
     // First send succeeds.
     let first = common::run_send_step(
@@ -743,9 +843,15 @@ async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
         EnqueueOutcome::DuplicateIdempotency,
         "the same logical step must never enqueue twice"
     );
-    assert!(
-        fx.quota.rollbacks() >= 1,
-        "the duplicate path must release its reservation"
+    assert_eq!(
+        fx.admission.used(),
+        1,
+        "the duplicate admission reserves nothing extra"
+    );
+    assert_eq!(
+        fx.admission.rollbacks(),
+        0,
+        "a duplicate owns no reservation and must NOT release the winner's (F22)"
     );
     assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
     finish_leased(&fx.db, &leased, ActionOutcome::Succeeded).await;
@@ -813,7 +919,7 @@ async fn quota_exhaustion_refuses_the_send_and_recovers() {
     .await;
 
     // Exactly one recipient fits the quota.
-    fx.set_quota(Arc::new(FakeQuotaGateway::with_limit(1)));
+    fx.set_admission(Arc::new(FakeAdmissionBackend::with_limit(1)));
     let key1 = fixture_key(&fx);
     let key2 = send_idempotency_key(SendIdentity::StepExecution {
         enrollment_id,
@@ -843,13 +949,16 @@ async fn quota_exhaustion_refuses_the_send_and_recovers() {
         matches!(denied, Err(SalesError::QuotaExhausted(_))),
         "quota exhaustion must surface, got {denied:?}"
     );
-    assert!(fx.quota.reserves() >= 2, "denied reserves were attempted");
+    assert!(
+        fx.admission.reserves() >= 2,
+        "denied reserves were attempted"
+    );
     assert_eq!(message_count_for_step(&fx.db, exec2).await, 0);
     assert_eq!(queue_count_for_step(&fx.db, exec2).await, 0);
 
     // Quota restored: the SAME still-live fence retries successfully (the
     // denial consumed nothing).
-    fx.set_quota(Arc::new(FakeQuotaGateway::new()));
+    fx.set_admission(Arc::new(FakeAdmissionBackend::new()));
     let retried = enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2).await;
     assert_eq!(
         retried.expect("retry after recovery"),
@@ -902,7 +1011,7 @@ async fn transient_quota_failure_is_retried_without_duplicates() {
 
     // The SECOND reserve call fails transiently: recipient 1 enqueues, then
     // the batch aborts.
-    fx.set_quota(Arc::new(FakeQuotaGateway::with_transient_failure_at(2)));
+    fx.set_admission(Arc::new(FakeAdmissionBackend::with_transient_failure_at(2)));
     let (leased1, sender1) = live_fence(&fx.db, &fx.tenant_id, step_execution_id).await;
     assert_eq!(
         enqueue_step(
@@ -930,7 +1039,7 @@ async fn transient_quota_failure_is_retried_without_duplicates() {
     assert_eq!(queue_count_for_step(&fx.db, exec2).await, 0);
 
     // Health restored: retry the failed step, then replay it — one row each.
-    fx.set_quota(Arc::new(FakeQuotaGateway::new()));
+    fx.set_admission(Arc::new(FakeAdmissionBackend::new()));
     assert_eq!(
         enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2)
             .await
@@ -947,9 +1056,178 @@ async fn transient_quota_failure_is_retried_without_duplicates() {
         replay.expect("replay is graceful"),
         EnqueueOutcome::DuplicateIdempotency
     );
-    assert!(fx.quota.rollbacks() >= 1, "replay releases its reservation");
+    // The deterministic usage identity collapses the replay onto the
+    // winner's metering event: no extra unit, and the duplicate must not
+    // release the winner's reservation (F22).
+    assert_eq!(fx.admission.used(), 1, "replay reserves nothing extra");
+    assert_eq!(fx.admission.rollbacks(), 0, "replay releases nothing");
     assert_eq!(message_count_for_step(&fx.db, exec2).await, 1);
     finish_leased(&fx.db, &leased2, ActionOutcome::Succeeded).await;
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Audit implementation-order item 3: ONE admission gate across send paths
+// ---------------------------------------------------------------------------
+
+/// A REST-shaped reservation and a sales send must consume the SAME tenant
+/// counter on the SAME admission backend: after the REST reservation, the
+/// sales send sees the decrement (it fits only because the shared limit is
+/// two), and once the sales unit is taken the REST-shaped gate is refused.
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn sales_send_consumes_the_same_quota_the_rest_path_consumes() {
+    let Some(mut fx) = fixture("sequence_shared_quota", fixture_options()).await else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let backend = Arc::new(FakeAdmissionBackend::with_limit(2));
+    fx.set_admission(backend.clone());
+    let service = SendAdmissionService::new(backend.clone());
+
+    // REST-shaped reservation: fixed quantity, HTTP-idempotency-key
+    // identity, no suppression filter (`Quantity`, exactly like
+    // messages.rs::reserve_email_quota).
+    let rest = service
+        .admit(SendAdmissionRequest {
+            tenant_id: &fx.tenant_id,
+            meter: AdmissionMeter::Quantity(1),
+            idempotency_key: Some("http-idempotency-key-rest-shaped"),
+            idempotency_item: None,
+            category: None,
+        })
+        .await
+        .expect("the first REST-shaped unit fits the shared quota");
+    rest.commit();
+    assert_eq!(backend.used(), 1, "REST took one unit");
+
+    // The sales send must observe that decrement: with limit 2 it fits on
+    // the shared counter, consuming the second unit.
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+    assert_eq!(
+        backend.used(),
+        2,
+        "the sales send consumed the SAME tenant counter the REST path did"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
+
+    // And the shared counter is now genuinely exhausted for BOTH paths: a
+    // further REST-shaped reservation is refused.
+    let refused = service
+        .admit(SendAdmissionRequest {
+            tenant_id: &fx.tenant_id,
+            meter: AdmissionMeter::Quantity(1),
+            idempotency_key: Some("http-idempotency-key-rest-shaped-2"),
+            idempotency_item: None,
+            category: None,
+        })
+        .await
+        .expect_err("the exhausted shared quota must refuse the REST-shaped send");
+    assert!(matches!(refused, SendAdmissionError::QuotaExceeded));
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
+}
+
+/// With the shared quota already consumed by a REST-shaped reservation, a
+/// sales send is refused as a RETRYABLE deferral: the worker's error path
+/// requeues the action, and NO message or queue row is written.
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn sales_send_without_quota_defers_retryably_and_writes_no_message() {
+    let Some(mut fx) = fixture("sequence_quota_defer", fixture_options()).await else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let backend = Arc::new(FakeAdmissionBackend::with_limit(1));
+    fx.set_admission(backend.clone());
+    let service = SendAdmissionService::new(backend.clone());
+
+    service
+        .admit(SendAdmissionRequest {
+            tenant_id: &fx.tenant_id,
+            meter: AdmissionMeter::Quantity(1),
+            idempotency_key: Some("http-idempotency-key-exhausts"),
+            idempotency_item: None,
+            category: None,
+        })
+        .await
+        .expect("the REST-shaped unit fits")
+        .commit();
+    assert_eq!(backend.used(), 1);
+
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(
+        matches!(outcome, ActionOutcome::Retry(_)),
+        "a quota refusal must be a retryable deferral, got {outcome:?}"
+    );
+    assert_eq!(backend.used(), 1, "a refused admission reserves nothing");
+    assert_eq!(
+        message_count_for_step(&fx.db, step_execution_id).await,
+        0,
+        "no message may be written without quota"
+    );
+    assert_eq!(
+        queue_count_for_step(&fx.db, step_execution_id).await,
+        0,
+        "no queue row may be written without quota"
+    );
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
+}
+
+/// A recipient on the canonical suppression list is refused by admission
+/// BEFORE the enqueue transaction: NON-RETRYABLE (the step is cancelled, the
+/// action succeeds — it must never be requeued), no message, no queue row,
+/// no quota consumed.
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn suppressed_recipient_is_refused_non_retryably_on_the_sales_path() {
+    let Some(fx) = fixture("sequence_suppressed_admission", fixture_options()).await else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+
+    // Canonical suppression list (the shared admission lookup), NOT the
+    // sales-local unsubscribe store.
+    fx.admission.suppress(&fx.seq.email);
+
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(
+        matches!(outcome, ActionOutcome::Succeeded),
+        "a suppression refusal is a terminal skip, never a retry: {outcome:?}"
+    );
+    let (state, _) = step_state(&fx.db, step_execution_id).await;
+    assert_eq!(
+        state, "cancelled",
+        "the step must be terminally cancelled, not left retryable"
+    );
+    assert_eq!(
+        fx.admission.used(),
+        0,
+        "a suppressed recipient consumes no quota"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
 
     common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
@@ -998,8 +1276,13 @@ async fn unverified_sender_domain_refuses_dispatch() {
     assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
     assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
     assert!(
-        fx.quota.rollbacks() >= 1,
+        fx.admission.rollbacks() >= 1,
         "the refused enqueue must release its reservation"
+    );
+    assert_eq!(
+        fx.admission.used(),
+        0,
+        "a rolled-back reservation consumes no shared quota"
     );
     let (state, _) = step_state(&fx.db, step_execution_id).await;
     assert_eq!(state, "scheduled", "the step must remain retryable");
@@ -1083,7 +1366,7 @@ async fn dry_run_renders_without_enqueueing() {
         ProductionCampaignDispatcher::new(
             common::test_dispatch_config_for(&domain),
             db.clone(),
-            Arc::new(FakeQuotaGateway::new()) as Arc<dyn QuotaGateway>,
+            Arc::new(FakeAdmissionBackend::new()),
         )
         .unwrap(),
     );
@@ -1266,7 +1549,7 @@ mod unsub_http {
             ProductionCampaignDispatcher::new(
                 dispatch.clone(),
                 db.clone(),
-                Arc::new(FakeQuotaGateway::new()),
+                Arc::new(FakeAdmissionBackend::new()),
             )
             .unwrap(),
         );
@@ -1389,7 +1672,7 @@ mod unsub_http {
             ProductionCampaignDispatcher::new(
                 dispatch.clone(),
                 db.clone(),
-                Arc::new(FakeQuotaGateway::new()),
+                Arc::new(FakeAdmissionBackend::new()),
             )
             .unwrap(),
         );
@@ -1589,7 +1872,7 @@ mod reply_http {
             ProductionCampaignDispatcher::new(
                 dispatch.clone(),
                 db.clone(),
-                Arc::new(FakeQuotaGateway::new()),
+                Arc::new(FakeAdmissionBackend::new()),
             )
             .unwrap(),
         );

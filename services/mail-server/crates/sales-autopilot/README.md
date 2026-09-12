@@ -70,8 +70,8 @@ platform guarantee:
 | REST send (`messages.rs`) | Sequenced dispatch (`dispatcher.rs`) |
 |---|---|
 | `resolve_sender_domain_id` — verified + DKIM-ready domain row lock (`FOR SHARE`), SES/SMTP transport gate | same SQL, same predicate |
-| platform `suppressions` check | platform `suppressions` **and** crate-local `sales_unsubscribes`, re-checked inside the enqueue transaction |
-| `reserve_email_quota` / `rollback_email_quota` via `billing_service::usage::record_with_quota_check` | the same contract, behind the `QuotaGateway` trait (see the billing note below) |
+| platform `suppressions` check | the SAME canonical admission check **plus** crate-local `sales_unsubscribes`, re-checked inside the enqueue transaction |
+| `reserve_email_quota` / `rollback_email_quota` via the shared `SendAdmissionService` | the SAME service, same `EmailsSent` counter, same validated category (see the admission note below) |
 | `insert_message_and_queue` — one `messages` row + one `email_queue` row per recipient, `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` | the same two inserts; the canonical sequence path uses the logical step-execution identity (see below) |
 | `Idempotency-Key` request header (per API call) | deterministic per logical send identity — a crash/restart can never double-send |
 
@@ -105,15 +105,31 @@ The legacy single-touch key `sacmp:{campaign_id}:{recipient_email}` remains in
 `send_idempotency_key` for the callerless single-touch methods; the production
 campaign surface no longer uses it.
 
-### Billing quota integration
+### Unified send admission
 
-`BillingQuotaGateway` (src/dispatcher.rs) calls the platform's real
-`billing_service::usage::record_with_quota_check` / `rollback_usage_record`
-directly — same Redis counters, dedup keys and `metering_events`
-persistence as the REST send path. There is no local quota mirror. The
-canonical `enqueue_sequenced` reserves before the transaction and rolls the
-reservation back for every non-delivered outcome (duplicate, already claimed,
-lease lost, error).
+Every sales send (sequenced, legacy campaign, and manual reply) calls the ONE
+shared `billing_service::send_admission::SendAdmissionService` — the same gate
+the REST and SMTP submission paths use. `ProductionCampaignDispatcher::new`
+takes the shared `SendAdmissionBackend` (production:
+`PostgresAdmissionBackend`), so sales cannot drift from the platform on:
+
+* **quota/entitlement** — the same `EmailsSent` plan counter through
+  `record_with_quota_check`, reserved under the send's deterministic logical
+  identity (`sa-send:{step_execution_id}` for sequence mail,
+  `sacmp:{campaign}:{recipient}` for campaign mail,
+  `sareply:{inbox_message_id}` for replies), so a retry cannot double-reserve;
+* **suppression** — the canonical tenant suppression lookup, applied before
+  the enqueue transaction;
+* **category** — validated by the shared helper and written EXPLICITLY into
+  `messages.message_category` / `email_queue.message_category`: sequence and
+  campaign mail are `marketing` (non-exempt), a 1:1 reply is `transactional`;
+* **settlement** — committed only after the enqueue transaction commits,
+  rolled back on every refusal/error.
+
+A quota refusal is a retryable deferral (`SalesError::QuotaExhausted`); a
+suppression refusal is a non-retryable skip (`EnqueueOutcome::Suppressed`,
+mapped to the terminal `cancelled` step state) — retrying a suppression is the
+loop the release gates forbid.
 
 Once the rows are in `email_queue`, the platform worker delivers them with ALL
 platform guarantees: DKIM signing (SMTP) or SES BYODKIM, retries with

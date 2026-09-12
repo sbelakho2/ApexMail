@@ -1734,6 +1734,7 @@ dependencies = [
 name = "compliance"
 version = "0.1.0"
 dependencies = [
+ "accounting-core",
  "aes-gcm",
  "aho-corasick",
  "anyhow",
@@ -1750,6 +1751,7 @@ dependencies = [
  "migrator",
  "moka",
  "observability-service",
+ "quick-xml 0.41.0",
  "redis",
  "regex",
  "reqwest",
@@ -9162,6 +9164,7 @@ dependencies = [
  "migrator",
  "moka",
  "observability-service",
+ "outbound-mta",
  "rand 0.9.4",
  "redis",
  "regex",

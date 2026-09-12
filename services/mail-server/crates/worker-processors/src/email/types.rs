@@ -232,6 +232,14 @@ pub struct VerpBinding {
 /// Prepared email ready for sending.
 #[derive(Debug, Clone)]
 pub struct PreparedEmail {
+    /// Stable logical send identity for this per-recipient copy — EXACTLY the
+    /// `send_unit` the processor reserves on `sales_delivery_acceptances`
+    /// (`send_unit_of`: `sa-send:{step_execution_id}` or
+    /// `email_queue:{queue row id}:{canonical recipient}`). The outbound MTA
+    /// passes it through to `outbound_relay_ledger` (migration 212), whose
+    /// PRIMARY KEY is the same value, so a retried submission returns the
+    /// stored acceptance instead of delivering a second copy.
+    pub send_unit: String,
     pub from: String,
     /// Envelope destination: exactly ONE recipient (the send unit).
     pub to: String,

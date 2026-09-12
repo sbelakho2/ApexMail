@@ -619,9 +619,11 @@ impl RelayLedger for PgLedger {
 }
 
 /// In-memory ledger used by the delivery tests (same semantics as
-/// [`PgLedger`], including the claim classification).
-#[cfg(test)]
-pub(crate) mod test_support {
+/// [`PgLedger`], including the claim classification). Public under
+/// `test-support` so dependent crates can run the real [`crate::Relay`]
+/// against it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Mutex;

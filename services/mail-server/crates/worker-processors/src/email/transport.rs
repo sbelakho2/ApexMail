@@ -19,7 +19,8 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
-use super::types::{DeliveryReceipt, DeliveryRoute, Mailbox, PreparedEmail};
+use super::outbound_mta::OutboundMtaTransport;
+use super::types::{DeliveryReceipt, DeliveryRoute, DkimConfig, Mailbox, PreparedEmail};
 use crate::common::error::{ProcessorError, ProcessorResult};
 use crate::common::{EmailConfig, SesConfig, SmtpConfig, TransportType};
 
@@ -331,7 +332,7 @@ pub fn verp_return_path(
 /// transport only — SES owns the envelope on its API path (per-message MAIL
 /// FROM is not possible there; SES bounce routing goes through SNS
 /// notifications instead).
-fn verp_return_path_for(email: &PreparedEmail) -> Option<String> {
+pub(crate) fn verp_return_path_for(email: &PreparedEmail) -> Option<String> {
     let domain = verp_domain()?;
     let secret = verp_hmac_secret()?;
     let binding = email.verp.as_ref()?;
@@ -698,25 +699,35 @@ impl SmtpTransport {
 
     fn build_dkim_signer(
         &self,
-        config: &super::types::DkimConfig,
+        config: &DkimConfig,
     ) -> ProcessorResult<DkimSigner<RsaKey<Sha256>, mail_send::mail_auth::dkim::Done>> {
-        let private_key = config.private_key.trim();
-        let key = RsaKey::<Sha256>::from_rsa_pem(private_key)
-            .or_else(|_| RsaKey::<Sha256>::from_pkcs8_pem(private_key))
-            .map_err(|e| ProcessorError::Dkim(format!("Invalid DKIM key: {e}")))?;
-
-        Ok(DkimSigner::from_key(key)
-            .domain(config.domain.clone())
-            .selector(config.selector.clone())
-            .headers([
-                "From",
-                "To",
-                "Subject",
-                "Date",
-                "Message-ID",
-                "MIME-Version",
-            ]))
+        build_dkim_signer(config)
     }
+}
+
+/// Build a DKIM signer from a domain's decrypted key material. Shared by the
+/// SMTP transport (mail-send signs during `send_signed`) and the outbound-MTA
+/// transport (which signs the raw submission bytes itself, since the relay
+/// delivers the message verbatim).
+pub(crate) fn build_dkim_signer(
+    config: &DkimConfig,
+) -> ProcessorResult<DkimSigner<RsaKey<Sha256>, mail_send::mail_auth::dkim::Done>> {
+    let private_key = config.private_key.trim();
+    let key = RsaKey::<Sha256>::from_rsa_pem(private_key)
+        .or_else(|_| RsaKey::<Sha256>::from_pkcs8_pem(private_key))
+        .map_err(|e| ProcessorError::Dkim(format!("Invalid DKIM key: {e}")))?;
+
+    Ok(DkimSigner::from_key(key)
+        .domain(config.domain.clone())
+        .selector(config.selector.clone())
+        .headers([
+            "From",
+            "To",
+            "Subject",
+            "Date",
+            "Message-ID",
+            "MIME-Version",
+        ]))
 }
 
 #[async_trait]
@@ -985,6 +996,54 @@ pub(crate) fn classify_ses_failure(
 // AWS SES Transport
 // ═══════════════════════════════════════════════════════════════
 
+/// Build a raw RFC 5322 MIME message from a [`PreparedEmail`].
+///
+/// F26: the same structured To/Cc/Reply-To construction as the SMTP path
+/// (`Address::new_list` mailbox arrays, never comma-joined strings). Shared
+/// by the SES API submission and the outbound-MTA relay submission, so every
+/// backend serializes the message identically.
+pub(crate) fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
+    // F26: same structured MIME To/Cc/Reply-To construction as the SMTP
+    // path (see `SmtpTransport::build_message`) — `Address::new_list`
+    // mailbox arrays, never comma-joined strings.
+    let mut builder = MessageBuilder::new()
+        .from(email.from.as_str())
+        .subject(email.subject.as_str());
+    if email.mime_to.is_empty() {
+        builder = builder.to(single_mailbox(email.to.as_str()));
+    } else {
+        builder = builder.to(mailbox_list(&email.mime_to));
+    }
+    if !email.mime_cc.is_empty() {
+        builder = builder.cc(mailbox_list(&email.mime_cc));
+    }
+    if let Some(reply_to) = &email.reply_to {
+        builder = builder.reply_to(mailbox_list(std::slice::from_ref(reply_to)));
+    }
+
+    for (key, value) in &email.headers {
+        builder = builder.header(key.as_str(), Text::new(value.as_str()));
+    }
+
+    if let Some(text) = &email.text {
+        builder = builder.text_body(text.as_str());
+    }
+
+    if let Some(html) = &email.html {
+        builder = builder.html_body(html.as_str());
+    }
+
+    for attachment in &email.attachments {
+        builder = builder.attachment(
+            attachment.content_type.as_str(),
+            attachment.filename.as_str(),
+            attachment.content.as_slice(),
+        );
+    }
+
+    builder.write_to_vec().unwrap_or_default()
+}
+
 /// AWS SES v2 transport — sends via the `SendEmail` API with raw MIME content.
 /// SES handles:/// - DKIM signing through the domain's configured BYODKIM identity
 /// - IP reputation management
@@ -1022,45 +1081,7 @@ impl SesTransport {
     /// We use `mail-builder` to construct the message identically to
     /// how `SmtpTransport` does it, then extract the raw bytes for SES.
     fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
-        // F26: same structured MIME To/Cc/Reply-To construction as the SMTP
-        // path (see `SmtpTransport::build_message`) — `Address::new_list`
-        // mailbox arrays, never comma-joined strings.
-        let mut builder = MessageBuilder::new()
-            .from(email.from.as_str())
-            .subject(email.subject.as_str());
-        if email.mime_to.is_empty() {
-            builder = builder.to(single_mailbox(email.to.as_str()));
-        } else {
-            builder = builder.to(mailbox_list(&email.mime_to));
-        }
-        if !email.mime_cc.is_empty() {
-            builder = builder.cc(mailbox_list(&email.mime_cc));
-        }
-        if let Some(reply_to) = &email.reply_to {
-            builder = builder.reply_to(mailbox_list(std::slice::from_ref(reply_to)));
-        }
-
-        for (key, value) in &email.headers {
-            builder = builder.header(key.as_str(), Text::new(value.as_str()));
-        }
-
-        if let Some(text) = &email.text {
-            builder = builder.text_body(text.as_str());
-        }
-
-        if let Some(html) = &email.html {
-            builder = builder.html_body(html.as_str());
-        }
-
-        for attachment in &email.attachments {
-            builder = builder.attachment(
-                attachment.content_type.as_str(),
-                attachment.filename.as_str(),
-                attachment.content.as_slice(),
-            );
-        }
-
-        builder.write_to_vec().unwrap_or_default()
+        build_raw_mime(email)
     }
 
     /// Map an already-classified SES failure onto the processor error type.
@@ -1423,6 +1444,21 @@ pub fn smtp_relay_configured(config: &SmtpConfig) -> bool {
     !host.is_empty() && host != SmtpConfig::default().host
 }
 
+/// Create the route-aware [`HybridTransport`] from the full `EmailConfig`,
+/// without a database handle.
+///
+/// Kept for callers/tests that do not own the worker's `PgPool`; it delegates
+/// to [`create_transport_from_config_with_db`] with no pool, so the dedicated
+/// slot falls back to the legacy (UNVERIFIABLE) `SmtpTransport` when
+/// configured. Production construction goes through
+/// [`EmailProcessor::new`](crate::email::EmailProcessor), which passes the
+/// pool and therefore gets the honest outbound-MTA-backed transport.
+pub async fn create_transport_from_config(
+    config: &EmailConfig,
+) -> ProcessorResult<HybridTransport> {
+    create_transport_from_config_with_db(config, None).await
+}
+
 /// Create the route-aware [`HybridTransport`] from the full `EmailConfig`.
 ///
 /// Both slots are populated when their backend is configured, regardless of
@@ -1434,33 +1470,65 @@ pub fn smtp_relay_configured(config: &SmtpConfig) -> bool {
 ///   must never silently fall back to the SMTP relay, and a deployment
 ///   without usable AWS credentials fails the shared route loudly at send
 ///   time instead.
-/// * `dedicated_smtp` — built when `transport_type == Smtp` (the operator
-///   explicitly selected the relay) or when a concrete `SMTP_HOST` is
-///   configured (`smtp_relay_configured`).
+/// * `dedicated_smtp` — the [`OutboundMtaTransport`] when the worker's
+///   database pool is available (the outbound-MTA relay library is the only
+///   backend that can BIND the recipient-facing socket and report the
+///   verified IP back in the same idempotent acceptance). Without a pool —
+///   or when the in-process relay cannot be constructed — it falls back to
+///   the legacy relay `SmtpTransport` when `transport_type == Smtp` or a
+///   concrete `SMTP_HOST` is configured; that backend honestly reports
+///   `supports_source_binding() == false`, so dedicated routes keep deferring
+///   before DATA instead of being submitted unverifiably.
 ///
 /// Signature change (reported): this used to return `Box<dyn EmailTransport>`
 /// of the single selected backend; it now returns the dispatcher itself.
-pub async fn create_transport_from_config(
+/// Added (reported): the `db` parameter and the sibling
+/// [`create_transport_from_config`] wrapper.
+pub async fn create_transport_from_config_with_db(
     config: &EmailConfig,
+    db: Option<&sqlx::PgPool>,
 ) -> ProcessorResult<HybridTransport> {
     info!(region = %config.ses.region, "Initialising SES shared-pool transport");
     let ses_shared: Arc<dyn EmailTransport> =
         Arc::new(SesTransport::from_env(config.ses.clone()).await?);
 
-    let dedicated_smtp: Option<Arc<dyn EmailTransport>> =
-        if config.transport_type == TransportType::Smtp || smtp_relay_configured(&config.smtp) {
-            info!(
-                host = %config.smtp.host,
-                "Initialising dedicated SMTP relay transport"
-            );
-            Some(Arc::new(SmtpTransport::new(config.smtp.clone())))
-        } else {
-            warn!(
-                "no SMTP relay configured (SMTP_HOST unset) — dedicated delivery routes \
-                 will defer before DATA instead of silently using the shared SES pool"
-            );
-            None
-        };
+    // Prefer the in-process outbound MTA: it is the only dedicated backend
+    // that can bind the recipient socket and report the verified source IP
+    // (see [`OutboundMtaTransport`]).
+    let mut dedicated_smtp: Option<Arc<dyn EmailTransport>> = None;
+    if let Some(pool) = db {
+        match OutboundMtaTransport::from_pool(pool) {
+            Ok(transport) => {
+                info!(
+                    "Initialising in-process outbound MTA transport \
+                     (verifiable dedicated source binding)"
+                );
+                dedicated_smtp = Some(Arc::new(transport));
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "outbound MTA transport unavailable — falling back to the legacy \
+                     relay transport, whose dedicated routes defer before DATA"
+                );
+            }
+        }
+    }
+    if dedicated_smtp.is_none()
+        && (config.transport_type == TransportType::Smtp || smtp_relay_configured(&config.smtp))
+    {
+        info!(
+            host = %config.smtp.host,
+            "Initialising dedicated SMTP relay transport (cannot verify source binding)"
+        );
+        dedicated_smtp = Some(Arc::new(SmtpTransport::new(config.smtp.clone())));
+    }
+    if dedicated_smtp.is_none() {
+        warn!(
+            "no dedicated transport configured — dedicated delivery routes \
+             will defer before DATA instead of silently using the shared SES pool"
+        );
+    }
 
     let transport = HybridTransport::new(Some(ses_shared), dedicated_smtp);
     info!(
@@ -1553,6 +1621,7 @@ mod tests {
     #[test]
     fn mailbox_lists_render_as_separate_mailboxes_not_one_malformed_mailbox() {
         let email = PreparedEmail {
+            send_unit: "email_queue:job-1:bcc-recipient@example.net".into(),
             from: "sender@example.com".into(),
             // Envelope destination of THIS copy (the Bcc recipient).
             to: "bcc-recipient@example.net".into(),
@@ -1649,6 +1718,7 @@ mod tests {
     fn smtp_builder_renders_the_same_structured_mailboxes() {
         let transport = SmtpTransport::new(SmtpConfig::default());
         let email = PreparedEmail {
+            send_unit: "email_queue:job-1:envelope@example.net".into(),
             from: "sender@example.com".into(),
             to: "envelope@example.net".into(),
             mime_to: vec![
@@ -1693,6 +1763,7 @@ mod tests {
         // No preserved mailbox list: the visible To is the envelope
         // destination as a ONE-element list.
         let email = PreparedEmail {
+            send_unit: "email_queue:job-1:only@example.net".into(),
             from: "sender@example.com".into(),
             to: "only@example.net".into(),
             mime_to: vec![],
@@ -1716,6 +1787,7 @@ mod tests {
     #[test]
     fn test_build_raw_mime_basic() {
         let email = PreparedEmail {
+            send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
             to: "recipient@example.com".into(),
             subject: "Test".into(),
@@ -1742,6 +1814,7 @@ mod tests {
     #[test]
     fn test_build_raw_mime_empty_body() {
         let email = PreparedEmail {
+            send_unit: "email_queue:job-1:c@d.com".into(),
             from: "a@b.com".into(),
             to: "c@d.com".into(),
             subject: "Empty".into(),
@@ -1765,6 +1838,7 @@ mod tests {
     fn test_build_raw_mime_with_attachment() {
         use super::super::types::Attachment;
         let email = PreparedEmail {
+            send_unit: "email_queue:job-1:c@d.com".into(),
             from: "a@b.com".into(),
             to: "c@d.com".into(),
             subject: "With attachment".into(),
@@ -1964,6 +2038,39 @@ mod tests {
         assert!(transport
             .ensure_route_dispatchable(&DeliveryRoute::SesShared)
             .is_ok());
+    }
+
+    /// P0 closure: with the worker's database pool available the dedicated
+    /// slot is the outbound-MTA-backed transport, which HONESTLY claims
+    /// verifiable source binding — so a dedicated route passes the pre-DATA
+    /// gate instead of deferring forever.
+    #[tokio::test]
+    async fn outbound_mta_backed_dedicated_slot_claims_verifiable_source_binding() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let config = EmailConfig::default();
+        let transport = create_transport_from_config_with_db(&config, Some(&pool))
+            .await
+            .expect("hybrid transport");
+        assert!(transport.has_ses_shared());
+        assert!(
+            transport.has_dedicated_smtp(),
+            "the outbound-MTA-backed dedicated slot must be configured"
+        );
+        assert!(
+            transport.dedicated_supports_source_binding(),
+            "the outbound-MTA path binds and reports the source IP"
+        );
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "127.0.0.1".parse().expect("test IP"),
+        };
+        assert!(
+            transport.ensure_route_dispatchable(&dedicated).is_ok(),
+            "the pre-DATA gate must admit a dedicated route on this transport"
+        );
     }
 
     /// P0: a concrete `SMTP_HOST` on a SES-selected worker enables the
@@ -2350,6 +2457,7 @@ mod tests {
         std::env::set_var("VERP_HMAC_SECRET", "test-secret-test-secret-test-secret");
 
         let mut email = PreparedEmail {
+            send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
             to: "recipient@example.com".into(),
             subject: "Test".into(),
@@ -2413,6 +2521,7 @@ mod tests {
 
     fn route_test_email(headers: Vec<(String, String)>) -> PreparedEmail {
         PreparedEmail {
+            send_unit: "email_queue:job-1:recipient@example.com".into(),
             from: "sender@example.com".into(),
             to: "recipient@example.com".into(),
             mime_to: vec![],
