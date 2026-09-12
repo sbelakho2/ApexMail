@@ -42,6 +42,35 @@ pub struct CrmLead {
     pub tags: serde_json::Value,
 }
 
+/// The CRM-leads read, as one named function.
+///
+/// Named so a test can execute EXACTLY what the handler executes: the previous
+/// version selected `stage`/`last_contacted_at`, which do not exist on the
+/// canonical `sales_leads`, and nothing caught it because no test ever ran the
+/// query.
+fn crm_leads_sql() -> String {
+    format!(
+        "{cte}
+         SELECT l.id::text, l.company_name, l.domain, l.contact_email,
+                l.contact_name, cl.status, l.score, l.source,
+                lc.last_contacted_at, l.created_at,
+                COALESCE(l.tags, '[]'::jsonb)
+         FROM sales_leads l
+         JOIN canonical_leads cl ON cl.id = l.id AND cl.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (
+             SELECT MAX(se.executed_at) AS last_contacted_at
+             FROM sales_step_executions se
+             JOIN sales_enrollments e ON e.id = se.enrollment_id
+             WHERE e.contact_id = l.contact_id AND e.tenant_id = l.tenant_id
+               AND se.executed_at IS NOT NULL
+         ) lc ON TRUE
+         WHERE l.tenant_id = $3
+         ORDER BY l.score DESC NULLS LAST, l.created_at DESC
+         LIMIT $1 OFFSET $2",
+        cte = super::sales::CANONICAL_LEAD_CTE
+    )
+}
+
 async fn list_crm_leads(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -83,13 +112,15 @@ async fn list_crm_leads(
         ),
     >(
         // API-104: Scope CRM leads by tenant_id to prevent cross-tenant access.
-        // `last_contacted_at` exists per migration 006; `last_activity` does not.
-        "SELECT id::text, company_name, domain, contact_email, contact_name,
-                stage, score, source, last_contacted_at, created_at,
-                COALESCE(tags, '[]'::jsonb)
-         FROM sales_leads WHERE tenant_id = $3
-         ORDER BY score DESC NULLS LAST, created_at DESC
-         LIMIT $1 OFFSET $2",
+        //
+        // `stage` and `last_contacted_at` DO NOT EXIST on the canonical
+        // `sales_leads` (they were legacy-lineage columns), so the previous
+        // query failed with 42703 on every call — this endpoint had no test
+        // that executed it, only none at all. `stage` is now the canonical
+        // status derivation (shared with the CP list so the two cannot
+        // disagree) and `last_contacted_at` is the newest executed sequence
+        // step, which is what "last contacted" means in the canonical model.
+        &crm_leads_sql(),
     )
     .bind(limit)
     .bind(offset)
@@ -117,4 +148,120 @@ async fn list_crm_leads(
         .collect();
 
     Ok(Json(leads))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The regression this file exists for: both queries selected columns that
+    /// do not exist on the canonical `sales_leads` (`stage`, `industry`,
+    /// `last_contacted_at`) and failed with 42703 on every request. There was
+    /// no test that EXECUTED them, so the drift went unnoticed. Executing the
+    /// exact statement the handler runs is what closes that gap.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn crm_leads_query_executes_against_the_canonical_schema() {
+        let Some(pool) = crate::test_db::canonical_pool("crm_leads_sql").await else {
+            return;
+        };
+        let tenant = format!(
+            "crmlead-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+
+        // A canonical lead: account + contact + point + the bridge row the CTE
+        // joins through.
+        let account_id = uuid::Uuid::new_v4();
+        let contact_id = uuid::Uuid::new_v4();
+        let lead_id = format!("lead-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, industry) \
+             VALUES ($1, $2, 'Canonical Co', $3, 'Email Infrastructure')",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{account_id}.example"))
+        .execute(&pool)
+        .await
+        .expect("seed account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Canonical Prospect')",
+        )
+        .bind(contact_id)
+        .bind(&tenant)
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("seed contact");
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+             VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(contact_id)
+        .bind(format!(
+            "prospect-{}@example.com",
+            &contact_id.simple().to_string()[..8]
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed contact point");
+        sqlx::query(
+            "INSERT INTO sales_leads \
+                 (id, tenant_id, company_name, domain, status, score, source, account_id, contact_id) \
+             VALUES ($1, $2, 'Canonical Co', $3, 'new', 42, 'fixture', $4, $5)",
+        )
+        .bind(&lead_id)
+        .bind(&tenant)
+        .bind(format!("{account_id}.example"))
+        .bind(account_id)
+        .bind(contact_id)
+        .execute(&pool)
+        .await
+        .expect("seed bridge lead");
+
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            chrono::DateTime<chrono::Utc>,
+            serde_json::Value,
+        )> = sqlx::query_as(&crm_leads_sql())
+            .bind(50i64)
+            .bind(0i64)
+            .bind(&tenant)
+            .fetch_all(&pool)
+            .await
+            .expect("the handler query must execute against the canonical schema");
+
+        let row = rows
+            .iter()
+            .find(|r| r.0 == lead_id)
+            .expect("the seeded lead must be returned");
+        assert_eq!(
+            row.5.as_deref(),
+            Some("new"),
+            "stage is the canonical status derivation, not the frozen legacy column"
+        );
+        assert_eq!(row.6, Some(42), "the bounded projection score is returned");
+
+        for stmt in [
+            "DELETE FROM sales_leads WHERE tenant_id = $1",
+            "DELETE FROM sales_contact_points WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            sqlx::query(stmt).bind(&tenant).execute(&pool).await.ok();
+        }
+    }
 }

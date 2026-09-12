@@ -465,15 +465,66 @@ pub mod test_support {
         Ok(())
     }
 
+    /// Drop a database using the privileges a non-superuser test role has.
+    ///
+    /// `DROP DATABASE ... WITH (FORCE)` terminates EVERY backend on the target,
+    /// including backends owned by other roles, which requires superuser or
+    /// `pg_signal_backend`. A non-superuser test role therefore fails with
+    /// "must be a member of the role whose process is being terminated"
+    /// whenever a session has not finished closing — which made provisioning
+    /// fail intermittently (observed as a rotating handful of DB-backed tests
+    /// failing under repeat runs).
+    ///
+    /// Terminating the sessions THIS role owns is always permitted, so release
+    /// those and retry before giving up. FORCE stays as the last attempt: it
+    /// succeeds for a privileged role, and for an unprivileged one its error is
+    /// the most specific available.
     async fn drop_database(admin: &PgPool, db_name: &str) -> Result<(), ProvisionError> {
-        sqlx::query(&format!(
+        let mut last: Option<sqlx::Error> = None;
+        for attempt in 0..5u32 {
+            match sqlx::query(&format!(r#"DROP DATABASE IF EXISTS "{db_name}""#))
+                .execute(admin)
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    // Release our own lingering sessions (a pool still shutting
+                    // down, or a verification pool that outlived its use). A
+                    // database must have no connections to be dropped.
+                    let _ = sqlx::query(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+                         WHERE datname = $1 AND usename = current_user \
+                           AND pid <> pg_backend_pid()",
+                    )
+                    .bind(db_name)
+                    .execute(admin)
+                    .await;
+                    last = Some(error);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        50 * u64::from(attempt + 1),
+                    ))
+                    .await;
+                }
+            }
+        }
+
+        if let Err(error) = sqlx::query(&format!(
             r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
         ))
         .execute(admin)
         .await
-        .map_err(|error| {
-            ProvisionError::new("drop-database", format!("drop {db_name}: {error}"))
-        })?;
+        {
+            return Err(ProvisionError::new(
+                "drop-database",
+                format!(
+                    "drop {db_name}: {error}. The plain drop could not release it either (last \
+                     error: {}). A session owned by a role other than `{}` is still connected — \
+                     terminate it, or grant the test role membership in pg_signal_backend.",
+                    last.map(|e| e.to_string()).unwrap_or_else(|| "none".into()),
+                    "the test role",
+                ),
+            ));
+        }
         Ok(())
     }
 

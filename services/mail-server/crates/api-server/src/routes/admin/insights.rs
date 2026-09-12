@@ -819,9 +819,21 @@ mod tests {
         seed(message_b, 3 * 24 * 60 + 5).await;
 
         let columns = crate::analytics_metrics::EventColumns::default();
-        let rows = sent_volume_by_day(&pool, columns, AnalyticsRange::Days30)
-            .await
-            .expect("canonical series must load");
+        // Scoped to THIS test's tenant. `sent_volume_by_day` is deliberately
+        // fleet-wide (it backs the CP insights page), so asserting on it here
+        // made the expected counts depend on every other test writing `events`
+        // into the same shared database — an intermittent failure.
+        let rows: Vec<(String, i64)> = crate::analytics_metrics::send_cohort_time_series(
+            &pool,
+            Some(&tenant),
+            AnalyticsRange::Days30,
+            columns,
+        )
+        .await
+        .expect("canonical series must load")
+        .into_iter()
+        .map(|point| (point.date, point.sent))
+        .collect();
         let total: i64 = rows.iter().map(|(_, c)| *c).sum();
         assert_eq!(
             total, 2,

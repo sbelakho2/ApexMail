@@ -12,20 +12,115 @@ use uuid::Uuid;
 use crate::crm::{is_valid_transition, CrmService as InMemoryCrmService};
 use crate::types::{Lead, LeadStatus, SalesError};
 
-const LEAD_SELECT_COLUMNS: &str = r#"
-    SELECT
-        id,
-        tenant_id,
-        COALESCE(email, contact_email, '') AS email,
-        COALESCE(contact_name, '') AS name,
-        COALESCE(company_name, '') AS company,
-        COALESCE(title, '') AS title,
-        COALESCE(score, 0) AS score,
-        COALESCE(source, '') AS source,
-        status,
-        created_at
-    FROM sales_leads
+/// Canonical status derivation — byte-for-byte the CP's lead read
+/// (`CANONICAL_LEAD_CTE` in `api-server/src/routes/admin/sales.rs` and
+/// `CP_LEADS_CANONICAL_CTE` in `api-server/src/routes/web/data.rs`).
+///
+/// `status` is derived from `sales_contacts.lifecycle` +
+/// `sales_accounts.lifecycle` + the newest live `sales_enrollments.state`.
+/// The legacy `sales_leads.status` column is never read (audit item 17): it
+/// is no longer written by any runtime path, so presenting it would surface a
+/// frozen value as truth.
+const DERIVED_LEAD_STATUS_SQL: &str = r#"
+        CASE
+            WHEN c.lifecycle = 'customer' OR a.lifecycle = 'customer' THEN 'converted'
+            WHEN c.lifecycle = 'meeting_booked' OR e.state = 'meeting_booked' THEN 'demo_scheduled'
+            WHEN c.lifecycle = 'replied' OR e.state = 'replied' THEN 'engaged'
+            WHEN c.lifecycle = 'do_not_contact'
+                 OR e.state IN ('suppressed', 'failed') THEN 'lost'
+            WHEN c.lifecycle = 'left_company'
+                 OR a.lifecycle = 'disqualified' THEN 'unqualified'
+            WHEN a.lifecycle = 'qualified' THEN 'qualified'
+            WHEN a.lifecycle = 'nurturing' THEN 'prospect'
+            WHEN e.state IN ('active', 'waiting', 'pending', 'completed')
+                 OR c.lifecycle = 'snoozed' THEN 'contacted'
+            ELSE 'new'
+        END
 "#;
+
+/// Joins required by [`DERIVED_LEAD_STATUS_SQL`]; `sales_leads` is the
+/// projection row, `c`/`a`/`e` supply the canonical lifecycle state.
+const LEAD_LIFECYCLE_JOINS_SQL: &str = r#"
+    LEFT JOIN sales_contacts c
+           ON c.id = l.contact_id AND c.tenant_id = l.tenant_id
+    LEFT JOIN sales_accounts a
+           ON a.id = l.account_id AND a.tenant_id = l.tenant_id
+    LEFT JOIN LATERAL (
+        SELECT e.state
+        FROM sales_enrollments e
+        WHERE e.contact_id = c.id AND e.tenant_id = l.tenant_id
+        ORDER BY CASE
+                     WHEN e.state IN ('completed', 'failed', 'suppressed') THEN 1
+                     ELSE 0
+                 END,
+                 e.updated_at DESC, e.id
+        LIMIT 1
+    ) e ON TRUE
+"#;
+
+/// The lead projection: identity/lead-only columns come from the bridge row,
+/// `status` is derived canonically. `LEAD_SELECT_COLUMNS` was a plain
+/// single-table SELECT before item 17; callers now scope with `l.` aliases.
+fn lead_select_columns() -> String {
+    format!(
+        r#"
+    SELECT
+        l.id,
+        l.tenant_id,
+        COALESCE(l.email, l.contact_email, '') AS email,
+        COALESCE(l.contact_name, '') AS name,
+        COALESCE(l.company_name, '') AS company,
+        COALESCE(l.title, '') AS title,
+        COALESCE(l.score, 0) AS score,
+        COALESCE(l.source, '') AS source,
+        {status} AS status,
+        l.created_at
+    FROM sales_leads l
+    {joins}
+"#,
+        status = DERIVED_LEAD_STATUS_SQL,
+        joins = LEAD_LIFECYCLE_JOINS_SQL
+    )
+}
+
+/// The canonical label a legacy [`LeadStatus`] filter maps onto.
+///
+/// `Snoozed` contacts derive `contacted` and `Interested` (replied) contacts
+/// derive `engaged` in [`DERIVED_LEAD_STATUS_SQL`]; filtering by those
+/// variants therefore uses the derived label.
+fn canonical_status_filter(status: &LeadStatus) -> String {
+    match status {
+        LeadStatus::New => "new".to_string(),
+        LeadStatus::Contacted => "contacted".to_string(),
+        LeadStatus::Qualified => "qualified".to_string(),
+        LeadStatus::Converted => "converted".to_string(),
+        LeadStatus::Lost => "lost".to_string(),
+        LeadStatus::Snoozed => "contacted".to_string(),
+        LeadStatus::Interested => "engaged".to_string(),
+        LeadStatus::Unknown(raw) => raw.clone(),
+    }
+}
+
+/// Canonical lifecycle destination for a legacy [`LeadStatus`] transition.
+///
+/// Requested statuses with no canonical destination are rejected by
+/// [`SqlxCrmService::update_lead_status`] instead of writing the legacy
+/// column.
+enum CanonicalLeadTarget {
+    /// Write `sales_accounts.lifecycle` for the lead's linked account.
+    Account(&'static str),
+    /// Write `sales_contacts.lifecycle` for the lead's linked contact.
+    Contact(&'static str),
+}
+
+fn canonical_lead_target(status: &LeadStatus) -> Option<CanonicalLeadTarget> {
+    match status {
+        LeadStatus::Qualified => Some(CanonicalLeadTarget::Account("qualified")),
+        LeadStatus::Converted => Some(CanonicalLeadTarget::Contact("customer")),
+        LeadStatus::Lost => Some(CanonicalLeadTarget::Contact("do_not_contact")),
+        _ => None,
+    }
+}
 
 /// Confidence recorded on the `sales_contact_points` row this path creates.
 ///
@@ -232,15 +327,18 @@ impl SqlxCrmService {
             None
         };
 
-        // 4. Compatibility lead row carrying the canonical links.
+        // 4. Compatibility lead row carrying the canonical links. The legacy
+        //    `status` column is NOT listed: the NOT NULL DEFAULT 'new'
+        //    applies, and no read path treats that column as truth (the read
+        //    derives status canonically, see `lead_select_columns`).
         let insert = sqlx::query(
             r#"
             INSERT INTO sales_leads (
                 id, tenant_id, contact_email, contact_name, title,
-                company_name, domain, score, source, status,
+                company_name, domain, source,
                 account_id, contact_id, created_at, updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, 'new', $9, $10, $11, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
         "#,
         )
         .bind(&id_string)
@@ -288,8 +386,14 @@ impl SqlxCrmService {
     }
 
     /// Retrieve a lead by id, scoped to tenant.
+    ///
+    /// `status` in the returned [`Lead`] is the canonical derivation, not the
+    /// legacy `sales_leads.status` column.
     pub async fn get_lead(&self, id: &str, tenant_id: &str) -> Result<Lead, SalesError> {
-        let query = format!("{LEAD_SELECT_COLUMNS} WHERE id = $1 AND tenant_id = $2");
+        let query = format!(
+            "{} WHERE l.id = $1 AND l.tenant_id = $2",
+            lead_select_columns()
+        );
         let row = sqlx::query(&query)
             .bind(id)
             .bind(tenant_id)
@@ -302,6 +406,9 @@ impl SqlxCrmService {
     }
 
     /// List leads, scoped to tenant, optionally filtering by status and/or source.
+    ///
+    /// `status` filters the canonical derived status
+    /// ([`canonical_status_filter`]), not the legacy column.
     pub async fn list_leads(
         &self,
         tenant_id: &str,
@@ -310,21 +417,25 @@ impl SqlxCrmService {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
-        let mut query = QueryBuilder::new(LEAD_SELECT_COLUMNS);
-        query.push(" WHERE tenant_id = ");
+        let mut query = QueryBuilder::new(lead_select_columns());
+        query.push(" WHERE l.tenant_id = ");
         query.push_bind(tenant_id);
 
         if let Some(status) = status {
-            query.push(" AND status = ").push_bind(status.to_string());
+            query
+                .push(" AND ")
+                .push(DERIVED_LEAD_STATUS_SQL)
+                .push(" = ")
+                .push_bind(canonical_status_filter(&status));
         }
         if let Some(source) = source {
-            query.push(" AND source = ").push_bind(source);
+            query.push(" AND l.source = ").push_bind(source);
         }
 
         // `id` tiebreaker keeps OFFSET pagination stable when many leads
         // share the same created_at timestamp.
         query
-            .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+            .push(" ORDER BY l.created_at DESC, l.id DESC LIMIT ")
             .push_bind(limit)
             .push(" OFFSET ")
             .push_bind(offset);
@@ -340,9 +451,20 @@ impl SqlxCrmService {
 
     /// Transition a lead to a new status, scoped to tenant.
     ///
-    /// Enforces the lead lifecycle state machine (see [`is_valid_transition`]);
-    /// invalid transitions are rejected with [`SalesError::InvalidInput`].
-    /// The current status is read with `SELECT ... FOR UPDATE` inside the
+    /// Audit item 17: this writes the CANONICAL lifecycle field the CP read
+    /// derives status from — `sales_accounts.lifecycle` for `Qualified`,
+    /// `sales_contacts.lifecycle` for `Converted` (customer) and `Lost`
+    /// (do_not_contact). It never writes `sales_leads.status`, which no read
+    /// path renders.
+    ///
+    /// Requested statuses with no canonical equivalent (`New`, `Contacted`,
+    /// `Snoozed`, `Interested`, `Unknown`) are rejected with
+    /// [`SalesError::InvalidInput`] naming the supported set instead of
+    /// writing a column nothing reads.
+    ///
+    /// The transition check runs against the CURRENT canonical status (same
+    /// derivation as the read) and keeps using [`is_valid_transition`]; the
+    /// current state is read with `FOR UPDATE` on the lead row inside the
     /// same transaction as the update so concurrent writers cannot slip an
     /// invalid transition through the check.
     pub async fn update_lead_status(
@@ -351,23 +473,41 @@ impl SqlxCrmService {
         new_status: LeadStatus,
         tenant_id: &str,
     ) -> Result<Lead, SalesError> {
+        let Some(target) = canonical_lead_target(&new_status) else {
+            return Err(SalesError::InvalidInput(format!(
+                "lead status '{new_status}' has no canonical equivalent; supported: \
+                 qualified (sales_accounts.lifecycle = 'qualified'), converted \
+                 (sales_contacts.lifecycle = 'customer'), lost \
+                 (sales_contacts.lifecycle = 'do_not_contact')"
+            )));
+        };
+
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
 
-        let current_status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
-        )
+        // The current canonical status (never the legacy column), with the
+        // bridge row locked so a concurrent transition serializes.
+        let row = sqlx::query(&format!(
+            "SELECT l.account_id, l.contact_id, {status} AS canonical_status \
+             FROM sales_leads l {joins} \
+             WHERE l.id = $1 AND l.tenant_id = $2 \
+             FOR UPDATE OF l",
+            status = DERIVED_LEAD_STATUS_SQL,
+            joins = LEAD_LIFECYCLE_JOINS_SQL
+        ))
         .bind(id)
         .bind(tenant_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        .map_err(|e| SalesError::Database(e.to_string()))?
+        .ok_or_else(|| SalesError::LeadNotFound(id.to_string()))?;
 
-        let current_status =
-            current_status.ok_or_else(|| SalesError::LeadNotFound(id.to_string()))?;
+        let current_status: String = row
+            .try_get("canonical_status")
+            .map_err(|e| SalesError::Database(e.to_string()))?;
         let current = parse_lead_status(&current_status);
         if !is_valid_transition(&current, &new_status) {
             warn!(
@@ -375,36 +515,71 @@ impl SqlxCrmService {
                 tenant_id = %tenant_id,
                 from = %current,
                 to = %new_status,
-                "rejected invalid lead status transition"
+                "rejected invalid canonical lead status transition"
             );
             return Err(SalesError::InvalidInput(format!(
                 "invalid lead status transition: {current} -> {new_status}"
             )));
         }
 
-        let result = sqlx::query(
-            r#"
-            UPDATE sales_leads SET status = $2, updated_at = NOW()
-            WHERE id = $1 AND tenant_id = $3
-            RETURNING
-                id,
-                tenant_id,
-                COALESCE(email, contact_email, '') AS email,
-                COALESCE(contact_name, '') AS name,
-                COALESCE(company_name, '') AS company,
-                COALESCE(title, '') AS title,
-                COALESCE(score, 0) AS score,
-                COALESCE(source, '') AS source,
-                status,
-                created_at
-        "#,
-        )
-        .bind(id)
-        .bind(new_status.to_string())
-        .bind(tenant_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        match target {
+            CanonicalLeadTarget::Account(lifecycle) => {
+                let account_id: Uuid = row
+                    .try_get::<Option<Uuid>, _>("account_id")
+                    .map_err(|e| SalesError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        SalesError::InvalidInput(format!(
+                            "lead {id} has no canonical account link; status '{new_status}' \
+                             cannot be applied"
+                        ))
+                    })?;
+                sqlx::query(
+                    "UPDATE sales_accounts SET lifecycle = $1, updated_at = NOW() \
+                     WHERE id = $2 AND tenant_id = $3",
+                )
+                .bind(lifecycle)
+                .bind(account_id)
+                .bind(tenant_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+            }
+            CanonicalLeadTarget::Contact(lifecycle) => {
+                let contact_id: Uuid = row
+                    .try_get::<Option<Uuid>, _>("contact_id")
+                    .map_err(|e| SalesError::Database(e.to_string()))?
+                    .ok_or_else(|| {
+                        SalesError::InvalidInput(format!(
+                            "lead {id} has no canonical contact link; status '{new_status}' \
+                             cannot be applied"
+                        ))
+                    })?;
+                sqlx::query(
+                    "UPDATE sales_contacts SET lifecycle = $1, updated_at = NOW() \
+                     WHERE id = $2 AND tenant_id = $3",
+                )
+                .bind(lifecycle)
+                .bind(contact_id)
+                .bind(tenant_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+            }
+        }
+
+        // Read the response back through the canonical projection inside the
+        // same transaction, so the returned status is exactly what the CP
+        // read will show after commit.
+        let query = format!(
+            "{} WHERE l.id = $1 AND l.tenant_id = $2",
+            lead_select_columns()
+        );
+        let result = sqlx::query(&query)
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         tx.commit()
             .await
@@ -414,6 +589,9 @@ impl SqlxCrmService {
     }
 
     /// Full-text search over lead name, email, and company, scoped to tenant.
+    ///
+    /// `status` in the results is the canonical derivation
+    /// ([`DERIVED_LEAD_STATUS_SQL`]); the legacy column is not read.
     ///
     /// # Security (O-12.1)
     ///
@@ -427,7 +605,9 @@ impl SqlxCrmService {
     /// expression as the `idx_sales_leads_fts_gin` GIN index — concatenating
     /// per-column tsvectors instead would be syntactically different from the
     /// indexed expression, preventing the planner from matching the index.
-    /// The search is scoped to tenant_id.
+    /// The canonical joins added by item 17 do not change the indexed
+    /// expression (it is still computed on `l.` columns). The search is
+    /// scoped to tenant_id.
     pub async fn search_leads(
         &self,
         tenant_id: &str,
@@ -435,47 +615,38 @@ impl SqlxCrmService {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Lead>, SalesError> {
-        let rows = sqlx::query(
+        let sql = format!(
             r#"
-            SELECT
-                id,
-                tenant_id,
-                COALESCE(email, contact_email, '') AS email,
-                COALESCE(contact_name, '') AS name,
-                COALESCE(company_name, '') AS company,
-                COALESCE(title, '') AS title,
-                COALESCE(score, 0) AS score,
-                COALESCE(source, '') AS source,
-                status,
-                created_at
-            FROM sales_leads
-            WHERE tenant_id = $1
+            {columns}
+            WHERE l.tenant_id = $1
               AND to_tsvector('english',
-                    COALESCE(contact_name, '') || ' ' ||
-                    COALESCE(email, contact_email, '') || ' ' ||
-                    COALESCE(company_name, '')
+                    COALESCE(l.contact_name, '') || ' ' ||
+                    COALESCE(l.email, l.contact_email, '') || ' ' ||
+                    COALESCE(l.company_name, '')
                 ) @@ plainto_tsquery('english', $2)
             ORDER BY
                   ts_rank(
                       to_tsvector('english',
-                          COALESCE(contact_name, '') || ' ' ||
-                          COALESCE(email, contact_email, '') || ' ' ||
-                          COALESCE(company_name, '')
+                          COALESCE(l.contact_name, '') || ' ' ||
+                          COALESCE(l.email, l.contact_email, '') || ' ' ||
+                          COALESCE(l.company_name, '')
                       ),
                       plainto_tsquery('english', $2)
                   ) DESC,
-                  created_at DESC,
-                  id DESC
+                  l.created_at DESC,
+                  l.id DESC
             LIMIT $3 OFFSET $4
         "#,
-        )
-        .bind(tenant_id)
-        .bind(query)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+            columns = lead_select_columns()
+        );
+        let rows = sqlx::query(&sql)
+            .bind(tenant_id)
+            .bind(query)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         Ok(rows.iter().map(row_to_lead).collect())
     }
@@ -549,11 +720,15 @@ impl SqlxCrmService {
 
 /// Parse a lead status from its snake_case string representation.
 ///
-/// Known values map to their variants — including `snoozed`/`interested`,
-/// which the reply-handler workers write directly via SQL. An empty/blank
-/// value defaults to `New` (with a warning); any other unrecognised value is
-/// preserved as [`LeadStatus::Unknown`] rather than being silently coerced
-/// to `New`, which previously masked data corruption and worker typos.
+/// This parses the CANONICAL derived labels (the CP vocabulary:
+/// new/prospect/contacted/qualified/engaged/demo_scheduled/converted/lost/
+/// unqualified) plus the historical `snoozed`/`interested` labels (still used
+/// by callers of the in-memory API). The legacy `sales_leads.status` column is
+/// no longer written by the reply handler or the CP, so real rows only ever
+/// carry the creation default. An empty/blank value defaults to `New` (with a
+/// warning); any other unrecognised value is preserved as
+/// [`LeadStatus::Unknown`] rather than being silently coerced to `New`, which
+/// previously masked data corruption and worker typos.
 fn parse_lead_status(s: &str) -> LeadStatus {
     match s {
         "new" => LeadStatus::New,
@@ -1142,5 +1317,265 @@ mod tests {
         assert_eq!(unlinked, 0, "no lead created by this path may be unlinked");
 
         cleanup_lead_fixture(&pool, &tenant).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 17: lead status transitions are canonical
+    // -----------------------------------------------------------------------
+
+    async fn lifecycle_state(
+        pool: &PgPool,
+        tenant: &str,
+        lead_id: &str,
+    ) -> (String, String, String) {
+        sqlx::query_as(
+            "SELECT COALESCE(a.lifecycle, '<none>'), COALESCE(c.lifecycle, '<none>'), l.status \
+             FROM sales_leads l \
+             LEFT JOIN sales_accounts a ON a.id = l.account_id AND a.tenant_id = l.tenant_id \
+             LEFT JOIN sales_contacts c ON c.id = l.contact_id AND c.tenant_id = l.tenant_id \
+             WHERE l.id = $1 AND l.tenant_id = $2",
+        )
+        .bind(lead_id)
+        .bind(tenant)
+        .fetch_one(pool)
+        .await
+        .expect("lead lifecycle state")
+    }
+
+    /// Test 7: a legal transition writes the canonical lifecycle the read
+    /// derives status from, and the legacy `sales_leads.status` column keeps
+    /// its creation default (it is never the write target).
+    #[tokio::test]
+    async fn status_transitions_write_canonical_lifecycle_not_the_legacy_column() {
+        let Some(pool) = crate::test_db::canonical_test_pool("update_lead_canonical").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("canonstatus");
+        let crm = SqlxCrmService::new(pool.clone());
+
+        let lead = crm
+            .create_lead(
+                &tenant,
+                "ada@acme.example".into(),
+                "Ada".into(),
+                "Acme".into(),
+                "".into(),
+                "import".into(),
+            )
+            .await
+            .expect("lead");
+
+        // New -> Qualified lands on the account lifecycle.
+        let qualified = crm
+            .update_lead_status(&lead.id, LeadStatus::Qualified, &tenant)
+            .await
+            .expect("new -> qualified is a valid canonical transition");
+        assert_eq!(qualified.status, LeadStatus::Qualified);
+        let (account, contact, legacy) = lifecycle_state(&pool, &tenant, &lead.id).await;
+        assert_eq!(
+            account, "qualified",
+            "qualified must be written to sales_accounts.lifecycle"
+        );
+        assert_eq!(contact, "active", "the contact lifecycle must be untouched");
+        assert_eq!(
+            legacy, "new",
+            "the legacy status column must keep its creation default"
+        );
+
+        // Qualified -> Converted lands on the contact lifecycle.
+        let converted = crm
+            .update_lead_status(&lead.id, LeadStatus::Converted, &tenant)
+            .await
+            .expect("qualified -> converted is a valid canonical transition");
+        assert_eq!(converted.status, LeadStatus::Converted);
+        let (account, contact, legacy) = lifecycle_state(&pool, &tenant, &lead.id).await;
+        assert_eq!(account, "qualified");
+        assert_eq!(
+            contact, "customer",
+            "converted must be written to sales_contacts.lifecycle"
+        );
+        assert_eq!(legacy, "new");
+
+        // The read path reports the canonical truth.
+        let fetched = crm.get_lead(&lead.id, &tenant).await.expect("read back");
+        assert_eq!(fetched.status, LeadStatus::Converted);
+
+        cleanup_lead_fixture(&pool, &tenant).await;
+    }
+
+    /// Test 8: requested statuses with no canonical equivalent are rejected
+    /// with the supported set named, and nothing is written anywhere.
+    #[tokio::test]
+    async fn statuses_without_a_canonical_destination_are_rejected_and_write_nothing() {
+        let Some(pool) = crate::test_db::canonical_test_pool("update_lead_unsupported").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("canonreject");
+        let crm = SqlxCrmService::new(pool.clone());
+
+        let lead = crm
+            .create_lead(
+                &tenant,
+                "grace@hopper.example".into(),
+                "Grace".into(),
+                "Hopper Labs".into(),
+                "".into(),
+                "import".into(),
+            )
+            .await
+            .expect("lead");
+
+        let error = crm
+            .update_lead_status(&lead.id, LeadStatus::Contacted, &tenant)
+            .await
+            .expect_err("`contacted` is derived from enrollment activity, not writable");
+        match &error {
+            SalesError::InvalidInput(message) => {
+                assert!(
+                    message.contains("canonical") && message.contains("qualified"),
+                    "the rejection must explain the canonical vocabulary, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        let (account, contact, legacy) = lifecycle_state(&pool, &tenant, &lead.id).await;
+        assert_eq!(
+            (account.as_str(), contact.as_str(), legacy.as_str()),
+            ("discovered", "active", "new"),
+            "a rejected status must not write any state"
+        );
+
+        cleanup_lead_fixture(&pool, &tenant).await;
+    }
+
+    /// Test 9: `lost` on a lead whose canonical contact is gone is rejected
+    /// as a whole (the account lifecycle is not partially changed) and never
+    /// panics.
+    #[tokio::test]
+    async fn lost_without_a_canonical_contact_is_rejected_without_partial_write() {
+        let Some(pool) = crate::test_db::canonical_test_pool("update_lead_missing_contact").await
+        else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("nolostlink");
+        let crm = SqlxCrmService::new(pool.clone());
+
+        // No address means no canonical contact (documented creation state).
+        let lead = crm
+            .create_lead(
+                &tenant,
+                "  ".into(),
+                "No Mail".into(),
+                "Acme".into(),
+                "".into(),
+                "import".into(),
+            )
+            .await
+            .expect("address-less lead");
+
+        // Qualify the account so `Qualified -> Lost` is a legal transition
+        // and the missing contact link is what rejects the request.
+        sqlx::query("UPDATE sales_accounts SET lifecycle = 'qualified' WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("qualify the account");
+
+        let error = crm
+            .update_lead_status(&lead.id, LeadStatus::Lost, &tenant)
+            .await
+            .expect_err("lost needs a canonical contact");
+        match &error {
+            SalesError::InvalidInput(message) => assert!(
+                message.contains("contact link"),
+                "the rejection must name the missing canonical contact, got: {message}"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        let (account, contact, legacy) = lifecycle_state(&pool, &tenant, &lead.id).await;
+        assert_eq!(
+            (account.as_str(), contact.as_str(), legacy.as_str()),
+            ("qualified", "<none>", "new"),
+            "the rejected transition must not partially write"
+        );
+
+        cleanup_lead_fixture(&pool, &tenant).await;
+    }
+
+    /// Test 10 (regression guard): a contradictory legacy `status` value is
+    /// NOT read by the lead read path or its status filter — the canonical
+    /// derivation wins. If someone reintroduces a read of the legacy column,
+    /// this fails.
+    #[tokio::test]
+    async fn contradictory_legacy_status_is_not_read_by_the_lead_read_path() {
+        let Some(pool) = crate::test_db::canonical_test_pool("read_ignores_legacy").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("legacyread");
+        let crm = SqlxCrmService::new(pool.clone());
+
+        let lead = crm
+            .create_lead(
+                &tenant,
+                "linus@kernel.example".into(),
+                "Linus".into(),
+                "Kernel".into(),
+                "".into(),
+                "import".into(),
+            )
+            .await
+            .expect("lead");
+
+        // Contradictory value: the canonical state says 'new'.
+        sqlx::query("UPDATE sales_leads SET status = 'converted' WHERE id = $1 AND tenant_id = $2")
+            .bind(&lead.id)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("write the contradictory legacy value");
+
+        let fetched = crm.get_lead(&lead.id, &tenant).await.expect("read");
+        assert_eq!(
+            fetched.status,
+            LeadStatus::New,
+            "the read must derive status canonically, not from the legacy column"
+        );
+
+        let filtered = crm
+            .list_leads(&tenant, Some(LeadStatus::Converted), None, 50, 0)
+            .await
+            .expect("filter by converted");
+        assert!(
+            filtered.is_empty(),
+            "the legacy 'converted' value must not match the canonical 'converted' filter"
+        );
+        let canonical_new = crm
+            .list_leads(&tenant, Some(LeadStatus::New), None, 50, 0)
+            .await
+            .expect("filter by new");
+        assert_eq!(canonical_new.len(), 1);
+
+        cleanup_lead_fixture(&pool, &tenant).await;
+    }
+
+    /// Writer regression guard: the production half of this module must not
+    /// write the legacy status column (the bounded `score` projection update
+    /// is the only UPDATE sales_leads statement left).
+    #[test]
+    fn production_paths_never_write_the_legacy_lead_status() {
+        let source = include_str!("crm_pg.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("crm_pg.rs has a test module");
+        for fragment in [["SET status", "="].join(" "), "status = $".to_string()] {
+            assert!(
+                !production.contains(&fragment),
+                "crm_pg.rs must not write the legacy lead status (`{fragment}` found)"
+            );
+        }
     }
 }

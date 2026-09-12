@@ -118,66 +118,40 @@ const RESET_CLAIM_SQL: &str = r#"
 
 /// Resolve the enrollment behind an inbound reply.
 ///
-/// Resolution order:
+/// Resolution is canonical-only: the candidate addresses (`from_email`, plus
+/// the DSN `Final-Recipient` / `X-Failed-Recipients` for a bounce, whose own
+/// `From:` is MAILER-DAEMON rather than the prospect) matched against
+/// `sales_contact_points.normalized_value` (`channel = 'email'`). Candidate
+/// order wins first (the `From:` address is the sender), then unsuppressed
+/// over suppressed, then highest confidence and newest.
 ///
-/// 1. the canonical address link — the candidate addresses (`from_email`,
-///    plus the DSN `Final-Recipient` / `X-Failed-Recipients` for a bounce,
-///    whose own `From:` is MAILER-DAEMON rather than the prospect) matched
-///    against `sales_contact_points.normalized_value` (`channel = 'email'`).
-///    Candidate order wins first (the `From:` address is the sender), then
-///    unsuppressed over suppressed, then highest confidence and newest;
-/// 2. TRANSITION FALLBACK — `inbound_messages.lead_id` →
-///    `sales_leads.contact_id` (the bridge columns migration 200 added).
-///    Consulted ONLY when step 1 found no canonical contact, i.e. while a
-///    legacy lead row can still exist without a contact point.
-///
-/// [`LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION`] names when step 2 (and the
-/// `lead_contact` CTE plus its `NOT EXISTS` guard) can be deleted: once the
-/// transition migration has backfilled every bridge column, no lead row has
-/// a NULL `contact_id` and the legacy link resolves nothing the canonical
-/// lookup would not.
+/// The former transitional fallback — `inbound_messages.lead_id` →
+/// `sales_leads.contact_id` — was DELETED (audit item 17). Its removal
+/// condition was "no `sales_leads` row resolves a reply the canonical lookup
+/// would not": every path in this workspace that inserts into
+/// `inbound_messages` (mta migration 088 shape, ai_drafts, the reply
+/// handler's own tests) leaves `lead_id` NULL, and the bridge columns on
+/// `sales_leads` are no longer a resolution input, so the fallback was
+/// dead code that could only ever resurrect a legacy identity.
 ///
 /// Live enrollments win over terminal ones so a re-delivered reply resolves
 /// to the same row it locked the first time instead of an older completed
 /// enrollment.
-// The constant is referenced by the SQL-shape test, not the runtime path;
-// keeping it in production source (rather than only in a comment) is the
-// point: the fallback's removal condition travels with the code.
-#[allow(dead_code)]
-pub const LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION: &str =
-    "when no sales_leads row has a NULL contact_id (after the transition migration \
-     backfills the account_id/contact_id bridge), remove the lead_contact CTE and its \
-     NOT EXISTS guard from RESOLVE_ENROLLMENT_SQL";
-
 const RESOLVE_ENROLLMENT_SQL: &str = r#"
             WITH canonical_contact AS (
                 SELECT cp.contact_id
                 FROM sales_contact_points cp
                 WHERE cp.tenant_id = $1 AND cp.channel = 'email'
-                  AND lower(cp.normalized_value) = ANY($3)
-                ORDER BY array_position($3::text[], lower(cp.normalized_value)) NULLS LAST,
+                  AND lower(cp.normalized_value) = ANY($2)
+                ORDER BY array_position($2::text[], lower(cp.normalized_value)) NULLS LAST,
                          (cp.suppressed_at IS NULL) DESC,
                          cp.confidence DESC,
                          cp.created_at DESC
                 LIMIT 1
-            ),
-            -- Transitional only; see LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION.
-            lead_contact AS (
-                SELECT l.contact_id
-                FROM sales_leads l
-                WHERE l.id = $2 AND l.tenant_id = $1 AND l.contact_id IS NOT NULL
-                  AND NOT EXISTS (SELECT 1 FROM canonical_contact)
-            ),
-            target AS (
-                SELECT COALESCE(
-                    (SELECT contact_id FROM canonical_contact),
-                    (SELECT contact_id FROM lead_contact)
-                ) AS contact_id
             )
             SELECT e.id, e.contact_id, e.contact_point_id, e.account_id, e.state
-            FROM sales_enrollments e, target t
+            FROM sales_enrollments e, canonical_contact t
             WHERE e.tenant_id = $1
-              AND t.contact_id IS NOT NULL
               AND e.contact_id = t.contact_id
             ORDER BY CASE
                          WHEN e.state IN ('completed', 'failed', 'suppressed') THEN 1
@@ -454,7 +428,6 @@ impl ReplyHandler {
         }
         let row: Option<ResolvedEnrollmentRow> = sqlx::query_as(RESOLVE_ENROLLMENT_SQL)
             .bind(tenant_id)
-            .bind(msg.lead_id.as_deref())
             .bind(&addresses)
             .fetch_optional(&self.db)
             .await?;
@@ -834,10 +807,12 @@ impl ReplyHandler {
             .execute(&self.db)
             .await?;
 
-        // If there's a lead, update lead status
-        if let Some(ref lead_id) = msg.lead_id {
-            self.update_lead_status(lead_id, &outcome.result).await?;
-        }
+        // Audit item 17: the former `sales_leads.status` write here is gone.
+        // The reply's visible outcome is already canonical — `lock_enrollment`
+        // set `sales_enrollments.state` / `has_human_reply` and (for
+        // suppression) the contact point — and the CP read derives status
+        // from exactly those fields. Any `sales_leads.status` write would be
+        // pure divergence: no read path renders that column any more.
 
         Ok(())
     }
@@ -850,23 +825,18 @@ impl ReplyHandler {
     ) -> ProcessorResult<Option<String>> {
         match classification.suggested_action.action {
             super::types::ActionType::Snooze => {
+                // The canonical effect (reschedule the enrollment's queued
+                // actions/steps, set the enrollment state) is applied by
+                // `lock_enrollment` in the same transaction as the reply
+                // lock. The former legacy lead-column writes here were
+                // removed in audit item 17: nothing reads those columns any
+                // more.
                 let days = classification
                     .suggested_action
                     .parameters
                     .get("duration_days")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(7);
-
-                if let Some(ref lead_id) = msg.lead_id {
-                    let snooze_until = Utc::now() + chrono::Duration::days(days);
-                    sqlx::query(
-                        "UPDATE sales_leads SET snoozed_until = $1, status = 'snoozed' WHERE id = $2",
-                    )
-                    .bind(snooze_until)
-                    .bind(lead_id)
-                    .execute(&self.db)
-                    .await?;
-                }
 
                 Ok(Some(format!("snoozed_for_{}_days", days)))
             }
@@ -929,15 +899,11 @@ impl ReplyHandler {
                 Ok(Some("unsubscribed".to_string()))
             }
             super::types::ActionType::FlagSales => {
-                if let Some(ref lead_id) = msg.lead_id {
-                    sqlx::query(
-                        "UPDATE sales_leads SET status = 'interested', priority = 'high', updated_at = NOW() WHERE id = $1",
-                    )
-                    .bind(lead_id)
-                    .execute(&self.db)
-                    .await?;
-                }
-
+                // The `sales_leads.status` / `priority` write that used to
+                // live here was removed in audit item 17: the columns are
+                // write-only (no reader in the workspace), and the reply's
+                // canonical record — the enrollment lock and the persisted
+                // classification — already carries the flag.
                 Ok(Some("flagged_for_sales".to_string()))
             }
             super::types::ActionType::Escalate => {
@@ -954,40 +920,6 @@ impl ReplyHandler {
             super::types::ActionType::Ignore => Ok(Some("ignored".to_string())),
             _ => Ok(None),
         }
-    }
-
-    /// Update lead status based on classification.
-    async fn update_lead_status(
-        &self,
-        lead_id: &str,
-        classification: &super::types::ClassificationResult,
-    ) -> ProcessorResult<()> {
-        use super::types::ReplyClassification;
-        let new_status = match classification.classification {
-            ReplyClassification::Interested
-            | ReplyClassification::TellMeMore
-            | ReplyClassification::PositiveIntent
-            | ReplyClassification::Question
-            | ReplyClassification::Referral => "interested",
-            ReplyClassification::NotInterested => "lost",
-            ReplyClassification::MeetingRequest => "demo_requested",
-            ReplyClassification::OutOfOffice => "snoozed",
-            ReplyClassification::WrongPerson => "wrong_contact",
-            ReplyClassification::Unsubscribe => "unsubscribed",
-            ReplyClassification::Complaint => "complaint",
-            ReplyClassification::Bounce => "bounced",
-            _ => return Ok(()), // Don't update for unknown/other
-        };
-
-        sqlx::query(
-            "UPDATE sales_leads SET status = $1, last_reply_at = NOW(), updated_at = NOW() WHERE id = $2",
-        )
-        .bind(new_status)
-        .bind(lead_id)
-        .execute(&self.db)
-        .await?;
-
-        Ok(())
     }
 }
 
@@ -1418,48 +1350,56 @@ mod tests {
 
     // ── §21: the lock SQL shape ──────────────────────────────────────
 
+    /// Audit item 17: resolution is canonical-ONLY. The previous version of
+    /// this test asserted the canonical-first ordering plus the transitional
+    /// `lead_contact` fallback; the fallback is gone, so the assertions now
+    /// guard its absence (do not weaken: the old ordering assertions became
+    /// a stronger "no bridge identity in the resolver at all").
     #[test]
-    fn resolution_prefers_the_canonical_contact_point_then_falls_back_to_the_bridge() {
-        // Canonical identity first: the contact point lookup is the primary
-        // link and is defined BEFORE the lead bridge in the SQL.
-        let canonical_at = RESOLVE_ENROLLMENT_SQL
-            .find("canonical_contact")
-            .expect("canonical contact-point lookup");
-        let bridge_at = RESOLVE_ENROLLMENT_SQL
-            .find("lead_contact")
-            .expect("transitional lead bridge");
-        assert!(
-            canonical_at < bridge_at,
-            "sales_contact_points must be resolved BEFORE the sales_leads bridge"
-        );
+    fn resolution_is_canonical_only_and_never_reads_the_lead_bridge() {
         assert!(
             RESOLVE_ENROLLMENT_SQL.contains("sales_contact_points")
-                && RESOLVE_ENROLLMENT_SQL.contains("lower(cp.normalized_value) = ANY($3)"),
+                && RESOLVE_ENROLLMENT_SQL.contains("lower(cp.normalized_value) = ANY($2)"),
             "the email link must match any candidate address (from_email or DSN recipient)"
         );
-        // The bridge is a fallback: it must be guarded by the canonical miss.
         assert!(
-            RESOLVE_ENROLLMENT_SQL.contains("NOT EXISTS (SELECT 1 FROM canonical_contact)"),
-            "the sales_leads bridge must only fire when no canonical contact matched"
+            !RESOLVE_ENROLLMENT_SQL.contains("sales_leads"),
+            "the resolver must not read the sales_leads bridge"
         );
         assert!(
-            RESOLVE_ENROLLMENT_SQL.contains("COALESCE"),
-            "the target contact must coalesce canonical first, bridge second"
+            !RESOLVE_ENROLLMENT_SQL.contains("lead_contact")
+                && !RESOLVE_ENROLLMENT_SQL.contains("COALESCE"),
+            "the deleted bridge fallback (and its COALESCE) must not return"
         );
         assert!(
             RESOLVE_ENROLLMENT_SQL.contains("'completed', 'failed', 'suppressed'"),
             "live enrollments must sort before terminal ones"
         );
-        // The fallback's removal condition is stated in code, not only in a
-        // comment, so it cannot be forgotten: it must name the NULL bridge.
-        assert!(
-            LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION.contains("NULL contact_id"),
-            "the fallback's removal condition must name the NULL contact_id state"
-        );
-        assert!(
-            LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION.contains("lead_contact"),
-            "the removal condition must name what gets deleted"
-        );
+    }
+
+    /// The reply handler must not write the legacy `sales_leads` columns at
+    /// all (item 17). This is a source scan so a reintroduced write fails
+    /// loudly without needing a database. Only the production half of the
+    /// file is scanned — the tests below legitimately seed/delete bridge rows.
+    #[test]
+    fn reply_handler_writes_no_legacy_sales_leads_state() {
+        let source = include_str!("processor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("processor.rs has a test module");
+        for fragment in [
+            ["UPDATE sales_leads", "SET"].join(" "),
+            ["INSERT INTO", "sales_leads"].join(" "),
+            ["DELETE FROM", "sales_leads"].join(" "),
+            ["snoozed", "until"].join("_"),
+            ["last_reply", "at"].join("_"),
+        ] {
+            assert!(
+                !production.contains(&fragment),
+                "reply handler must not write legacy lead state (`{fragment}` found)"
+            );
+        }
     }
 
     #[test]
@@ -1687,14 +1627,16 @@ mod tests {
     // Item 17: canonical-first identity resolution
     // =======================================================================
 
-    /// Inbound identity must resolve through `sales_contact_points` FIRST and
-    /// only use the `sales_leads` bridge as a transition fallback.
+    /// Inbound identity resolves through `sales_contact_points` ONLY; the
+    /// `sales_leads` bridge is not a resolution input at all (item 17).
     ///
-    /// Proved adversarially: the legacy bridge row points at a DIFFERENT
-    /// contact (B) with its own live enrollment, so a resolver that still
-    /// preferred the bridge would return B. Canonical-first must return A.
-    /// Then the bridge row is deleted and resolution must still succeed —
-    /// proving the fallback was not load-bearing.
+    /// Proved adversarially in three legs: the legacy bridge row points at a
+    /// DIFFERENT contact (B) with its own live enrollment; (1) the resolver
+    /// returns the sender's canonical contact A, (2) the bridge row is
+    /// deleted and resolution still succeeds, (3) the inbound message's
+    /// legacy `lead_id` is rewritten to a nonexistent lead and resolution
+    /// STILL returns A — proving the deleted fallback is not load-bearing
+    /// even in its last reachable shape.
     ///
     /// DB-backed via the canonical migrator fixture (soft-skips without
     /// `TEST_DATABASE_URL`, like the F67 handoff test above).
@@ -1868,6 +1810,24 @@ mod tests {
             .expect("resolution must still succeed with no sales_leads row at all");
         assert_eq!(resolved_without_bridge.contact_id, contact_a);
         assert_eq!(resolved_without_bridge.enrollment_id, enrollment_a);
+
+        // Last reachable shape of the deleted fallback: `lead_id` points at a
+        // lead that does not exist. The resolver must still return the
+        // canonical contact (a resolver that consulted `lead_id` at all would
+        // fail to resolve here).
+        sqlx::query("UPDATE inbound_messages SET lead_id = $1 WHERE id = $2")
+            .bind("missing_lead_17")
+            .bind(&inbound_id)
+            .execute(&pool)
+            .await
+            .expect("rewrite lead_id to a nonexistent lead");
+        let resolved_after_bogus_lead = handler
+            .resolve_enrollment(&msg)
+            .await
+            .expect("resolve after bogus lead_id")
+            .expect("resolution must ignore inbound_messages.lead_id entirely");
+        assert_eq!(resolved_after_bogus_lead.contact_id, contact_a);
+        assert_eq!(resolved_after_bogus_lead.enrollment_id, enrollment_a);
 
         pool.close().await;
     }

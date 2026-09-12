@@ -206,14 +206,32 @@ pub(crate) mod test_db {
                         "api-server test DB bootstrap: creating fresh {isolated_db} \
                          (exists={exists}; missing, foreign, or poison-marked)"
                     );
-                    let _ = sqlx::query(&format!(
+                    // Both statements were previously `let _ =`, which would
+                    // silently reuse a database this path decided was
+                    // unusable. The bootstrap below self-heals via the marker
+                    // and migration apply, but a failure here must be visible
+                    // or a "fresh" database that was never recreated looks
+                    // identical to one that was.
+                    if let Err(error) = sqlx::query(&format!(
                         "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
                     ))
                     .execute(&admin)
-                    .await;
-                    let _ = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
+                    .await
+                    {
+                        eprintln!(
+                            "api-server test DB bootstrap: could not drop {isolated_db}: {error} \
+                             (continuing — the marker + migration apply below will converge it)"
+                        );
+                    }
+                    if let Err(error) = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
                         .execute(&admin)
-                        .await;
+                        .await
+                    {
+                        eprintln!(
+                            "api-server test DB bootstrap: could not create {isolated_db}: {error} \
+                             (if it already exists this is benign)"
+                        );
+                    }
                 }
 
                 // Marker + canonical migrations, still under the advisory

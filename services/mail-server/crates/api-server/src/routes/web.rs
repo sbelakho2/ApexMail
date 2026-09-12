@@ -371,6 +371,11 @@ pub fn admin_router(state: AppState) -> Router<AppState> {
             post(form_sales_outreach_launch),
         )
         .route(
+            // Retained as the SSR mirror of the admin lead-update API. No page
+            // currently renders a form for it (the sales console became an
+            // autonomy control centre), so it is reachable only by a direct
+            // CSRF-protected POST — which is harmless but worth knowing before
+            // assuming an operator can reach it.
             "/web/admin/sales/leads/update",
             post(form_sales_leads_update),
         )
@@ -5487,7 +5492,6 @@ async fn form_sales_leads_update(
         })
         .unwrap_or_default();
     let status = field(&form, "status");
-    let allowed = ["qualified", "proposal", "approved", "escalated"];
     if lead_ids.is_empty() {
         return redirect_error(
             "Pick at least one lead in the queue first.",
@@ -5495,32 +5499,39 @@ async fn form_sales_leads_update(
             &state.config,
         );
     }
-    if !allowed.contains(&status.as_str()) {
-        return redirect_error("Choose a valid stage.", "/sales", &state.config);
-    }
-    let result = sqlx::query(
-        "UPDATE sales_leads SET status = $1, updated_at = NOW() WHERE id = ANY($2) AND tenant_id = $3",
+
+    // Audit item 17: the operator decision is written to the canonical
+    // lifecycle fields the CP read actually derives status from — never to
+    // the legacy `sales_leads.status` column (which no read path renders).
+    // The supported vocabulary is the one in `canonical_lead_status`;
+    // `proposal`, `approved` and `escalated` are not in the canonical model
+    // and are rejected with the supported list.
+    let result = crate::routes::admin::sales::apply_lead_status_decision(
+        &state.db,
+        user.tenant_id.as_str(),
+        &lead_ids,
+        &status,
     )
-    .bind(&status)
-    .bind(lead_ids)
-    .bind(user.tenant_id.as_str())
-    .execute(&state.db)
     .await;
     match result {
-        Ok(result) => redirect_success(
-            &format!("{} lead(s) moved to {status}.", result.rows_affected()),
+        Ok((updated, rendered)) => redirect_success(
+            &format!("{updated} lead(s) moved to {rendered}."),
             "/sales",
             &state.config,
         ),
         Err(error) => {
-            // Honest failure: a database error is an error, never a
-            // success flash.
-            tracing::error!(error = %error, "web sales leads update failed");
-            redirect_error(
-                "The stage change failed. Refresh and retry.",
-                "/sales",
-                &state.config,
-            )
+            // Honest failure: a database error is an error, never a success
+            // flash; an unsupported stage names the supported vocabulary.
+            if let crate::routes::admin::sales::LeadStatusWriteError::Database(sqlx_error) = &error
+            {
+                tracing::error!(error = %sqlx_error, "web sales leads update failed");
+                return redirect_error(
+                    "The stage change failed. Refresh and retry.",
+                    "/sales",
+                    &state.config,
+                );
+            }
+            redirect_error(&error.to_string(), "/sales", &state.config)
         }
     }
 }
