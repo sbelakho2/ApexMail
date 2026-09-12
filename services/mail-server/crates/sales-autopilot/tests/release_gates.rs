@@ -925,10 +925,40 @@ async fn gate_07_expired_lease_recovery_fences_the_stale_worker_to_one_message()
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Worker B recovers the expired work.
-    let recovered = sales_autopilot::actions::requeue_expired_leases(&db)
+    // The sweep is deployment-global (it recovers expired leases for every
+    // tenant), so its return value is a property of the whole database, not of
+    // this test — asserting on it made this gate flaky. A concurrent test's
+    // sweep can legitimately have recovered OUR action first. Assert on the
+    // action's own resulting state instead: that is the invariant under test.
+    sales_autopilot::actions::requeue_expired_leases(&db)
         .await
         .expect("the recovery sweep");
-    assert!(recovered >= 1, "the expired lease must be recovered");
+
+    let (state, owner, token, expiry): (
+        String,
+        Option<String>,
+        Option<Uuid>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
+        "SELECT state, lease_owner, lease_token, lease_expires_at \
+         FROM sales_actions WHERE id = $1",
+    )
+    .bind(action.id)
+    .fetch_one(&db)
+    .await
+    .expect("the action must still exist");
+
+    assert_eq!(
+        state, "queued",
+        "an expired lease must return the action to the queue \
+         (owner={owner:?} token={token:?} expiry={expiry:?})"
+    );
+    assert!(
+        owner.is_none() && token.is_none() && expiry.is_none(),
+        "recovery must clear the dead worker's lease: owner={owner:?} token={token:?} \
+         expiry={expiry:?}"
+    );
+
     let worker_b = common::claim_specific_action(&db, "gate07-worker-b", action.id)
         .await
         .expect("worker B recovers the action");
