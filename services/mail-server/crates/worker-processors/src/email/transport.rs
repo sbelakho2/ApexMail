@@ -18,24 +18,132 @@ use mail_send::{Credentials, SmtpClientBuilder};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
-use super::types::{Mailbox, PreparedEmail, SendResult};
+use super::types::{DeliveryReceipt, DeliveryRoute, Mailbox, PreparedEmail};
 use crate::common::error::{ProcessorError, ProcessorResult};
 use crate::common::{EmailConfig, SesConfig, SmtpConfig, TransportType};
 
 /// Email transport trait for sending emails.
+///
+/// `send` takes the per-send [`DeliveryRoute`] the processor selected from
+/// the tenant's warmup-IP identity and returns a [`DeliveryReceipt`] that
+/// MUST report the recipient-facing source IP it actually used (or `None`
+/// when the transport cannot report it — see the receipt docs). The
+/// processor fails the send closed when a dedicated route is not confirmed.
 #[async_trait]
 pub trait EmailTransport: Send + Sync {
     /// Verify transport connection.
     async fn verify(&self) -> ProcessorResult<()>;
 
-    /// Send an email.
-    async fn send(&self, email: &PreparedEmail) -> ProcessorResult<SendResult>;
+    /// Send an email along `route` and report what actually happened.
+    async fn send(
+        &self,
+        email: &PreparedEmail,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<DeliveryReceipt>;
 
     /// Close the transport gracefully.
     async fn close(&self) -> ProcessorResult<()>;
 
     /// Human-readable transport name for logging.
     fn transport_name(&self) -> &str;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Internal delivery-route contract (worker → relay MTA)
+// ═══════════════════════════════════════════════════════════════
+//
+// WHY THE ROUTE MUST TRAVEL TO THE MTA AT ALL
+//
+// `SmtpTransport` relays to an MTA (SMTP_HOST). Binding the worker→relay
+// socket would NOT change the address a recipient MX sees: the reputation-
+// bearing source IP is the RELAY's recipient-facing socket. So for
+// `DeliveryRoute::Dedicated` the selected `dedicated_ip_id` / `source_ip`
+// must reach the relay as internal routing metadata, and the relay's
+// outbound connector must bind its recipient-facing socket to `source_ip`.
+//
+// CHANNEL CHOSEN: an internal SMTP header on the existing authenticated
+// relay submission (`SmtpConfig` credentials), injected by this transport —
+// NOT a user-supplied header.
+//
+// * Why a header on the existing submission instead of a dedicated internal
+//   submission API: the worker→relay link is already an SMTP submission
+//   with its own authenticated session and no internal API exists to be
+//   implemented against. The route value can ride that session and be
+//   stripped at the trust boundary without opening a new network surface.
+// * Why it is not spoofable: the whole `X-ApexMail-*` namespace is reserved
+//   (blocked at the API submission boundary and again by `prepare_email`,
+//   see `apexmail_lib::email_headers::is_reserved_internal_header`), and
+//   `build_message_with_route` additionally DROPS any caller-supplied
+//   header with this exact name before the transport writes its own. The
+//   receiving MTA must trust the header only because it arrived on the
+//   authenticated internal submission listener — provenance is the SESSION,
+//   never the header value alone.
+//
+// WIRE CONTRACT (receiving side, worker version = v1):
+//
+//     X-ApexMail-Route: v1 dedicated <dedicated_ip_id> <source_ip>
+//
+//   * `<dedicated_ip_id>`: `dedicated_ips.id` (VARCHAR, migrations
+//     003/071/093), no whitespace.
+//   * `<source_ip>`: the literal IP the relay MUST bind for the
+//     recipient-facing connection (`dedicated_ips.ip_address`,
+//     migrations/003_dedicated_ips.sql:43).
+//   * Absent header ⇒ shared-pool/SES routing, no binding.
+//
+// TODO(mta-owner): the receiving component is the outbound relay MTA
+// deployed behind SMTP_HOST. It is NOT implemented in this repository —
+// `crates/mta` contains only the inbound/submission/bounce servers, and no
+// recipient-facing outbound connector exists here. The relay must, before
+// the contract is enforceable end-to-end:
+//   1. accept the header ONLY on the authenticated internal submission
+//      listener (never relay a client-supplied header of this name),
+//   2. consume it and STRIP it before the message leaves the trust
+//      boundary (it must never reach the recipient),
+//   3. bind the recipient-facing socket to `<source_ip>`,
+//   4. report the actually-used source IP back to the worker; the agreed
+//      reply-token contract is [`APEXMAIL_SOURCE_IP_REPLY_HEADER`]
+//      (`X-ApexMail-Source-IP: <ip>`) in the end-of-DATA reply. Until that
+//      exists, `SmtpTransport` reports `actual_source_ip: None` and the
+//      processor REFUSES to count the send as dedicated (hard error,
+//      warmup capacity released) — the route is unverified, not assumed.
+
+/// The internal SMTP route header injected by `SmtpTransport` for a
+/// dedicated route (see the wire contract above). It lives inside the
+/// reserved `X-ApexMail-*` namespace so external submitters can never set
+/// it; the receiving MTA must only honour it on the authenticated internal
+/// submission listener and must strip it before outbound delivery.
+pub const APEXMAIL_ROUTE_HEADER: &str = "X-ApexMail-Route";
+
+/// The `v1` route grammar's leading token: `v1 dedicated <id> <ip>`.
+pub const APEXMAIL_ROUTE_VALUE_PREFIX: &str = "v1 dedicated";
+
+/// The reply token the receiving relay uses to report the source IP it
+/// actually bound for a dedicated route. Agreed contract; the relay side is
+/// TODO(mta-owner) (see the module comment above). `SmtpTransport` reports
+/// `actual_source_ip: None` until the reply is parseable, and the processor
+/// treats that as UNVERIFIED — never as success.
+pub const APEXMAIL_SOURCE_IP_REPLY_HEADER: &str = "X-ApexMail-Source-IP";
+
+/// Render the wire value for a route: `None` for the shared pool, the
+/// `v1 dedicated <id> <ip>` value for a dedicated route.
+fn route_header_value(route: &DeliveryRoute) -> Option<String> {
+    match route {
+        DeliveryRoute::SesShared => None,
+        DeliveryRoute::Dedicated {
+            dedicated_ip_id,
+            source_ip,
+        } => Some(format!(
+            "{APEXMAIL_ROUTE_VALUE_PREFIX} {dedicated_ip_id} {source_ip}"
+        )),
+    }
+}
+
+/// True when the SES shared-pool transport can honour the route. SES has no
+/// per-message dedicated source-IP binding in this design, so a dedicated
+/// route is refused up front instead of silently sending from the shared
+/// pool (which would spend warmup capacity on an IP nothing sent from).
+fn ses_transport_supports_route(route: &DeliveryRoute) -> bool {
+    matches!(route, DeliveryRoute::SesShared)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -408,7 +516,19 @@ impl SmtpTransport {
         Ok(builder)
     }
 
-    fn build_message<'a>(&self, email: &'a PreparedEmail) -> MessageBuilder<'a> {
+    /// Build the MIME message, optionally injecting the internal
+    /// [`APEXMAIL_ROUTE_HEADER`] routing metadata (see the module-level
+    /// worker → relay contract).
+    ///
+    /// A caller-supplied header carrying the route header's name is DROPPED
+    /// here — defence in depth on top of the reserved `X-ApexMail-*`
+    /// namespace filter in `prepare_email`/the API boundary — so message
+    /// content can never spoof (or shadow) the transport's own route value.
+    fn build_message_with_route<'a>(
+        &self,
+        email: &'a PreparedEmail,
+        route: Option<&DeliveryRoute>,
+    ) -> MessageBuilder<'a> {
         // F26: the MIME To/Cc headers show the ORIGINAL visible recipient
         // LIST when the per-recipient expansion preserved it — structured
         // `Address::new_list`, never a comma-joined `&str` (mail-builder
@@ -432,7 +552,16 @@ impl SmtpTransport {
         }
 
         for (key, value) in &email.headers {
+            if key.eq_ignore_ascii_case(APEXMAIL_ROUTE_HEADER) {
+                // Never let message content carry (or shadow) internal
+                // routing metadata.
+                continue;
+            }
             builder = builder.header(key.as_str(), Text::new(value.as_str()));
+        }
+
+        if let Some(value) = route.and_then(route_header_value) {
+            builder = builder.header(APEXMAIL_ROUTE_HEADER, Text::new(value));
         }
 
         if let Some(text) = &email.text {
@@ -452,6 +581,13 @@ impl SmtpTransport {
         }
 
         builder
+    }
+
+    /// Route-less MIME build for tests; the send path uses
+    /// [`Self::build_message_with_route`].
+    #[cfg(test)]
+    fn build_message<'a>(&self, email: &'a PreparedEmail) -> MessageBuilder<'a> {
+        self.build_message_with_route(email, None)
     }
 
     fn build_dkim_signer(
@@ -504,7 +640,11 @@ impl EmailTransport for SmtpTransport {
         result
     }
 
-    async fn send(&self, email: &PreparedEmail) -> ProcessorResult<SendResult> {
+    async fn send(
+        &self,
+        email: &PreparedEmail,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<DeliveryReceipt> {
         // DKIM signer (when signing) is built BEFORE connecting so a key
         // error cannot leak an open connection.
         let signer = match &email.dkim {
@@ -537,9 +677,14 @@ impl EmailTransport for SmtpTransport {
         };
         let outgoing = match explicit_envelope {
             OutgoingMailFrom::Verp(return_path) => {
-                let raw = self.build_message(email).write_to_vec().map_err(|e| {
-                    ProcessorError::Transport(format!("MIME serialization for VERP failed: {e}"))
-                })?;
+                let raw = self
+                    .build_message_with_route(email, Some(route))
+                    .write_to_vec()
+                    .map_err(|e| {
+                        ProcessorError::Transport(format!(
+                            "MIME serialization for VERP failed: {e}"
+                        ))
+                    })?;
                 Outgoing::Envelope(mail_send::smtp::message::Message {
                     mail_from: return_path.into(),
                     rcpt_to: vec![email
@@ -551,11 +696,14 @@ impl EmailTransport for SmtpTransport {
                 })
             }
             OutgoingMailFrom::Sender(mail_from) => {
-                let raw = self.build_message(email).write_to_vec().map_err(|e| {
-                    ProcessorError::Transport(format!(
-                        "MIME serialization for preserved headers failed: {e}"
-                    ))
-                })?;
+                let raw = self
+                    .build_message_with_route(email, Some(route))
+                    .write_to_vec()
+                    .map_err(|e| {
+                        ProcessorError::Transport(format!(
+                            "MIME serialization for preserved headers failed: {e}"
+                        ))
+                    })?;
                 Outgoing::Envelope(mail_send::smtp::message::Message {
                     mail_from: mail_from.into(),
                     rcpt_to: vec![email
@@ -566,7 +714,9 @@ impl EmailTransport for SmtpTransport {
                     body: raw.into(),
                 })
             }
-            OutgoingMailFrom::DeriveFromHeaders => Outgoing::Builder(self.build_message(email)),
+            OutgoingMailFrom::DeriveFromHeaders => {
+                Outgoing::Builder(self.build_message_with_route(email, Some(route)))
+            }
         };
 
         let builder = self.smtp_builder()?;
@@ -585,10 +735,24 @@ impl EmailTransport for SmtpTransport {
             send_result
         };
 
-        result.map(|_| SendResult {
-            smtp_message_id: None,
-            accepted: true,
-            response: "250 OK".to_string(),
+        // The relay accepted the message. `actual_source_ip` is `None`
+        // because the pinned mail-send 0.4.x API returns only `Result<()>`
+        // for DATA — it does not surface the end-of-DATA reply, so the
+        // agreed relay report ([`APEXMAIL_SOURCE_IP_REPLY_HEADER`]) cannot
+        // be parsed yet. That is reported HONESTLY as "not verified": the
+        // processor refuses to count a dedicated send until the relay
+        // reports the bound source IP (TODO(mta-owner), see the module
+        // contract above). For the shared route the receipt needs no IP.
+        result.map(|_| DeliveryReceipt {
+            transport: TransportType::Smtp,
+            transport_message_id: None,
+            actual_source_ip: None,
+            // The relay MTA performs recipient MX resolution and does not
+            // report it back (see the module contract above); this path
+            // therefore does not know the recipient provider. It is left
+            // None — never inferred from the visible recipient domain.
+            recipient_provider: None,
+            provider_source: None,
         })
     }
 
@@ -824,7 +988,22 @@ impl EmailTransport for SesTransport {
         Ok(())
     }
 
-    async fn send(&self, email: &PreparedEmail) -> ProcessorResult<SendResult> {
+    async fn send(
+        &self,
+        email: &PreparedEmail,
+        route: &DeliveryRoute,
+    ) -> ProcessorResult<DeliveryReceipt> {
+        // A dedicated route cannot be honoured on the SES shared pool:
+        // silently sending from shared IPs would spend the warming IP's
+        // reserved capacity on an IP nothing sent from — the exact defect
+        // this contract removes. Refuse BEFORE the API call.
+        if !ses_transport_supports_route(route) {
+            return Err(ProcessorError::Transport(
+                "dedicated delivery route cannot be carried by the SES shared-pool transport"
+                    .into(),
+            ));
+        }
+
         let raw_mime = Self::build_raw_mime(email);
 
         if raw_mime.is_empty() {
@@ -879,10 +1058,18 @@ impl EmailTransport for SesTransport {
             "Email sent via SES"
         );
 
-        Ok(SendResult {
-            smtp_message_id: ses_message_id,
-            accepted: true,
-            response: "SES 200 OK".to_string(),
+        // SES rides its shared pool: no dedicated source IP is bound, and
+        // `SesShared` carries no IP to verify (the deliberate asymmetry —
+        // the mismatch check does not apply to the shared route).
+        Ok(DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: ses_message_id,
+            actual_source_ip: None,
+            // SES accepts the message; it does not report the recipient's
+            // mailbox provider. Unknown stays None — never inferred from
+            // the visible recipient domain.
+            recipient_provider: None,
+            provider_source: None,
         })
     }
 
@@ -1738,5 +1925,95 @@ mod tests {
         std::env::set_var("VERP_DOMAIN", "");
         assert!(verp_return_path_for(&email).is_none(), "disabled via env");
         std::env::remove_var("VERP_DOMAIN");
+    }
+
+    // ── Dedicated route metadata (worker → relay MTA contract) ────────────
+
+    fn route_test_email(headers: Vec<(String, String)>) -> PreparedEmail {
+        PreparedEmail {
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "Route".into(),
+            html: None,
+            text: Some("body".into()),
+            headers,
+            attachments: vec![],
+            dkim: None,
+        }
+    }
+
+    /// Adversarial: a caller-supplied header with the internal route name
+    /// must be STRIPPED, and the transport's own value must be the only one
+    /// on the wire — message content cannot spoof the route.
+    #[test]
+    fn dedicated_route_header_wins_over_a_caller_supplied_one() {
+        let transport = SmtpTransport::new(SmtpConfig::default());
+        let email = route_test_email(vec![
+            (
+                APEXMAIL_ROUTE_HEADER.to_string(),
+                "v1 dedicated forged-dip 198.51.100.7".to_string(),
+            ),
+            ("X-Legit".to_string(), "kept".to_string()),
+        ]);
+        let route = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("valid test IP"),
+        };
+        let raw = transport
+            .build_message_with_route(&email, Some(&route))
+            .write_to_vec()
+            .unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+
+        assert_eq!(
+            mime_header(&raw_str, APEXMAIL_ROUTE_HEADER).as_deref(),
+            Some("v1 dedicated dip-1 203.0.113.9"),
+            "exactly the processor-selected route may be emitted"
+        );
+        assert_eq!(
+            raw_str.matches(APEXMAIL_ROUTE_HEADER).count(),
+            1,
+            "the forged caller header must be stripped, not duplicated"
+        );
+        assert!(
+            !raw_str.contains("forged-dip") && !raw_str.contains("198.51.100.7"),
+            "the forged route value must never reach the wire"
+        );
+        assert!(raw_str.contains("X-Legit"), "ordinary headers pass through");
+    }
+
+    /// The shared route carries NO route header, even if message content
+    /// tries to force one.
+    #[test]
+    fn shared_route_emits_no_route_header() {
+        let transport = SmtpTransport::new(SmtpConfig::default());
+        let email = route_test_email(vec![(
+            APEXMAIL_ROUTE_HEADER.to_string(),
+            "v1 dedicated forged-dip 198.51.100.7".to_string(),
+        )]);
+        let raw = transport
+            .build_message_with_route(&email, Some(&DeliveryRoute::SesShared))
+            .write_to_vec()
+            .unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        assert!(
+            mime_header(&raw_str, APEXMAIL_ROUTE_HEADER).is_none(),
+            "shared pool sends no routing metadata"
+        );
+    }
+
+    /// The SES shared-pool transport refuses a dedicated route instead of
+    /// silently sending from the shared pool (which would burn warmup
+    /// capacity on an IP nothing sent from).
+    #[test]
+    fn ses_transport_refuses_a_dedicated_route() {
+        assert!(ses_transport_supports_route(&DeliveryRoute::SesShared));
+        assert!(!ses_transport_supports_route(&DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("valid test IP"),
+        }));
     }
 }

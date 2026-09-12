@@ -17,7 +17,16 @@ pub struct EventTypeCount {
 pub struct EventsRepo;
 
 impl EventsRepo {
-    /// Create a new event.
+    /// Create a new event, optionally carrying recipient-mailbox-provider
+    /// provenance.
+    ///
+    /// `recipient_provider` / `provider_source` were added to `events` by
+    /// migration `202_sales_feedback_delivery_binding.sql:150-167`; the
+    /// `provider_source` CHECK accepts `mx_resolved`, `provider_callback`,
+    /// or `inferred` (or NULL). Writers must pass a provider only when the
+    /// value was actually obtained (e.g. MX resolved at delivery time) with
+    /// the matching source; unknown stays `None`. NEVER infer a provider
+    /// from the visible recipient domain here.
     pub async fn create(
         pool: &PgPool,
         tenant_id: &str,
@@ -25,11 +34,14 @@ impl EventsRepo {
         event_type: &str,
         recipient: Option<&str>,
         metadata: Option<serde_json::Value>,
+        recipient_provider: Option<&str>,
+        provider_source: Option<&str>,
     ) -> Result<Event, sqlx::Error> {
         sqlx::query_as::<_, Event>(
-            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, metadata, timestamp) \
-             VALUES ($1, $2, $3, $4, $5, $6, NOW()) \
-             RETURNING id, tenant_id, message_id, event_type, recipient, metadata, timestamp"
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, metadata, \
+                                 recipient_provider, provider_source, timestamp) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) \
+             RETURNING id, tenant_id, message_id, event_type, recipient, metadata, timestamp",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(tenant_id)
@@ -37,6 +49,8 @@ impl EventsRepo {
         .bind(event_type)
         .bind(recipient)
         .bind(metadata)
+        .bind(recipient_provider)
+        .bind(provider_source)
         .fetch_one(pool)
         .await
     }

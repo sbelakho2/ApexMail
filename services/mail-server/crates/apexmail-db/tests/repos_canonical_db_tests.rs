@@ -1,11 +1,16 @@
 //! F86/F87 canonical-schema tests for the standalone IncidentRepo and the
-//! two-model warmup repositories, exercised against the REAL canonical
-//! migration chain (resolved_at arrives with migration 198; the two warmup
-//! relations with migration 042). Gated on `TEST_DATABASE_URL`.
+//! ADVISORY warmup catalog repository, exercised against the REAL canonical
+//! migration chain (resolved_at arrives with migration 198; the advisory
+//! `isp_warmup_templates` catalog with migration 042). Gated on
+//! `TEST_DATABASE_URL`.
+//!
+//! The former per-pool execution model was removed (audit item 26): no live
+//! path resolves the recipient's provider at admission time, so the ISP
+//! schedule cannot be enforced. `isp_warmup_templates` survives as inert
+//! reference data and only its CRUD is tested here.
 
 use apexmail_db::repos::incidents::{IncidentRepo, IncidentStatus};
-use apexmail_db::repos::warmup::{WarmupExecutionRepo, WarmupProfileRepo};
-use apexmail_db::types::IspWarmupExecution;
+use apexmail_db::repos::warmup::WarmupCatalogRepo;
 use sqlx::PgPool;
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
@@ -149,105 +154,56 @@ async fn legacy_resolved_incidents_are_backfilled() {
     pool.close().await;
 }
 
-// ── F87: warmup — two explicit models ────────────────────────────────────────
+// ── F87/audit-26: warmup — ADVISORY catalog only ─────────────────────────────
 
-/// Create an ISP profile, instantiate a pool schedule from it and record
-/// daily actuals: both profile CRUD and the per-pool execution view
-/// round-trip on the canonical migrations.
+/// The advisory ISP warmup catalog round-trips CRUD on the canonical
+/// migrations. This test intentionally exercises STORAGE ONLY: the former
+/// execution model (per-pool/day target/actual rows instantiated from a
+/// profile) no longer exists in Rust, because no live path resolves a
+/// recipient provider at admission time and therefore cannot enforce an ISP
+/// target (see `apexmail_db::repos::warmup`). Storing hostile schedule
+/// values here (0/negative) is inert data, not a control.
 #[tokio::test]
-async fn warmup_profile_and_pool_execution_round_trip() {
+async fn warmup_catalog_crud_round_trip() {
     let Some(pool) = canonical_pool("warmup").await else {
         eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
         return;
     };
 
-    // Profile CRUD on the catalog relation. The name sorts BEFORE the
-    // canonically-seeded "Default" profile (whose "*" wildcard matches
-    // every host), so pattern resolution can be asserted deterministically.
-    let profile = WarmupProfileRepo::create(
+    // Catalog CRUD. The name sorts BEFORE the canonically-seeded "Default"
+    // template; nothing in this test derives a limit from it.
+    let template = WarmupCatalogRepo::create(
         &pool,
         "isp_f87_test",
         "AaaTestISP",
         serde_json::json!(["*.testisp.com"]),
-        serde_json::json!([10, 20, 40, 80]),
-        Some("f87 fixture"),
+        // Hostile/advisory schedule values: stored, never interpreted.
+        serde_json::json!([0, -1, 40, 80]),
+        Some("f87 advisory fixture"),
     )
     .await
-    .expect("profile create on canonical catalog");
-    assert_eq!(profile.isp_name, "AaaTestISP");
+    .expect("template create on canonical catalog");
+    assert_eq!(template.isp_name, "AaaTestISP");
 
-    let fetched = WarmupProfileRepo::get_by_isp(&pool, "AaaTestISP")
+    let fetched = WarmupCatalogRepo::get_by_isp(&pool, "AaaTestISP")
         .await
         .unwrap()
-        .expect("profile by isp");
+        .expect("template by isp");
     assert_eq!(fetched.id, "isp_f87_test");
-    assert_eq!(
-        WarmupProfileRepo::get_daily_limit(&fetched.warmup_schedule, 2),
-        Some(40)
-    );
-
-    let by_mx = WarmupProfileRepo::find_by_mx_pattern(&pool, "mx1.testisp.com")
+    let by_id = WarmupCatalogRepo::get_by_id(&pool, "isp_f87_test")
         .await
         .unwrap()
-        .expect("mx pattern resolves the profile");
-    assert_eq!(by_mx.id, "isp_f87_test");
+        .expect("template by id");
+    assert_eq!(by_id.isp_name, "AaaTestISP");
 
-    // Instantiate a pool's execution rows FROM the profile.
-    let execution: Vec<IspWarmupExecution> =
-        WarmupExecutionRepo::instantiate_from_profile(&pool, &profile, "pool_f87")
-            .await
-            .expect("pool schedule instantiated from the profile");
-    assert_eq!(execution.len(), 4, "one row per schedule day");
-    assert_eq!(execution[0].target_volume, 10);
-    assert_eq!(execution[3].target_volume, 80);
-    assert!(execution.iter().all(|e| e.status == "pending"));
-
-    // Re-instantiating never resets recorded actuals (idempotent per day).
-    WarmupExecutionRepo::record_daily_actual(&pool, "pool_f87", 0, 10)
-        .await
-        .unwrap()
-        .expect("record actual");
-    let after_reinstantiate =
-        WarmupExecutionRepo::instantiate_from_profile(&pool, &profile, "pool_f87")
-            .await
-            .unwrap();
-    assert_eq!(
-        after_reinstantiate[0].actual_volume,
-        Some(10),
-        "re-instantiation keeps recorded actuals"
-    );
-    assert_eq!(
-        after_reinstantiate[0].status, "completed",
-        "meeting the target completes the day"
-    );
-
-    // Partial day stays active.
-    WarmupExecutionRepo::record_daily_actual(&pool, "pool_f87", 1, 5)
-        .await
-        .unwrap();
-    let days = WarmupExecutionRepo::list_by_pool(&pool, "pool_f87")
-        .await
-        .unwrap();
-    assert_eq!(days[1].status, "active");
-    assert!(days[1].started_at.is_some());
-    assert!(days[1].completed_at.is_none());
-
-    // The execution relation carries NO profile columns — the models stay
-    // explicit (a pool day is not an ISP definition).
-    let has_isp_name: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns \
-         WHERE table_name = 'isp_warmup_schedules' AND column_name = 'isp_name')",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let all = WarmupCatalogRepo::list(&pool).await.unwrap();
     assert!(
-        !has_isp_name,
-        "execution rows must not grow profile columns (F87)"
+        all.iter().any(|t| t.id == "isp_f87_test"),
+        "the advisory template is listed"
     );
 
-    // Profile update/delete round-trip.
-    let updated = WarmupProfileRepo::update(
+    // Update/delete round-trip.
+    let updated = WarmupCatalogRepo::update(
         &pool,
         "isp_f87_test",
         serde_json::json!([15, 30]),
@@ -255,11 +211,15 @@ async fn warmup_profile_and_pool_execution_round_trip() {
     )
     .await
     .unwrap()
-    .expect("profile update");
+    .expect("template update");
     assert_eq!(updated.warmup_schedule, serde_json::json!([15, 30]));
-    assert!(WarmupProfileRepo::delete(&pool, "isp_f87_test")
+    assert!(WarmupCatalogRepo::delete(&pool, "isp_f87_test")
         .await
         .unwrap());
+    assert!(WarmupCatalogRepo::get_by_id(&pool, "isp_f87_test")
+        .await
+        .unwrap()
+        .is_none());
 
     pool.close().await;
 }

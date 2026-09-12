@@ -1,9 +1,11 @@
 //! Public contact-form endpoints for the marketing site.
 //!
 //! These accept form-encoded POSTs from the marketing site's contact forms
-//! (sales, enterprise, security) and store the lead in the `sales_leads`
-//! table. No authentication required — they are public lead-capture endpoints
-//! protected by rate limiting at the middleware layer.
+//! (sales, enterprise, security). Each submission writes the canonical sales
+//! model (`sales_accounts` → `sales_contacts` → `sales_contact_points`) and
+//! the compatibility `sales_leads` row — carrying both canonical ids — in one
+//! transaction. No authentication required — they are public lead-capture
+//! endpoints protected by rate limiting at the middleware layer.
 
 use axum::{
     extract::{RawForm, State},
@@ -303,6 +305,26 @@ fn contact_respond(
     Redirect::to(&location).into_response()
 }
 
+/// Canonical write path for a marketing-form lead: account, contact,
+/// contact point, then the compatibility `sales_leads` row — all in ONE
+/// transaction.
+///
+/// * The domain is normalized (trim, lowercase, strip a leading `www.`) to
+///   the `sales_accounts` unique key `(tenant_id, domain)` (migration
+///   200_sales_autopilot_v2_unification.sql:241), so `Example.COM`,
+///   `www.example.com` and ` example.com ` share one account.
+/// * The contact is matched through the contact point's normalized address,
+///   so a repeat submission reuses the existing person instead of creating a
+///   second one.
+/// * `verification = 'unverified'` is the only honest value for a public form
+///   submission: the visitor typed the address, but no SMTP/mailbox
+///   verification step ran, so claiming `valid` would fabricate provenance.
+///   `confidence` is correspondingly low (0.3: a self-supplied business
+///   address is weak reachability evidence, nothing more). An existing point
+///   is never downgraded — the upsert only refreshes `updated_at`.
+/// * A failure in any canonical write rolls the whole transaction back; there
+///   is no bare-lead fallback, so no lead row can be created with a NULL
+///   canonical link while the canonical rows are writable.
 async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(), ApiError> {
     let email = form
         .work_email
@@ -436,7 +458,7 @@ async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(),
     }
 
     let company = form.company.as_deref().unwrap_or("Unknown").trim();
-    let domain = email.split('@').nth(1).unwrap_or("unknown");
+    let domain = domain_from_email(email);
     let notes = lead_notes(form);
 
     // Unique per-submission id (prefix + 26 random chars). The old
@@ -444,25 +466,116 @@ async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(),
     // same millisecond, silently dropping one via ON CONFLICT DO NOTHING.
     let id = apexmail_lib::id::generate_id("lead", 26);
     let system_tenant = "system";
+    let normalized_email = email.to_ascii_lowercase();
 
+    // ONE transaction: canonical account/contact/contact-point first, then
+    // the compatibility lead row. No canonical write may be skipped.
+    let mut tx = db.begin().await.map_err(store_lead_failure)?;
+
+    // Serialize same-address submissions for this transaction so two
+    // concurrent forms cannot race into duplicate `sales_contacts` rows.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))")
+        .bind(system_tenant)
+        .bind(&normalized_email)
+        .execute(&mut *tx)
+        .await
+        .map_err(store_lead_failure)?;
+
+    // 1. Canonical account keyed by the normalized domain. Never clobbers an
+    // existing account's data — a repeat submission only touches updated_at.
+    let account_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO sales_accounts
+             (id, tenant_id, company, domain, lifecycle, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'discovered', NOW(), NOW())
+         ON CONFLICT (tenant_id, domain) DO UPDATE SET updated_at = NOW()
+         RETURNING id",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(system_tenant)
+    .bind(if company.is_empty() {
+        domain.as_str()
+    } else {
+        company
+    })
+    .bind(&domain)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(store_lead_failure)?;
+
+    // 2. Contact matched by the address already on file for this tenant, or
+    // created now.
+    let existing_contact: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT contact_id FROM sales_contact_points
+         WHERE tenant_id = $1 AND channel = 'email' AND normalized_value = $2",
+    )
+    .bind(system_tenant)
+    .bind(&normalized_email)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(store_lead_failure)?;
+
+    let contact_id = match existing_contact {
+        Some(contact_id) => contact_id,
+        None => {
+            let contact_id = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO sales_contacts
+                     (id, tenant_id, account_id, full_name, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, NOW(), NOW())",
+            )
+            .bind(contact_id)
+            .bind(system_tenant)
+            .bind(account_id)
+            .bind(form.name.as_deref().unwrap_or("").trim())
+            .execute(&mut *tx)
+            .await
+            .map_err(store_lead_failure)?;
+            contact_id
+        }
+    };
+
+    // 3. Contact point: `unverified`, low confidence, source recorded.
+    let contact_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO sales_contact_points
+             (id, tenant_id, contact_id, channel, value, normalized_value,
+              verification, confidence, source, created_at, updated_at)
+         VALUES ($1, $2, $3, 'email', $4, $5, 'unverified', 0.3, $6, NOW(), NOW())
+         ON CONFLICT (tenant_id, channel, normalized_value)
+             DO UPDATE SET updated_at = NOW()
+         RETURNING contact_id",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(system_tenant)
+    .bind(contact_id)
+    .bind(email)
+    .bind(&normalized_email)
+    .bind(source)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(store_lead_failure)?;
+
+    // 4. Compatibility lead row carrying the canonical links. The public form
+    // still tolerates a duplicate submission (`ON CONFLICT DO NOTHING`); a
+    // duplicate adds no second canonical row because steps 1-3 are idempotent.
     sqlx::query(
-        "INSERT INTO sales_leads (id, tenant_id, company_name, domain, contact_email, status, source, notes, score, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'new', $6, $7, 0, now())
+        "INSERT INTO sales_leads (id, tenant_id, company_name, domain, contact_email, status, source, notes, score, account_id, contact_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'new', $6, $7, 0, $8, $9, now())
          ON CONFLICT DO NOTHING",
     )
     .bind(&id)
     .bind(system_tenant)
     .bind(company)
-    .bind(domain)
+    .bind(&domain)
     .bind(email)
     .bind(source)
     .bind(&notes)
-    .execute(db)
+    .bind(account_id)
+    .bind(contact_id)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "failed to store contact lead");
-        ApiError::Internal("failed to submit form".into())
-    })?;
+    .map_err(store_lead_failure)?;
+
+    tx.commit().await.map_err(store_lead_failure)?;
 
     // GDPR Art. 5(1)(c) data minimisation: log the redacted address, never
     // the raw PII.
@@ -473,6 +586,41 @@ async fn store_lead(db: &PgPool, form: &ContactForm, source: &str) -> Result<(),
         "contact form lead captured"
     );
     Ok(())
+}
+
+/// Map any canonical-write failure to the public form's opaque error (and log
+/// the real cause). The whole transaction is dropped on the way here.
+fn store_lead_failure(error: sqlx::Error) -> ApiError {
+    tracing::error!(error = %error, "failed to store contact lead");
+    ApiError::Internal("failed to submit form".into())
+}
+
+/// Normalize the domain part of a form email to the canonical
+/// `sales_accounts.domain` key.
+fn domain_from_email(email: &str) -> String {
+    normalize_domain(
+        email
+            .split_once('@')
+            .map(|(_, domain)| domain)
+            .unwrap_or("unknown"),
+    )
+}
+
+/// Normalize a raw domain to the canonical `sales_accounts.domain` key: trim,
+/// lowercase, strip one leading `www.` (and a trailing root dot). Mirrors
+/// `SqlxCrmService::create_lead`'s normalization in
+/// sales-autopilot/src/crm_pg.rs; `sales_accounts` is unique on
+/// `(tenant_id, domain)` (migration 200:241), so `Example.COM`,
+/// `www.example.com` and ` example.com ` must converge on one account.
+pub(crate) fn normalize_domain(raw: &str) -> String {
+    let lower = raw.trim().trim_matches('.').to_ascii_lowercase();
+    let without_www = lower.strip_prefix("www.").unwrap_or(&lower);
+    let normalized = without_www.trim_matches('.');
+    if normalized.is_empty() {
+        "unknown".to_string()
+    } else {
+        normalized.to_string()
+    }
 }
 
 async fn contact_sales(State(state): State<AppState>, RawForm(raw): RawForm) -> Response {
@@ -884,5 +1032,139 @@ mod tests {
         assert!(!apexmail_lib::validation::is_valid_email("not-an-email"));
         assert!(!apexmail_lib::validation::is_valid_email(""));
         assert!(apexmail_lib::validation::is_valid_email("ada@example.com"));
+    }
+
+    #[test]
+    fn domain_from_email_normalizes_case_www_and_whitespace() {
+        assert_eq!(domain_from_email("ada@Example.COM"), "example.com");
+        assert_eq!(domain_from_email("ada@www.example.com"), "example.com");
+        assert_eq!(domain_from_email("ada@ example.com "), "example.com");
+        assert_eq!(domain_from_email("ada@WWW.Example.COM."), "example.com");
+        assert_eq!(domain_from_email("not-an-email"), "unknown");
+    }
+
+    /// The public form writes the canonical account/contact/point BEFORE the
+    /// compatibility lead row, in one transaction, and never claims the
+    /// address is verified. DB-backed on the api-server canonical test pool;
+    /// soft-skips without `TEST_DATABASE_URL`.
+    #[tokio::test]
+    async fn form_submission_writes_the_canonical_model_with_unverified_provenance() {
+        let Some(pool) = crate::test_db::optional_pg_pool("contact_form_canonical").await else {
+            return;
+        };
+        let email = format!(
+            "ada-{}@acme.example",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        let domain_email = email.split('@').nth(1).unwrap().to_string();
+
+        // A previous crashed run may have left the fixture behind; the tenant
+        // is shared (`system`), so clean by the unique address/domain first.
+        sqlx::query("DELETE FROM sales_leads WHERE tenant_id = 'system' AND contact_email = $1")
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("clean form leads");
+        sqlx::query(
+            "DELETE FROM sales_contacts WHERE tenant_id = 'system' AND id IN (
+                 SELECT contact_id FROM sales_contact_points
+                 WHERE tenant_id = 'system' AND normalized_value = lower($1)
+             )",
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("clean form contacts");
+        sqlx::query(
+            "DELETE FROM sales_contact_points \
+             WHERE tenant_id = 'system' AND normalized_value = lower($1)",
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("clean form points");
+        sqlx::query("DELETE FROM sales_accounts WHERE tenant_id = 'system' AND domain = $1")
+            .bind(&domain_email)
+            .execute(&pool)
+            .await
+            .expect("clean form accounts");
+
+        let form = ContactForm {
+            company: Some("Acme GmbH".into()),
+            work_email: Some(email.clone()),
+            name: Some("Ada Lovelace".into()),
+            ..Default::default()
+        };
+        store_lead(&pool, &form, "marketing-sales-form")
+            .await
+            .expect("canonical form write");
+
+        let (lead_id, account_id, contact_id): (String, Option<uuid::Uuid>, Option<uuid::Uuid>) =
+            sqlx::query_as(
+                "SELECT id, account_id, contact_id FROM sales_leads \
+                 WHERE tenant_id = 'system' AND contact_email = $1",
+            )
+            .bind(&email)
+            .fetch_one(&pool)
+            .await
+            .expect("form lead row");
+        assert!(
+            account_id.is_some() && contact_id.is_some(),
+            "the public form must create the lead only WITH its canonical links"
+        );
+
+        let (verification, confidence, source): (String, f64, Option<String>) = sqlx::query_as(
+            "SELECT verification, confidence, source FROM sales_contact_points \
+             WHERE tenant_id = 'system' AND normalized_value = lower($1)",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("form contact point");
+        assert_eq!(verification, "unverified");
+        assert!(
+            confidence < 1.0,
+            "form input is not verified; confidence={confidence}"
+        );
+        assert_eq!(source.as_deref(), Some("marketing-sales-form"));
+
+        let (company, domain): (String, String) =
+            sqlx::query_as("SELECT company, domain FROM sales_accounts WHERE id = $1")
+                .bind(account_id.unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("form account");
+        assert_eq!(company, "Acme GmbH");
+        assert_eq!(domain, domain_email);
+
+        let contact_account: uuid::Uuid =
+            sqlx::query_scalar("SELECT account_id FROM sales_contacts WHERE id = $1")
+                .bind(contact_id.unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("form contact");
+        assert_eq!(Some(contact_account), account_id);
+
+        // Cleanup (child → parent).
+        sqlx::query("DELETE FROM sales_leads WHERE id = $1")
+            .bind(&lead_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_contact_points WHERE contact_id = $1")
+            .bind(contact_id.unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_contacts WHERE id = $1")
+            .bind(contact_id.unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_accounts WHERE id = $1")
+            .bind(account_id.unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

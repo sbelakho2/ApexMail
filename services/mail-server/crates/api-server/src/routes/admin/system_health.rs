@@ -199,6 +199,12 @@ async fn system_health(
 
     // ── IP pool addresses (rows of ip_pool_addresses) ──────────
     // These are sending IP ADDRESSES, not MTA processes/nodes.
+    // `ip_pool_addresses.ip_address` is INET (migration 093:395): decoding
+    // it directly into a Rust `String` fails on a real database, so the
+    // host form is selected. `daily_limit` is INTEGER (093:399) and must be
+    // widened to BIGINT for the `Option<i64>` field. `ORDER BY ip_address`
+    // stays on the raw INET column so ordering keeps its natural (address)
+    // semantics.
     let ip_rows = optional_relation_rows(
         sqlx::query_as::<
             _,
@@ -211,8 +217,8 @@ async fn system_health(
                 Option<i64>,
             ),
         >(
-            "SELECT id::text, ip_address, pool_id::text, status,
-                    warmup_day, daily_limit
+            "SELECT id::text, host(ip_address) AS ip_address, pool_id::text, status,
+                    warmup_day, daily_limit::bigint AS daily_limit
              FROM ip_pool_addresses ORDER BY ip_address LIMIT 50",
         )
         .fetch_all(&state.db)
@@ -323,5 +329,62 @@ mod tests {
         let json = serde_json::to_string(&address).expect("serialize ip pool address");
         assert!(json.contains("ipAddress"));
         assert!(!json.contains("mtaNode"));
+    }
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("test-static-key".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// Item 24: `ip_pool_addresses.ip_address` is INET (migration 093:395).
+    /// Selecting it directly into a Rust `String` fails to decode on a real
+    /// database; the handler must select `host(ip_address)` and the API must
+    /// return the dotted-quad text.
+    #[tokio::test]
+    async fn ip_pool_inet_column_serializes_as_dotted_quad() {
+        let Some(pool) = crate::test_db::canonical_pool("system_health_inet").await else {
+            return;
+        };
+
+        // Insert a real INET value; a direct String decode of this column is
+        // exactly what used to fail.
+        sqlx::query(
+            "INSERT INTO ip_pool_addresses (id, pool_id, ip_address, status, warmup_day, daily_limit)
+             VALUES (gen_random_uuid(), $1, $2::inet, 'active', 0, 0)
+             ON CONFLICT (ip_address) DO NOTHING",
+        )
+        .bind("health-inet-test-pool")
+        .bind("192.0.2.25")
+        .execute(&pool)
+        .await
+        .expect("seed an INET ip_pool_addresses row");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let response = system_health(State(state), admin_auth())
+            .await
+            .expect("system health must decode INET addresses");
+        let body = serde_json::to_value(&response.0).expect("serialize system health");
+
+        let addresses = body["ipPoolAddresses"]
+            .as_array()
+            .expect("ipPoolAddresses is an array");
+        let entry = addresses
+            .iter()
+            .find(|row| row["ipAddress"] == "192.0.2.25")
+            .expect("the seeded address is present in the response");
+        assert_eq!(
+            entry["ipAddress"], "192.0.2.25",
+            "an INET address must serialize in host (dotted-quad) form"
+        );
+
+        let _ = sqlx::query("DELETE FROM ip_pool_addresses WHERE ip_address = $1::inet")
+            .bind("192.0.2.25")
+            .execute(&pool)
+            .await;
     }
 }

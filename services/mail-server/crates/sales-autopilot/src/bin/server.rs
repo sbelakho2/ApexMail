@@ -12,6 +12,9 @@ use sales_autopilot::{
     dispatcher::{BillingQuotaGateway, ProductionCampaignDispatcher},
     enrichment::{EnrichmentService, HttpEnrichmentProvider},
     inbox::InboxManager,
+    intelligence,
+    knowledge::SalesKnowledgeBase,
+    personalization::MessageStrategist,
     routes::{self, AppState},
 };
 use tracing_subscriber::EnvFilter;
@@ -127,20 +130,31 @@ async fn main() -> anyhow::Result<()> {
     let dispatcher_for_worker = dispatcher.clone();
     let worker_db = db.clone();
 
-    let mut campaigns = CampaignManager::new(cfg.max_campaigns, db.clone())
-        .with_dispatch_batch_size(cfg.dispatch.dispatch_batch_size);
-    if let Some(ref d) = dispatcher {
-        campaigns = campaigns.with_email_dispatcher(
-            d.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>
-        );
-    }
+    // The campaign manager is a compatibility planner only: `start_campaign`
+    // adapts legacy campaign recipients into canonical contacts/sequence
+    // enrollments. It owns no dispatcher and has no send path of its own.
+    let campaigns = CampaignManager::new(cfg.max_campaigns, db.clone());
+
+    // ── §12/§13 intelligence + strategist ─────────────────────────────
+    // The live sequence planner owns the evidence-grounded stack: research,
+    // angle selection and next-action reasoning go through the configured AI
+    // provider (or the deterministic offline implementation when none is
+    // configured), and prose is composed and claim-validated against the
+    // canonical verified knowledge base. Constructed once and shared by the
+    // router state and the durable action worker.
+    let intelligence = intelligence::intelligence_from_env();
+    let strategist = Arc::new(MessageStrategist::new(
+        db.clone(),
+        SalesKnowledgeBase::canonical(),
+    ));
+    let enrichment = EnrichmentService::new(Arc::new(HttpEnrichmentProvider::new(
+        &cfg.enrichment_api_url,
+        &cfg.enrichment_api_key,
+    )));
 
     let state = AppState {
         config: cfg.clone(),
-        enrichment: EnrichmentService::new(Arc::new(HttpEnrichmentProvider::new(
-            &cfg.enrichment_api_url,
-            &cfg.enrichment_api_key,
-        ))),
+        enrichment: enrichment.clone(),
         campaigns,
         dispatcher: dispatcher.clone(),
         calendar: CalendarService::new(db.clone()),
@@ -148,6 +162,8 @@ async fn main() -> anyhow::Result<()> {
         crm,
         redis,
         db,
+        intelligence: intelligence.clone(),
+        strategist: strategist.clone(),
         service_token: {
             let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
             if token.is_empty() {
@@ -163,11 +179,11 @@ async fn main() -> anyhow::Result<()> {
         )),
     };
 
-    // Campaign dispatch scheduler: send due campaign batches every N seconds
-    // (jittered), bounded per campaign and concurrency-bounded across
-    // campaigns. Only runs when the production dispatcher is configured.
-    // (Captured BEFORE `state` is moved into the router.)
-    let scheduler_manager = dispatcher.as_ref().map(|_| state.campaigns.clone());
+    // The legacy campaign dispatch scheduler is GONE. There is no second send
+    // loop: campaign mail is materialized into canonical enrollments by
+    // `CampaignManager::start_campaign` and executed by the durable action
+    // worker below (single send path, Decision Packet + legal + sender-health
+    // + action fence applied). Do not re-add a campaign dispatch task here.
 
     let app = routes::router(state);
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -207,72 +223,79 @@ async fn main() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(());
     });
 
-    if let Some(dispatcher) = dispatcher {
-        if let Some(manager) = scheduler_manager {
-            let mut scheduler_shutdown = shutdown_rx.clone();
-            let interval = cfg.dispatch.dispatch_interval_secs;
-            let batch = cfg.dispatch.dispatch_batch_size;
-            let concurrency = cfg.dispatch.dispatch_concurrency;
-            tokio::spawn(async move {
-                sales_autopilot::scheduler::run(
-                    manager,
-                    dispatcher,
-                    interval,
-                    batch,
-                    concurrency,
-                    async move {
-                        let _ = scheduler_shutdown.changed().await;
-                    },
-                )
-                .await;
-            });
-        }
-    }
-
     // ── Durable sequence action worker ────────────────────────────────
     // The canonical execution loop: claim `sales_actions` rows with
     // FOR UPDATE SKIP LOCKED, run them through the sequence step handler, and
     // report an outcome. Any number of replicas may run this concurrently.
     //
-    // Requires the production dispatcher: without it there is no send path, so
-    // the worker is not started and the queue is left for a correctly
-    // configured deployment (a half-wired worker would dead-letter everything).
-    {
-        let needs_dispatcher = dispatcher_for_worker.is_some();
-        let queue = sales_autopilot::actions::ActionQueue::new(
-            worker_db.clone(),
-            format!("sales-worker-{}", std::process::id()),
-        );
-        let handler: std::sync::Arc<dyn sales_autopilot::actions::ActionHandler> =
-            match dispatcher_for_worker {
-                Some(dispatcher) => {
-                    std::sync::Arc::new(sales_autopilot::sequence_worker::SequenceStepHandler::new(
+    // The worker REQUIRES the production dispatcher. Starting it without one
+    // would mean claiming real work and then having nothing to send it with,
+    // so every claimed action would burn its attempt budget and dead-letter —
+    // visible as data loss even though the queue itself was healthy. Without a
+    // dispatcher the queue is left completely untouched and this is stated
+    // loudly, both here and on the readiness surface.
+    match dispatcher_for_worker {
+        Some(dispatcher) => {
+            let queue =
+                sales_autopilot::actions::ActionQueue::new(worker_db.clone(), unique_worker_id());
+            let handler: std::sync::Arc<dyn sales_autopilot::actions::ActionHandler> =
+                std::sync::Arc::new(
+                    sales_autopilot::sequence_worker::SequenceStepHandler::with_stack(
                         worker_db.clone(),
                         dispatcher,
-                    ))
-                }
-                None => std::sync::Arc::new(sales_autopilot::actions::UnhandledActionHandler),
-            };
+                        intelligence,
+                        strategist,
+                    )
+                    .with_enrichment(enrichment),
+                );
 
-        if !needs_dispatcher {
+            let mut worker_shutdown = shutdown_rx.clone();
+            let interval = cfg.dispatch.dispatch_interval_secs.max(1);
+            tokio::spawn(async move {
+                sales_autopilot::actions::run(
+                    queue,
+                    handler,
+                    interval,
+                    ACTION_WORKER_CONCURRENCY,
+                    sales_autopilot::actions::DEFAULT_LEASE_SECS,
+                    async move {
+                        let _ = worker_shutdown.changed().await;
+                    },
+                )
+                .await;
+            });
+        }
+        None => {
             tracing::warn!(
-                "sales action worker starting WITHOUT a send handler — sequence actions will \
-                 dead-letter with a precise reason (set SALES_CAMPAIGN_FROM_EMAIL and \
-                 SALES_UNSUBSCRIBE_SECRET to enable sequence sending)"
+                "sales outbound action worker disabled: the production dispatcher is not \
+                 configured (set SALES_CAMPAIGN_FROM_EMAIL and SALES_UNSUBSCRIBE_SECRET). \
+                 Queued sales actions are left untouched so they are executed once a \
+                 dispatcher is provisioned, rather than being claimed and dead-lettered."
             );
         }
+    }
 
-        let mut worker_shutdown = shutdown_rx.clone();
+    // ── Sales feedback projector ──────────────────────────────────────
+    // Folds the two delivery ledgers into the learning loops: sender-health
+    // events into `sales_sender_health`, and production outcomes into the
+    // experiment posteriors. Runs unconditionally — unlike the send worker it
+    // has no dispatcher dependency, because it consumes events that were
+    // already produced by whatever sent (or refused to send) the mail.
+    {
+        let projector = sales_autopilot::outcome_projector::OutcomeProjector::new(
+            worker_db.clone(),
+            unique_worker_id(),
+        );
+        let mut projector_shutdown = shutdown_rx.clone();
         let interval = cfg.dispatch.dispatch_interval_secs.max(1);
         tokio::spawn(async move {
-            sales_autopilot::actions::run(
-                queue,
-                handler,
+            sales_autopilot::outcome_projector::run(
+                projector,
                 interval,
-                50,
+                OUTCOME_PROJECTOR_CONCURRENCY,
                 sales_autopilot::actions::DEFAULT_LEASE_SECS,
                 async move {
-                    let _ = worker_shutdown.changed().await;
+                    let _ = projector_shutdown.changed().await;
                 },
             )
             .await;
@@ -292,4 +315,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Maximum actions this process runs simultaneously.
+///
+/// Bounded so a burst cannot open an unbounded number of concurrent sends;
+/// the queue is claimed only up to the number of free slots.
+const ACTION_WORKER_CONCURRENCY: i64 = 8;
+
+/// Maximum feedback-projection batches in flight simultaneously.
+const OUTCOME_PROJECTOR_CONCURRENCY: i64 = 4;
+
+/// A worker identity that is unique per process across replicas.
+///
+/// The PID alone is not a valid replica identity — separate containers
+/// routinely share the same PID number — so the hostname and a random suffix
+/// are included. The lease token is what actually fences writes; this string
+/// only makes the owner column diagnosable.
+fn unique_worker_id() -> String {
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into());
+    format!("{}:{}:{}", host, std::process::id(), uuid::Uuid::new_v4())
 }

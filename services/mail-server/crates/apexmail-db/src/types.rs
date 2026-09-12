@@ -278,36 +278,23 @@ pub struct StatusPageIncidentUpdate {
     pub created_at: DateTime<Utc>,
 }
 
-// ─── ISP Warmup (two explicit models, F87) ──────────────────────
+// ─── ISP warmup catalog (ADVISORY DATA ONLY, F87/audit-26) ──────
 
-/// ISP warmup PROFILE (catalog row in `isp_warmup_templates`, migration
-/// 042): MX patterns plus the ordered daily-volume schedule a pool warmup
-/// is instantiated from. One row per ISP.
+/// ADVISORY catalog row in `isp_warmup_templates` (migration 042): example
+/// MX patterns plus an example daily-volume ramp for one ISP.
+///
+/// This is NOT an admission control and is NOT read by any send path. Warmup
+/// admission is the per-source-IP control in `worker-processors` (canonical
+/// `mail_common::warmup` cap + Redis key `apexmail:warmup:ip:{ip}:{day}`),
+/// and no live path resolves the recipient's provider/MX at admission time,
+/// so an ISP target cannot be applied. See `repos::warmup` for the full
+/// rationale before adding any consumer.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct IspWarmupProfile {
+pub struct IspWarmupTemplate {
     pub id: String,
     pub isp_name: String,
     pub mx_patterns: serde_json::Value,
     pub warmup_schedule: serde_json::Value,
-    pub notes: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Per-pool/day warmup EXECUTION row (`isp_warmup_schedules`, migration
-/// 042): one row per (pool_id, day) with target/actual volume and status.
-/// Deliberately carries NO profile columns — the ISP definition lives in
-/// [`IspWarmupProfile`].
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct IspWarmupExecution {
-    pub id: String,
-    pub pool_id: String,
-    pub day: i32,
-    pub target_volume: i64,
-    pub actual_volume: Option<i64>,
-    pub status: String,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
     pub notes: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -425,9 +412,12 @@ mod tests {
         assert_eq!(i.status, "investigating");
     }
 
+    /// The ISP warmup row is inert catalog payload: constructing it with
+    /// hostile values changes nothing because no production path reads it
+    /// (see `repos::warmup`). This pins the advisory shape.
     #[test]
-    fn test_isp_warmup_profile() {
-        let s = IspWarmupProfile {
+    fn test_isp_warmup_template_is_advisory_payload() {
+        let s = IspWarmupTemplate {
             id: "isp_test".into(),
             isp_name: "Gmail".into(),
             mx_patterns: serde_json::json!(["*.google.com"]),
@@ -437,6 +427,14 @@ mod tests {
             updated_at: Utc::now(),
         };
         assert_eq!(s.isp_name, "Gmail");
+        // Zero/negative schedule entries are storable as data and have no
+        // admission reader to fall back from — the canonical schedule is
+        // the only cap.
+        let hostile = IspWarmupTemplate {
+            warmup_schedule: serde_json::json!([0, -1]),
+            ..s
+        };
+        assert_eq!(hostile.warmup_schedule, serde_json::json!([0, -1]));
     }
 
     #[test]

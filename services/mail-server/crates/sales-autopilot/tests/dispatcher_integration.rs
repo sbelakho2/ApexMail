@@ -1,6 +1,39 @@
-//! Production dispatcher integration tests — aggressive, non-happy-path
-//! heavy. Run against a real Postgres (soft-skip without one); see
-//! `common/mod.rs` for the platform-schema bootstrap.
+//! Production dispatcher integration tests on the surviving sequence path.
+//!
+//! The second campaign send engine (`CampaignEmailDispatcher`,
+//! `CampaignManager::with_email_dispatcher`, `scheduler::process_campaign`,
+//! `due_recipients`) was deleted by the one-send-engine refactor. Every test
+//! below keeps its ORIGINAL subject matter but exercises it through the one
+//! path that exists:
+//!
+//! `sales_actions` (leased, fenced) → `SequenceStepHandler` →
+//! `decision_engine::decide` → `ProductionCampaignDispatcher::enqueue_sequenced`
+//! → `messages` + `email_queue`.
+//!
+//! Mapping notes:
+//! * the send ledger is now `sales_step_executions` (state `sent`/`skipped`)
+//!   plus the `messages` idempotency key
+//!   `sa:{enrollment}:{version}:{step}:{attempt_kind}:{variant}` — NOT the
+//!   campaign `sacmp:{campaign}:{recipient}` key;
+//! * "the scheduler completes the campaign" no longer exists
+//!   (`scheduler::run`/`tick`/`process_campaign` removed with the engine); the
+//!   surviving completion behaviour is enrollment advancement, asserted here;
+//! * "quota exhaustion pauses the campaign with an error state" no longer
+//!   exists either; the surviving contract is that `enqueue_sequenced`
+//!   reserves the same billing quota and refuses without an external effect,
+//!   and the action stays retryable (queue bookkeeping is covered by the
+//!   `src/actions.rs` tests, e.g. `expired_lease_is_recovered_by_another_worker`);
+//! * the campaign-stats reconciliation test was removed: `start_campaign` no
+//!   longer links messages to `sales_campaign_recipients`, and
+//!   `reconcile_campaign_stats`'s real coverage now lives in
+//!   `campaigns::tests::reconcile_sql_counts_sent_events_with_enqueue_fallback`
+//!   (pure, default) and
+//!   `campaigns::tests::reconcile_sent_counter_follows_events_or_falls_back`
+//!   (live, ignored).
+//!
+//! Run against a real Postgres (soft-skip without one; the live tests are
+//! `#[ignore]`d so the default crate run stays database-free); see
+//! `common/mod.rs` for the canonical bootstrap and the sequence fixture.
 
 mod common;
 
@@ -10,11 +43,14 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use sales_autopilot::campaigns::{CampaignEmailDispatcher, CampaignManager};
+use sales_autopilot::actions::{ActionOutcome, ActionQueue, LeasedAction};
+use sales_autopilot::campaigns::CampaignManager;
 use sales_autopilot::dispatcher::{
-    ProductionCampaignDispatcher, QuotaFuture, QuotaGateway, QuotaReservation,
+    send_idempotency_key, EnqueueOutcome, ProductionCampaignDispatcher, QuotaFuture, QuotaGateway,
+    QuotaReservation, RenderedMessage, SendIdentity,
 };
-use sales_autopilot::types::SalesError;
+use sales_autopilot::sender_pool;
+use sales_autopilot::types::{SalesError, SenderIdentity, SenderPool};
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -112,704 +148,983 @@ impl QuotaGateway for FakeQuotaGateway {
 // Fixture
 // ---------------------------------------------------------------------------
 
+/// A `ProductionCampaignDispatcher` bound to the canonical sequence fixture.
 struct Fixture {
     db: PgPool,
     tenant_id: String,
-    /// The per-fixture verified sender domain (globally unique in canonical
-    /// `domains`); rebuilt dispatchers must keep sending from it.
-    domain: String,
-    manager: CampaignManager,
+    seq: common::SequenceFixture,
     dispatcher: Arc<ProductionCampaignDispatcher>,
     quota: Arc<FakeQuotaGateway>,
 }
 
-async fn fixture(test_name: &str) -> Option<Fixture> {
+impl Fixture {
+    /// Rebuild the dispatcher around a different quota gateway (the tests that
+    /// exercise quota accounting replace it mid-test, exactly like the old
+    /// suite did).
+    fn set_quota(&mut self, quota: Arc<FakeQuotaGateway>) {
+        self.quota = quota;
+        self.dispatcher = Arc::new(
+            ProductionCampaignDispatcher::new(
+                common::test_dispatch_config_for(&self.seq.domain),
+                self.db.clone(),
+                self.quota.clone() as Arc<dyn QuotaGateway>,
+            )
+            .expect("test dispatch config must be valid"),
+        );
+    }
+}
+
+async fn fixture(test_name: &str, opts: common::SequenceFixtureOptions) -> Option<Fixture> {
     let db = common::test_pool(test_name).await?;
     let tenant_id = common::insert_test_tenant(&db, test_name).await;
-    // Per-fixture domain: canonical domains.name is GLOBALLY unique and this
-    // suite's tests share one database, so each fixture claims its own.
-    let domain = common::unique_test_domain();
-    common::insert_verified_domain(&db, &tenant_id, &domain).await;
-
+    let seq = common::seed_sequence_fixture(&db, &tenant_id, opts).await;
     let quota = Arc::new(FakeQuotaGateway::new());
     let dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
-            common::test_dispatch_config_for(&domain),
+            common::test_dispatch_config_for(&seq.domain),
             db.clone(),
             quota.clone() as Arc<dyn QuotaGateway>,
         )
         .expect("test dispatch config must be valid"),
     );
-    let manager = CampaignManager::new(50, db.clone()).with_email_dispatcher(
-        dispatcher.clone() as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>
-    );
     Some(Fixture {
         db,
         tenant_id,
-        domain,
-        manager,
+        seq,
         dispatcher,
         quota,
     })
 }
 
-async fn make_campaign(
-    fx: &Fixture,
-    template_subject: &str,
-    template_html: &str,
-    recipients: &[&str],
-) -> Uuid {
-    let template_id = common::insert_template(
-        &fx.db,
-        &fx.tenant_id,
-        template_subject,
-        template_html,
-        Some("Hello {{name}}, plain text."),
-    )
-    .await;
-    let campaign = fx
-        .manager
-        .create_campaign(
-            fx.tenant_id.clone(),
-            "Integration wave".into(),
-            template_id,
-            String::new(),
-        )
-        .await
-        .unwrap();
-    fx.manager
-        .add_recipients(
-            &fx.tenant_id,
-            campaign.id,
-            recipients.iter().map(|s| s.to_string()).collect(),
-        )
-        .await
-        .unwrap();
-    campaign.id
+fn fixture_options() -> common::SequenceFixtureOptions {
+    common::SequenceFixtureOptions::default()
 }
 
-async fn queue_rows_for_campaign(
+/// The expected logical send identity of the fixture's first step.
+fn fixture_key(fx: &Fixture) -> String {
+    send_idempotency_key(SendIdentity::StepExecution {
+        enrollment_id: fx.seq.enrollment_id.expect("fixture enrolls"),
+        sequence_version_id: fx.seq.version_id,
+        step_id: fx.seq.step_id,
+        attempt_kind: "primary",
+        variant: "default",
+    })
+}
+
+fn rendered() -> RenderedMessage {
+    RenderedMessage {
+        subject: "fixture subject".into(),
+        html: Some("<p>fixture html</p>".into()),
+        text: Some("fixture text".into()),
+    }
+}
+
+async fn step_state(db: &PgPool, step_execution_id: Uuid) -> (String, Option<String>) {
+    sqlx::query_as("SELECT state, skip_reason FROM sales_step_executions WHERE id = $1")
+        .bind(step_execution_id)
+        .fetch_one(db)
+        .await
+        .expect("read step execution")
+}
+
+async fn message_count_for_step(db: &PgPool, step_execution_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE sales_step_execution_id = $1")
+        .bind(step_execution_id)
+        .fetch_one(db)
+        .await
+        .expect("count messages")
+}
+
+async fn queue_count_for_step(db: &PgPool, step_execution_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE sales_step_execution_id = $1")
+        .bind(step_execution_id)
+        .fetch_one(db)
+        .await
+        .expect("count queue rows")
+}
+
+/// Enqueue and claim the step's production action; resolve the sender the
+/// sequence worker would use. Returns the live lease and the identity.
+async fn live_fence(
     db: &PgPool,
-    campaign_id: Uuid,
-) -> Vec<(String, String, Option<String>)> {
-    sqlx::query_as(
-        r#"SELECT "to", status, headers->>'List-Unsubscribe' FROM email_queue
-           WHERE metadata->>'campaign_id' = $1 ORDER BY "to""#,
-    )
-    .bind(campaign_id.to_string())
-    .fetch_all(db)
-    .await
-    .unwrap()
+    tenant_id: &str,
+    step_execution_id: Uuid,
+) -> (LeasedAction, SenderIdentity) {
+    let action = common::enqueue_send_step_action(db, tenant_id, step_execution_id).await;
+    let worker = format!("dispatcher-test-{}", Uuid::new_v4().simple());
+    let leased = common::claim_specific_action(db, &worker, action.id)
+        .await
+        .expect("the just-enqueued action must be claimable");
+    let sender = sender_pool::resolve_sales_sender(db, tenant_id, SenderPool::SalesOutbound)
+        .await
+        .expect("fixture sender identity resolves");
+    (leased, sender)
+}
+
+async fn finish_leased(db: &PgPool, leased: &LeasedAction, outcome: ActionOutcome) {
+    let queue = ActionQueue::new(db.clone(), leased.lease_owner.clone());
+    assert!(
+        queue
+            .finish(&leased.fence(), outcome)
+            .await
+            .expect("finish action"),
+        "the worker must still own its live lease"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_step(
+    fx: &Fixture,
+    key: &str,
+    step_execution_id: Uuid,
+    enrollment_id: Uuid,
+    leased: &LeasedAction,
+    sender: &SenderIdentity,
+) -> Result<EnqueueOutcome, SalesError> {
+    // The typed provenance FK (`fk_messages_sales_decision`, migration 202
+    // line 46) requires a real Decision Packet row.
+    let decision_id = common::insert_fixture_decision(&fx.db, &fx.tenant_id).await;
+    fx.dispatcher
+        .enqueue_sequenced(
+            &fx.tenant_id,
+            key,
+            &rendered(),
+            &fx.seq.email,
+            "https://sales.example.com/u/fixture-token",
+            sender,
+            decision_id,
+            step_execution_id,
+            enrollment_id,
+            &leased.fence(),
+            serde_json::json!({ "enrollment_id": enrollment_id.to_string() }),
+        )
+        .await
 }
 
 // ---------------------------------------------------------------------------
 // Happy path: real enqueue through the platform pipeline
 // ---------------------------------------------------------------------------
 
+/// The dispatcher's real job is unchanged: enqueue through the platform
+/// pipeline with List-Unsubscribe headers, escaped personalization, the
+/// compliance footer, typed sales provenance — but the envelope sender is now
+/// the RESOLVED sender identity, never the deployment-wide
+/// `SALES_CAMPAIGN_FROM_EMAIL` (the defect the sequence path exists to fix).
 #[tokio::test]
-async fn dispatcher_enqueues_into_platform_pipeline() {
-    let Some(fx) = fixture("dispatch_enqueues").await else {
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
+    // The identity sends from a SECOND verified domain, distinct from the
+    // dispatcher config's deployment-wide sender.
+    let identity_domain = common::unique_test_domain();
+    let Some(fx) = fixture(
+        "sequence_pipeline",
+        fixture_options().with_identity_domain(identity_domain.clone()),
+    )
+    .await
+    else {
         return;
     };
-    let campaign_id = make_campaign(
-        &fx,
-        "Hi {{first_name}} from {{company}}",
-        "<html><body><p>Hello {{first_name}}, meet {{company}}!</p><a href=\"https://example.com/x\">x</a></body></html>",
-        &["alice@example.com", "bob@example.com"],
-    )
-    .await;
+    let db = fx.db.clone();
+    let tenant = fx.tenant_id.clone();
+    let seq = fx.seq.clone();
+    let step_execution_id = seq.step_execution_id.expect("fixture enrolls");
+    let enrollment_id = seq.enrollment_id.expect("fixture enrolls");
 
-    // CRM lead profile for alice with hostile personalization data.
-    // (`domain` is NOT NULL in the platform sales_leads schema.)
-    sqlx::query(
-        "INSERT INTO sales_leads (id, tenant_id, domain, contact_email, contact_name, company_name, title) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind("lead-alice")
-    .bind(&fx.tenant_id)
-    .bind("example.com")
-    .bind("alice@example.com")
-    .bind("<script>alert('xss')</script>")
-    .bind("ACME & Sons")
-    .bind("CTO")
-    .execute(&fx.db)
-    .await
-    .unwrap();
-
-    fx.manager
-        .start_campaign(&fx.tenant_id, campaign_id)
+    // Hostile personalization data on the canonical contact/account.
+    sqlx::query("UPDATE sales_contacts SET full_name = $2 WHERE id = $1")
+        .bind(seq.contact_id)
+        .bind("<script>alert('xss')</script>")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sales_accounts SET company = $2 WHERE id = $1")
+        .bind(seq.account_id)
+        .bind("ACME & Sons")
+        .execute(&db)
         .await
         .unwrap();
 
-    // `messages` audit rows exist with campaign idempotency keys.
-    let message_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT idempotency_key, status FROM messages \
-         WHERE tenant_id = $1 AND idempotency_key LIKE $2 ORDER BY idempotency_key",
-    )
-    .bind(&fx.tenant_id)
-    .bind(format!("sacmp:{campaign_id}:%"))
-    .fetch_all(&fx.db)
-    .await
-    .unwrap();
-    assert_eq!(message_rows.len(), 2, "one messages row per recipient");
-    assert!(message_rows
-        .iter()
-        .all(|(k, _)| k.starts_with(&format!("sacmp:{campaign_id}:"))));
-    assert!(message_rows.iter().all(|(_, s)| s == "queued"));
-
-    // `email_queue` rows: pending, single-recipient, List-Unsubscribe header.
-    let queue = queue_rows_for_campaign(&fx.db, campaign_id).await;
-    assert_eq!(queue.len(), 2);
-    for (to, status, list_unsub) in &queue {
-        assert_eq!(status, "pending", "queue row for {to} must start pending");
-        let link = list_unsub
-            .as_ref()
-            .expect("List-Unsubscribe header present");
-        assert!(
-            link.starts_with('<') && link.ends_with('>'),
-            "RFC 2369 angle form: {link}"
-        );
-        assert!(
-            link.contains("/u/"),
-            "link points at the unsubscribe endpoint: {link}"
-        );
-    }
-
-    // List-Unsubscribe-Post one-click header.
-    let post_headers: Vec<(String,)> = sqlx::query_as(
-        "SELECT headers->>'List-Unsubscribe-Post' FROM email_queue \
-         WHERE metadata->>'campaign_id' = $1",
-    )
-    .bind(campaign_id.to_string())
-    .fetch_all(&fx.db)
-    .await
-    .unwrap();
-    assert!(post_headers
-        .iter()
-        .all(|(v,)| v == "List-Unsubscribe=One-Click"));
-
-    // Personalization: alice's lead name is HTML-ESCAPED in subject + html.
-    let alice_html: (String,) = sqlx::query_as(
-        "SELECT html FROM email_queue WHERE metadata->>'campaign_id' = $1 AND \"to\" = 'alice@example.com'",
-    )
-    .bind(campaign_id.to_string())
-    .fetch_one(&fx.db)
-    .await
-    .unwrap();
+    let outcome =
+        common::run_send_step(&db, fx.dispatcher.clone(), &tenant, step_execution_id).await;
     assert!(
-        alice_html
-            .0
-            .contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"),
-        "lead name must be HTML-escaped: {}",
-        alice_html.0
+        matches!(outcome, ActionOutcome::Succeeded),
+        "fixture must send: {outcome:?}"
+    );
+
+    // `messages`: one row, the canonical step-execution idempotency key (NOT
+    // `sacmp:...`), status queued, envelope = resolved identity.
+    let messages: Vec<(
+        String,
+        String,
+        String,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT idempotency_key, status, from_email, sales_step_execution_id, \
+                sales_enrollment_id, sales_decision_id, sales_sender_identity_id, \
+                to_emails->>0 \
+         FROM messages WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(messages.len(), 1, "one messages row per step execution");
+    let (key, status, from_email, msg_step, msg_enrollment, msg_decision, msg_sender, recipient) =
+        &messages[0];
+    assert_eq!(key, &fixture_key(&fx), "logical step identity");
+    assert!(
+        key.starts_with(&format!(
+            "sa:{enrollment_id}:{version}:",
+            version = seq.version_id
+        )),
+        "key namespace is the step execution: {key}"
+    );
+    assert_eq!(status, "queued");
+    assert_eq!(
+        from_email,
+        &format!("sales@{identity_domain}"),
+        "the RESOLVED identity must be the envelope sender"
+    );
+    assert_ne!(
+        from_email,
+        &fx.dispatcher.config().from_email,
+        "the deployment-wide SALES_CAMPAIGN_FROM_EMAIL must not be the sender"
+    );
+    assert_eq!(msg_step, &Some(step_execution_id));
+    assert_eq!(msg_enrollment, &Some(enrollment_id));
+    assert!(msg_decision.is_some(), "a Decision Packet must be linked");
+    assert_eq!(msg_sender, &seq.sender_id);
+    assert_eq!(recipient.as_deref(), Some(seq.email.as_str()));
+
+    // The Decision Packet records the enforcement verdict and the sender used.
+    let (enforcement, selected_sender): (Option<String>, Option<Uuid>) =
+        sqlx::query_as("SELECT enforcement, selected_sender_id FROM sales_decisions WHERE id = $1")
+            .bind(msg_decision.unwrap())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(enforcement.as_deref(), Some("execute"));
+    assert_eq!(selected_sender, seq.sender_id);
+
+    // `email_queue`: pending, single recipient, RFC 2369 + RFC 8058 headers,
+    // typed provenance, campaign_id NULL (sequence mail is attributed to a
+    // step execution, not a campaign).
+    let queue: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+    )> = sqlx::query_as(
+        "SELECT \"to\", status, headers->>'List-Unsubscribe', \
+                headers->>'List-Unsubscribe-Post', sales_step_execution_id, \
+                sales_enrollment_id, sales_decision_id, campaign_id \
+         FROM email_queue WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(queue.len(), 1);
+    let (to, q_status, list_unsub, post, q_step, q_enrollment, q_decision, campaign_id) = &queue[0];
+    assert_eq!(to, &seq.email);
+    assert_eq!(q_status, "pending");
+    let link = list_unsub
+        .as_ref()
+        .expect("List-Unsubscribe header present");
+    assert!(
+        link.starts_with('<') && link.ends_with('>'),
+        "RFC 2369 angle form: {link}"
     );
     assert!(
-        !alice_html.0.contains("<script>alert"),
+        link.contains("/u/"),
+        "points at the unsubscribe endpoint: {link}"
+    );
+    assert_eq!(post.as_deref(), Some("List-Unsubscribe=One-Click"));
+    assert_eq!(q_step, &Some(step_execution_id));
+    assert_eq!(q_enrollment, &Some(enrollment_id));
+    assert_eq!(q_decision, msg_decision);
+    assert_eq!(campaign_id, &None);
+
+    // Personalization is HTML-escaped in subject + html; the compliance footer
+    // rides along.
+    let (subject, html): (String, Option<String>) = sqlx::query_as(
+        "SELECT subject, html_body FROM messages WHERE idempotency_key = $1 AND tenant_id = $2",
+    )
+    .bind(key)
+    .bind(&tenant)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    let html = html.expect("html part");
+    assert!(
+        html.contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"),
+        "contact name must be HTML-escaped: {html}"
+    );
+    assert!(
+        !html.contains("<script>alert"),
         "raw script must never appear"
     );
     assert!(
-        alice_html.0.contains("ACME &amp; Sons"),
+        html.contains("ACME &amp; Sons"),
         "company ampersand escaped"
     );
-    // CAN-SPAM footer with working unsubscribe link.
-    assert!(alice_html.0.contains("Unsubscribe</a>"));
-
-    let alice_subject: (String,) = sqlx::query_as(
-        "SELECT subject FROM email_queue WHERE metadata->>'campaign_id' = $1 AND \"to\" = 'alice@example.com'",
-    )
-    .bind(campaign_id.to_string())
-    .fetch_one(&fx.db)
-    .await
-    .unwrap();
+    assert!(html.contains("Unsubscribe</a>"), "footer unsubscribe link");
     assert!(
-        alice_subject.0.contains("&lt;script&gt;"),
-        "subject is escaped too: {}",
-        alice_subject.0
+        subject.contains("&lt;script&gt;"),
+        "subject is escaped too: {subject}"
     );
 
-    // Send ledger stamped + linked to the messages rows; campaign counter advanced.
-    let ledger: Vec<(String, Option<Uuid>)> = sqlx::query_as(
-        "SELECT email, message_id FROM sales_campaign_recipients \
-         WHERE campaign_id = $1 ORDER BY email",
-    )
-    .bind(campaign_id)
-    .fetch_all(&fx.db)
-    .await
-    .unwrap();
-    assert_eq!(ledger.len(), 2);
-    assert!(
-        ledger.iter().all(|(_, m)| m.is_some()),
-        "message_id recorded per recipient"
-    );
-
-    let sent: (i64,) = sqlx::query_as("SELECT sent FROM sales_campaigns WHERE id = $1")
-        .bind(campaign_id)
-        .fetch_one(&fx.db)
-        .await
-        .unwrap();
+    // The send ledger is the step execution; the enrollment advanced to
+    // completion (single-step sequence).
+    let (state, _) = step_state(&db, step_execution_id).await;
+    assert_eq!(state, "sent");
+    let enrollment_state: String =
+        sqlx::query_scalar("SELECT state FROM sales_enrollments WHERE id = $1")
+            .bind(enrollment_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
     assert_eq!(
-        sent.0, 2,
-        "campaign sent counter advanced inside the enqueue tx"
+        enrollment_state, "completed",
+        "the last step completes the enrollment"
     );
+
+    common::cleanup_tenant(&db, &tenant).await;
 }
 
 // ---------------------------------------------------------------------------
-// Non-happy-path: suppression (platform table), the way messages.rs reads it
+// Non-happy-path: suppression
 // ---------------------------------------------------------------------------
 
+/// A platform suppression (the table the delivery worker writes hard bounces
+/// and complaints into) recorded after the recipient was selected must stop
+/// the send at the Decision Packet.
 #[tokio::test]
-async fn platform_suppressions_exclude_recipients() {
-    let Some(fx) = fixture("platform_suppressions").await else {
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn platform_suppression_after_selection_blocks_the_send() {
+    let Some(fx) = fixture("sequence_suppression", fixture_options()).await else {
         return;
     };
-    let campaign_id = make_campaign(
-        &fx,
-        "s",
-        "<p>x</p>",
-        &["keep@example.com", "bounced@example.com"],
-    )
-    .await;
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
 
-    // Hard bounce recorded by the platform worker into `suppressions`
-    // (NOT the crate-local sales_unsubscribes — that path is covered by
-    // can_spam.rs; this proves the poll of the PLATFORM table works).
     sqlx::query(
         "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) \
          VALUES ($1, $2, $3, 'hard_bounce', 'worker', NOW())",
     )
     .bind(apexmail_lib::id::generate_id("sup", 22))
     .bind(&fx.tenant_id)
-    .bind("bounced@example.com")
+    .bind(&fx.seq.email)
     .execute(&fx.db)
     .await
     .unwrap();
 
-    fx.manager
-        .start_campaign(&fx.tenant_id, campaign_id)
-        .await
-        .unwrap();
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(
+        matches!(outcome, ActionOutcome::Succeeded),
+        "a denial is a recorded skip, not a retry: {outcome:?}"
+    );
+    let (state, skip_reason) = step_state(&fx.db, step_execution_id).await;
+    assert_eq!(state, "skipped");
+    assert!(
+        skip_reason.as_deref().unwrap_or("").contains("suppressed"),
+        "the refusal must name the suppression: {skip_reason:?}"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
 
-    let queue = queue_rows_for_campaign(&fx.db, campaign_id).await;
-    assert_eq!(queue.len(), 1, "suppressed recipient excluded: {queue:?}");
-    assert_eq!(queue[0].0, "keep@example.com");
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
+}
+
+/// Suppression is tenant-scoped: another tenant's opt-out row for the SAME
+/// address must not refuse this tenant's send. (The old suite asserted tenant
+/// isolation on the campaign and inbox paths; this pins it on the send gate.)
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn suppression_is_tenant_scoped_for_the_send_recheck() {
+    let Some(fx) = fixture("sequence_tenant_scope", fixture_options()).await else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let other_tenant = common::insert_test_tenant(&fx.db, "sequence-other").await;
+
+    sqlx::query(
+        "INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, lower($2)) \
+         ON CONFLICT (tenant_id, email) DO NOTHING",
+    )
+    .bind(&other_tenant)
+    .bind(&fx.seq.email)
+    .execute(&fx.db)
+    .await
+    .unwrap();
+
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+    let (state, _) = step_state(&fx.db, step_execution_id).await;
+    assert_eq!(
+        state, "sent",
+        "another tenant's row must not block this send"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
+
+    common::cleanup_tenant(&fx.db, &other_tenant).await;
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
+}
+
+/// The dispatcher's transactional pre-send recheck (the old
+/// `enqueue_recipient` behaviour): a suppression that lands between the
+/// decision and the enqueue is still honoured, nothing is written, and the
+/// quota reservation is released.
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn suppression_landing_between_decision_and_enqueue_is_refused() {
+    let Some(fx) = fixture("sequence_suppression_race", fixture_options()).await else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let enrollment_id = fx.seq.enrollment_id.expect("fixture enrolls");
+    let key = fixture_key(&fx);
+    let (leased, sender) = live_fence(&fx.db, &fx.tenant_id, step_execution_id).await;
+
+    // Suppression lands AFTER the action was claimed/decided but BEFORE the
+    // enqueue transaction.
+    sqlx::query(
+        "INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, lower($2)) \
+         ON CONFLICT (tenant_id, email) DO NOTHING",
+    )
+    .bind(&fx.tenant_id)
+    .bind(&fx.seq.email)
+    .execute(&fx.db)
+    .await
+    .unwrap();
+
+    let outcome = enqueue_step(
+        &fx,
+        &key,
+        step_execution_id,
+        enrollment_id,
+        &leased,
+        &sender,
+    )
+    .await;
+    assert_eq!(
+        outcome.expect("the recheck is a graceful refusal, not an error"),
+        EnqueueOutcome::AlreadyClaimed,
+        "the in-transaction recheck must refuse the suppressed recipient"
+    );
+    assert!(fx.quota.rollbacks() >= 1, "no quota may leak on a refusal");
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
+    finish_leased(&fx.db, &leased, ActionOutcome::Succeeded).await;
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
 
 // ---------------------------------------------------------------------------
 // Non-happy-path: crash-restart idempotency (never double-send)
 // ---------------------------------------------------------------------------
 
+/// Crash/restart must never double-send. Two layers are asserted:
+/// 1. a crashed worker that left the step in `executing` cannot enqueue again
+///    when its action is replayed (the step-claim guard);
+/// 2. replaying the same logical step execution through the dispatcher hits
+///    the idempotency key and is a no-op that releases its reservation;
+/// 3. a DIFFERENT step for the same recipient is a different logical send and
+///    does produce a second message — the regression the key change exists
+///    for.
 #[tokio::test]
-async fn crash_restart_does_not_double_send() {
-    let Some(fx) = fixture("crash_restart").await else {
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
+    let Some(fx) = fixture("sequence_crash_replay", fixture_options()).await else {
         return;
     };
-    let campaign_id = make_campaign(&fx, "s", "<p>x</p>", &["victim@example.com"]).await;
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let enrollment_id = fx.seq.enrollment_id.expect("fixture enrolls");
+    let template_id = fx.seq.template_id.clone().expect("fixture template");
+    let key = fixture_key(&fx);
 
-    // First dispatch succeeds.
-    fx.manager
-        .start_campaign(&fx.tenant_id, campaign_id)
+    // First send succeeds.
+    let first = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(matches!(first, ActionOutcome::Succeeded), "{first:?}");
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
+
+    // Crash window: the worker enqueued, then died before stamping the step
+    // and advancing the enrollment.
+    sqlx::query("UPDATE sales_step_executions SET state = 'executing' WHERE id = $1")
+        .bind(step_execution_id)
+        .execute(&fx.db)
         .await
         .unwrap();
-    assert_eq!(queue_rows_for_campaign(&fx.db, campaign_id).await.len(), 1);
-
-    // Simulate a crash between the ledger write and enqueue of an OLDER
-    // code path: the messages row survived with the idempotency key, but the
-    // ledger stamp was lost (sent_at reset).
+    sqlx::query("UPDATE sales_enrollments SET state = 'active', completed_at = NULL WHERE id = $1")
+        .bind(enrollment_id)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+    // Recovery requeues the action (what lease expiry does).
     sqlx::query(
-        "UPDATE sales_campaign_recipients SET sent_at = NULL, message_id = NULL \
-         WHERE campaign_id = $1 AND email = 'victim@example.com'",
+        "UPDATE sales_actions SET state = 'queued', due_at = NOW(), lease_owner = NULL, \
+                lease_token = NULL, lease_expires_at = NULL, completed_at = NULL \
+         WHERE entity_type = 'step_execution' AND entity_id = $1",
     )
-    .bind(campaign_id)
+    .bind(step_execution_id)
     .execute(&fx.db)
     .await
     .unwrap();
 
-    // "Restart": the scheduler picks the recipient up again and dispatches.
-    let enqueued = fx
-        .dispatcher
-        .dispatch_batch(
-            &fx.tenant_id,
-            campaign_id,
-            &fetch_template_id(&fx, campaign_id).await,
-            &fx.manager
-                .due_recipients(&fx.tenant_id, campaign_id, 100)
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    // The idempotency key must prevent the double-send: nothing NEW enqueued.
-    assert_eq!(enqueued, 0, "duplicate must not enqueue a second time");
-    // The duplicate path still RESERVED quota (before the conflict was
-    // detected) and released it afterwards — no quota leak.
+    let replay = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
     assert!(
-        fx.quota.rollbacks() >= 1,
-        "duplicate path must release its reservation"
+        matches!(replay, ActionOutcome::Succeeded),
+        "an in-flight step must not enqueue again: {replay:?}"
     );
     assert_eq!(
-        queue_rows_for_campaign(&fx.db, campaign_id).await.len(),
+        message_count_for_step(&fx.db, step_execution_id).await,
+        1,
+        "still exactly one messages row"
+    );
+    assert_eq!(
+        queue_count_for_step(&fx.db, step_execution_id).await,
         1,
         "still exactly one queue row"
     );
-    let messages: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM messages WHERE idempotency_key LIKE $1")
-            .bind(format!("sacmp:{campaign_id}:%"))
-            .fetch_one(&fx.db)
-            .await
-            .unwrap();
-    assert_eq!(messages.0, 1, "still exactly one messages row");
 
-    // And the ledger is stamped again, so no infinite retry.
-    let unstamped: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sales_campaign_recipients WHERE campaign_id = $1 AND sent_at IS NULL",
+    // Dispatcher-level replay of the same logical step execution.
+    sqlx::query(
+        "UPDATE sales_actions SET state = 'queued', due_at = NOW(), lease_owner = NULL, \
+                lease_token = NULL, lease_expires_at = NULL, completed_at = NULL \
+         WHERE entity_type = 'step_execution' AND entity_id = $1",
     )
-    .bind(campaign_id)
-    .fetch_one(&fx.db)
+    .bind(step_execution_id)
+    .execute(&fx.db)
     .await
     .unwrap();
-    assert_eq!(unstamped.0, 0);
+    let (leased, sender) = live_fence(&fx.db, &fx.tenant_id, step_execution_id).await;
+    let duplicate = enqueue_step(
+        &fx,
+        &key,
+        step_execution_id,
+        enrollment_id,
+        &leased,
+        &sender,
+    )
+    .await;
+    assert_eq!(
+        duplicate.expect("duplicate detection is graceful"),
+        EnqueueOutcome::DuplicateIdempotency,
+        "the same logical step must never enqueue twice"
+    );
+    assert!(
+        fx.quota.rollbacks() >= 1,
+        "the duplicate path must release its reservation"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
+    finish_leased(&fx.db, &leased, ActionOutcome::Succeeded).await;
 
-    // The sent counter was NOT double-incremented.
-    let sent: (i64,) = sqlx::query_as("SELECT sent FROM sales_campaigns WHERE id = $1")
-        .bind(campaign_id)
-        .fetch_one(&fx.db)
-        .await
-        .unwrap();
-    assert_eq!(sent.0, 1);
-}
+    // A second step for the SAME recipient is a different logical send.
+    let step2 =
+        common::add_email_step(&fx.db, &fx.tenant_id, fx.seq.version_id, 1, &template_id).await;
+    let exec2 = common::seed_step_execution(
+        &fx.db,
+        &fx.tenant_id,
+        enrollment_id,
+        fx.seq.version_id,
+        step2,
+        1,
+    )
+    .await;
+    let second = common::run_send_step(&fx.db, fx.dispatcher.clone(), &fx.tenant_id, exec2).await;
+    assert!(matches!(second, ActionOutcome::Succeeded), "{second:?}");
+    assert_eq!(
+        message_count_for_step(&fx.db, exec2).await,
+        1,
+        "a second step for the same recipient must be representable"
+    );
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT idempotency_key FROM messages WHERE tenant_id = $1 ORDER BY idempotency_key",
+    )
+    .bind(&fx.tenant_id)
+    .fetch_all(&fx.db)
+    .await
+    .unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_ne!(keys[0], keys[1], "each step has its own send identity");
 
-async fn fetch_template_id(fx: &Fixture, campaign_id: Uuid) -> String {
-    let (template_id,): (String,) =
-        sqlx::query_as("SELECT template_id FROM sales_campaigns WHERE id = $1")
-            .bind(campaign_id)
-            .fetch_one(&fx.db)
-            .await
-            .unwrap();
-    template_id
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
 
 // ---------------------------------------------------------------------------
-// Non-happy-path: quota exhausted → campaign PAUSES WITH ERROR STATE
+// Non-happy-path: quota exhaustion
 // ---------------------------------------------------------------------------
 
+/// Quota exhaustion refuses the send with no external effect and no leak;
+/// restoring quota lets the SAME live action enqueue. The old "campaign pauses
+/// with an error state" half of this test was scheduler behaviour
+/// (`scheduler::process_campaign` is removed with the engine); the surviving
+/// caller contract is a retryable action — see the module docs.
 #[tokio::test]
-async fn quota_exhausted_pauses_campaign_with_error_state() {
-    let Some(mut fx) = fixture("quota_exhausted").await else {
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn quota_exhaustion_refuses_the_send_and_recovers() {
+    let Some(mut fx) = fixture("sequence_quota", fixture_options()).await else {
         return;
     };
-    fx.quota = Arc::new(FakeQuotaGateway::with_limit(1));
-    fx.dispatcher = Arc::new(
-        ProductionCampaignDispatcher::new(
-            common::test_dispatch_config_for(&fx.domain),
-            fx.db.clone(),
-            fx.quota.clone() as Arc<dyn QuotaGateway>,
-        )
-        .unwrap(),
-    );
-    fx.manager =
-        CampaignManager::new(50, fx.db.clone())
-            .with_email_dispatcher(fx.dispatcher.clone()
-                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
-
-    let campaign_id = make_campaign(
-        &fx,
-        "s",
-        "<p>x</p>",
-        &["a@example.com", "b@example.com", "c@example.com"],
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let enrollment_id = fx.seq.enrollment_id.expect("fixture enrolls");
+    let template_id = fx.seq.template_id.clone().expect("fixture template");
+    let step2 =
+        common::add_email_step(&fx.db, &fx.tenant_id, fx.seq.version_id, 1, &template_id).await;
+    let exec2 = common::seed_step_execution(
+        &fx.db,
+        &fx.tenant_id,
+        enrollment_id,
+        fx.seq.version_id,
+        step2,
+        1,
     )
     .await;
 
-    let err = fx
-        .manager
-        .start_campaign(&fx.tenant_id, campaign_id)
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("quota"),
-        "error must name the quota exhaustion: {err}"
-    );
+    // Exactly one recipient fits the quota.
+    fx.set_quota(Arc::new(FakeQuotaGateway::with_limit(1)));
+    let key1 = fixture_key(&fx);
+    let key2 = send_idempotency_key(SendIdentity::StepExecution {
+        enrollment_id,
+        sequence_version_id: fx.seq.version_id,
+        step_id: step2,
+        attempt_kind: "primary",
+        variant: "default",
+    });
 
-    let (status, last_error, sent): (String, Option<String>, i64) =
-        sqlx::query_as("SELECT status, last_error, sent FROM sales_campaigns WHERE id = $1")
-            .bind(campaign_id)
-            .fetch_one(&fx.db)
-            .await
-            .unwrap();
-    assert_eq!(status, "paused", "campaign must pause, not stay active");
-    assert!(
-        last_error.as_deref().unwrap_or("").contains("quota"),
-        "error state recorded: {last_error:?}"
-    );
-    assert_eq!(sent, 1, "the one pre-exhaustion recipient was sent");
+    let (leased1, sender1) = live_fence(&fx.db, &fx.tenant_id, step_execution_id).await;
+    let first = enqueue_step(
+        &fx,
+        &key1,
+        step_execution_id,
+        enrollment_id,
+        &leased1,
+        &sender1,
+    )
+    .await
+    .expect("first recipient fits the quota");
+    assert_eq!(first, EnqueueOutcome::Enqueued);
+    finish_leased(&fx.db, &leased1, ActionOutcome::Succeeded).await;
 
-    // Exactly one queue row — no partial-silent overflow.
-    assert_eq!(queue_rows_for_campaign(&fx.db, campaign_id).await.len(), 1);
-    // The exhausted reserve attempts were called for every recipient tried,
-    // and denial did not leak a reservation (rollback never fires for
-    // exhaustion — the Lua check-and-incr does not consume on denial).
+    let (leased2, sender2) = live_fence(&fx.db, &fx.tenant_id, exec2).await;
+    let denied = enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2).await;
+    assert!(
+        matches!(denied, Err(SalesError::QuotaExhausted(_))),
+        "quota exhaustion must surface, got {denied:?}"
+    );
     assert!(fx.quota.reserves() >= 2, "denied reserves were attempted");
+    assert_eq!(message_count_for_step(&fx.db, exec2).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, exec2).await, 0);
 
-    // Quota resets: restarting the campaign continues the remaining recipients.
-    fx.quota = Arc::new(FakeQuotaGateway::new());
-    fx.dispatcher = Arc::new(
-        ProductionCampaignDispatcher::new(
-            common::test_dispatch_config_for(&fx.domain),
-            fx.db.clone(),
-            fx.quota.clone() as Arc<dyn QuotaGateway>,
-        )
-        .unwrap(),
-    );
-    fx.manager =
-        CampaignManager::new(50, fx.db.clone())
-            .with_email_dispatcher(fx.dispatcher.clone()
-                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
-    fx.manager
-        .start_campaign(&fx.tenant_id, campaign_id)
-        .await
-        .unwrap();
+    // Quota restored: the SAME still-live fence retries successfully (the
+    // denial consumed nothing).
+    fx.set_quota(Arc::new(FakeQuotaGateway::new()));
+    let retried = enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2).await;
     assert_eq!(
-        queue_rows_for_campaign(&fx.db, campaign_id).await.len(),
-        3,
-        "resume sends only the remaining recipients"
+        retried.expect("retry after recovery"),
+        EnqueueOutcome::Enqueued
     );
+    assert_eq!(message_count_for_step(&fx.db, exec2).await, 1);
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
+    finish_leased(&fx.db, &leased2, ActionOutcome::Succeeded).await;
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
 
 // ---------------------------------------------------------------------------
-// Non-happy-path: transient batch failure → retried, idempotently
+// Non-happy-path: transient quota failure → retried, idempotently
 // ---------------------------------------------------------------------------
 
+/// A transient reserve failure mid-batch leaves the earlier recipient
+/// enqueued, the failed one untouched, and a retry after recovery enqueues it
+/// exactly once. The old campaign status assertions ("active" through the
+/// failure, "completed" after the tick) belonged to the removed scheduler; the
+/// surviving equivalent is the idempotent action retry asserted here.
 #[tokio::test]
-async fn batch_failure_is_retried_without_duplicates() {
-    let Some(mut fx) = fixture("batch_retry").await else {
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn transient_quota_failure_is_retried_without_duplicates() {
+    let Some(mut fx) = fixture("sequence_quota_transient", fixture_options()).await else {
         return;
     };
-    // The SECOND reserve call fails with a transient error: recipient 1 is
-    // enqueued, then the batch aborts.
-    fx.quota = Arc::new(FakeQuotaGateway::with_transient_failure_at(2));
-    fx.dispatcher = Arc::new(
-        ProductionCampaignDispatcher::new(
-            common::test_dispatch_config_for(&fx.domain),
-            fx.db.clone(),
-            fx.quota.clone() as Arc<dyn QuotaGateway>,
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let enrollment_id = fx.seq.enrollment_id.expect("fixture enrolls");
+    let template_id = fx.seq.template_id.clone().expect("fixture template");
+    let step2 =
+        common::add_email_step(&fx.db, &fx.tenant_id, fx.seq.version_id, 1, &template_id).await;
+    let exec2 = common::seed_step_execution(
+        &fx.db,
+        &fx.tenant_id,
+        enrollment_id,
+        fx.seq.version_id,
+        step2,
+        1,
+    )
+    .await;
+    let key1 = fixture_key(&fx);
+    let key2 = send_idempotency_key(SendIdentity::StepExecution {
+        enrollment_id,
+        sequence_version_id: fx.seq.version_id,
+        step_id: step2,
+        attempt_kind: "primary",
+        variant: "default",
+    });
+
+    // The SECOND reserve call fails transiently: recipient 1 enqueues, then
+    // the batch aborts.
+    fx.set_quota(Arc::new(FakeQuotaGateway::with_transient_failure_at(2)));
+    let (leased1, sender1) = live_fence(&fx.db, &fx.tenant_id, step_execution_id).await;
+    assert_eq!(
+        enqueue_step(
+            &fx,
+            &key1,
+            step_execution_id,
+            enrollment_id,
+            &leased1,
+            &sender1
         )
-        .unwrap(),
-    );
-    fx.manager =
-        CampaignManager::new(50, fx.db.clone())
-            .with_email_dispatcher(fx.dispatcher.clone()
-                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
-
-    let campaign_id =
-        make_campaign(&fx, "s", "<p>x</p>", &["a@example.com", "b@example.com"]).await;
-
-    let err = fx
-        .manager
-        .start_campaign(&fx.tenant_id, campaign_id)
         .await
-        .unwrap_err();
+        .expect("first recipient enqueues"),
+        EnqueueOutcome::Enqueued
+    );
+    finish_leased(&fx.db, &leased1, ActionOutcome::Succeeded).await;
+
+    let (leased2, sender2) = live_fence(&fx.db, &fx.tenant_id, exec2).await;
+    let failed = enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2).await;
     assert!(
-        matches!(err, SalesError::ServiceUnavailable(_)),
-        "transient failure surfaces, got {err:?}"
+        matches!(failed, Err(SalesError::ServiceUnavailable(_))),
+        "transient failure surfaces, got {failed:?}"
     );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 1);
+    assert_eq!(message_count_for_step(&fx.db, exec2).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, exec2).await, 0);
 
-    // The batch failed mid-way but the campaign stays ACTIVE (retryable).
-    let (status,): (String,) = sqlx::query_as("SELECT status FROM sales_campaigns WHERE id = $1")
-        .bind(campaign_id)
-        .fetch_one(&fx.db)
-        .await
-        .unwrap();
-    assert_eq!(status, "active");
-    // The failed reserve attempt did not leak a reservation (rollback is
-    // not needed for a failed reserve — no quota was ever granted).
-
-    // Health restored: the scheduler tick retries the batch idempotently.
-    fx.quota = Arc::new(FakeQuotaGateway::new());
-    fx.dispatcher = Arc::new(
-        ProductionCampaignDispatcher::new(
-            common::test_dispatch_config_for(&fx.domain),
-            fx.db.clone(),
-            fx.quota.clone() as Arc<dyn QuotaGateway>,
-        )
-        .unwrap(),
+    // Health restored: retry the failed step, then replay it — one row each.
+    fx.set_quota(Arc::new(FakeQuotaGateway::new()));
+    assert_eq!(
+        enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2)
+            .await
+            .expect("retry after recovery"),
+        EnqueueOutcome::Enqueued
     );
-    fx.manager =
-        CampaignManager::new(50, fx.db.clone())
-            .with_email_dispatcher(fx.dispatcher.clone()
-                as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
+    assert_eq!(
+        message_count_for_step(&fx.db, exec2).await,
+        1,
+        "no duplicates"
+    );
+    let replay = enqueue_step(&fx, &key2, exec2, enrollment_id, &leased2, &sender2).await;
+    assert_eq!(
+        replay.expect("replay is graceful"),
+        EnqueueOutcome::DuplicateIdempotency
+    );
+    assert!(fx.quota.rollbacks() >= 1, "replay releases its reservation");
+    assert_eq!(message_count_for_step(&fx.db, exec2).await, 1);
+    finish_leased(&fx.db, &leased2, ActionOutcome::Succeeded).await;
 
-    let template_id = fetch_template_id(&fx, campaign_id).await;
-    let enqueued = sales_autopilot::scheduler::process_campaign(
-        &fx.manager,
-        &fx.dispatcher,
-        100,
-        campaign_id,
-        &fx.tenant_id,
-        &template_id,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(enqueued, 1, "only the unsent recipient is dispatched");
-    let queue = queue_rows_for_campaign(&fx.db, campaign_id).await;
-    assert_eq!(queue.len(), 2, "no duplicates after retry: {queue:?}");
-
-    // No due recipients remain ⇒ the tick completes the campaign.
-    sales_autopilot::scheduler::process_campaign(
-        &fx.manager,
-        &fx.dispatcher,
-        100,
-        campaign_id,
-        &fx.tenant_id,
-        &template_id,
-    )
-    .await
-    .unwrap();
-    let (status,): (String,) = sqlx::query_as("SELECT status FROM sales_campaigns WHERE id = $1")
-        .bind(campaign_id)
-        .fetch_one(&fx.db)
-        .await
-        .unwrap();
-    assert_eq!(status, "completed");
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
 
 // ---------------------------------------------------------------------------
-// Non-happy-path: unverified sender domain refuses the whole campaign
+// Non-happy-path: sender-domain readiness
 // ---------------------------------------------------------------------------
 
+/// Without the verified/DKIM-ready platform domain for the resolved sender,
+/// the enqueue transaction refuses; nothing is written and the reservation is
+/// released.
 #[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn unverified_sender_domain_refuses_dispatch() {
-    let Some(fx) = fixture("unverified_domain").await else {
+    let Some(fx) = fixture(
+        "sequence_unverified_domain",
+        fixture_options().without_verified_domain(),
+    )
+    .await
+    else {
         return;
     };
-    // Tenant has NO verified domain for the sender's domain.
-    sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
-        .bind(&fx.tenant_id)
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+    let enrollment_id = fx.seq.enrollment_id.expect("fixture enrolls");
+    let key = fixture_key(&fx);
+    let (leased, sender) = live_fence(&fx.db, &fx.tenant_id, step_execution_id).await;
+
+    let err = enqueue_step(
+        &fx,
+        &key,
+        step_execution_id,
+        enrollment_id,
+        &leased,
+        &sender,
+    )
+    .await
+    .expect_err("an unverified sender domain must refuse");
+    assert!(
+        matches!(err, SalesError::InvalidInput(_)),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.to_string().contains("sender domain"),
+        "error must name the sender-domain problem: {err}"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert!(
+        fx.quota.rollbacks() >= 1,
+        "the refused enqueue must release its reservation"
+    );
+    let (state, _) = step_state(&fx.db, step_execution_id).await;
+    assert_eq!(state, "scheduled", "the step must remain retryable");
+    finish_leased(
+        &fx.db,
+        &leased,
+        ActionOutcome::Retry("sender domain missing".into()),
+    )
+    .await;
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Non-happy-path: missing template
+// ---------------------------------------------------------------------------
+
+/// A step whose template does not exist is a RECORDED skip
+/// (`skip_reason` names it), not an enqueue and not a retry loop. The old
+/// campaign path raised an error out of `start_campaign`; on the canonical
+/// path a missing template is a per-step poison condition, so it skips.
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn missing_template_is_a_recorded_skip_without_enqueueing() {
+    let Some(fx) = fixture(
+        "sequence_missing_template",
+        fixture_options().without_template(),
+    )
+    .await
+    else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+
+    sqlx::query("UPDATE sales_sequence_steps SET template_id = 'tpl_does_not_exist' WHERE id = $1")
+        .bind(fx.seq.step_id)
         .execute(&fx.db)
         .await
         .unwrap();
 
-    let campaign_id = make_campaign(&fx, "s", "<p>x</p>", &["a@example.com"]).await;
-    let err = fx
-        .manager
-        .start_campaign(&fx.tenant_id, campaign_id)
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("not verified"),
-        "error must name the sender-domain problem: {err}"
-    );
-    assert_eq!(queue_rows_for_campaign(&fx.db, campaign_id).await.len(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// Missing template refuses dispatch
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn missing_template_refuses_dispatch() {
-    let Some(fx) = fixture("missing_template").await else {
-        return;
-    };
-    let campaign = fx
-        .manager
-        .create_campaign(
-            fx.tenant_id.clone(),
-            "Broken".into(),
-            "tpl_does_not_exist".into(),
-            String::new(),
-        )
-        .await
-        .unwrap();
-    fx.manager
-        .add_recipients(&fx.tenant_id, campaign.id, vec!["a@example.com".into()])
-        .await
-        .unwrap();
-
-    let err = fx
-        .manager
-        .start_campaign(&fx.tenant_id, campaign.id)
-        .await
-        .unwrap_err();
-    assert!(
-        err.to_string().contains("template"),
-        "error must name the missing template: {err}"
-    );
-    assert_eq!(queue_rows_for_campaign(&fx.db, campaign.id).await.len(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// Stats reconciliation: opens/clicks flow back into campaign columns
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn campaign_stats_reconcile_from_platform_tracking() {
-    let Some(fx) = fixture("stats_reconcile").await else {
-        return;
-    };
-    let campaign_id = make_campaign(
-        &fx,
-        "s",
-        "<p>track me</p>",
-        &["a@example.com", "b@example.com"],
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
     )
     .await;
-    fx.manager
-        .start_campaign(&fx.tenant_id, campaign_id)
-        .await
-        .unwrap();
+    assert!(
+        matches!(outcome, ActionOutcome::Succeeded),
+        "a missing template is a recorded skip: {outcome:?}"
+    );
+    let (state, skip_reason) = step_state(&fx.db, step_execution_id).await;
+    assert_eq!(state, "skipped");
+    assert!(
+        skip_reason.as_deref().unwrap_or("").contains("template"),
+        "the skip reason must name the template: {skip_reason:?}"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
 
-    // Simulate the tracking service recording an open + a click for
-    // recipient a's message.
-    sqlx::query(
-        "UPDATE messages SET open_count = 1, click_count = 1 \
-         WHERE idempotency_key = $1",
-    )
-    .bind(format!("sacmp:{campaign_id}:a@example.com"))
-    .execute(&fx.db)
-    .await
-    .unwrap();
-
-    fx.manager
-        .reconcile_campaign_stats(campaign_id)
-        .await
-        .unwrap();
-
-    let (opened, clicked, sent): (i64, i64, i64) =
-        sqlx::query_as("SELECT opened, clicked, sent FROM sales_campaigns WHERE id = $1")
-            .bind(campaign_id)
-            .fetch_one(&fx.db)
-            .await
-            .unwrap();
-    assert_eq!(sent, 2);
-    assert_eq!(opened, 1, "one recipient opened");
-    assert_eq!(clicked, 1, "one recipient clicked");
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
 
 // ---------------------------------------------------------------------------
 // Dry-run: renders + validates WITHOUT enqueueing
 // ---------------------------------------------------------------------------
 
+/// The legacy compatibility planner's dry-run survives the engine removal:
+/// it renders and evaluates the legacy recipient funnel against the production
+/// dispatcher's sender config without enqueueing or stamping the ledger.
 #[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn dry_run_renders_without_enqueueing() {
-    let Some(fx) = fixture("dry_run").await else {
+    let Some(db) = common::test_pool("dry_run").await else {
         return;
     };
-    let campaign_id = make_campaign(
-        &fx,
+    let tenant_id = common::insert_test_tenant(&db, "dry-run").await;
+    let domain = common::unique_test_domain();
+    common::insert_verified_domain(&db, &tenant_id, &domain).await;
+    let dispatcher = Arc::new(
+        ProductionCampaignDispatcher::new(
+            common::test_dispatch_config_for(&domain),
+            db.clone(),
+            Arc::new(FakeQuotaGateway::new()) as Arc<dyn QuotaGateway>,
+        )
+        .unwrap(),
+    );
+    let manager = CampaignManager::new(50, db.clone());
+
+    let template_id = common::insert_template(
+        &db,
+        &tenant_id,
         "Hi {{first_name}}",
         "<html><body><p>Hello {{first_name}}</p></body></html>",
-        &["alice@example.com", "bob@example.com", "gone@example.com"],
+        Some("Hello {{name}}, plain text."),
     )
     .await;
-    fx.manager
-        .suppress_recipient(&fx.tenant_id, "gone@example.com")
+    let campaign = manager
+        .create_campaign(
+            tenant_id.clone(),
+            "Dry run".into(),
+            template_id,
+            String::new(),
+        )
+        .await
+        .unwrap();
+    manager
+        .add_recipients(
+            &tenant_id,
+            campaign.id,
+            vec![
+                "alice@example.com".into(),
+                "bob@example.com".into(),
+                "gone@example.com".into(),
+            ],
+        )
+        .await
+        .unwrap();
+    manager
+        .suppress_recipient(&tenant_id, "gone@example.com")
         .await
         .unwrap();
 
-    let report = fx
-        .manager
-        .dry_run(&fx.tenant_id, campaign_id, 5, Some(fx.dispatcher.as_ref()))
+    let report = manager
+        .dry_run(&tenant_id, campaign.id, 5, Some(dispatcher.as_ref()))
         .await
         .unwrap();
 
@@ -826,15 +1141,105 @@ async fn dry_run_renders_without_enqueueing() {
         .all(|p| p["subject"].as_str().unwrap().starts_with("Hi ")));
 
     // Nothing was sent: no queue rows, no ledger stamps.
-    assert_eq!(queue_rows_for_campaign(&fx.db, campaign_id).await.len(), 0);
-    let stamped: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sales_campaign_recipients WHERE campaign_id = $1 AND sent_at IS NOT NULL",
+    let queued: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE metadata->>'campaign_id' = $1")
+            .bind(campaign.id.to_string())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(queued, 0);
+    let stamped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sales_campaign_recipients \
+         WHERE campaign_id = $1 AND sent_at IS NOT NULL",
     )
-    .bind(campaign_id)
+    .bind(campaign.id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(stamped, 0);
+
+    common::cleanup_tenant(&db, &tenant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Unsubscribe exclusion on the sequence path
+// ---------------------------------------------------------------------------
+
+/// A recipient who clicks the dispatcher-generated unsubscribe link is
+/// suppressed in BOTH stores and the next sequence send is refused. This is
+/// the sequence-path successor of "unsubscribed recipient is excluded from
+/// the next campaign dispatch".
+#[tokio::test]
+#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
+async fn unsubscribed_recipient_is_excluded_from_the_sequence_send() {
+    let Some(fx) = fixture("sequence_unsub_excluded", fixture_options()).await else {
+        return;
+    };
+    let step_execution_id = fx.seq.step_execution_id.expect("fixture enrolls");
+
+    // The link the footer carries is a v2 opaque token; resolving it through
+    // the persisted hash yields the canonical (tenant, lowercased email) pair.
+    let link = fx
+        .dispatcher
+        .unsubscribe_link(&fx.tenant_id, Uuid::new_v4(), &fx.seq.email)
+        .await
+        .expect("v2 unsubscribe link persists its token hash");
+    let token = link.rsplit('/').next().unwrap().to_string();
+    assert!(
+        !token.contains('.'),
+        "v2 tokens are opaque, not v1 payloads"
+    );
+    let data = sales_autopilot::dispatcher::resolve_unsubscribe_token(&fx.db, &token)
+        .await
+        .expect("token lookup succeeds")
+        .expect("dispatcher-generated link carries a valid token");
+    assert_eq!(data.email, fx.seq.email.to_ascii_lowercase());
+    assert_eq!(data.tenant_id, fx.tenant_id);
+
+    ProductionCampaignDispatcher::suppress(
+        &fx.db,
+        &data.tenant_id,
+        &data.email,
+        "unsubscribe-link",
+    )
+    .await
+    .unwrap();
+    let sales_sup: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+    )
+    .bind(&fx.tenant_id)
+    .bind(&data.email)
     .fetch_one(&fx.db)
     .await
     .unwrap();
-    assert_eq!(stamped.0, 0);
+    let platform_sup: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind(&fx.tenant_id)
+            .bind(&data.email)
+            .fetch_one(&fx.db)
+            .await
+            .unwrap();
+    assert_eq!(sales_sup, 1, "sales-side suppression recorded");
+    assert_eq!(platform_sup, 1, "platform suppression mirrored");
+
+    let outcome = common::run_send_step(
+        &fx.db,
+        fx.dispatcher.clone(),
+        &fx.tenant_id,
+        step_execution_id,
+    )
+    .await;
+    assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+    let (state, skip_reason) = step_state(&fx.db, step_execution_id).await;
+    assert_eq!(state, "skipped");
+    assert!(
+        skip_reason.as_deref().unwrap_or("").contains("suppressed"),
+        "the unsubscribe must refuse the next send: {skip_reason:?}"
+    );
+    assert_eq!(message_count_for_step(&fx.db, step_execution_id).await, 0);
+    assert_eq!(queue_count_for_step(&fx.db, step_execution_id).await, 0);
+
+    common::cleanup_tenant(&fx.db, &fx.tenant_id).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -866,9 +1271,7 @@ mod unsub_http {
             .unwrap(),
         );
         let state = AppState {
-            campaigns: CampaignManager::new(50, db.clone())
-                .with_email_dispatcher(dispatcher.clone()
-                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>),
+            campaigns: CampaignManager::new(50, db.clone()),
             dispatcher: Some(dispatcher),
             config: SalesConfig {
                 dispatch,
@@ -886,11 +1289,17 @@ mod unsub_http {
             rate_limit_fallback: Arc::new(
                 parking_lot::Mutex::new(std::collections::HashMap::new()),
             ),
+            intelligence: Arc::new(sales_autopilot::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(sales_autopilot::personalization::MessageStrategist::new(
+                db.clone(),
+                sales_autopilot::knowledge::SalesKnowledgeBase::canonical(),
+            )),
         };
         routes::router(state)
     }
 
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn get_unsubscribe_suppresses_and_renders_page() {
         let Some(db) = common::test_pool("unsub_get").await else {
             return;
@@ -963,9 +1372,12 @@ mod unsub_http {
                 .await
                 .unwrap();
         assert_eq!(sales_sup2.0, 1, "no duplicate suppression row");
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn get_unsubscribe_redirects_when_configured() {
         let Some(db) = common::test_pool("unsub_redirect").await else {
             return;
@@ -982,9 +1394,7 @@ mod unsub_http {
             .unwrap(),
         );
         let state = AppState {
-            campaigns: CampaignManager::new(50, db.clone())
-                .with_email_dispatcher(dispatcher.clone()
-                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>),
+            campaigns: CampaignManager::new(50, db.clone()),
             dispatcher: Some(dispatcher),
             config: SalesConfig {
                 dispatch,
@@ -1002,6 +1412,11 @@ mod unsub_http {
             rate_limit_fallback: Arc::new(
                 parking_lot::Mutex::new(std::collections::HashMap::new()),
             ),
+            intelligence: Arc::new(sales_autopilot::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(sales_autopilot::personalization::MessageStrategist::new(
+                db.clone(),
+                sales_autopilot::knowledge::SalesKnowledgeBase::canonical(),
+            )),
         };
         let app = routes::router(state);
 
@@ -1023,9 +1438,12 @@ mod unsub_http {
             resp.headers().get("location").unwrap(),
             "https://brand.example.com/goodbye"
         );
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn invalid_token_is_rejected() {
         let Some(db) = common::test_pool("unsub_invalid").await else {
             return;
@@ -1084,9 +1502,12 @@ mod unsub_http {
         .await
         .unwrap();
         assert_eq!(rows.0, 0);
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn rfc8058_post_requires_exact_body() {
         let Some(db) = common::test_pool("unsub_post_body").await else {
             return;
@@ -1135,79 +1556,8 @@ mod unsub_http {
         .await
         .unwrap();
         assert_eq!(sup.0, 1);
-    }
 
-    #[tokio::test]
-    async fn unsubscribed_recipient_is_excluded_from_next_dispatch() {
-        let Some(db) = common::test_pool("unsub_excluded").await else {
-            return;
-        };
-        let tenant_id = common::insert_test_tenant(&db, "unsub-excl").await;
-        let domain = common::unique_test_domain();
-        common::insert_verified_domain(&db, &tenant_id, &domain).await;
-
-        let quota = Arc::new(FakeQuotaGateway::new());
-        let dispatcher = Arc::new(
-            ProductionCampaignDispatcher::new(
-                common::test_dispatch_config_for(&domain),
-                db.clone(),
-                quota.clone() as Arc<dyn QuotaGateway>,
-            )
-            .unwrap(),
-        );
-        let manager =
-            CampaignManager::new(50, db.clone())
-                .with_email_dispatcher(dispatcher.clone()
-                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>);
-
-        let template_id =
-            common::insert_template(&db, &tenant_id, "s", "<p>x</p>", Some("t")).await;
-        let campaign = manager
-            .create_campaign(tenant_id.clone(), "wave".into(), template_id, String::new())
-            .await
-            .unwrap();
-        manager
-            .add_recipients(
-                &tenant_id,
-                campaign.id,
-                vec!["stay@example.com".into(), "leave@example.com".into()],
-            )
-            .await
-            .unwrap();
-
-        // "leave" clicks the unsubscribe link generated by the dispatcher.
-        let link = dispatcher.unsubscribe_link(&tenant_id, campaign.id, "leave@example.com");
-        let token = link.rsplit('/').next().unwrap().to_string();
-        let data = sales_autopilot::dispatcher::verify_unsubscribe_token(
-            "integration-test-unsubscribe-secret-321",
-            &token,
-        )
-        .expect("dispatcher-generated link carries a valid token");
-        assert_eq!(data.email, "leave@example.com");
-        ProductionCampaignDispatcher::suppress(
-            &db,
-            &data.tenant_id,
-            &data.email,
-            "unsubscribe-link",
-        )
-        .await
-        .unwrap();
-
-        manager
-            .start_campaign(&tenant_id, campaign.id)
-            .await
-            .unwrap();
-        let queue: Vec<(String,)> =
-            sqlx::query_as("SELECT \"to\" FROM email_queue WHERE metadata->>'campaign_id' = $1")
-                .bind(campaign.id.to_string())
-                .fetch_all(&db)
-                .await
-                .unwrap();
-        assert_eq!(queue.len(), 1);
-        assert_eq!(
-            queue[0].0, "stay@example.com",
-            "unsubscribed recipient excluded"
-        );
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 }
 
@@ -1244,9 +1594,7 @@ mod reply_http {
             .unwrap(),
         );
         let state = AppState {
-            campaigns: CampaignManager::new(50, db.clone())
-                .with_email_dispatcher(dispatcher.clone()
-                    as Arc<dyn sales_autopilot::campaigns::CampaignEmailDispatcher>),
+            campaigns: CampaignManager::new(50, db.clone()),
             dispatcher: Some(dispatcher),
             config: SalesConfig {
                 dispatch,
@@ -1264,6 +1612,11 @@ mod reply_http {
             rate_limit_fallback: Arc::new(
                 parking_lot::Mutex::new(std::collections::HashMap::new()),
             ),
+            intelligence: Arc::new(sales_autopilot::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(sales_autopilot::personalization::MessageStrategist::new(
+                db.clone(),
+                sales_autopilot::knowledge::SalesKnowledgeBase::canonical(),
+            )),
         };
 
         // One inbound message from a lead.
@@ -1306,6 +1659,7 @@ mod reply_http {
     /// Happy path: the reply is composed, escaped and enqueued through the
     /// platform pipeline; the replied flag flips atomically.
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_composes_and_enqueues_through_email_queue() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_happy").await else {
             return;
@@ -1372,11 +1726,14 @@ mod reply_http {
                 .await
                 .unwrap();
         assert!(replied.0);
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     /// Double-click / retry: the second POST is an idempotent no-op —
     /// exactly one queue row, one messages row, no double send.
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_double_post_is_idempotent_no_double_send() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_double").await else {
             return;
@@ -1419,11 +1776,14 @@ mod reply_http {
                 .await
                 .unwrap();
         assert_eq!(messages.0, 1, "still exactly one messages row");
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     /// A correspondent who hard-bounced (platform suppressions) never gets
     /// the reply — and the message stays visibly unanswered.
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_to_suppressed_correspondent_refused() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_suppressed").await else {
             return;
@@ -1453,14 +1813,16 @@ mod reply_http {
                 .await
                 .unwrap();
         assert!(!replied.0, "failed reply must not flip the replied flag");
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     /// Cross-tenant isolation: another tenant's reply to this message is a
     /// 404 and enqueues nothing.
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_cross_tenant_is_404() {
-        let Some((app, db, _tenant_id, inbox_id)) = reply_fixture("reply_cross_tenant").await
-        else {
+        let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_cross_tenant").await else {
             return;
         };
         // NOTE: sales-autopilot's token model lets the caller address any
@@ -1474,10 +1836,14 @@ mod reply_http {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 0);
+
+        common::cleanup_tenant(&db, &other_tenant).await;
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     /// Unknown message id → 404, nothing enqueued.
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_to_missing_message_is_404() {
         let Some((app, db, tenant_id, _)) = reply_fixture("reply_missing").await else {
             return;
@@ -1496,11 +1862,14 @@ mod reply_http {
         .await
         .unwrap();
         assert_eq!(queue.0, 0);
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     /// Unverified sender domain: the pipeline gate refuses the reply
     /// (mirrors the REST send path's domain gate).
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_refused_when_sender_domain_not_ready() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_no_domain").await else {
             return;
@@ -1535,11 +1904,14 @@ mod reply_http {
                 .await
                 .unwrap();
         assert!(!replied.0);
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 
     /// A campaign opt-out (sales_unsubscribes only) deliberately does NOT
     /// block a 1:1 reply — documented decision in enqueue_reply.
     #[tokio::test]
+    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn campaign_optout_does_not_block_personal_reply() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_campaign_optout").await
         else {
@@ -1570,5 +1942,7 @@ mod reply_http {
             "campaign opt-out must not block a 1:1 reply"
         );
         assert_eq!(reply_queue_rows(&db, inbox_id).await.len(), 1);
+
+        common::cleanup_tenant(&db, &tenant_id).await;
     }
 }

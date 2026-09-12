@@ -432,6 +432,11 @@ impl std::fmt::Display for ReplyDisposition {
 }
 
 /// A resolved sender identity from `sales_sender_identities`.
+///
+/// This is the identity a send actually goes out as. `source_ip` is a
+/// Postgres `INET` column, which does not decode into a Rust string/IpAddr
+/// directly: every SELECT must project `host(source_ip)` and this type parses
+/// the resulting text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SenderIdentity {
     pub id: Uuid,
@@ -442,6 +447,23 @@ pub struct SenderIdentity {
     pub domain: String,
     pub status: String,
     pub daily_limit: Option<i32>,
+    /// Sending IP, decoded from `host(source_ip)` (INET). `None` when the
+    /// identity has no dedicated source IP.
+    pub source_ip: Option<std::net::IpAddr>,
+    /// Sending provider label (e.g. `ses`, `smtp`); `None` when unset.
+    pub provider: Option<String>,
+}
+
+impl SenderIdentity {
+    /// The display name a message from this identity must show. Falls back to
+    /// the deployment default ONLY when the identity itself sets no
+    /// `from_name` — the footer/metadata must name the sender actually used,
+    /// never a different identity.
+    pub fn display_name(&self, default_name: &str) -> String {
+        self.from_name
+            .clone()
+            .unwrap_or_else(|| default_name.to_string())
+    }
 }
 
 /// A jurisdiction policy row governing whether a contact may be approached.
@@ -1126,5 +1148,32 @@ mod tests {
         assert_eq!(parsed.from, "sender@test.com");
         assert_eq!(parsed.tenant_id, "tenant-1");
         assert!(!parsed.replied);
+    }
+
+    #[test]
+    fn sender_identity_carries_the_send_identity_and_prefers_its_own_name() {
+        let mut sender = SenderIdentity {
+            id: Uuid::new_v4(),
+            tenant_id: "tenant-a".into(),
+            pool: SenderPool::SalesOutbound,
+            from_email: "identity@outbound.example".into(),
+            from_name: Some("Real Sender".into()),
+            domain: "outbound.example".into(),
+            status: "active".into(),
+            daily_limit: Some(50),
+            source_ip: Some("203.0.113.7".parse().unwrap()),
+            provider: Some("ses".into()),
+        };
+        assert_eq!(sender.display_name("Deployment Default"), "Real Sender");
+        // No identity name → the deployment default is the only fallback.
+        sender.from_name = None;
+        assert_eq!(
+            sender.display_name("Deployment Default"),
+            "Deployment Default"
+        );
+        // The new typed fields round-trip through serde (metadata belt-and-braces).
+        let json = serde_json::to_value(&sender).unwrap();
+        assert_eq!(json["source_ip"], "203.0.113.7");
+        assert_eq!(json["provider"], "ses");
     }
 }

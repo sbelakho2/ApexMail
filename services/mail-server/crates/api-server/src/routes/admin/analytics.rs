@@ -3,24 +3,24 @@
 //! Metric conventions (single source of truth:
 //! [`crate::analytics_metrics`]):
 //!
-//! * cohort time = event-OCCURRENCE timestamps (`events.timestamp`);
+//! * the unit is a recipient-send cohort row `(message_id, lower(recipient))`
+//!   whose `sent` event falls in the window; outcomes attach to that send;
 //! * `sent` = a successful `sent` event, never message creation;
-//! * cardinality = DISTINCT message ids, so repeat opens/clicks on one
-//!   message can never inflate a numerator (no clamping anywhere);
-//! * rates are FRACTIONS in `0.0..=1.0`, never percentages.
+//! * outcomes use `BOOL_OR` per cohort, so repeat opens/clicks on one
+//!   recipient-send can never inflate a numerator (no clamping anywhere);
+//! * rates are FRACTIONS in `0.0..=1.0`, or `null`/absent when the send
+//!   cohort is empty — never `0`, never percentages.
 //!
 //! Provider identity prefers a persisted normalized provider dimension on
-//! `events`; when the schema has none, only well-known consumer domains are
-//! classified and every row is labelled `inferred`.
+//! `events` (migration 202); rows without one fall back to well-known
+//! consumer domains only and are labelled `inferred`.
 
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::analytics_metrics::{
-    distinct_message_counts, distinct_message_time_series, provider_breakdown,
-};
+use crate::analytics_metrics::{provider_breakdown, send_cohort_counts, send_cohort_time_series};
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -74,10 +74,13 @@ pub struct AnalyticsResponse {
 
 /// Aggregate engagement numbers.
 ///
-/// Every count is a count of DISTINCT message ids and every rate is a
-/// FRACTION in `0.0..=1.0` (delivered/sent etc.) over the event-occurrence
-/// window. Because each numerator message also has a `sent` event, the
-/// ratios are `<= 1.0` by construction — they are never clamped.
+/// Every count is a send-cohort row count `(message_id, lower(recipient))`
+/// and every rate is a FRACTION in `0.0..=1.0` (delivered/sent etc.) over
+/// the send-cohort window. Because each numerator cohort also has a `sent`
+/// event, the ratios are `<= 1.0` by construction — they are never clamped.
+///
+/// A rate is `null` when the window has no send cohort at all: absent, never
+/// a fabricated zero.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyticsStats {
@@ -87,28 +90,28 @@ pub struct AnalyticsStats {
     pub total_clicked: i64,
     pub total_bounced: i64,
     pub total_complaints: i64,
-    pub delivery_rate: f64,
-    pub open_rate: f64,
-    pub click_rate: f64,
-    pub bounce_rate: f64,
-    pub complaint_rate: f64,
+    pub delivery_rate: Option<f64>,
+    pub open_rate: Option<f64>,
+    pub click_rate: Option<f64>,
+    pub bounce_rate: Option<f64>,
+    pub complaint_rate: Option<f64>,
 }
 
-/// One day of distinct-message counts (event-occurrence buckets).
-pub use crate::analytics_metrics::DistinctTimeSeriesPoint as TimeSeriesPoint;
+/// One `sent_at` day of send-cohort counts (outcomes attached to the cohort).
+pub use crate::analytics_metrics::SendCohortTimeSeriesPoint as TimeSeriesPoint;
 
 /// One provider bucket. `inferred` is `true` when the provider was derived
 /// from the recipient-domain suffix (no persisted provider dimension), so
 /// the UI cannot present the fallback as authoritative.
 pub use crate::analytics_metrics::ProviderCount as ProviderBreakdown;
 
-/// Canonical distinct-message aggregate for the system tenant (fleet-wide).
-async fn system_distinct_counts(
+/// Canonical send-cohort aggregate for the system tenant (fleet-wide).
+async fn system_send_cohort(
     state: &AppState,
     columns: EventColumns,
     range: AnalyticsRange,
-) -> Result<crate::analytics_metrics::DistinctMessageCounts, ApiError> {
-    distinct_message_counts(&state.db, None, range.interval_sql(), columns).await
+) -> Result<crate::analytics_metrics::SendCohortCounts, ApiError> {
+    send_cohort_counts(&state.db, None, range.interval_sql(), columns).await
 }
 
 async fn get_analytics(
@@ -122,9 +125,8 @@ async fn get_analytics(
     let range = parse_analytics_range(&params.range);
     let columns = detect_event_columns(&state).await;
 
-    // Aggregate stats — canonical distinct-message counts over
-    // event-occurrence timestamps.
-    let counts = system_distinct_counts(&state, columns, range).await?;
+    // Aggregate stats — canonical send-cohort counts over send time.
+    let counts = system_send_cohort(&state, columns, range).await?;
 
     let stats = AnalyticsStats {
         total_sent: counts.sent,
@@ -140,15 +142,15 @@ async fn get_analytics(
         complaint_rate: counts.complaint_rate(),
     };
 
-    // Time series — same convention, bucketed per day.
-    let time_series = distinct_message_time_series(&state.db, None, range, columns).await?;
+    // Time series — same convention, bucketed per send day.
+    let time_series = send_cohort_time_series(&state.db, None, range, columns).await?;
 
     // Provider breakdown — persisted dimension when present, otherwise a
     // labelled consumer-domain-suffix inference.
     let breakdown = provider_breakdown(&state.db, None, range.interval_sql(), columns).await?;
 
     let mut notes = vec![
-        "Counts are DISTINCT messages from event-occurrence timestamps; rates are fractions (0.0-1.0)."
+        "Counts are send-cohort rows (message_id + lowercased recipient) whose send event falls in the window; outcomes attach to that send and rates are fractions (0.0-1.0), or null when the window has no sends."
             .to_string(),
     ];
     if let Some(note) = breakdown.note {
@@ -340,12 +342,12 @@ mod tests {
         assert_eq!(clickhouse_window("bogus"), chrono::Duration::days(7));
     }
 
-    /// Fix 1 + Fix 3: the response rates are FRACTIONS over DISTINCT
-    /// messages, and multi-open on one message cannot push engagement above
-    /// 100% — no clamping anywhere.
+    /// The response rates are FRACTIONS over send-cohort rows, and
+    /// multi-open on one recipient-send cannot push engagement above 100% —
+    /// no clamping anywhere. The zero-cohort case is `None`, never 0.
     #[test]
-    fn stats_rates_are_fractions_over_distinct_messages() {
-        let counts = crate::analytics_metrics::DistinctMessageCounts {
+    fn stats_rates_are_fractions_over_the_send_cohort() {
+        let counts = crate::analytics_metrics::SendCohortCounts {
             sent: 10,
             delivered: 9,
             opened: 7,
@@ -367,9 +369,9 @@ mod tests {
             complaint_rate: counts.complaint_rate(),
         };
 
-        assert!((stats.delivery_rate - 0.9).abs() < 1e-9);
-        assert!((stats.open_rate - 0.7).abs() < 1e-9);
-        assert!((stats.bounce_rate - 0.1).abs() < 1e-9);
+        assert_eq!(stats.delivery_rate, Some(0.9));
+        assert_eq!(stats.open_rate, Some(0.7));
+        assert_eq!(stats.bounce_rate, Some(0.1));
         for rate in [
             stats.delivery_rate,
             stats.open_rate,
@@ -377,7 +379,13 @@ mod tests {
             stats.bounce_rate,
             stats.complaint_rate,
         ] {
+            let rate = rate.expect("sent > 0");
             assert!((0.0..=1.0).contains(&rate), "rate out of range: {rate}");
         }
+
+        // Empty cohort: every rate absent (null), never a fabricated 0.
+        let empty = crate::analytics_metrics::SendCohortCounts::default();
+        assert_eq!(empty.delivery_rate(), None);
+        assert_eq!(empty.open_rate(), None);
     }
 }

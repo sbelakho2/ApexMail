@@ -6,6 +6,8 @@ use serde_json::Value as JsonValue;
 use sqlx::FromRow;
 use zeroize::Zeroizing;
 
+use crate::common::TransportType;
+
 /// An email job from the queue.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct EmailJob {
@@ -225,12 +227,86 @@ pub struct DkimConfig {
     pub private_key: Zeroizing<String>,
 }
 
-/// Email send result.
+/// The delivery route selected for ONE send unit — the decision the
+/// transport layer must actually execute.
+///
+/// This is derived by the processor from state it already relies on:
+/// * [`Domain::warmup_ip`] — the dedicated-IP identity selected per tenant
+///   (its `ip_address` is the reputation boundary the warmup admission
+///   reserves capacity on) → [`DeliveryRoute::Dedicated`];
+/// * no warming dedicated IP → [`DeliveryRoute::SesShared`] (the shared
+///   pool rides platform reputation; there is no per-IP binding to honour).
+///
+/// The route is NOT a replacement for `EmailJob.metadata` / `Domain::warmup_ip`
+/// — it is the derived, per-send value that travels with the send so the
+/// admission decision and the network path cannot disagree.
 #[derive(Debug, Clone)]
-pub struct SendResult {
-    pub smtp_message_id: Option<String>,
-    pub accepted: bool,
-    pub response: String,
+pub enum DeliveryRoute {
+    /// AWS SES shared IP pool — no dedicated source IP to bind. The
+    /// dedicated-source-IP verification deliberately does NOT apply.
+    SesShared,
+    /// Self-hosted relay MTA must send from the tenant's dedicated source
+    /// IP: `dedicated_ip_id` is `dedicated_ips.id` and `source_ip` is the
+    /// parsed `dedicated_ips.ip_address` that warmup admission reserved
+    /// capacity against.
+    Dedicated {
+        dedicated_ip_id: String,
+        source_ip: std::net::IpAddr,
+    },
+}
+
+impl DeliveryRoute {
+    /// True for the dedicated-IP route — the only route whose source IP must
+    /// be confirmed by the transport before warmup capacity counts as spent.
+    pub fn is_dedicated(&self) -> bool {
+        matches!(self, Self::Dedicated { .. })
+    }
+
+    /// `Some(source_ip)` for [`DeliveryRoute::Dedicated`], `None` for the
+    /// shared route.
+    pub fn dedicated_source_ip(&self) -> Option<std::net::IpAddr> {
+        match self {
+            Self::Dedicated { source_ip, .. } => Some(*source_ip),
+            Self::SesShared => None,
+        }
+    }
+}
+
+/// What a transport actually did for one [`DeliveryRoute`].
+///
+/// `actual_source_ip` is the ONLY evidence that a dedicated route was
+/// really used: the transport must report the source address the recipient
+/// would observe. `None` means "not reported" — NEVER "assumed the selected
+/// IP": the processor treats a dedicated route with `None` as unverified
+/// (hard error, warmup capacity released), because counting an unverified
+/// send against a warming IP's quota is exactly the defect this contract
+/// removes.
+#[derive(Debug, Clone)]
+pub struct DeliveryReceipt {
+    /// Which transport carried the message.
+    pub transport: TransportType,
+    /// Opaque per-message id when the transport exposes one (SES
+    /// `MessageId`; `None` on the SMTP relay path).
+    pub transport_message_id: Option<String>,
+    /// The recipient-facing source IP the transport actually used, when it
+    /// can report it. `None` = not reported (see type docs).
+    pub actual_source_ip: Option<std::net::IpAddr>,
+    /// Normalized recipient mailbox provider as resolved at delivery time
+    /// (e.g. `google_workspace` from the recipient domain's MX records),
+    /// when the transport's delivery path actually resolved it.
+    ///
+    /// `None` = NOT KNOWN on this path. It must never be guessed from the
+    /// visible recipient domain here: a custom domain hosted by Google
+    /// Workspace is indistinguishable from a self-hosted one without the MX
+    /// record (migration 202's rationale). The value is persisted on the
+    /// `sent`/`bounced` events rows together with `provider_source`.
+    pub recipient_provider: Option<String>,
+    /// How `recipient_provider` was obtained — one of `mx_resolved`,
+    /// `provider_callback`, or `inferred` (the `events.provider_source`
+    /// CHECK constraint, migration
+    /// `202_sales_feedback_delivery_binding.sql:154-163`). `None` whenever
+    /// `recipient_provider` is `None`.
+    pub provider_source: Option<String>,
 }
 
 /// Send outcome for error rate tracking.

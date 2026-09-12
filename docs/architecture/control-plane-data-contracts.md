@@ -281,6 +281,18 @@ Relevant current implementation files:
 
 ### IP Warmup
 
+> **Advisory only — not a control.** The `/api/warmup*` routes below are
+> historical migration inventory; no current route starts, pauses or advances
+> warmup admission. The only warmup surface in the current Rust admin API is
+> `GET|POST /admin/warmup`, which manages advisory catalog data
+> (`ip_pools.status` + `isp_warmup_schedules`) and explicitly returns
+> `advisory: true` / `admissionControl: false`
+> (`services/mail-server/crates/api-server/src/routes/admin/warmup.rs`). The
+> live cap is enforced per source IP in `worker-processors`
+> (`mail_common::warmup` over the Redis key
+> `apexmail:warmup:ip:{ip_address}:{utc_day}`) and is not represented by these
+> routes.
+
 #### `GET /api/warmup`
 - **Response 200:** `{ ips: WarmupIP[], schedule: WarmupSchedule }`
 

@@ -56,31 +56,45 @@ pub fn limit_for_day(day: u32) -> u64 {
 
 ## Behaviour during warmup
 
-- **Enforcement is per source IP in the outbound queue.** Before opening an
-  SMTP connection, `SmtpSender` calls `IpPool::reserve_send`, which atomically
-  reserves one slot of the selected IP's daily quota through the Redis-backed
-  `RedisWarmupQuotaStore` (check-and-increment Lua, key
-  `apexmail:outbound:warmup:{identity}:{day}`, shared by every MTA process).
-  The cap comes from `mail_common::warmup::limit_for_day()` for that IP's
-  warmup day (`dedicated_ips.warmup_started_at`); day 60+ is unlimited.
-- **A full cap refuses the send; it does not overflow.** When no candidate
-  source IP can accept the send, `IpPool::reserve_send` returns
-  `IpPoolError::WarmupQuotaExhausted` (and a candidate whose quota store is
-  unavailable is likewise not sendable). There is **no automatic overflow to
-  SES shared sending** in the runtime: shared traffic is SES-only and selected
-  by `EMAIL_TRANSPORT_TYPE=ses`, with no per-message failover. A warming
-  dedicated IP never silently exceeds its schedule.
+- **Enforcement is per source IP in the worker, at send admission.** The one
+  admission function is `EmailProcessor::check_warmup_limit` in
+  [`worker-processors/src/email/processor.rs`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:2337),
+  called before the transport is constructed. It selects the tenant's
+  least-warmed `dedicated_ips` row (`status = 'warming'`, day derived from
+  `warmup_started_at`) and reserves one slot through the atomic
+  check-and-increment Lua script `WARMUP_RESERVE_LUA` (`reserve_warmup_send`,
+  same file, line 838). The Redis key is
+  **`apexmail:warmup:ip:{ip_address}:{utc_day}`** (48-hour TTL, shared by every
+  worker process; the historical `apexmail:outbound:warmup:{identity}:{day}`
+  key is not written by any live path). The cap comes from
+  `mail_common::warmup::limit_for_day()` for that IP's warmup day; day 60+ is
+  unlimited.
+- **A full cap defers the row; it does not overflow.** `QuotaExhausted` sends
+  the row back through the normal requeue path with its attempt preserved, and
+  an unavailable quota store also fails closed and defers. There is **no
+  automatic overflow to SES shared sending** in the runtime: shared traffic is
+  SES-only and selected by `EMAIL_TRANSPORT_TYPE=ses`, with no per-message
+  failover. A warming dedicated IP never silently exceeds its schedule.
+- **There is no ISP-specific cap.** It cannot be computed at admission time —
+  no per-recipient provider is resolvable there (the SMTP relay resolves MX
+  and does not report it; SES does not report it either). The
+  `isp_warmup_templates` / `isp_warmup_schedules` tables and the admin
+  `/admin/warmup` routes are **advisory catalog data only** and are not read
+  by any send path (see
+  [`api-server/src/routes/admin/warmup.rs`](../../services/mail-server/crates/api-server/src/routes/admin/warmup.rs:1)).
 - **Progress bookkeeping is not currently scheduled.** `DedicatedIpProvider`
   exposes `tick_warmup()` (updates `dedicated_ips.warmup_progress` and
-  graduates IPs to `active` after `FULL_WARMUP_DAYS`) and
-  `SesProvider::sync_warmup_progress()` exists, but **no runtime component in
-  this tree calls either** — there is no warmup cron. Graduation/progress only
-  advances if an operator invokes it; do not assume a running cron will do it.
+  graduates IPs to `active` after `FULL_WARMUP_DAYS`,
+  [`api-server/src/ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504))
+  and `SesProvider::sync_warmup_progress()` exists, but **no runtime component
+  in this tree calls either** — there is no warmup cron. Graduation/progress
+  only advances if an operator invokes it; do not assume a running cron will
+  do it.
 
 The single schedule lives in
 [`mail_common::warmup`](../../services/mail-server/crates/mail-common/src/warmup.rs)
-and is used directly by the outbound queue and `DedicatedIpProvider`; the
-historical `WarmupLimits::for_day()` type no longer exists.
+and is used directly by the worker admission gate; the historical
+`WarmupLimits::for_day()` type no longer exists.
 
 ## Related
 

@@ -3839,7 +3839,15 @@ paths:
   /admin/warmup:
     get:
       operationId: listAdminWarmupPools
-      summary: List warmup pools and schedules
+      summary: List advisory warmup pool plans
+      description: |
+        Returns the advisory per-pool warmup plan (`ip_pools` +
+        `isp_warmup_schedules`). These rows are catalog data only: they are NOT
+        consulted by the send path. Live warmup admission is enforced per
+        source IP in `worker-processors` (canonical
+        `mail_common::warmup` schedule over the Redis key
+        `apexmail:warmup:ip:{ip_address}:{utc_day}`). Every pool carries
+        `advisory: true`.
       tags:
         - Admin
       security:
@@ -3864,7 +3872,7 @@ paths:
             default: 0
       responses:
         '200':
-          description: Warmup pools.
+          description: Advisory warmup pool plans (not admission controls).
           content:
             application/json:
               schema:
@@ -3880,7 +3888,13 @@ paths:
 
     post:
       operationId: updateAdminWarmupPool
-      summary: Start, pause, or reset a warmup pool
+      summary: Update the advisory warmup plan for a pool (start, pause, reset)
+      description: |
+        Applies `start` / `pause` / `reset` to the ADVISORY plan only
+        (`ip_pools.status` and the `isp_warmup_schedules` rows). This does NOT
+        start, pause, raise or lower send admission; the live cap is the
+        canonical per-source-IP warmup in `worker-processors`. The response
+        states `advisory: true` and `admissionControl: false`.
       tags:
         - Admin
       security:
@@ -3908,11 +3922,11 @@ paths:
               $ref: '#/components/schemas/AdminWarmupActionRequest'
       responses:
         '200':
-          description: Warmup pool updated.
+          description: Advisory warmup plan updated (no admission effect).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AdminStatusMessageResponse'
+                $ref: '#/components/schemas/AdminWarmupActionResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -15630,6 +15644,9 @@ components:
 
     AdminWarmupSchedule:
       type: object
+      description: |
+        One advisory plan day for a pool (`isp_warmup_schedules`). Nothing in
+        the send path reads this row; `actualVolume` has no runtime writer.
       required:
         - id
         - day
@@ -15643,7 +15660,9 @@ components:
         targetVolume:
           type: integer
           format: int64
+          description: Advisory daily target; not enforced anywhere.
         actualVolume:
+          description: Legacy display data; no runtime writer.
           oneOf:
             - type: integer
               format: int64
@@ -15653,6 +15672,9 @@ components:
 
     AdminWarmupPool:
       type: object
+      description: |
+        Advisory per-pool warmup plan. `advisory` is always `true`: this
+        payload describes a plan, not an admission control.
       required:
         - id
         - name
@@ -15660,6 +15682,7 @@ components:
         - createdAt
         - addresses
         - schedules
+        - advisory
       properties:
         id:
           type: string
@@ -15678,6 +15701,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AdminWarmupSchedule'
+        advisory:
+          type: boolean
+          description: Always `true`; the plan is not read by any send path.
 
     AdminWarmupActionRequest:
       type: object
@@ -15693,6 +15719,31 @@ components:
             - start
             - pause
             - reset
+
+    AdminWarmupActionResponse:
+      type: object
+      description: |
+        Advisory plan action result. `admissionControl: false` states that the
+        action did not change the live per-source-IP warmup admission.
+      required:
+        - success
+        - advisory
+        - admissionControl
+        - status
+        - message
+      properties:
+        success:
+          type: boolean
+        advisory:
+          type: boolean
+          description: Always `true`.
+        admissionControl:
+          type: boolean
+          description: Always `false`; the live control is the worker's per-IP admission.
+        status:
+          type: string
+        message:
+          type: string
 
     AdminStatusMessageResponse:
       type: object

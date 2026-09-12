@@ -9,6 +9,7 @@ pub mod app;
 pub mod audit_log;
 pub mod config;
 pub mod error;
+pub mod feature_flags;
 pub mod ip_provider;
 pub mod middleware;
 pub mod presentation;

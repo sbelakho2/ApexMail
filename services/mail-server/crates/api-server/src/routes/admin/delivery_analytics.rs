@@ -4,12 +4,14 @@
 //! Metric conventions (single source of truth:
 //! [`crate::analytics_metrics`]):
 //!
-//! * **One cohort/time convention**: event-OCCURRENCE timestamps. `sent`
-//!   counts `events.event_type = 'sent'` (written after provider
-//!   acceptance), never `messages.created_at`.
-//! * **One rate unit**: every rate is a FRACTION in `0.0..=1.0`.
-//! * Counts are DISTINCT message ids, so per-recipient copies of one message
-//!   cannot inflate a bucket.
+//! * **One cohort/time convention**: the unit is a recipient-send cohort row
+//!   `(message_id, lower(recipient))` whose `sent` event falls in the
+//!   window; outcomes attach to that send. `sent` counts
+//!   `events.event_type = 'sent'` (written after provider acceptance),
+//!   never `messages.created_at`.
+//! * **One rate unit**: every rate is a FRACTION in `0.0..=1.0`, or
+//!   `null`/absent when the denominator is zero.
+//! * Repeat opens/clicks on one recipient-send cannot inflate a bucket.
 //!
 //! Latency percentiles come from `email_delivery_log` (attempt-occurrence
 //! timestamps); the queue block is an explicit CURRENT snapshot, not a
@@ -20,7 +22,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::analytics_metrics::{detect_event_columns, distinct_message_counts, EventColumns};
+use crate::analytics_metrics::{detect_event_columns, send_cohort_counts, EventColumns};
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
@@ -47,20 +49,21 @@ fn default_range() -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeliveryAnalyticsResponse {
-    /// Fraction in `0.0..=1.0` (distinct delivered messages / distinct sent
-    /// messages), over event-occurrence timestamps.
-    pub delivery_rate: f64,
-    /// Fraction in `0.0..=1.0`.
-    pub bounce_rate: f64,
-    /// Fraction in `0.0..=1.0`.
-    pub complaint_rate: f64,
-    /// DISTINCT messages with a successful `sent` event in the window.
+    /// Fraction in `0.0..=1.0` (cohort rows with a delivered outcome / send
+    /// cohort rows), or `null` when the window has no send cohort.
+    pub delivery_rate: Option<f64>,
+    /// Fraction in `0.0..=1.0`, or `null` when the window has no sends.
+    pub bounce_rate: Option<f64>,
+    /// Fraction in `0.0..=1.0`, or `null` when the window has no sends.
+    pub complaint_rate: Option<f64>,
+    /// Send-cohort rows `(message_id, lower(recipient))` with a successful
+    /// `sent` event in the window.
     pub total_sent: i64,
-    /// DISTINCT messages with a `delivered` event in the window.
+    /// Cohort rows with a `delivered` outcome.
     pub total_delivered: i64,
-    /// DISTINCT messages with a `bounced` event in the window.
+    /// Cohort rows with a `bounced` outcome.
     pub total_bounced: i64,
-    /// DISTINCT messages with a `complained` event in the window.
+    /// Cohort rows with a `complained` outcome.
     pub total_complaints: i64,
     pub delivery_by_provider: Vec<ProviderDeliveryStats>,
     pub latency: LatencyStats,
@@ -81,10 +84,12 @@ pub struct ProviderDeliveryStats {
     pub sent: i64,
     pub delivered: i64,
     pub bounced: i64,
-    /// Fraction in `0.0..=1.0`.
-    pub delivery_rate: f64,
-    /// Fraction in `0.0..=1.0`.
-    pub bounce_rate: f64,
+    /// Fraction in `0.0..=1.0`, or `null` when this transport group has no
+    /// sends in the window (zero denominator is absent, never 0).
+    pub delivery_rate: Option<f64>,
+    /// Fraction in `0.0..=1.0`, or `null` when this transport group has no
+    /// sends in the window.
+    pub bounce_rate: Option<f64>,
     /// `None` — per-provider/transport latency is not derivable from the
     /// event-based breakdown. Real percentiles are served by `/latency`
     /// (from `email_delivery_log`), so this is explicitly absent instead of
@@ -198,7 +203,7 @@ fn parse_range_interval(range: &str) -> String {
 /// Interpretation notes shared by the delivery endpoints.
 fn delivery_notes() -> Vec<String> {
     vec![
-        "All rates are fractions in 0.0-1.0. Counts are DISTINCT messages bucketed by event-occurrence timestamps; 'sent' means a successful send event, not message creation."
+                "All rates are fractions in 0.0-1.0 (null when there are no sends in the window). Counts are send-cohort rows (message_id + lowercased recipient) bucketed by send time; 'sent' means a successful send event, not message creation."
             .to_string(),
         "Queue fields (queueDepth / /queue) are CURRENT snapshots, not windowed metrics.".to_string(),
     ]
@@ -240,16 +245,9 @@ async fn transport_breakdown(
             sent: r.sent,
             delivered: r.delivered,
             bounced: r.bounced,
-            delivery_rate: if r.sent > 0 {
-                r.delivered as f64 / r.sent as f64
-            } else {
-                0.0
-            },
-            bounce_rate: if r.sent > 0 {
-                r.bounced as f64 / r.sent as f64
-            } else {
-                0.0
-            },
+            // A zero-denominator group reports an absent rate, never 0.
+            delivery_rate: (r.sent > 0).then(|| r.delivered as f64 / r.sent as f64),
+            bounce_rate: (r.sent > 0).then(|| r.bounced as f64 / r.sent as f64),
             avg_latency_ms: None,
         })
         .collect())
@@ -265,10 +263,10 @@ async fn get_delivery_analytics(
     let interval = parse_range_interval(&params.range);
     let db = &state.db;
 
-    // One cohort convention: event occurrence. `sent` is a successful send
-    // event and every count is DISTINCT messages.
+    // One cohort convention: the send cohort (recipient-send rows), with
+    // outcomes attached to the send.
     let columns = detect_event_columns(&state).await;
-    let counts = distinct_message_counts(db, None, &interval, columns).await?;
+    let counts = send_cohort_counts(db, None, &interval, columns).await?;
 
     let delivery_by_provider = transport_breakdown(db, &interval, columns).await?;
 
@@ -511,19 +509,21 @@ mod tests {
         assert_eq!(stats.sample_count, 100);
     }
 
+    /// UPDATED for the send-cohort rules: a zero denominator reports an
+    /// absent rate (`None`), not the previous fabricated `0.0`.
     #[test]
-    fn provider_stats_zero_denominator() {
+    fn provider_stats_zero_denominator_is_absent_not_zero() {
         let stats = ProviderDeliveryStats {
             provider: "smtp".into(),
             sent: 0,
             delivered: 0,
             bounced: 0,
-            delivery_rate: 0.0,
-            bounce_rate: 0.0,
+            delivery_rate: None,
+            bounce_rate: None,
             avg_latency_ms: None,
         };
-        assert_eq!(stats.delivery_rate, 0.0);
-        assert_eq!(stats.bounce_rate, 0.0);
+        assert_eq!(stats.delivery_rate, None);
+        assert_eq!(stats.bounce_rate, None);
         // Per-transport latency is absent, never a placeholder zero.
         assert!(stats.avg_latency_ms.is_none());
     }
@@ -603,8 +603,8 @@ mod tests {
             ses.bounced, 1,
             "two bounce events on one message count once"
         );
-        assert!(ses.delivery_rate <= 1.0);
-        assert!(ses.bounce_rate <= 1.0);
+        assert!(ses.delivery_rate.expect("sent > 0") <= 1.0);
+        assert!(ses.bounce_rate.expect("sent > 0") <= 1.0);
         assert!(ses.avg_latency_ms.is_none(), "no placeholder latency");
 
         pool.close().await;

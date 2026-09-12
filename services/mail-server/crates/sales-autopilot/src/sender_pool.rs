@@ -81,6 +81,11 @@ struct SenderIdentityRow {
     domain: String,
     status: String,
     daily_limit: Option<i32>,
+    /// Projected as `host(source_ip)`: the column is Postgres `INET`, which
+    /// does not decode into a Rust string/IpAddr directly. The text form is
+    /// parsed in [`SenderIdentityRow::into_sales_identity`].
+    source_ip: Option<String>,
+    provider: Option<String>,
 }
 
 impl SenderIdentityRow {
@@ -96,6 +101,10 @@ impl SenderIdentityRow {
             ))
         })?;
         ensure_sales_pool(pool)?;
+        // `host()` returns canonical INET text; a value that does not parse is
+        // impossible for a real INET column, and a NULL stays `None` rather
+        // than failing the send over a cosmetic field.
+        let source_ip = self.source_ip.as_deref().and_then(|ip| ip.parse().ok());
         Ok(SenderIdentity {
             id: self.id,
             tenant_id: self.tenant_id,
@@ -105,16 +114,27 @@ impl SenderIdentityRow {
             domain: self.domain,
             status: self.status,
             daily_limit: self.daily_limit,
+            source_ip,
+            provider: self.provider,
         })
     }
 }
 
+/// Every sender-identity SELECT projects `host(source_ip) AS source_ip`
+/// (mandatory: selecting the `INET` column directly does not decode into a
+/// Rust string and fails at runtime) and `provider`. Pool isolation is
+/// unchanged: only sales pools are ever returned.
 const SELECT_ACTIVE_POOL: &str = "SELECT id, tenant_id, pool, from_email, from_name, domain, \
-     status, daily_limit \
+     status, daily_limit, host(source_ip) AS source_ip, provider \
      FROM sales_sender_identities \
      WHERE tenant_id = $1 AND pool = $2 AND status = 'active' \
      ORDER BY from_email ASC \
      LIMIT 1";
+
+const SELECT_BY_ID: &str = "SELECT id, tenant_id, pool, from_email, from_name, domain, \
+     status, daily_limit, host(source_ip) AS source_ip, provider \
+     FROM sales_sender_identities \
+     WHERE id = $1 AND tenant_id = $2";
 
 /// Resolve a sender identity for a sales send. REFUSES any non-sales pool.
 ///
@@ -195,16 +215,12 @@ pub async fn load_sales_sender(
     tenant_id: &str,
     sender_identity_id: Uuid,
 ) -> Result<SenderIdentity, SalesError> {
-    let row: Option<SenderIdentityRow> = sqlx::query_as(
-        "SELECT id, tenant_id, pool, from_email, from_name, domain, status, daily_limit \
-         FROM sales_sender_identities \
-         WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(sender_identity_id)
-    .bind(tenant_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    let row: Option<SenderIdentityRow> = sqlx::query_as(SELECT_BY_ID)
+        .bind(sender_identity_id)
+        .bind(tenant_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
 
     let row = row.ok_or_else(|| {
         SalesError::PolicyDenied(format!(
@@ -256,6 +272,26 @@ mod tests {
         // No fallback for transactional pools — this is the isolation invariant.
         assert_eq!(fallback_pool(SenderPool::TransactionalCustomer), None);
         assert_eq!(fallback_pool(SenderPool::InternalTransactional), None);
+    }
+
+    /// `sales_sender_identities.source_ip` is `INET`: it must be projected as
+    /// `host(source_ip)` in EVERY select, or Decode fails at runtime.
+    #[test]
+    fn every_select_decodes_source_ip_as_text_and_carries_provider() {
+        for sql in [SELECT_ACTIVE_POOL, SELECT_BY_ID] {
+            assert!(
+                sql.contains("host(source_ip) AS source_ip"),
+                "INET must be decoded with host(source_ip): {sql}"
+            );
+            assert!(
+                !sql.contains("SELECT id, tenant_id, pool, from_email, from_name, domain, status, daily_limit, source_ip"),
+                "raw INET select must not reappear: {sql}"
+            );
+            assert!(sql.contains("provider"), "provider must be selected: {sql}");
+        }
+        // Pool isolation semantics are unchanged.
+        assert!(SELECT_ACTIVE_POOL.contains("pool = $2 AND status = 'active'"));
+        assert!(SELECT_BY_ID.contains("WHERE id = $1 AND tenant_id = $2"));
     }
 
     /// The async resolver must refuse a requested transactional pool before it

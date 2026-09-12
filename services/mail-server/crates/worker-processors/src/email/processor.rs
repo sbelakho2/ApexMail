@@ -22,9 +22,10 @@ use tracing::{debug, error, info, warn};
 
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
 use super::transport::{create_transport_from_config, EmailTransport};
+use super::transport_router::transport_kind_for;
 use super::types::{
-    Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, Mailbox, PreparedEmail,
-    SendOutcome, SendResult, WarmupIpIdentity,
+    Attachment, CachedSuppression, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain, EmailJob,
+    Mailbox, PreparedEmail, SendOutcome, WarmupIpIdentity,
 };
 use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
@@ -295,8 +296,8 @@ const MESSAGES_CLAIMED_UPDATE_SQL: &str = r#"
 ///
 /// Warmup state comes from the REAL warmup tables: per-IP warmup lives on
 /// `dedicated_ips` (created by migration 003 with `warmup_started_at`, given
-/// the per-IP warmup model by migrations 071/093 — the same table
-/// `transport_router.rs` routes on), so the query returns the identity
+/// the per-IP warmup model by migrations 071/093 — the same table the
+/// delivery route ([`delivery_route`]) is derived from), so the query returns the identity
 /// (`id`, `ip_address`) and `warmup_started_at` of every dedicated IP still
 /// in status 'warming'. The day/enabled derivation and the selection of the
 /// BINDING IP happen in Rust ([`select_binding_warmup_ip`]), and the
@@ -850,6 +851,142 @@ async fn reserve_warmup_send(
         .await
         .map_err(|error| error.to_string())?;
     Ok(reserved == 1)
+}
+
+/// Release-one-slot Lua: delete the send-unit marker and, ONLY when the
+/// marker existed (i.e. this send unit held a reservation), decrement the
+/// per-IP counter. A missing marker means there is nothing to release — the
+/// DECR is skipped so a repeated release can never underflow another
+/// sender's counter.
+const WARMUP_RELEASE_LUA: &str = r#"
+if redis.call('DEL', KEYS[2]) == 1 then
+    local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+    if current ~= nil and current > 0 then
+        redis.call('DECR', KEYS[1])
+    end
+end
+return 1
+"#;
+
+/// Release a warmup reservation whose send did NOT actually use the
+/// reserved IP (route/source-IP mismatch or an unverified dedicated route).
+///
+/// The reservation is taken BEFORE the transport (see
+/// [`reserve_warmup_send`]); when the transport cannot confirm the reserved
+/// IP was the actual source, the capacity must NOT count as consumed. The
+/// Lua script deletes the idempotency marker (so a retry can re-reserve)
+/// and decrements the per-IP counter exactly once.
+async fn release_warmup_reservation(
+    redis: &RedisPool,
+    reservation: &WarmupReservation,
+) -> Result<(), String> {
+    let mut conn = redis.get().await.map_err(|error| error.to_string())?;
+    let _: i32 = redis::Script::new(WARMUP_RELEASE_LUA)
+        .key(&reservation.counter_key)
+        .key(&reservation.marker_key)
+        .invoke_async(&mut *conn)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// The Redis keys and identity of the warmup slot reserved for ONE send
+/// unit. Kept alongside the route so the enforcement point can release the
+/// exact slot the admission gate reserved.
+#[derive(Debug, Clone)]
+struct WarmupReservation {
+    /// `dedicated_ips.id` of the reserved IP.
+    dedicated_ip_id: String,
+    /// Parsed source IP (`dedicated_ips.ip_address`).
+    source_ip: std::net::IpAddr,
+    /// `apexmail:warmup:ip:{ip_address}:{utc_day}` — the same key
+    /// [`check_warmup_limit`] reserved on.
+    counter_key: String,
+    /// The per-send-unit idempotency marker.
+    marker_key: String,
+}
+
+/// Resolve the warmup reservation for a send unit from the SAME identity
+/// the admission gate used ([`Domain::warmup_ip`]). `None` when the stored
+/// `ip_address` is not a parseable IP — the caller fails closed rather than
+/// routing to an IP it cannot name.
+fn warmup_reservation_for(
+    job: &EmailJob,
+    warmup_ip: &WarmupIpIdentity,
+) -> Option<WarmupReservation> {
+    let source_ip: std::net::IpAddr = warmup_ip.ip_address.trim().parse().ok()?;
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    Some(WarmupReservation {
+        dedicated_ip_id: warmup_ip.dedicated_ip_id.clone(),
+        source_ip,
+        counter_key: warmup_ip_counter_key(&warmup_ip.ip_address, &today),
+        marker_key: warmup_ip_send_marker_key(&warmup_ip.ip_address, &today, job),
+    })
+}
+
+/// Derive the ONE active delivery route for a send unit from the
+/// warmup-IP selection the processor already performs:
+///
+/// * a selected dedicated IP → [`DeliveryRoute::Dedicated`] plus the
+///   [`WarmupReservation`] its capacity was reserved against;
+/// * no dedicated IP → [`DeliveryRoute::SesShared`] with no reservation.
+///
+/// A selected identity whose `ip_address` cannot be parsed into an
+/// [`std::net::IpAddr`] is a hard configuration error: refusing the send is
+/// safer than routing to an unnamed IP (and the admission gate keys on the
+/// same unparseable string, so no correct route exists).
+fn delivery_route(
+    job: &EmailJob,
+    domain: &Domain,
+) -> ProcessorResult<(DeliveryRoute, Option<WarmupReservation>)> {
+    match &domain.warmup_ip {
+        None => Ok((DeliveryRoute::SesShared, None)),
+        Some(identity) => {
+            let reservation = warmup_reservation_for(job, identity).ok_or_else(|| {
+                ProcessorError::Config(format!(
+                    "dedicated IP identity {} has an unparseable source address {:?} — refusing to route",
+                    identity.dedicated_ip_id, identity.ip_address
+                ))
+            })?;
+            Ok((
+                DeliveryRoute::Dedicated {
+                    dedicated_ip_id: identity.dedicated_ip_id.clone(),
+                    source_ip: reservation.source_ip,
+                },
+                Some(reservation),
+            ))
+        }
+    }
+}
+
+/// Enforce that the receipt confirms the route the transport was asked to
+/// execute. Deliberately ASYMMETRIC:
+///
+/// * [`DeliveryRoute::Dedicated`]: the receipt's `actual_source_ip` must be
+///   present AND equal to the selected IP. A different IP is a mismatch; a
+///   missing report is UNVERIFIED and refused — never assumed to be the
+///   selected IP (the route stays unverified until the relay/MTA reports
+///   the bound source IP; see the transport module contract).
+/// * [`DeliveryRoute::SesShared`]: no dedicated IP exists to confirm, so no
+///   `actual_source_ip` requirement applies.
+///
+/// On `Err` the caller MUST release the warmup reservation for the selected
+/// IP: a send that did not demonstrably use the IP must not consume its
+/// capacity.
+fn verify_delivery_route(route: &DeliveryRoute, receipt: &DeliveryReceipt) -> ProcessorResult<()> {
+    match route {
+        DeliveryRoute::SesShared => Ok(()),
+        DeliveryRoute::Dedicated { source_ip, .. } => match receipt.actual_source_ip {
+            Some(actual) if actual == *source_ip => Ok(()),
+            Some(actual) => Err(ProcessorError::Transport(format!(
+                "dedicated route/source-IP mismatch: route selected {source_ip}, receipt reported {actual}"
+            ))),
+            None => Err(ProcessorError::Transport(format!(
+                "dedicated route/source-IP unverified: receipt did not report an actual source IP for {source_ip} \
+                 — the route stays unverified until the relay MTA reports it (see APEXMAIL_SOURCE_IP_REPLY_HEADER)"
+            ))),
+        },
+    }
 }
 
 /// G.3c: try to claim the send slot (Redis SET NX EX). `Ok(true)` — we own
@@ -1861,6 +1998,20 @@ impl EmailProcessor {
             }
         }
 
+        // Release-blocker 15: derive the ACTIVE delivery route from the same
+        // warmup-IP selection the admission above reserved capacity on. The
+        // route travels with the send (to the relay MTA for a dedicated IP)
+        // and its receipt is verified after the send; the reservation is
+        // released when that verification fails, so the quota can never
+        // count a send that did not demonstrably use the IP.
+        let (route, warmup_reservation) = delivery_route(job, &domain)?;
+        debug!(
+            job_id = %job.id,
+            route_kind = %transport_kind_for(&route),
+            dedicated_ip = ?route.dedicated_source_ip(),
+            "dispatch route resolved"
+        );
+
         // Prepare email
         let email = self.prepare_email(job, &domain)?;
 
@@ -1910,18 +2061,33 @@ impl EmailProcessor {
             }
         }
 
-        // Send email
-        let send_result = self.transport.send(&email).await;
+        // Send email along the resolved route, then ENFORCE that the route
+        // actually happened: a dedicated send whose receipt does not confirm
+        // the selected source IP is a hard error, and its warmup reservation
+        // is released inside `settle_delivery_route` so the IP's capacity is
+        // not counted as consumed.
+        let send_result: ProcessorResult<DeliveryReceipt> =
+            match self.transport.send(&email, &route).await {
+                Ok(receipt) => match self
+                    .settle_delivery_route(&route, &receipt, warmup_reservation.as_ref())
+                    .await
+                {
+                    Ok(()) => Ok(receipt),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
 
         // Per-attempt delivery log (email_delivery_log) — the table
         // delivery_analytics' latency percentiles and billing's usage ingest
         // read; previously no runtime writer existed, so those surfaces were
         // structurally zero. Best-effort: a logging failure must not fail
-        // the send path.
+        // the send path. (The free-text SMTP reply is no longer part of the
+        // receipt contract — the receipt's structured fields are the
+        // transport id and the verified source IP.)
         match &send_result {
-            Ok(result) => {
-                self.record_delivery_attempt(job, true, Some(&result.response), None)
-                    .await;
+            Ok(_result) => {
+                self.record_delivery_attempt(job, true, None, None).await;
             }
             Err(error) => {
                 self.record_delivery_attempt(job, false, None, Some(&error.to_string()))
@@ -2218,6 +2384,47 @@ impl EmailProcessor {
                     "warmup quota store unavailable — deferring row (fail closed)"
                 );
                 Ok(WarmupAdmission::Unavailable)
+            }
+        }
+    }
+
+    /// Release-blocker 15: post-send route enforcement. A dedicated route is
+    /// only satisfied by a receipt whose `actual_source_ip` EQUALS the
+    /// selected IP; a different IP is a mismatch and a missing report is
+    /// unverified — both are hard errors, and the warmup reservation for the
+    /// selected IP is released in the error path (a send that did not
+    /// demonstrably use the IP must not consume its capacity). The shared
+    /// route has no IP to confirm (deliberate asymmetry).
+    async fn settle_delivery_route(
+        &self,
+        route: &DeliveryRoute,
+        receipt: &DeliveryReceipt,
+        reservation: Option<&WarmupReservation>,
+    ) -> ProcessorResult<()> {
+        match verify_delivery_route(route, receipt) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Some(reservation) = reservation {
+                    if let Err(release_error) =
+                        release_warmup_reservation(&self.redis, reservation).await
+                    {
+                        // Failing to release is itself logged and retried by
+                        // the 48 h TTL; the send still fails closed.
+                        warn!(
+                            ip = %reservation.source_ip,
+                            dedicated_ip_id = %reservation.dedicated_ip_id,
+                            error = %release_error,
+                            "failed to release warmup reservation after route verification failure"
+                        );
+                    } else {
+                        debug!(
+                            ip = %reservation.source_ip,
+                            dedicated_ip_id = %reservation.dedicated_ip_id,
+                            "warmup reservation released: send did not demonstrably use the selected IP"
+                        );
+                    }
+                }
+                Err(error)
             }
         }
     }
@@ -2577,9 +2784,13 @@ impl EmailProcessor {
     /// row only becomes 'sent' when the set is empty. Requeue paths
     /// (`handle_soft_bounce`) retry only this remaining set, so an
     /// already-delivered recipient is never re-sent.
-    async fn handle_success(&self, job: &EmailJob, result: &SendResult) -> ProcessorResult<()> {
+    async fn handle_success(
+        &self,
+        job: &EmailJob,
+        result: &DeliveryReceipt,
+    ) -> ProcessorResult<()> {
         let updated = sqlx::query(HANDLE_SUCCESS_UPDATE_SQL)
-            .bind(&result.smtp_message_id)
+            .bind(&result.transport_message_id)
             .bind(&job.id)
             .bind(&job.to)
             .bind(lease_token_of(job))
@@ -2598,24 +2809,45 @@ impl EmailProcessor {
             return Ok(());
         }
 
+        // Audit item 12 — THE DELIBERATE GAP: provider/SMTP acceptance
+        // (exactly what this function handles) is NOT recorded as a
+        // `sales_outcomes.delivered` outcome, and not as a `delivered`
+        // sender-health event either. Acceptance is an operational signal
+        // this worker can observe; DELIVERY requires a delivery-confirmation
+        // event (DSN / SES delivery notification), whose consumer does not
+        // exist yet — see `SALES_OUTCOME_MAPPING`, whose
+        // `smtp_or_provider_acceptance` row is `Prohibited` and whose
+        // `delivery_confirmation_callback` row is `NoProducerYet`. Until that
+        // producer lands, this step records NO outcome: the audit explicitly
+        // forbids classifying SMTP acceptance as delivered, and a missing
+        // fact must stay missing rather than become a wrong one.
+        //
         // Record sent event. Best-effort BY CONTRACT: the send already
         // happened and the row is already 'sent' — an analytics INSERT
         // failure must NOT classify the delivered mail as failed (the
         // caller would route it to the bounce handlers and the retry path).
         // Log + metric; the delivery stands.
-        if let Err(e) = sqlx::query(
-            r#"
-            INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient, timestamp)
-            VALUES ($1, $2, $3, $4, $5, 'sent', $6, NOW())
-            "#,
+        //
+        // Audit item 21: the recipient mailbox provider is persisted HERE,
+        // at delivery time, when the transport's delivery path actually
+        // resolved it (MX lookup). Unknown stays NULL — it is never inferred
+        // from the visible recipient domain (a custom domain hosted by
+        // Google Workspace would be misreported).
+        let (recipient_provider, provider_source) = normalized_provider_columns(
+            result.recipient_provider.as_deref(),
+            result.provider_source.as_deref(),
+        );
+        if let Err(e) = insert_recipient_event(
+            &self.db,
+            &job.tenant_id,
+            &job.message_id,
+            &job.domain_id,
+            job.campaign_id.as_deref(),
+            "sent",
+            &job.to,
+            recipient_provider.as_deref(),
+            provider_source,
         )
-        .bind(format!("evt_{}", uuid::Uuid::new_v4()))
-        .bind(&job.tenant_id)
-        .bind(&job.message_id)
-        .bind(&job.domain_id)
-        .bind(&job.campaign_id)
-        .bind(&job.to)
-        .execute(&self.db)
         .await
         {
             metrics::counter!("email.sent_event_write_failed").increment(1);
@@ -2831,6 +3063,12 @@ impl EmailProcessor {
         // completed).
         self.reconcile_parent_progress(job).await;
 
+        // Audit item 10: a transient failure is one sender-health `deferral`
+        // fact. There is no outcome rung for a retryable failure (the ladder
+        // has no `deferral`), so only the ledger row is written here.
+        self.record_sales_feedback(job, SalesDeliveryEvent::SoftBounce)
+            .await;
+
         Ok(())
     }
 
@@ -2901,23 +3139,90 @@ impl EmailProcessor {
         // 'processing' forever.
         self.reconcile_parent_progress(job).await;
 
-        // Record bounce event (for the bounced recipient only)
-        sqlx::query(
-            r#"
-            INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient, timestamp)
-            VALUES ($1, $2, $3, $4, $5, 'bounced', $6, NOW())
-            "#,
+        // Record bounce event (for the bounced recipient only).
+        //
+        // Audit item 21: carry the recipient-provider identity persisted at
+        // delivery time for this recipient-send onto the bounce, so outcome
+        // events never lose provenance. When nothing was persisted (the
+        // MX was never resolved) both fields stay NULL — never inferred.
+        let (recipient_provider, provider_source) =
+            carried_recipient_provider(&self.db, &job.tenant_id, &job.message_id, &job.to).await;
+        insert_recipient_event(
+            &self.db,
+            &job.tenant_id,
+            &job.message_id,
+            &job.domain_id,
+            job.campaign_id.as_deref(),
+            "bounced",
+            &job.to,
+            recipient_provider.as_deref(),
+            provider_source.as_deref(),
         )
-        .bind(format!("evt_{}", uuid::Uuid::new_v4()))
-        .bind(&job.tenant_id)
-        .bind(&job.message_id)
-        .bind(&job.domain_id)
-        .bind(&job.campaign_id)
-        .bind(&job.to)
-        .execute(&self.db)
         .await?;
 
+        // Audit items 10/12: feed the sales feedback loop. ONE
+        // `sales_sender_events` row (`hard_bounce`) plus the `bounce` outcome
+        // when the queue row carries the typed sales provenance. Both inserts
+        // are idempotent on their stable keys. Best-effort: the recipient is
+        // already suppressed and the delivery record written — a ledger
+        // failure is logged, never turned into a retry of an already-bounced
+        // message.
+        self.record_sales_feedback(job, SalesDeliveryEvent::HardBounce)
+            .await;
+
         Ok(())
+    }
+
+    /// Record the Sales V2 outcome and the sender-health ledger row for one
+    /// delivery fact tied to this queue row.
+    ///
+    /// Both writes are the single-sourced functions at the bottom of this
+    /// module; both are idempotent (a replayed provider callback or a
+    /// re-claimed queue row cannot double-count). Best-effort by design — the
+    /// delivery state transition has already happened and must not be
+    /// unwound by a feedback-ledger failure; failures are logged and
+    /// counted.
+    async fn record_sales_feedback(&self, job: &EmailJob, event: SalesDeliveryEvent) {
+        let provider = transport_provider_label(&self.config.transport_type);
+        match record_sales_outcome_if_linked(&self.db, &job.id, event, provider).await {
+            Ok(Some(outcome_id)) => {
+                debug!(
+                    job_id = %job.id,
+                    outcome_id = %outcome_id,
+                    outcome = event.outcome().unwrap_or("none"),
+                    "Sales V2 outcome recorded from a delivery fact"
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                metrics::counter!("email.sales_outcome_write_failed").increment(1);
+                warn!(
+                    job_id = %job.id,
+                    error = %error,
+                    "sales outcome write failed — delivery state is unaffected, feedback event lost"
+                );
+            }
+        }
+
+        match record_sender_event_if_linked(&self.db, &job.id, event, &job.to).await {
+            Ok(Some(sender_event_id)) => {
+                debug!(
+                    job_id = %job.id,
+                    sender_event_id = %sender_event_id,
+                    event_type = event.sender_ledger_event().unwrap_or("none"),
+                    "sender-health ledger row recorded from a delivery fact"
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                metrics::counter!("email.sales_sender_event_write_failed").increment(1);
+                warn!(
+                    job_id = %job.id,
+                    error = %error,
+                    "sender-health ledger write failed — delivery state is unaffected, feedback event lost"
+                );
+            }
+        }
     }
 
     /// Handle generic error.
@@ -3263,6 +3568,141 @@ fn transport_provider_label(transport_type: &TransportType) -> &'static str {
     }
 }
 
+// ─── Recipient-mailbox-provider provenance (audit item 21) ─────────────
+//
+// The recipient provider is a DELIVERY-TIME fact: only the path that
+// resolves the recipient domain's MX records can know it. It is persisted
+// on the `sent` event when the transport reports it and carried onto
+// subsequent events for the same recipient-send. Unknown is stored as NULL;
+// the visible recipient domain is NEVER turned into a provider guess here
+// (migration 202's rationale: `@customer.com` is not Google Workspace
+// without MX evidence).
+
+/// `events.provider_source` values accepted by the CHECK constraint in
+/// `202_sales_feedback_delivery_binding.sql:154-163`.
+const PROVIDER_SOURCES: [&str; 3] = ["mx_resolved", "provider_callback", "inferred"];
+
+/// Normalize a delivery-time recipient-provider report to a canonical slug:
+/// lowercase ASCII alphanumerics plus `_`, `.`, `-`, whitespace folded to
+/// `_`, trimmed of separator edges, non-empty, at most 64 chars. `None` for
+/// anything unusable (blank, all separators, oversize) — garbage must never
+/// reach the shared provider dimension.
+fn normalize_recipient_provider(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '_' | '.' | '-') {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('_');
+        }
+    }
+    let trimmed = out
+        .trim_matches(|c| matches!(c, '_' | '.' | '-'))
+        .to_string();
+    (!trimmed.is_empty() && trimmed.len() <= 64).then_some(trimmed)
+}
+
+/// The `(recipient_provider, provider_source)` pair to persist for one event
+/// insert. A provider is only persisted WITH a valid provenance source; an
+/// unrecognized source drops the pair rather than attributing a value to
+/// nothing (the DB CHECK would reject it anyway).
+fn normalized_provider_columns(
+    provider: Option<&str>,
+    source: Option<&str>,
+) -> (Option<String>, Option<&'static str>) {
+    let Some(provider) = provider.and_then(normalize_recipient_provider) else {
+        return (None, None);
+    };
+    let Some(source) = source.and_then(|raw| {
+        PROVIDER_SOURCES
+            .iter()
+            .copied()
+            .find(|allowed| *allowed == raw.trim())
+    }) else {
+        return (None, None);
+    };
+    (Some(provider), Some(source))
+}
+
+/// Insert one recipient-send lifecycle event carrying the optional
+/// recipient-provider provenance (columns added by migration
+/// `202_sales_feedback_delivery_binding.sql:150-167`; the event columns are
+/// `075_create_missing_tables.sql:30-49` plus the widened
+/// `domain_id`/`campaign_id` from `090_widen_events_id_columns.sql:25-32`).
+async fn insert_recipient_event(
+    db: &PgPool,
+    tenant_id: &str,
+    message_id: &str,
+    domain_id: &str,
+    campaign_id: Option<&str>,
+    event_type: &str,
+    recipient: &str,
+    recipient_provider: Option<&str>,
+    provider_source: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type,
+                            recipient, recipient_provider, provider_source, timestamp)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        "#,
+    )
+    .bind(format!("evt_{}", uuid::Uuid::new_v4()))
+    .bind(tenant_id)
+    .bind(message_id)
+    .bind(domain_id)
+    .bind(campaign_id)
+    .bind(event_type)
+    .bind(recipient)
+    .bind(recipient_provider)
+    .bind(provider_source)
+    .execute(db)
+    .await
+    .map(|_| ())
+}
+
+/// The recipient-provider pair already persisted for this recipient-send
+/// (written on the `sent` event at delivery time), so subsequent events —
+/// e.g. a hard bounce — carry the SAME normalized provider. Best-effort:
+/// a lookup failure logs and yields `(None, None)` rather than failing the
+/// bounce path; the provenance is lost, never fabricated.
+async fn carried_recipient_provider(
+    db: &PgPool,
+    tenant_id: &str,
+    message_id: &str,
+    recipient: &str,
+) -> (Option<String>, Option<String>) {
+    let lookup = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT recipient_provider, provider_source
+         FROM events
+         WHERE tenant_id = $1
+           AND message_id = $2
+           AND lower(recipient) = lower($3)
+           AND recipient_provider IS NOT NULL
+         ORDER BY timestamp DESC
+         LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(message_id)
+    .bind(recipient)
+    .fetch_optional(db)
+    .await;
+    match lookup {
+        Ok(Some(pair)) => pair,
+        Ok(None) => (None, None),
+        Err(error) => {
+            warn!(
+                message_id = %message_id,
+                error = %error,
+                "recipient-provider carry-through lookup failed; event written without provider provenance"
+            );
+            (None, None)
+        }
+    }
+}
+
 /// Envelope-sender domain used for per-domain reputation counters.
 fn envelope_domain(from: &str) -> Option<&str> {
     from.rsplit_once('@').map(|(_, d)| d)
@@ -3289,6 +3729,362 @@ fn overlay_status_counts(counts: Vec<(String, i64)>) -> Vec<(String, i64)> {
     }
     snapshot.extend(by_status);
     snapshot
+}
+
+// ===========================================================================
+// Sales V2 outcomes and the sender-health ledger (audit items 10/12)
+// ===========================================================================
+//
+// The sales feedback loops read two canonical tables:
+//
+//   * `sales_sender_events` — ONE row per delivery fact, folded into
+//     `sales_sender_health` by `sales_autopilot::outcome_projector`
+//     (migration 202 lines 106-125);
+//   * `sales_outcomes` — the outcome ladder the optimizer learns from,
+//     unique on `(tenant_id, outcome, step_execution_id)`
+//     (migration 200 lines 758-777).
+//
+// DEPENDENCY DIRECTION: this crate deliberately does NOT depend on
+// `sales-autopilot` (see the comment at the top of
+// `src/reply_handler/processor.rs`: pulling the control-plane crate into the
+// worker image would drag its routes/dispatcher/AXUM surface along, and the
+// worker only needs the canonical tables). `sales-autopilot` does not depend
+// on `worker-processors` either, so a new dependency would not be a Cargo
+// cycle — but it would invert the intended layering (the delivery worker is
+// infrastructure; the sales engine is the consumer of its DB rows), so the
+// insert is implemented here directly against the canonical tables, kept in
+// the ONE function [`record_sales_outcome_if_linked`] so the SQL is still
+// single-sourced. If the workspace ever moves the delivery worker under the
+// sales crate's dependency envelope, that function should call
+// `sales_autopilot::attribution::record_outcome` instead; the SQL below is
+// intentionally equivalent.
+
+/// One platform delivery fact that may produce a Sales V2 outcome and/or a
+/// sender-health ledger row.
+///
+/// `ProviderAccepted` exists to make the audit's prohibition explicit in
+/// code: provider/SMTP acceptance is an operational signal, NOT a delivery,
+/// and both mappings for it are `None` so the code can never record a
+/// `delivered` outcome from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalesDeliveryEvent {
+    /// The transport accepted the message (SMTP 250 / SES SendEmail success).
+    ///
+    /// Never constructed in production: acceptance deliberately records
+    /// nothing (see [`SALES_OUTCOME_MAPPING`]); the variant is the type-level
+    /// statement of the prohibition and is exercised by the mapping test.
+    #[allow(dead_code)]
+    ProviderAccepted,
+    /// Permanent delivery failure (SMTP 5xx classified hard, or an SES
+    /// failure the transport classified `permanent`).
+    HardBounce,
+    /// Transient failure / deferral (SMTP 4xx / SES transient). Has a
+    /// sender-health rung (`deferral`) but no outcome rung.
+    SoftBounce,
+}
+
+impl SalesDeliveryEvent {
+    /// The `sales_outcomes.outcome` value this fact produces, if any.
+    ///
+    /// SMTP/provider acceptance deliberately returns `None`: "Do not classify
+    /// SMTP acceptance as delivered" (audit item 12). `delivered` requires a
+    /// delivery-confirmation event, which has no producer yet — see
+    /// [`SALES_OUTCOME_MAPPING`].
+    pub fn outcome(self) -> Option<&'static str> {
+        match self {
+            Self::ProviderAccepted => None,
+            Self::HardBounce => Some("bounce"),
+            Self::SoftBounce => None,
+        }
+    }
+
+    /// The `sales_sender_events.event_type` value this fact produces, if any.
+    /// Acceptance produces none for the same reason: `delivered` requires a
+    /// delivery confirmation.
+    pub fn sender_ledger_event(self) -> Option<&'static str> {
+        match self {
+            Self::ProviderAccepted => None,
+            Self::HardBounce => Some("hard_bounce"),
+            Self::SoftBounce => Some("deferral"),
+        }
+    }
+}
+
+/// Where a rung of the outcome ladder is produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalesOutcomeProducer {
+    /// Produced by this file, on the delivery path named in `producer`.
+    ImplementedHere,
+    /// The platform event exists but no workspace producer writes the rung
+    /// yet. Recorded here so the gap is explicit rather than silent.
+    NoProducerYet,
+    /// The mapping must never be produced (the audit forbids it).
+    Prohibited,
+}
+
+/// One row of the documented platform-event → Sales V2 outcome mapping.
+///
+/// Read by [`SALES_OUTCOME_MAPPING`]'s auditing test; the `allow(dead_code)`
+/// keeps the documented contract from reading as an unused struct in the
+/// non-test build.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct SalesOutcomeMapping {
+    /// The platform event that would produce the rung.
+    pub platform_event: &'static str,
+    /// The `sales_outcomes.outcome` value, or `None` when the event must not
+    /// produce an outcome at all.
+    pub outcome: Option<&'static str>,
+    /// Where the producer lives (or would live).
+    pub producer: &'static str,
+    pub status: SalesOutcomeProducer,
+}
+
+/// The audit's full Sales V2 outcome ladder and its producer status in this
+/// worker.
+///
+/// Wire strings are the `sales_outcomes.outcome` CHECK vocabulary
+/// (migration 200 lines 768-771). `delivered` requires a delivery
+/// confirmation and is explicitly NOT produced from SMTP/provider
+/// acceptance; the `NoProducerYet` rows document producers owned by other
+/// services (tracking-service, reply_handler, calendar, billing) that this
+/// audit item does not cover.
+///
+/// Kept as this crate's documented contract: the mapping test pins it to the
+/// migration-200 CHECK vocabulary so a future producer cannot silently add an
+/// undocumented rung.
+#[allow(dead_code)]
+pub const SALES_OUTCOME_MAPPING: &[SalesOutcomeMapping] = &[
+    SalesOutcomeMapping {
+        platform_event: "smtp_or_provider_acceptance",
+        outcome: None,
+        producer: "worker-processors email/processor.rs handle_success",
+        status: SalesOutcomeProducer::Prohibited,
+    },
+    SalesOutcomeMapping {
+        platform_event: "delivery_confirmation_callback (DSN / SES delivery notification)",
+        outcome: Some("delivered"),
+        producer: "delivery-notification consumer (not implemented in this worker)",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "tracking_open",
+        outcome: Some("open"),
+        producer: "tracking-service open-pixel handler",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "tracking_click",
+        outcome: Some("click"),
+        producer: "tracking-service link redirect",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "reply_processor (reply)",
+        outcome: Some("reply"),
+        producer: "worker-processors reply_handler",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "reply_processor (positive reply)",
+        outcome: Some("positive_reply"),
+        producer: "worker-processors reply_handler",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "calendar booking",
+        outcome: Some("meeting_booked"),
+        producer: "sales-autopilot calendar service",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "calendar attendance",
+        outcome: Some("meeting_attended"),
+        producer: "sales-autopilot calendar service",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "trial_conversion",
+        outcome: Some("trial"),
+        producer: "billing-service trial conversion",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "subscription_purchase",
+        outcome: Some("paid_subscription"),
+        producer: "billing-service subscription lifecycle",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "retained_billing_state",
+        outcome: Some("retained_mrr"),
+        producer: "billing-service retention sweep",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "complaint_callback",
+        outcome: Some("complaint"),
+        producer: "reply_handler / FBL consumer",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "unsubscribe",
+        outcome: Some("unsubscribe"),
+        producer: "reply_handler / unsubscribe endpoint",
+        status: SalesOutcomeProducer::NoProducerYet,
+    },
+    SalesOutcomeMapping {
+        platform_event: "hard_bounce",
+        outcome: Some("bounce"),
+        producer: "worker-processors email/processor.rs handle_hard_bounce",
+        status: SalesOutcomeProducer::ImplementedHere,
+    },
+];
+
+/// The typed sales provenance of one `email_queue` row, as the dispatcher
+/// wrote it (migration 202 lines 34-38).
+#[derive(Debug, sqlx::FromRow)]
+struct SalesProvenance {
+    tenant_id: String,
+    message_id: Option<uuid::Uuid>,
+    sales_enrollment_id: Option<uuid::Uuid>,
+    sales_step_execution_id: Option<uuid::Uuid>,
+}
+
+/// Parse an `email_queue.id` (text in [`EmailJob`]) into its UUID form.
+/// Legacy rows whose id is not a UUID cannot carry the sales provenance
+/// (migration 202 columns are UUID FKs), so they are skipped rather than
+/// failing the send path with a cast error.
+fn parse_queue_row_id(queue_row_id: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(queue_row_id.trim()).ok()
+}
+
+/// THE single source of the `sales_outcomes` insert in this crate.
+///
+/// Reads the typed sales provenance from `email_queue` (the dispatcher wrote
+/// it), and when the row links a `sales_step_execution_id`, inserts the
+/// outcome for `event` idempotently:
+///
+/// * `ON CONFLICT (tenant_id, outcome, step_execution_id) DO NOTHING`
+///   (migration 200 line 777) — a replayed provider callback or a retried
+///   delivery attempt can never double-count a bounce or a complaint;
+/// * rows without a step execution are skipped — there is nothing to
+///   attribute to and the unique key does not dedupe `NULL`s.
+///
+/// Returns `Ok(Some(id))` when this call inserted the row, `Ok(None)` when
+/// nothing was due (prohibited mapping, no sales provenance, or a duplicate
+/// that already existed), and `Err` only on a real database failure.
+pub async fn record_sales_outcome_if_linked(
+    db: &PgPool,
+    queue_row_id: &str,
+    event: SalesDeliveryEvent,
+    provider: &str,
+) -> ProcessorResult<Option<uuid::Uuid>> {
+    let Some(outcome) = event.outcome() else {
+        // `ProviderAccepted` lands here: acceptance is not delivery.
+        return Ok(None);
+    };
+    let Some(queue_id) = parse_queue_row_id(queue_row_id) else {
+        debug!(
+            queue_row_id,
+            "email_queue row id is not a UUID; not sales-provenanced mail, no outcome recorded"
+        );
+        return Ok(None);
+    };
+
+    // `email_queue` is partitioned with PRIMARY KEY (id, created_at), so the
+    // id alone is not guaranteed unique; pick the newest row deterministically.
+    let provenance: Option<SalesProvenance> = sqlx::query_as(
+        "SELECT COALESCE(tenant_id::text, '') AS tenant_id, message_id, \
+                sales_enrollment_id, sales_step_execution_id \
+         FROM email_queue WHERE id = $1 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(queue_id)
+    .fetch_optional(db)
+    .await?;
+
+    let Some(provenance) = provenance else {
+        return Ok(None);
+    };
+    if provenance.tenant_id.is_empty() {
+        return Ok(None);
+    }
+    let Some(step_execution_id) = provenance.sales_step_execution_id else {
+        debug!(
+            queue_row_id,
+            "email_queue row carries no sales_step_execution_id; no Sales V2 outcome recorded"
+        );
+        return Ok(None);
+    };
+
+    let id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "INSERT INTO sales_outcomes \
+             (id, tenant_id, account_id, contact_id, enrollment_id, step_execution_id, \
+              outcome, value_eur, message_id, provider, occurred_at, created_at) \
+         SELECT gen_random_uuid(), $1, e.account_id, e.contact_id, $2, $3, $4, 0, $5, $6, NOW(), NOW() \
+         FROM (SELECT 1) AS one \
+         LEFT JOIN sales_enrollments e ON e.id = $2 AND e.tenant_id = $1 \
+         ON CONFLICT (tenant_id, outcome, step_execution_id) DO NOTHING \
+         RETURNING id",
+    )
+    .bind(&provenance.tenant_id)
+    .bind(provenance.sales_enrollment_id)
+    .bind(step_execution_id)
+    .bind(outcome)
+    .bind(provenance.message_id)
+    .bind(provider)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(id)
+}
+
+/// THE single source of the `sales_sender_events` insert in this crate.
+///
+/// One row per delivery fact, keyed by
+/// `UNIQUE (sender_identity_id, event_type, message_id, recipient)`
+/// (migration 202 line 120) so a replayed callback is a no-op and the
+/// projector folds each fact into the sender's health window exactly once.
+/// The message identity falls back to the queue row id when
+/// `email_queue.message_id` is NULL, so the dedupe key is never NULL (which
+/// Postgres unique indexes do not dedupe).
+pub async fn record_sender_event_if_linked(
+    db: &PgPool,
+    queue_row_id: &str,
+    event: SalesDeliveryEvent,
+    recipient: &str,
+) -> ProcessorResult<Option<uuid::Uuid>> {
+    let Some(event_type) = event.sender_ledger_event() else {
+        return Ok(None);
+    };
+    let Some(queue_id) = parse_queue_row_id(queue_row_id) else {
+        return Ok(None);
+    };
+    if recipient.trim().is_empty() {
+        return Ok(None);
+    }
+
+    // Same partitioned-key caveat as above: one deterministic queue row.
+    let id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "INSERT INTO sales_sender_events \
+             (id, tenant_id, sender_identity_id, event_type, message_id, recipient, occurred_at) \
+         SELECT gen_random_uuid(), q.tenant_id::text, q.sales_sender_identity_id, $2, \
+                COALESCE(q.message_id::text, q.id::text), $3, NOW() \
+         FROM (SELECT queue.* FROM email_queue queue WHERE queue.id = $1 \
+               ORDER BY queue.created_at DESC LIMIT 1) q \
+         WHERE q.tenant_id IS NOT NULL \
+           AND q.sales_sender_identity_id IS NOT NULL \
+         ON CONFLICT (sender_identity_id, event_type, message_id, recipient) DO NOTHING \
+         RETURNING id",
+    )
+    .bind(queue_id)
+    .bind(event_type)
+    .bind(recipient)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -4347,6 +5143,155 @@ mod tests {
         assert_eq!(transport_provider_label(&TransportType::Smtp), "smtp");
     }
 
+    // ── Audit item 21: recipient-provider provenance ───────────────────
+
+    #[test]
+    fn recipient_provider_normalizes_to_a_canonical_slug() {
+        assert_eq!(
+            normalize_recipient_provider("Google Workspace"),
+            Some("google_workspace".into())
+        );
+        assert_eq!(
+            normalize_recipient_provider("  Microsoft-365  "),
+            Some("microsoft-365".into())
+        );
+        assert_eq!(
+            normalize_recipient_provider("..."),
+            None,
+            "separator-only input is unusable"
+        );
+        assert_eq!(normalize_recipient_provider("   "), None);
+        assert_eq!(normalize_recipient_provider(&"x".repeat(65)), None);
+        assert_eq!(
+            normalize_recipient_provider("gôogle"),
+            Some("gogle".into()),
+            "non-ASCII characters are dropped, never guessed"
+        );
+    }
+
+    #[test]
+    fn recipient_provider_requires_valid_provenance_source() {
+        // A known provider with an MX source is persisted as mx_resolved.
+        assert_eq!(
+            normalized_provider_columns(Some("Google Workspace"), Some("mx_resolved")),
+            (Some("google_workspace".to_string()), Some("mx_resolved"))
+        );
+        // A provider_callback report is equally valid provenance.
+        assert_eq!(
+            normalized_provider_columns(Some("microsoft_365"), Some("provider_callback")),
+            (Some("microsoft_365".to_string()), Some("provider_callback"))
+        );
+        // No source: the value is dropped rather than attributed to nothing.
+        assert_eq!(
+            normalized_provider_columns(Some("google_workspace"), None),
+            (None, None)
+        );
+        // An unrecognized source (including whitespace variants) is dropped.
+        assert_eq!(
+            normalized_provider_columns(Some("google_workspace"), Some("looked_at_domain")),
+            (None, None)
+        );
+        // No provider: nothing persisted, no source.
+        assert_eq!(
+            normalized_provider_columns(None, Some("mx_resolved")),
+            (None, None)
+        );
+        // An empty provider cannot be persisted.
+        assert_eq!(
+            normalized_provider_columns(Some("  "), Some("mx_resolved")),
+            (None, None)
+        );
+    }
+
+    /// Audit item 21: the shared `events` writer persists the provenance on
+    /// the sent row, and the carry-through lookup hands the SAME normalized
+    /// provider to a later bounce on the same recipient-send. Rows with no
+    /// evidence stay NULL. Gated on TEST_DATABASE_URL.
+    #[tokio::test]
+    async fn provider_provenance_is_persisted_and_carried_through() {
+        let pool =
+            match migrator::test_support::fresh_canonical_pool("worker_provider", "carry").await {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            };
+        let Some(pool) = pool else {
+            eprintln!("skipping provider_provenance_is_persisted_and_carried_through: no TEST_DATABASE_URL");
+            return;
+        };
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let tenant = format!("t{}", &suffix[..25]);
+        let message_id = format!("msg-{suffix}");
+
+        // The sent event carries MX-resolved evidence.
+        insert_recipient_event(
+            &pool,
+            &tenant,
+            &message_id,
+            "dom-1",
+            None,
+            "sent",
+            "CEO@Acme-Corp.Example",
+            Some("google_workspace"),
+            Some("mx_resolved"),
+        )
+        .await
+        .expect("sent event insert must carry provider columns");
+
+        let stored: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT recipient_provider, provider_source FROM events
+             WHERE tenant_id = $1 AND message_id = $2 AND event_type = 'sent'",
+        )
+        .bind(&tenant)
+        .bind(&message_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read back sent event");
+        assert_eq!(stored.0.as_deref(), Some("google_workspace"));
+        assert_eq!(stored.1.as_deref(), Some("mx_resolved"));
+
+        // A bounce for a case-different recipient carries the same values.
+        let (provider, source) =
+            carried_recipient_provider(&pool, &tenant, &message_id, "ceo@acme-corp.example").await;
+        assert_eq!(provider.as_deref(), Some("google_workspace"));
+        assert_eq!(source.as_deref(), Some("mx_resolved"));
+
+        // An unknown recipient-send has no provenance to carry — NULL, not
+        // a suffix guess.
+        let (none_provider, none_source) =
+            carried_recipient_provider(&pool, &tenant, &message_id, "other@acme-corp.example")
+                .await;
+        assert_eq!(none_provider, None);
+        assert_eq!(none_source, None);
+
+        // A writer with no evidence persists NULL/ NULL.
+        insert_recipient_event(
+            &pool,
+            &tenant,
+            &format!("msg-{suffix}-unknown"),
+            "dom-1",
+            None,
+            "sent",
+            "user@unknown.example",
+            None,
+            None,
+        )
+        .await
+        .expect("unknown-provider insert");
+        let unknown: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT recipient_provider, provider_source FROM events
+             WHERE tenant_id = $1 AND message_id = $2",
+        )
+        .bind(&tenant)
+        .bind(format!("msg-{suffix}-unknown"))
+        .fetch_one(&pool)
+        .await
+        .expect("read back unknown-provider event");
+        assert_eq!(unknown, (None, None));
+
+        pool.close().await;
+    }
+
     #[test]
     fn test_envelope_domain() {
         assert_eq!(envelope_domain("sender@example.com"), Some("example.com"));
@@ -5136,6 +6081,80 @@ mod tests {
             crate::common::WarmupConfig::default().enabled,
             "warmup limiting must engage by default now that real state exists"
         );
+    }
+
+    /// Audit item 26 (delete branch): warmup capacity has EXACTLY ONE
+    /// admission entry point in the production send path, and its limit
+    /// derivation is the canonical `mail_common::warmup` schedule with the
+    /// canonical per-IP Redis key. The scan is over the production region
+    /// only (everything before the first `#[cfg(test)]`), so test code
+    /// cannot mask a second entry point; if an ISP-target admission is ever
+    /// added, these counts change and the guarantee is re-examined
+    /// deliberately.
+    #[test]
+    fn warmup_admission_has_exactly_one_production_entry_point() {
+        let source = include_str!("processor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("processor source must not begin with a test module");
+
+        assert_eq!(
+            production.matches("async fn check_warmup_limit(").count(),
+            1,
+            "exactly one warmup-admission function may exist"
+        );
+        assert_eq!(
+            production.matches("self.check_warmup_limit(").count(),
+            1,
+            "dispatch must consult exactly one warmup admission function"
+        );
+        assert_eq!(
+            production.matches("WarmupSchedule::limit_for_day").count(),
+            1,
+            "the canonical mail_common schedule must be the only limit derivation"
+        );
+        assert!(
+            production.contains("use mail_common::warmup::WarmupSchedule;"),
+            "the limit derivation must come from mail_common::warmup"
+        );
+        assert_eq!(
+            production
+                .matches(concat!("apexmail:warmup:", "ip:{}:{}"))
+                .count(),
+            1,
+            "the canonical per-IP Redis key format must be built in exactly one place"
+        );
+        assert_eq!(
+            production.matches("reserve_warmup_send(").count(),
+            2,
+            "one definition + one call: a single warmup-capacity reservation entry point"
+        );
+    }
+
+    /// Audit item 26 (delete branch) hostile-input equivalent: the send path
+    /// never resolves a recipient provider for admission and never reads the
+    /// ISP warmup catalog or the inert per-pool schedule rows. With no
+    /// reader, a catalog profile that is absent, maps to nothing, or carries
+    /// a zero/negative/huge target cannot produce ANY cap — the canonical
+    /// per-IP limit above stays the sole maximum. Provider strings that do
+    /// exist in this file are event-persistence evidence only.
+    #[test]
+    fn warmup_send_path_has_no_isp_catalog_or_provider_derived_cap() {
+        let source = include_str!("processor.rs");
+        for needle in [
+            ["isp", "_warmup"].concat(),
+            ["mx", "_patterns"].concat(),
+            ["Warmup", "CatalogRepo"].concat(),
+            ["Warmup", "ExecutionRepo"].concat(),
+            ["record", "_daily_actual"].concat(),
+        ] {
+            assert!(
+                !source.contains(needle.as_str()),
+                "the send path must contain no ISP-catalog-derived admission \
+                 input (found {needle:?})"
+            );
+        }
     }
 
     /// Audit-1 / Fix 3 behavioral gate: with warmup enabled for a binding
@@ -6245,5 +7264,814 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         result.expect("marker sequence");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Release-blocker 15: route/network-path unification
+    // ---------------------------------------------------------------------------
+
+    /// The route is DERIVED from the warmup-IP selection (not a second
+    /// decision): no selected IP → shared; selected IP → dedicated with the
+    /// parsed source address and the reservation keys the admission gate
+    /// used.
+    #[test]
+    fn delivery_route_derives_dedicated_from_the_warmup_ip_selection() {
+        let job = tracking_gate_job();
+
+        let (shared, no_reservation) = delivery_route(&job, &tracking_gate_domain()).unwrap();
+        assert!(matches!(shared, DeliveryRoute::SesShared));
+        assert!(!shared.is_dedicated());
+        assert_eq!(shared.dedicated_source_ip(), None);
+        assert!(no_reservation.is_none());
+
+        let mut domain = tracking_gate_domain();
+        domain.warmup_enabled = true;
+        domain.warmup_ip = Some(WarmupIpIdentity {
+            dedicated_ip_id: "dip-1".into(),
+            ip_address: "203.0.113.9".into(),
+            warmup_started_at: Utc::now() - chrono::Duration::days(3),
+        });
+        let (route, reservation) = delivery_route(&job, &domain).unwrap();
+        match &route {
+            DeliveryRoute::Dedicated {
+                dedicated_ip_id,
+                source_ip,
+            } => {
+                assert_eq!(dedicated_ip_id, "dip-1");
+                assert_eq!(
+                    *source_ip,
+                    "203.0.113.9".parse::<std::net::IpAddr>().expect("test IP")
+                );
+            }
+            other => panic!("expected the dedicated route, got {other:?}"),
+        }
+        assert!(route.is_dedicated());
+        assert_eq!(
+            route.dedicated_source_ip(),
+            Some("203.0.113.9".parse::<std::net::IpAddr>().expect("test IP"))
+        );
+        // The reservation names the SAME keys check_warmup_limit reserved.
+        let reservation = reservation.expect("a dedicated route carries its warmup reservation");
+        assert_eq!(reservation.dedicated_ip_id, "dip-1");
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            reservation.counter_key,
+            warmup_ip_counter_key("203.0.113.9", &today)
+        );
+        assert_eq!(
+            reservation.marker_key,
+            warmup_ip_send_marker_key("203.0.113.9", &today, &job)
+        );
+    }
+
+    /// A selected dedicated identity whose stored address is not an IP is a
+    /// hard config error — fail closed, never route to an unnamed IP.
+    #[test]
+    fn delivery_route_refuses_an_unparseable_dedicated_source_ip() {
+        let mut domain = tracking_gate_domain();
+        domain.warmup_enabled = true;
+        domain.warmup_ip = Some(WarmupIpIdentity {
+            dedicated_ip_id: "dip-bad".into(),
+            ip_address: "not-an-ip".into(),
+            warmup_started_at: Utc::now() - chrono::Duration::days(1),
+        });
+        let error = delivery_route(&tracking_gate_job(), &domain).unwrap_err();
+        assert!(
+            matches!(error, ProcessorError::Config(ref message) if message.contains("dip-bad")),
+            "invalid dedicated identity must fail closed: {error}"
+        );
+    }
+
+    /// Adversarial 3: verification is deliberately ASYMMETRIC — the shared
+    /// route has no dedicated IP to confirm (so a missing or different
+    /// `actual_source_ip` is irrelevant), while the dedicated route accepts
+    /// ONLY an exact match.
+    #[test]
+    fn route_verification_asymmetry_shared_ignores_dedicated_enforces() {
+        let receipt = |ip: Option<&str>| DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: None,
+            actual_source_ip: ip.map(|value| value.parse().expect("test IP")),
+            recipient_provider: None,
+            provider_source: None,
+        };
+        let dedicated = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-1".into(),
+            source_ip: "203.0.113.9".parse().expect("test IP"),
+        };
+
+        // Shared: no actual-source-IP requirement, and a stray value cannot
+        // fail the send (there is no dedicated boundary to verify).
+        assert!(verify_delivery_route(&DeliveryRoute::SesShared, &receipt(None)).is_ok());
+        assert!(
+            verify_delivery_route(&DeliveryRoute::SesShared, &receipt(Some("198.51.100.7")))
+                .is_ok(),
+            "the mismatch check must not apply to the shared route"
+        );
+
+        // Dedicated: exact match only.
+        assert!(verify_delivery_route(&dedicated, &receipt(Some("203.0.113.9"))).is_ok());
+        let mismatch =
+            verify_delivery_route(&dedicated, &receipt(Some("198.51.100.7"))).unwrap_err();
+        assert!(
+            mismatch.to_string().contains("mismatch"),
+            "a different source IP is a hard error: {mismatch}"
+        );
+        let unverified = verify_delivery_route(&dedicated, &receipt(None)).unwrap_err();
+        assert!(
+            unverified.to_string().contains("unverified"),
+            "a missing source-IP report must never pass as verified: {unverified}"
+        );
+    }
+
+    /// Adversarial 1: a receipt reporting a DIFFERENT source IP than the
+    /// route selected must error AND release the warmup capacity reserved
+    /// for the selected IP (it must not count as consumed).
+    #[tokio::test]
+    async fn dedicated_route_mismatch_releases_the_warmup_reservation() {
+        let Some(redis) = ephemeral_redis().await else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let processor = EmailProcessor::new(db, redis, EmailConfig::default())
+            .await
+            .unwrap();
+
+        let job = tracking_gate_job();
+        let mut domain = tracking_gate_domain();
+        domain.warmup_enabled = true;
+        domain.warmup_day = 3;
+        domain.warmup_ip = Some(WarmupIpIdentity {
+            dedicated_ip_id: "dip-1".into(),
+            ip_address: "203.0.113.9".into(),
+            warmup_started_at: Utc::now() - chrono::Duration::days(3),
+        });
+
+        // Admission reserves the slot on the selected IP.
+        assert_eq!(
+            processor.check_warmup_limit(&job, &domain).await.unwrap(),
+            WarmupAdmission::Admit
+        );
+        let (route, reservation) = delivery_route(&job, &domain).unwrap();
+        let reservation = reservation.expect("dedicated reservation");
+        let counter = |key: String| async {
+            let mut conn = processor.redis.get().await.unwrap();
+            redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<i64>>(&mut *conn)
+                .await
+                .unwrap()
+        };
+        let marker = |key: String| async {
+            let mut conn = processor.redis.get().await.unwrap();
+            redis::cmd("GET")
+                .arg(key)
+                .query_async::<Option<String>>(&mut *conn)
+                .await
+                .unwrap()
+        };
+        assert_eq!(counter(reservation.counter_key.clone()).await, Some(1));
+        assert_eq!(
+            marker(reservation.marker_key.clone()).await,
+            Some("1".into())
+        );
+
+        // The transport claims a DIFFERENT source IP.
+        let mismatched = DeliveryReceipt {
+            transport: TransportType::Smtp,
+            transport_message_id: None,
+            actual_source_ip: Some("198.51.100.7".parse().expect("test IP")),
+            recipient_provider: None,
+            provider_source: None,
+        };
+        let error = processor
+            .settle_delivery_route(&route, &mismatched, Some(&reservation))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("mismatch"),
+            "route/IP mismatch must fail closed: {error}"
+        );
+
+        // Capacity for the SELECTED IP is not consumed: counter back to 0,
+        // marker gone (a retry can re-reserve).
+        assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
+        assert_eq!(marker(reservation.marker_key.clone()).await, None);
+
+        // A repeated settle must not double-release (no underflow).
+        let _ = processor
+            .settle_delivery_route(&route, &mismatched, Some(&reservation))
+            .await;
+        assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
+    }
+
+    /// Adversarial 2: a receipt WITHOUT an actual source IP does not verify
+    /// a dedicated route (no false success) and the reservation is released
+    /// — the route stays unverified until the relay/MTA reports the IP.
+    #[tokio::test]
+    async fn dedicated_route_without_a_source_ip_report_does_not_verify() {
+        let Some(redis) = ephemeral_redis().await else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let processor = EmailProcessor::new(db, redis, EmailConfig::default())
+            .await
+            .unwrap();
+
+        let job = tracking_gate_job();
+        let mut domain = tracking_gate_domain();
+        domain.warmup_enabled = true;
+        domain.warmup_day = 3;
+        domain.warmup_ip = Some(WarmupIpIdentity {
+            dedicated_ip_id: "dip-1".into(),
+            ip_address: "203.0.113.9".into(),
+            warmup_started_at: Utc::now() - chrono::Duration::days(3),
+        });
+        assert_eq!(
+            processor.check_warmup_limit(&job, &domain).await.unwrap(),
+            WarmupAdmission::Admit
+        );
+        let (route, reservation) = delivery_route(&job, &domain).unwrap();
+        let reservation = reservation.expect("dedicated reservation");
+
+        // The SMTP transport cannot parse the relay report yet: None.
+        let unreported = DeliveryReceipt {
+            transport: TransportType::Smtp,
+            transport_message_id: None,
+            actual_source_ip: None,
+            recipient_provider: None,
+            provider_source: None,
+        };
+        let error = processor
+            .settle_delivery_route(&route, &unreported, Some(&reservation))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unverified"),
+            "an unreported source IP must be refused, never assumed: {error}"
+        );
+
+        let mut conn = processor.redis.get().await.unwrap();
+        let counter: Option<i64> = redis::cmd("GET")
+            .arg(&reservation.counter_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            counter,
+            Some(0),
+            "unverified send must not consume the IP quota"
+        );
+    }
+
+    /// Adversarial 4: the deduplicated module really has ONE transport
+    /// abstraction — `transport_router.rs` must not define a second
+    /// `EmailTransport` trait or its own send path.
+    #[test]
+    fn transport_router_defines_no_second_transport_trait_or_send_path() {
+        let router = include_str!("transport_router.rs");
+        assert!(
+            !router.contains("trait EmailTransport"),
+            "transport_router.rs must not define a second EmailTransport trait"
+        );
+        assert!(
+            !router.contains("async fn send") && !router.contains("fn send_raw_email"),
+            "transport_router.rs must not contain a second send path"
+        );
+        assert!(
+            !router.contains("struct TransportRouter")
+                && !router.contains("struct RoutingTransport"),
+            "the dead router/cache/wrapper must be gone"
+        );
+        // The one live contract remains exactly once.
+        let active = include_str!("transport.rs");
+        assert_eq!(
+            active.matches("pub trait EmailTransport").count(),
+            1,
+            "exactly one EmailTransport definition may exist in the crate"
+        );
+        assert_eq!(
+            active
+                .matches("build_message_with_route(email, Some(route))")
+                .count(),
+            3,
+            "all three SMTP outgoing paths must carry the route metadata"
+        );
+    }
+
+    /// Adversarial 5 (processor side): a caller-supplied header named like
+    /// the internal route metadata is stripped before transport — the
+    /// transport writes its own value, so message content cannot spoof the
+    /// route.
+    #[tokio::test]
+    async fn prepare_email_strips_a_forged_route_header() {
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: false,
+            ..crate::common::TrackingConfig::default()
+        })
+        .await;
+        let mut job = tracking_gate_job();
+        job.headers = Some(serde_json::json!({
+            "custom": {
+                "X-ApexMail-Route": "v1 dedicated forged-dip 198.51.100.7",
+                "X-ApexMail-Source-IP": "198.51.100.7",
+                "X-Legit-Custom": "kept"
+            }
+        }));
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain())
+            .unwrap();
+        assert!(
+            prepared.headers.iter().all(|(key, _)| !key
+                .eq_ignore_ascii_case(super::super::transport::APEXMAIL_ROUTE_HEADER)),
+            "a forged route header must never reach a transport: {:?}",
+            prepared.headers
+        );
+        assert!(
+            prepared.headers.iter().all(|(key, _)| !key
+                .eq_ignore_ascii_case(super::super::transport::APEXMAIL_SOURCE_IP_REPLY_HEADER)),
+            "a forged source-IP report must never reach the processor's receipt path"
+        );
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("X-Legit-Custom")));
+    }
+}
+
+#[cfg(test)]
+mod sales_feedback_db_tests {
+    //! Audit items 10/12 — the delivery-side producers for `sales_outcomes`
+    //! and `sales_sender_events`, against the canonical provisioned schema.
+    //!
+    //! The pool follows this crate's live-test convention
+    //! (`migrator::test_support::fresh_canonical_pool`): `TEST_DATABASE_URL`
+    //! must be set EXPLICITLY (no ambient localhost default); when it is
+    //! unset the tests soft-skip, and a configured-but-broken URL fails.
+
+    use super::*;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    async fn feedback_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    struct FeedbackFixture {
+        tenant_id: String,
+        queue_row_id: String,
+        step_execution_id: Uuid,
+        sender_id: Uuid,
+    }
+
+    /// Seed the canonical chain the dispatcher writes for sales mail:
+    /// tenant, account/contact, sequence/version/step, sender identity,
+    /// enrollment, step execution, and the `email_queue` row carrying the
+    /// typed sales provenance (migration 202 lines 34-38).
+    async fn seed_feedback_fixture(pool: &PgPool, label: &str) -> FeedbackFixture {
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let tenant_id = format!("fb-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("Feedback {label} {suffix}"))
+        .bind(format!("fb-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+
+        let account_id = Uuid::new_v4();
+        let contact_id = Uuid::new_v4();
+        let sequence_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let step_id = Uuid::new_v4();
+        let enrollment_id = Uuid::new_v4();
+        let step_execution_id = Uuid::new_v4();
+        let sender_id = Uuid::new_v4();
+        let queue_row_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO sales_accounts \
+                 (id, tenant_id, company, domain, country, country_confidence, lifecycle) \
+             VALUES ($1, $2, $3, $4, 'QZ', 0.95, 'discovered')",
+        )
+        .bind(account_id)
+        .bind(&tenant_id)
+        .bind(format!("Feedback Co {suffix}"))
+        .bind(format!("feedback-{suffix}.example"))
+        .execute(pool)
+        .await
+        .expect("insert account");
+
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, country) \
+             VALUES ($1, $2, $3, 'Feedback Prospect', 'QZ')",
+        )
+        .bind(contact_id)
+        .bind(&tenant_id)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("insert contact");
+
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, status) VALUES ($1, $2, $3, 'active')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant_id)
+        .bind(format!("Feedback Sequence {suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert sequence");
+
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions \
+                 (id, tenant_id, sequence_id, version, status, locale, approved_by, approved_at) \
+             VALUES ($1, $2, $3, 1, 'active', 'en', 'feedback-test', NOW())",
+        )
+        .bind(version_id)
+        .bind(&tenant_id)
+        .bind(sequence_id)
+        .execute(pool)
+        .await
+        .expect("insert sequence version");
+
+        sqlx::query(
+            "INSERT INTO sales_sequence_steps \
+                 (id, tenant_id, version_id, step_index, kind, min_delay_secs, max_delay_secs, sender_pool) \
+             VALUES ($1, $2, $3, 0, 'email', 0, 0, 'sales_outbound')",
+        )
+        .bind(step_id)
+        .bind(&tenant_id)
+        .bind(version_id)
+        .execute(pool)
+        .await
+        .expect("insert sequence step");
+
+        sqlx::query(
+            "INSERT INTO sales_sender_identities \
+                 (id, tenant_id, pool, from_email, from_name, domain, status, daily_limit) \
+             VALUES ($1, $2, 'sales_outbound', $3, 'Feedback Sender', 'feedback.example.com', \
+                     'active', 200)",
+        )
+        .bind(sender_id)
+        .bind(&tenant_id)
+        .bind(format!("sender-{}@feedback.example.com", &suffix[..6]))
+        .execute(pool)
+        .await
+        .expect("insert sender identity");
+
+        sqlx::query(
+            "INSERT INTO sales_enrollments \
+                 (id, tenant_id, sequence_version_id, account_id, contact_id, state) \
+             VALUES ($1, $2, $3, $4, $5, 'active')",
+        )
+        .bind(enrollment_id)
+        .bind(&tenant_id)
+        .bind(version_id)
+        .bind(account_id)
+        .bind(contact_id)
+        .execute(pool)
+        .await
+        .expect("insert enrollment");
+
+        sqlx::query(
+            "INSERT INTO sales_step_executions \
+                 (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, \
+                  step_index, state, variant, idempotency_key) \
+             VALUES ($1, $2, $3, $4, $5, 0, 'sent', 'default', $6)",
+        )
+        .bind(step_execution_id)
+        .bind(&tenant_id)
+        .bind(enrollment_id)
+        .bind(version_id)
+        .bind(step_id)
+        .bind(format!("feedback-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert step execution");
+
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  sales_sender_identity_id, sales_step_execution_id, sales_enrollment_id) \
+             VALUES ($1, 'sender@feedback.example.com', ARRAY['prospect@example.com'], \
+                     'Feedback fixture', 'pending', $2, $3, $4, $5, $6)",
+        )
+        .bind(queue_row_id)
+        .bind(&tenant_id)
+        .bind(message_id)
+        .bind(sender_id)
+        .bind(step_execution_id)
+        .bind(enrollment_id)
+        .execute(pool)
+        .await
+        .expect("insert email_queue row");
+
+        FeedbackFixture {
+            tenant_id,
+            queue_row_id: queue_row_id.to_string(),
+            step_execution_id,
+            sender_id,
+        }
+    }
+
+    /// The mapping table is the contract: SMTP acceptance is Prohibited, the
+    /// hard bounce is the implemented rung, and every migration-200 outcome
+    /// value appears in the ladder.
+    #[test]
+    fn mapping_table_marks_smtp_acceptance_prohibited() {
+        assert_eq!(SalesDeliveryEvent::ProviderAccepted.outcome(), None);
+        assert_eq!(
+            SalesDeliveryEvent::ProviderAccepted.sender_ledger_event(),
+            None,
+            "acceptance is not a delivery: no `delivered` sender event either"
+        );
+        assert_eq!(SalesDeliveryEvent::HardBounce.outcome(), Some("bounce"));
+        assert_eq!(
+            SalesDeliveryEvent::HardBounce.sender_ledger_event(),
+            Some("hard_bounce")
+        );
+        assert_eq!(SalesDeliveryEvent::SoftBounce.outcome(), None);
+        assert_eq!(
+            SalesDeliveryEvent::SoftBounce.sender_ledger_event(),
+            Some("deferral")
+        );
+
+        let acceptance = SALES_OUTCOME_MAPPING
+            .iter()
+            .find(|row| row.platform_event == "smtp_or_provider_acceptance")
+            .expect("the acceptance row must be documented");
+        assert_eq!(acceptance.outcome, None);
+        assert_eq!(acceptance.status, SalesOutcomeProducer::Prohibited);
+
+        assert!(
+            SALES_OUTCOME_MAPPING.iter().any(|row| {
+                row.status == SalesOutcomeProducer::ImplementedHere && row.outcome == Some("bounce")
+            }),
+            "the hard-bounce producer must be marked implemented"
+        );
+
+        // Every `sales_outcomes.outcome` CHECK value from migration 200
+        // (lines 768-771) must appear in the documented ladder.
+        let documented: Vec<&str> = SALES_OUTCOME_MAPPING
+            .iter()
+            .filter_map(|row| row.outcome)
+            .collect();
+        for rung in [
+            "delivered",
+            "open",
+            "click",
+            "reply",
+            "positive_reply",
+            "meeting_booked",
+            "meeting_attended",
+            "trial",
+            "paid_subscription",
+            "retained_mrr",
+            "bounce",
+            "complaint",
+            "unsubscribe",
+        ] {
+            assert!(
+                documented.contains(&rung),
+                "ladder rung '{rung}' is missing from SALES_OUTCOME_MAPPING"
+            );
+        }
+    }
+
+    /// Adversarial 6: SMTP/provider acceptance alone produces NO `delivered`
+    /// outcome — the audit's specific prohibition.
+    #[tokio::test]
+    async fn smtp_acceptance_produces_no_delivered_outcome() {
+        let Some(pool) = feedback_pool("smtp_acceptance").await else {
+            return;
+        };
+        let fixture = seed_feedback_fixture(&pool, "smtp-acceptance").await;
+
+        let inserted = record_sales_outcome_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::ProviderAccepted,
+            "smtp",
+        )
+        .await
+        .expect("acceptance recording must not error");
+        assert!(inserted.is_none(), "acceptance must record nothing");
+
+        let outcomes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_outcomes \
+             WHERE tenant_id = $1 AND step_execution_id = $2",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(fixture.step_execution_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count outcomes");
+        assert_eq!(outcomes, 0, "SMTP acceptance is NOT delivered");
+
+        let sender_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_events WHERE tenant_id = $1",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count sender events");
+        assert_eq!(
+            sender_events, 0,
+            "acceptance must not write a `delivered` sender event either"
+        );
+    }
+
+    /// Adversarial 7: a hard bounce produces exactly one `bounce` outcome and
+    /// one `hard_bounce` ledger row for the step execution, even when the
+    /// provider callback is delivered twice.
+    #[tokio::test]
+    async fn hard_bounce_is_recorded_exactly_once_for_the_step_execution() {
+        let Some(pool) = feedback_pool("hard_bounce_once").await else {
+            return;
+        };
+        let fixture = seed_feedback_fixture(&pool, "hard-bounce-once").await;
+        let recipient = "prospect@example.com";
+
+        let first = record_sales_outcome_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::HardBounce,
+            "smtp",
+        )
+        .await
+        .expect("first bounce recording");
+        assert!(first.is_some(), "the first bounce must insert the outcome");
+
+        let replay = record_sales_outcome_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::HardBounce,
+            "smtp",
+        )
+        .await
+        .expect("replayed bounce recording");
+        assert!(
+            replay.is_none(),
+            "a replayed provider callback must be a no-op (unique key)"
+        );
+
+        let (outcomes, outcome): (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, MIN(outcome) FROM sales_outcomes \
+             WHERE tenant_id = $1 AND step_execution_id = $2",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(fixture.step_execution_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count outcomes");
+        assert_eq!(outcomes, 1, "exactly one bounce row for the step execution");
+        assert_eq!(outcome, "bounce");
+
+        // The sender ledger is idempotent on its own unique key.
+        let event_first = record_sender_event_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::HardBounce,
+            recipient,
+        )
+        .await
+        .expect("first sender-event recording");
+        assert!(event_first.is_some());
+        let event_replay = record_sender_event_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::HardBounce,
+            recipient,
+        )
+        .await
+        .expect("replayed sender-event recording");
+        assert!(event_replay.is_none());
+
+        let events: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_type, recipient FROM sales_sender_events \
+             WHERE tenant_id = $1 AND sender_identity_id = $2 ORDER BY event_type",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(fixture.sender_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read sender events");
+        assert_eq!(
+            events.len(),
+            1,
+            "a replayed bounce must not duplicate the row"
+        );
+        assert_eq!(events[0].0, "hard_bounce");
+        assert_eq!(events[0].1, recipient);
+
+        // A transient failure produces a `deferral` ledger row but no outcome
+        // (there is no deferral rung in the ladder).
+        let soft_outcome = record_sales_outcome_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::SoftBounce,
+            "smtp",
+        )
+        .await
+        .expect("soft bounce outcome recording");
+        assert!(soft_outcome.is_none());
+        let soft_event = record_sender_event_if_linked(
+            &pool,
+            &fixture.queue_row_id,
+            SalesDeliveryEvent::SoftBounce,
+            recipient,
+        )
+        .await
+        .expect("soft bounce ledger recording");
+        assert!(soft_event.is_some());
+
+        let (outcomes, events): (i64, i64) = (
+            sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM sales_outcomes \
+                 WHERE tenant_id = $1 AND step_execution_id = $2",
+            )
+            .bind(&fixture.tenant_id)
+            .bind(fixture.step_execution_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count outcomes"),
+            sqlx::query_scalar(
+                "SELECT COUNT(*)::bigint FROM sales_sender_events WHERE tenant_id = $1",
+            )
+            .bind(&fixture.tenant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count sender events"),
+        );
+        assert_eq!(outcomes, 1, "a soft bounce adds no outcome");
+        assert_eq!(
+            events, 2,
+            "the deferral joins the hard bounce in the ledger"
+        );
+    }
+
+    /// Non-sales mail (no typed provenance) and legacy non-UUID ids record
+    /// nothing — the typed columns are the gate.
+    #[tokio::test]
+    async fn queue_rows_without_sales_provenance_record_nothing() {
+        let Some(pool) = feedback_pool("no_sales_provenance").await else {
+            return;
+        };
+        let plain_queue_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue (id, from_address, to_addresses, subject, status) \
+             VALUES ($1, 'sender@plain.example.com', ARRAY['plain@example.com'], \
+                     'Plain fixture', 'pending')",
+        )
+        .bind(plain_queue_id)
+        .execute(&pool)
+        .await
+        .expect("insert plain queue row");
+
+        let outcome = record_sales_outcome_if_linked(
+            &pool,
+            &plain_queue_id.to_string(),
+            SalesDeliveryEvent::HardBounce,
+            "smtp",
+        )
+        .await
+        .expect("plain row outcome recording");
+        assert!(outcome.is_none());
+
+        let event = record_sender_event_if_linked(
+            &pool,
+            &plain_queue_id.to_string(),
+            SalesDeliveryEvent::HardBounce,
+            "plain@example.com",
+        )
+        .await
+        .expect("plain row ledger recording");
+        assert!(event.is_none());
+
+        let legacy = record_sales_outcome_if_linked(
+            &pool,
+            "legacy-non-uuid-queue-id",
+            SalesDeliveryEvent::HardBounce,
+            "smtp",
+        )
+        .await
+        .expect("legacy id recording");
+        assert!(legacy.is_none());
     }
 }

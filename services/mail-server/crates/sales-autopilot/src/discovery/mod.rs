@@ -16,6 +16,13 @@
 //! ApexMail's own first-party data, or an explicitly labelled test fixture.
 //! Every source declares the jurisdictions it may lawfully return data for and
 //! the job runner enforces that declaration.
+//!
+//! Job execution is leased and fenced ([`DiscoveryJobRunner::run_job`], see
+//! the lease-protocol section of `job.rs`): one runner owns a job at a time,
+//! a crashed runner's lease expires and the job is recoverable, and a
+//! superseded runner cannot write. Requesting a source that is not configured
+//! is [`SalesError::InvalidInput`](crate::types::SalesError) — there is no
+//! fallback to running every configured (possibly paid) provider.
 
 pub mod first_party;
 pub mod http;
@@ -26,7 +33,8 @@ pub use first_party::FirstPartySource;
 pub use http::HttpDiscoverySource;
 pub use job::{
     promote_candidate, DiscoveryJob, DiscoveryJobRunner, DiscoveryRunReport, SourceRunReport,
-    MAX_CANDIDATES_PER_PAGE, MAX_PAGES_PER_RUN,
+    JOB_LEASED_MARKER, JOB_LEASE_MINUTES, MAX_CANDIDATES_PER_PAGE, MAX_JOB_ATTEMPTS,
+    MAX_PAGES_PER_RUN,
 };
 pub use provider::{
     candidate_allowed_by_jurisdiction, DiscoveredCandidate, DiscoveryError, DiscoveryPage,

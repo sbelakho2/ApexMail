@@ -818,6 +818,9 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
                 completed_at: None,
             },
             lease_owner: "test-worker".into(),
+            // Post-201 the claim carries a per-row token; the handler does not
+            // read it, but the struct requires it.
+            lease_token: Uuid::new_v4(),
         })
         .await;
     assert!(

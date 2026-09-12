@@ -1,13 +1,18 @@
 # sales-autopilot
 
-Sales automation — lead scoring, outreach campaigns, CRM integration.
+Sales automation — the canonical outbound sales engine: discovery, scoring,
+decisioning, durable actions, and outreach delivery.
 
 ## Overview
 
-The `sales-autopilot` crate powers ApexMail's sales automation features. It
-scores inbound leads based on engagement signals, orchestrates multi-step
-outreach campaigns, and integrates with external CRM systems to keep pipeline
-data synchronized and actionable for sales teams.
+The `sales-autopilot` crate powers ApexMail's sales automation. It scores
+accounts and contacts from evidence and signals, decides the next best action
+through a single decision gate, queues durable actions, and dispatches sequence
+mail into the platform's own delivery pipeline. It integrates with external CRM
+systems to keep pipeline data synchronized.
+
+The control plane reads and steers this service through the authenticated
+`/control/*` surface; it does not run a second sales loop of its own.
 
 ## Usage
 
@@ -27,119 +32,149 @@ cargo clippy -p sales-autopilot
 
 ---
 
-# Campaign dispatch architecture
+# The single send path
 
-## Problem
+## One external effect path
 
-`start_campaign` used to flip a status flag (and, after SA-5, call a
-dispatcher that was never wired in production). Operators got
-`503 dispatcher not configured` and campaigns never sent anything. This crate
-now ships a **real, production dispatcher** that sends through the platform's
-OWN delivery pipeline.
+Every external sales message is produced by the durable action worker. The
+legacy campaign surface no longer dispatches mail:
 
-## Chosen design: enqueue into `email_queue` exactly like the REST send path
+- `CampaignManager::start_campaign` (src/campaigns.rs:297) adapts every legacy
+  campaign recipient into canonical contacts/contact points and enrolls them
+  through `enrollments::start_outreach`. `sales_campaigns` /
+  `sales_campaign_recipients` are a read-compatibility ledger for the control
+  plane, not a send engine.
+- Enrollments enqueue `send_step` rows in the durable `sales_actions` queue.
+- `sales_autopilot::actions::run`, spawned in `src/bin/server.rs:251`, claims
+  those actions and runs `sequence_worker::SequenceStepHandler`, which passes
+  the Decision Packet, legal gate, sender-health gate and action fence.
+- `src/scheduler.rs` is a documentation stub. The old campaign dispatch loop
+  (`tick`/`run` calling `ProductionCampaignDispatcher::dispatch_batch`) was
+  deleted because it bypassed those gates (src/scheduler.rs:1-25;
+  src/bin/server.rs:179-183).
+- The single-touch `enqueue_recipient` / `dispatch_batch` methods still exist in
+  `dispatcher.rs` and are exercised by tests, but no production path calls
+  them; the live paths derive keys through
+  `send_idempotency_key` (src/dispatcher.rs:870).
 
-`ProductionCampaignDispatcher` (src/dispatcher.rs) mirrors
-`crates/api-server/src/routes/messages.rs` — the canonical enqueue path —
-statement for statement:
+A `POST /inbox/:id/reply` manual reply is a separate, non-bulk path (see below);
+it does not go through the action queue.
 
-| REST send (`messages.rs`) | Campaign dispatch (`dispatcher.rs`) |
+## Enqueue into `email_queue` exactly like the REST send path
+
+`ProductionCampaignDispatcher::enqueue_sequenced` (src/dispatcher.rs:1401) is
+the canonical sequence enqueue. It mirrors
+`crates/api-server/src/routes/messages.rs` — the REST enqueue path — for every
+platform guarantee:
+
+| REST send (`messages.rs`) | Sequenced dispatch (`dispatcher.rs`) |
 |---|---|
 | `resolve_sender_domain_id` — verified + DKIM-ready domain row lock (`FOR SHARE`), SES/SMTP transport gate | same SQL, same predicate |
-| `suppressed_recipients` — platform `suppressions` table | platform `suppressions` **and** crate-local `sales_unsubscribes`, checked per batch before any send |
+| platform `suppressions` check | platform `suppressions` **and** crate-local `sales_unsubscribes`, re-checked inside the enqueue transaction |
 | `reserve_email_quota` / `rollback_email_quota` via `billing_service::usage::record_with_quota_check` | the same contract, behind the `QuotaGateway` trait (see the billing note below) |
 | `insert_message_and_queue` — one `messages` row + one `email_queue` row per recipient, `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` | the same two inserts; the canonical sequence path uses the logical step-execution identity (see below) |
-| `Idempotency-Key` request header (per API call) | deterministic per logged send identity — a crash/restart can never double-send |
+| `Idempotency-Key` request header (per API call) | deterministic per logical send identity — a crash/restart can never double-send |
+
+### Envelope sender is the resolved sales identity
+
+`enqueue_sequenced` takes an explicit `&SenderIdentity` and uses
+`sender.from_email` as the envelope sender (src/dispatcher.rs:1374-1414).
+`SALES_CAMPAIGN_FROM_EMAIL` is only the legacy/manual-reply default and the
+display-name fallback; the sender is resolved by
+`sender_pool::resolve_sales_sender`, which refuses any non-sales pool
+(reputation isolation: sales traffic never selects a transactional pool;
+src/sender_pool.rs:139-204).
 
 ### Send identity is a logical sequence step execution
 
-The canonical multi-touch send path (`ProductionCampaignDispatcher::enqueue_sequenced`)
-keys a message on **one step execution of one enrollment**:
+The canonical multi-touch send path keys a message on **one step execution of
+one enrollment**:
 
 ```text
-sa:{enrollment_id}:{sequence_version_id}:{step_index}:{attempt_kind}:{variant}
+sa:{enrollment_id}:{sequence_version_id}:{step_id}:{attempt_kind}:{variant}
 ```
 
-Built by [`send_idempotency_key(SendIdentity::StepExecution)`](src/dispatcher.rs) via
-[`sales_step_idempotency_key`](src/sequences.rs). This is what makes a second,
-legitimate email to the same person a *different* message rather than a
-suppressed duplicate: `(enrollment, version, step, attempt kind, variant)` is
-unique per logical send, including follow-ups, meeting invites and nurture
-touches of the same sequence.
+Built by [`send_idempotency_key(SendIdentity::StepExecution)`](src/dispatcher.rs)
+via [`sales_step_idempotency_key`](src/sequences.rs:341-354). This is what
+makes a second, legitimate email to the same person a *different* message
+rather than a suppressed duplicate: `(enrollment, version, step, attempt kind,
+variant)` is unique per logical send, including follow-ups, meeting invites and
+nurture touches of the same sequence.
 
-The legacy single-touch campaign path (`enqueue_recipient`) still keys on
-`sacmp:{campaign_id}:{recipient_email}` — correct only for a campaign that
-sends exactly one email per recipient. New multi-touch work must use
-`SendIdentity::StepExecution`.
+The legacy single-touch key `sacmp:{campaign_id}:{recipient_email}` remains in
+`send_idempotency_key` for the callerless single-touch methods; the production
+campaign surface no longer uses it.
 
 ### Billing quota integration
 
 `BillingQuotaGateway` (src/dispatcher.rs) calls the platform's real
 `billing_service::usage::record_with_quota_check` / `rollback_usage_record`
 directly — same Redis counters, dedup keys and `metering_events`
-persistence as the REST send path. There is no local quota mirror.
+persistence as the REST send path. There is no local quota mirror. The
+canonical `enqueue_sequenced` reserves before the transaction and rolls the
+reservation back for every non-delivered outcome (duplicate, already claimed,
+lease lost, error).
 
 Once the rows are in `email_queue`, the platform worker delivers them with ALL
 platform guarantees: DKIM signing (SMTP) or SES BYODKIM, retries with
 backoff, bounce/complaint processing (hard bounces and opt-out replies are
 written to `suppressions` by the worker), tracking-pixel injection and link
 rewriting (`worker-processors/src/email/tracking.rs`), spam filtering on
-inbound replies. Campaign mail is therefore indistinguishable from — and
+inbound replies. Sequence mail is therefore indistinguishable from — and
 governed identically to — ordinary platform mail.
 
-### Rejected alternative: direct SMTP client to the MTA
+The queue rows carry typed provenance — `sales_decision_id`,
+`sales_sender_identity_id`, `sales_step_execution_id`, `sales_enrollment_id` —
+on both `messages` and `email_queue` (migration 202; inserts at
+src/dispatcher.rs:962-992), and `email_queue.campaign_id` is NULL for sequence
+mail.
 
-Rejected because it duplicates the platform's signing/retry/bounce/tracking
-stack inside this crate: a second DKIM implementation to keep in sync, a
-private retry queue without the worker's visibility leases, no bounce
-suppression feedback, and no billing quota enforcement. It would also bypass
-`email_queue`, so ops dashboards would not see campaign volume. The enqueue
-design reuses every guarantee for free.
+## Dispatch pipeline — canonical sequence path
 
-## Dispatch pipeline — single-touch campaign path (per recipient, one DB transaction)
+For each claimed `send_step` action, `SequenceStepHandler` runs
+(src/sequence_worker.rs:1814):
 
-For each due recipient of an active campaign (batch of at most
-`SALES_DISPATCH_BATCH_SIZE`, default 100 per tick):
+1. **Gates before planning** — kill switch / autonomy `permits_execution`, the
+   enrollment human-reply lock, and the enrollment state
+   (src/sequence_worker.rs:1854-1899).
+2. **Planning** — load account/contact facts, refresh evidence when the
+   next-best-action asks for information, recompute and persist the score
+   (`scoring::score`), choose the NBA, compose and validate the copy, select the
+   experiment arm (src/sequence_worker.rs:1901-2022).
+3. **Actual sender resolution** — `sender_pool::resolve_sales_sender` resolves
+   the identity from the step's declared sales pool; its id is recorded on the
+   step execution and the decision (src/sequence_worker.rs:2046-2093).
+4. **Decision Packet** — `decision_engine::decide` evaluates the kill switch,
+   autonomy, suppression, address verification, legal policy, human reply,
+   sender health and frequency budget, and persists one `sales_decisions` row
+   (src/sequence_worker.rs:2120-2252). `Enforcement::Denied` and `Shadowed`
+   skip without retrying; `AwaitApproval` parks the action.
+5. **Fenced enqueue** — `enqueue_sequenced` verifies the action lease fence
+   inside the transaction before any insert, re-checks suppression, resolves
+   the sender domain under `FOR SHARE`, and inserts `messages` + `email_queue`
+   with the step-execution idempotency key (src/dispatcher.rs:1462-1634). A
+   stale lease returns `LeaseLost` and enqueues nothing.
+6. **Advance** — the step execution is marked `sent`, the enrollment advances
+   and the next step's action is enqueued with its own key
+   (src/sequence_worker.rs:2410-2432).
 
-1. **Quota reservation** — `billing_service::usage::record_with_quota_check`
-   (Redis check-and-increment + `metering_events` row). Quota exhausted ⇒ the
-   campaign is **paused with an error state** (`sales_campaigns.last_error`),
-   never partially-silent.
-2. **Send-ledger claim** — `UPDATE sales_campaign_recipients SET sent_at =
-   NOW(), message_id = $msg WHERE … AND sent_at IS NULL RETURNING email`.
-   Zero rows ⇒ a concurrent dispatcher already claimed it ⇒ skip (and release
-   the reservation).
-3. **`messages` insert** with the campaign idempotency key
-   (`sacmp:{campaign}:{email}` on this legacy single-touch path),
-   `ON CONFLICT DO NOTHING`. Zero rows ⇒ idempotent duplicate (replay or a
-   ledger stamped by an older code path) ⇒ skip the queue insert.
-
-The **canonical sequence path** (`enqueue_sequenced`) differs deliberately: the
-caller (the durable action worker) has already claimed the logical
-`sales_step_executions` row, which *is* the send ledger; suppression is
-re-checked inside the transaction; the message carries the step-execution key
-above and `email_queue.campaign_id` is NULL (sequence mail is attributed to a
-step execution, not a campaign). A duplicate key means "this logical step was
-already enqueued" — a replay is a no-op.
-4. **`email_queue` insert** — single-recipient row, `status='pending'`,
-   `priority=5`, plus custom headers:
-   - `List-Unsubscribe: <https://…/u/{token}>` (angle-bracket form, RFC 2369)
-   - `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (RFC 8058)
-5. **`sales_campaigns.sent = sent + 1`** — same transaction.
-6. Commit. Any failure rolls the transaction back and releases the quota
-   reservation; the recipient stays unclaimed and is retried on the next tick.
-
-Steps 2–5 are atomic: a crash at ANY point either leaves the recipient fully
-dispatched (ledger + queue row) or not at all. The idempotency key is the
-second line of defence for deployments where the ledger was stamped by an
-older code path.
+Any failure rolls the transaction back and releases the quota reservation; a
+duplicate key means "this logical step was already enqueued" — a replay is a
+no-op.
 
 ## Unsubscribe (CAN-SPAM / RFC 8058)
 
 Every rendered message gets an HTML + text footer with a one-click link.
-Tokens are HMAC-SHA256 signed (`SALES_UNSUBSCRIBE_SECRET`, ≥ 32 chars) over
-`v1.{tenant_hex}.{email_hex}.{expiry_unix}` and carry no plaintext PII.
 
+- New sends use **opaque v2 tokens** (32 random bytes, URL-safe base64). Only
+  the SHA-256 hash is stored, in `sales_unsubscribe_tokens`; the URL carries no
+  recipient or tenant data (src/dispatcher.rs:202-246, `create_unsubscribe_token`).
+  `resolve_unsubscribe_token` decodes → SHA-256 → looks up the hash with
+  `expires_at > now()` (src/dispatcher.rs:280-308).
+- **v1 legacy tokens** (`v1.{tenant_hex}.{email_hex}.{expiry}.{sig}`) are
+  verified **read-only** for one expiry cycle (365 days) so links in
+  already-delivered mail keep working; no new v1 token may be minted
+  (src/dispatcher.rs:178-189; fallback in src/routes.rs:1335-1383).
 - `GET /u/:token` — validates, marks the recipient suppressed in
   `sales_unsubscribes` AND the platform `suppressions` table (so the REST send
   path excludes them too), then redirects to a branded page.
@@ -148,13 +183,12 @@ Tokens are HMAC-SHA256 signed (`SALES_UNSUBSCRIBE_SECRET`, ≥ 32 chars) over
 - Invalid signature / expired token ⇒ `400`. Double-unsubscribe is idempotent
   (`ON CONFLICT DO NOTHING` in both tables).
 - These two routes are public (like `/health`); authenticity comes from the
-  HMAC, not from the shared service token.
+  token, not from the shared service token.
 
 ## Inbox replies (`POST /inbox/:id/reply`)
 
-Previously 501 ("no outbound email path"). Now that the crate owns the
-enqueue pipeline, the sender identity IS resolvable whenever the production
-dispatcher is configured, so the endpoint composes and delivers:
+The sender identity IS resolvable whenever the production dispatcher is
+configured, so the endpoint composes and delivers:
 
 - **Configured** (`SALES_CAMPAIGN_FROM_EMAIL` + `SALES_UNSUBSCRIBE_SECRET`,
   sender domain verified/DKIM-ready for the tenant): composes
@@ -183,51 +217,55 @@ bulk mail, RFC 8058).
 
 The worker writes hard bounces and unsubscribe-reply classifications into the
 platform `suppressions` table (`worker-processors/src/email/processor.rs`,
-`reply_handler/processor.rs`). The dispatcher **polls**: the due-recipient
-query re-checks `suppressions` (and `sales_unsubscribes`) immediately before
-every batch, so a bounce that lands between ticks is honoured before the next
-send. That is the documented minimal-viable mechanism; a push subscription
-(LISTEN/NOTIFY on `suppressions`) is a future enhancement, noted in the code.
+`reply_handler/processor.rs`). The dispatcher **polls**: suppression is
+re-checked inside the enqueue transaction (and the due-recipient queries
+re-check it per batch on the legacy surface), so a bounce that lands between
+ticks is honoured before the next send. That is the documented minimal-viable
+mechanism; a push subscription (LISTEN/NOTIFY on `suppressions`) is a future
+enhancement, noted in the code.
 
 ## Scheduling
 
-`bin/server.rs` runs a background job (spawned task with graceful shutdown):
+`bin/server.rs` runs two background jobs (both with graceful shutdown):
 
-- every `SALES_DISPATCH_INTERVAL_SECS` (default 30) ± 20% jitter,
-- selects active campaigns,
-- dispatches at most `SALES_DISPATCH_BATCH_SIZE` recipients per campaign per
-  tick (bounded blast radius),
-- concurrency-bounded across campaigns (`SALES_DISPATCH_CONCURRENCY`,
-  default 4, semaphore),
-- completes a campaign (active → completed) when no due recipients remain,
-- reconciles `opened`/`clicked` stats from `messages.open_count/click_count`
-  (maintained by the tracking service) for every campaign it touched.
+- **Durable action worker** (`actions::run`, src/bin/server.rs:251) — claims
+  `sales_actions` rows with `FOR UPDATE SKIP LOCKED` and executes them through
+  the sequence step handler. Bounded concurrency (8 actions per process),
+  intervals paced by `SALES_DISPATCH_INTERVAL_SECS` (default 30). Without a
+  configured production dispatcher the worker is not started at all, so queued
+  actions are left untouched rather than claimed and dead-lettered.
+- **Outcome projector** (`outcome_projector::run`, src/bin/server.rs:275) —
+  folds `sales_sender_events` into `sales_sender_health` and
+  `sales_outcomes` into experiment posteriors. Runs unconditionally.
 
-`start_campaign` still performs the FIRST batch synchronously through the
-injected dispatcher (trait contract honoured), so a start either visibly
-sends or visibly fails; the loop then continues the campaign.
+There is no campaign dispatch loop and no synchronous first batch on
+`start_campaign`; starting a campaign materializes enrollments, and the action
+worker does the sending.
 
 ## Start flow & dry-run
 
-- No production dispatcher (missing `SALES_CAMPAIGN_FROM_EMAIL` /
-  `SALES_UNSUBSCRIBE_SECRET` or an unverified sender domain) ⇒ `503`, exactly
-  as before — "genuinely unconfigured" deployments stay loud.
+- Starting a campaign no longer requires a dispatcher: it materializes
+  canonical enrollments and returns the per-recipient enrollment outcome
+  (`already_enrolled` / rejected reasons) alongside the campaign
+  (src/routes.rs:1239-1276). Delivery then waits on the durable action worker;
+  if no dispatcher is configured the worker is not started and that is stated
+  loudly at startup and on the readiness surface (src/bin/server.rs:265-272).
 - `POST /campaigns/:id/dry-run` renders templates, resolves the sender
   domain, and evaluates suppression/frequency-cap filters WITHOUT enqueueing
-  or stamping the ledger — an operator safety net and the test seam.
+  or stamping a ledger — an operator safety net and the test seam.
 
 ## Configuration (env)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SALES_CAMPAIGN_FROM_EMAIL` | — (unset ⇒ 503) | envelope From for campaign mail; domain must be verified + DKIM-ready for the tenant |
-| `SALES_CAMPAIGN_FROM_NAME` | `ApexMail` | display name recorded in message metadata |
-| `SALES_UNSUBSCRIBE_SECRET` | — (unset ⇒ 503) | HMAC key for unsubscribe tokens (≥ 32 chars) |
+| `SALES_CAMPAIGN_FROM_EMAIL` | — (unset or unverifiable ⇒ no dispatcher) | legacy/manual-reply envelope From and display-name fallback; domain must be verified + DKIM-ready for the tenant |
+| `SALES_CAMPAIGN_FROM_NAME` | `ApexMail` | display-name fallback recorded in message metadata |
+| `SALES_UNSUBSCRIBE_SECRET` | — (unset ⇒ no dispatcher) | HMAC key for v1 unsubscribe tokens (≥ 32 chars); v2 tokens are secret-independent |
 | `SALES_PUBLIC_BASE_URL` | `http://localhost:3010` | base URL used to build unsubscribe links |
 | `SALES_UNSUBSCRIBE_REDIRECT_URL` | built-in branded page | redirect target after GET unsubscribe |
-| `SALES_DISPATCH_INTERVAL_SECS` | 30 | tick cadence (jittered ±20%) |
-| `SALES_DISPATCH_BATCH_SIZE` | 100 | max recipients per campaign per tick |
-| `SALES_DISPATCH_CONCURRENCY` | 4 | concurrent campaigns per tick |
+| `SALES_DISPATCH_INTERVAL_SECS` | 30 | action-worker / projector tick cadence |
+| `SALES_DISPATCH_BATCH_SIZE` | 100 | legacy single-touch batch size (no production caller) |
+| `SALES_DISPATCH_CONCURRENCY` | 4 | legacy single-touch concurrency (no production caller) |
 
 ## Operator integration (control plane)
 
@@ -251,7 +289,7 @@ CP requests forward the internal service token (`x-api-key`) plus
 | `POST /control/pause` / `POST /control/resume` | pause (→ Shadow) / resume (→ ApprovalRequired) |
 | `POST /control/kill-switch` | stop new outbound work immediately |
 | `POST /control/decisions/:id/review` | approve/reject a decision |
-| `POST /control/actions/:id/replay` | replay an action (idempotent) |
+| `POST /control/actions/:id/replay` | replay an action (idempotent; refused for `awaiting_approval`) |
 
 ### Autonomy modes
 
@@ -272,33 +310,44 @@ keep flowing.
 There is intentionally no unrestricted fully-autonomous mode. Unknown
 persisted mode values fail closed to `disabled`.
 
+### Approval does not bypass the hard gates
+
+An approval-gated decision parks its action in the `awaiting_approval` queue
+state (`ActionOutcome::AwaitApproval`, src/actions.rs:194-212); nothing is
+complete and nothing is claimable until an operator review releases it.
+`sales_decisions.review_status` is the authoritative approval signal, and
+`decision_engine::revalidate_execution` (src/decision_engine.rs:737) re-runs
+every hard gate immediately before the external effect — at approval time in
+`control::apply_review` and again in the worker before the enqueue. An
+approval recorded minutes ago does not defeat an unsubscribe, a human reply, a
+legal-policy change or a newly quarantined sender.
+
 ### Truthful footer
 
-Every rendered outreach message gets the policy-resolved footer
-(`render_for_recipient_with_footer`, src/dispatcher.rs). The footer's reason
-line must never claim a signup that did not happen: cold/prospected contacts
-are described as business contacts identified by research, not as
-subscribers. Manufacturing consent in a footer is both untrue and illegal.
+Every rendered outreach message gets a policy-resolved footer
+(`render_for_recipient_with_footer`, src/dispatcher.rs:647; the worker passes
+`FooterReason::BusinessContact`, src/sequence_worker.rs:2083-2093). The
+default footer (src/dispatcher.rs:613-630) describes a business contact
+identified by research; it never claims a signup that did not happen.
+Manufacturing consent in a footer is both untrue and illegal.
 
 ## Schema (owned by the canonical migration chain)
 
 Schema ownership is deterministic: **every** sales table is created by the
 canonical migration chain (`services/mail-server/migrations`, applied by the
-deploy-gate `migrator` binary). `routes::initialize_schema` is now a
+deploy-gate `migrator` binary). `routes::initialize_schema` is a
 **verification**, not a bootstrap: it checks the required tables/columns and
 refuses to start (`SalesError::SchemaIncompatible`) when anything is missing
 or stale (including retired tables from the old control-plane sales system
 still being present). There is no `CREATE TABLE IF NOT EXISTS` and no
 `ALTER TABLE` at runtime — the effective schema can never depend on service
-start order.
+start order (routes.rs:123-125; schema::REQUIRED_TABLES in src/schema.rs).
 
-The required/retired manifest is
-[`schema::REQUIRED_TABLES`](src/schema.rs); the old runtime-managed columns
-now live in migration 200 (`sales_campaign_recipients.message_id`,
-`sales_campaigns.last_error`, the `sales_campaign_recipients` send ledger and
-the canonical sequence/enrollment/step-execution tables). Platform tables
-(`messages`, `email_queue`, `suppressions`, `templates`, `domains`) are used
-as-is.
+The old runtime-managed columns now live in migration 200
+(`sales_campaign_recipients.message_id`, `sales_campaigns.last_error`, the
+`sales_campaign_recipients` send ledger and the canonical
+sequence/enrollment/step-execution tables). Platform tables (`messages`,
+`email_queue`, `suppressions`, `templates`, `domains`) are used as-is.
 
 Operators: run the migrator before starting this service; a drift error at
 startup means the database is not the schema this build expects, not a bug in
@@ -308,7 +357,8 @@ the service.
 
 - Unit tests (no DB): token signing/verification/tamper/expiry, HTML escaping
   of personalization values (`<script>` lead names), footer/header rendering,
-  idempotency key derivation (step-execution identity), config validation.
+  idempotency key derivation (step-execution identity), config validation,
+  action-state transitions (`awaiting_approval` is never replayable).
 - Integration tests (real Postgres via `SALES_TEST_DATABASE_URL`, soft-skip
   only when the variable is unset): the platform schema is applied through the
   REAL production migrator (`migrator::test_support::shared_canonical_db`,
@@ -316,9 +366,9 @@ the service.
   or archived schema. `routes::initialize_schema` then verifies the chain
   produced the sales schema. Covers: suppression exclusion (platform + local),
   frequency cap, crash-restart idempotency (no double-send), quota-exhausted
-  pause with error state, batch-failure retry semantics, unsubscribe
-  happy/invalid/double paths, List-Unsubscribe header presence, stats
-  increment, and the inbox-reply path (compose+escape+enqueue, double-reply
-  idempotency, suppressed correspondent,
+  handling, batch-failure retry semantics, unsubscribe happy/invalid/double
+  paths, List-Unsubscribe header presence, inbox-reply path
+  (compose+escape+enqueue, double-reply idempotency, suppressed correspondent,
   campaign-optout-does-not-block-reply, cross-tenant 404, sender-domain gate,
-  501 when unconfigured).
+  501 when unconfigured), and the release gates (Decision Packet coverage,
+  approval revalidation, action fence).

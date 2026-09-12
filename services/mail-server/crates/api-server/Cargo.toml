@@ -59,6 +59,9 @@ aws-sdk-sesv2 = { workspace = true }
 rand = { workspace = true }
 parking_lot = { workspace = true }
 urlencoding = { workspace = true }
+# Bounded TTL cache for FeatureFlagService (feature-flag evaluation): moka is
+# already the workspace's cache crate (analytics, billing-service, mta, ...).
+moka = { workspace = true }
 
 # Internal crates
 email-grader = { path = "../email-grader" }

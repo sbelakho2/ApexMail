@@ -139,7 +139,7 @@ aws sns subscribe \
     --notification-endpoint https://api.apexmail.ee/v1/ses/notifications
 ```
 
-Confirm the subscription when AWS SNS sends the `SubscriptionConfirmation` POST to the webhook endpoint. The [`ses_notifications.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) handler processes `SubscriptionConfirmation`, `Notification` (bounce, complaint, delivery), and `UnsubscribeConfirmation` payloads.
+Confirm the subscription when AWS SNS sends the `SubscriptionConfirmation` POST to the webhook endpoint. The [`ses_notifications.rs`](../../services/mail-server/crates/api-server/src/routes/ses_notifications.rs) handler processes `SubscriptionConfirmation`, `Notification` (bounce, complaint, delivery), and `UnsubscribeConfirmation` payloads.
 
 > For a detailed step-by-step SES setup guide, see [`ses-setup.md`](ses-setup.md).
 
@@ -371,42 +371,48 @@ cd deploy
 sqlx migrate run --database-url postgres://apexmail@10.0.1.4:5432/apexmail
 ```
 
-#### 2. Verify the Routing Cache Trigger
+#### 2. Routing and warmup state (legacy cache plus the live columns)
 
-The DB trigger [`trg_update_transport_routing`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) fires on `INSERT`, `UPDATE`, and `DELETE` on the [`dedicated_ips`](../tool-contracts/hetzner.md:253) table. It automatically populates the [`transport_routing_cache`](../tool-contracts/hetzner.md:257) table used by the [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:134).
+Migration `021_hybrid_infrastructure.sql` still creates the
+`transport_routing_cache` table and the `trg_update_transport_routing` trigger
+on `dedicated_ips`. **The delivery worker no longer reads that cache** — the
+per-message `TransportRouter` that consumed it was removed; route resolution is
+now a pure mapping from the route the worker derives per send
+([`transport_router.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:17)).
+The trigger/table are retained as legacy state only.
+
+The live warmup control is the per-source-IP admission in `worker-processors`,
+which reads the `dedicated_ips` rows directly (least-warmed `status='warming'`
+row; day derived from `warmup_started_at`) and reserves capacity in Redis under
+`apexmail:warmup:ip:{ip_address}:{utc_day}`. See
+[warmup-schedule.md](../operations/warmup-schedule.md).
 
 ```sql
--- Verify the trigger exists
+-- Legacy: the trigger may still exist, but nothing in the delivery path reads it.
 SELECT tgname, tgrelid::regclass AS table_name
 FROM pg_trigger
 WHERE tgname = 'trg_update_transport_routing';
-
--- Verify the cache table exists and has the expected structure
-\d transport_routing_cache;
-
--- Expected columns:
---   tenant_id           UUID (PRIMARY KEY)
---   has_dedicated_ips   BOOLEAN
---   preferred_dedicated_ip INET
---   dedicated_ip_count  INTEGER
---   updated_at          TIMESTAMPTZ
 ```
 
 #### 3. Verify Dedicated IPs Table
 
-The [`dedicated_ips`](../tool-contracts/hetzner.md:261) table is the source of truth. Key columns:
+The [`dedicated_ips`](../tool-contracts/hetzner.md:261) table is the source of
+truth for per-tenant warmup. Key columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `id` | UUID | Primary key |
-| `tenant_id` | UUID | FK to tenants table |
+| `id` | VARCHAR(64) | Primary key |
+| `tenant_id` | VARCHAR(64) | Tenant binding |
 | `hetzner_floating_ip_id` | BIGINT | Hetzner Floating IP ID |
 | `hetzner_server_id` | BIGINT | MTA server the IP is assigned to |
 | `ip_address` | INET | The Floating IP address |
-| `rdns_hostname` | TEXT | Reverse DNS hostname |
-| `status` | TEXT | One of: `warming`, `active`, `cooling`, `returned`, `failed` |
-| `warmup_progress` | INTEGER | Days completed in warmup (0–60) |
-| `billing_status` | TEXT | One of: `pending`, `active`, `removed` |
+| `rdns_hostname` | VARCHAR(255) | Reverse DNS hostname |
+| `status` | VARCHAR(20) | One of: `pending`, `warming`, `active`, `suspended`, `releasing`, `retired` |
+| `warmup_started_at` | TIMESTAMPTZ | Start of the 60-day warmup day count |
+| `warmup_progress` | DOUBLE PRECISION | Progress fraction (0.0–1.0), written by `tick_warmup()` |
+| `warmup_completed_at` | TIMESTAMPTZ | Set when the IP graduates to `active` |
+
+Only rows with `status = 'warming'` participate in warmup admission.
 
 ---
 
@@ -422,13 +428,11 @@ Once Phase 1 is complete, customer provisioning is fully automated. Here is exac
 2. A new tenant record is created with `plan = 'free'`.
 3. **No dedicated IPs are provisioned** — free-tier tenants use the SES shared pool.
 4. An account verification email is sent via SES (the default transport).
-5. The [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:225) resolves:
-
-```
-cache.entries.get(tenant_id) → None (no routing entry for new tenant)
-↓
-TransportRouter defaults to SesTransport
-```
+5. The worker derives the delivery route per send: the tenant has no
+   `status='warming'` `dedicated_ips` row, so the route is SES shared
+   (`DeliveryRoute::SesShared`). Route resolution is
+   [`transport_router.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs),
+   a pure mapping with no database or in-memory cache.
 
 ---
 
@@ -440,7 +444,7 @@ When the customer upgrades (e.g., from Free to Growth), Stripe sends a `checkout
 
 #### Step 2: Auto-Provision Background Job
 
-The webhook handler calls [`auto_provision_dedicated_ips_background()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) — a background async job that:
+The webhook handler calls [`auto_provision_dedicated_ips_background()`](../../services/mail-server/crates/billing-service/src/stripe_webhooks.rs:1153) — a background async job that:
 
 1. Reads the plan allocation (e.g., Growth = 1 dedicated IP, Scale = 3, Enterprise = 10+).
 2. Calls the **Hetzner Cloud API** to create Floating IPs:
@@ -475,62 +479,67 @@ POST /v1/floating_ips/{id}/actions/change_dns_ptr
 
 5. Inserts rows into the [`dedicated_ips`](../tool-contracts/hetzner.md:261) table with `status = 'warming'` and `warmup_progress = 0`.
 
-#### Step 3: DB Trigger Populates the Routing Cache
+#### Step 3: Database Rows Are the Source of Truth
 
-The `INSERT` on `dedicated_ips` fires the [`trg_update_transport_routing`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) trigger, which:
+The `INSERT` on `dedicated_ips` still fires the legacy
+`trg_update_transport_routing` trigger and updates `transport_routing_cache`,
+but **no delivery component reads that cache**. The worker selects the
+tenant's least-warmed `status='warming'` row directly from `dedicated_ips`
+when it resolves the route for a send.
 
-```sql
-INSERT INTO transport_routing_cache (tenant_id, has_dedicated_ips, preferred_dedicated_ip, dedicated_ip_count)
-VALUES (<tenant_id>, TRUE, '<first_ip>', 1)
-ON CONFLICT (tenant_id) DO UPDATE SET
-    has_dedicated_ips = TRUE,
-    preferred_dedicated_ip = EXCLUDED.preferred_dedicated_ip,
-    dedicated_ip_count = EXCLUDED.dedicated_ip_count,
-    updated_at = NOW();
-```
+#### Step 4: The Worker Routes the Next Send Through the Dedicated IP
 
-#### Step 4: TransportRouter Picks Up the Change
+There is no per-tenant routing cache and no 30-second refresh loop. On the
+next send, `delivery_route()` derives `DeliveryRoute::Dedicated {
+dedicated_ip_id, source_ip }` from the selected warming `dedicated_ips` row
+(`services/mail-server/crates/worker-processors/src/email/processor.rs:938`),
+and `check_warmup_limit` reserves that IP's daily capacity.
 
-The [`TransportRouter::ensure_cache_fresh()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:252) method refreshes the in-memory routing cache every **30 seconds**:
+> **Known gap:** the actual recipient-facing source-IP binding is a contract
+> with the relay MTA (`X-ApexMail-Route`), and that MTA component is not
+> implemented in this repository (`TODO(mta-owner)`). Until it reports the
+> bound source IP back, the transport returns `actual_source_ip: None` and the
+> worker treats the dedicated route as unverified. See
+> [delivery-transport.md](../architecture/delivery-transport.md).
 
-```rust
-if cache.last_refresh.elapsed() > Duration::from_secs(30) {
-    self.refresh_cache().await?;
-}
-```
+#### Step 5: Warmup Admission Begins
 
-The next time the customer sends an email, [`resolve_transport_kind()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:188) returns `TransportKind::Smtp` with the `preferred_dedicated_ip` as the `bind_ip`.
+The `DedicatedIpProvider` exposes `tick_warmup()` (it graduates IPs after 60
+days), but **no runtime component schedules it** — there is no warmup cron in
+this tree; progress only advances when an operator invokes it
+([`ip_provider.rs`](../../services/mail-server/crates/api-server/src/ip_provider.rs:504)).
 
-#### Step 5: Warmup Begins
+The worker's [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:2337)
+enforces the daily limit per source IP:
 
-The `DedicatedIpProvider` background task calls [`tick_warmup()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) daily, incrementing `warmup_progress` from 0 to 60.
-
-The worker's [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:463) enforces daily sending limits via Redis atomic counters:
-
-```rust
-// processor.rs line 472-514
-async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
-    let limit = WarmupLimits::for_day(warmup_progress).daily_limit;
-    // Redis: INCR warmup:count:<YYYY-MM-DD>:<domain_id>
-    // If count > limit → overflow to SES shared pool
-}
-```
+- the cap is `mail_common::warmup::limit_for_day(day)` with the day derived
+  from `dedicated_ips.warmup_started_at`;
+- the reservation is atomic (`WARMUP_RESERVE_LUA`) under the Redis key
+  `apexmail:warmup:ip:{ip_address}:{utc_day}` (48-hour TTL);
+- a full cap **defers the row** through the normal requeue path — it does
+  **not** overflow to the SES shared pool.
 
 **Warmup schedule** (60-day graduated, from [`warmup-schedule.md`](../operations/warmup-schedule.md:14)):
 
-| Day Range | Daily Limit | Cumulative |
-|-----------|-------------|------------|
-| 1–2 | 50 | 100 |
-| 3–4 | 100 | 300 |
-| 5–6 | 200 | 700 |
-| 7–8 | 400 | 1,500 |
-| 9–10 | 800 | 3,100 |
-| 11–14 | 1,000 | 7,100 |
-| 15–21 | 5,000 | 42,100 |
-| 22–27 | 10,000 | 102,100 |
-| 28+ | Unlimited (`i64::MAX`) | — |
+| Day(s) | Daily Limit |
+|--------|-------------|
+| 0–1 | 50 |
+| 2–3 | 100 |
+| 4–5 | 250 |
+| 6–7 | 500 |
+| 8–10 | 1,000 |
+| 11–14 | 2,500 |
+| 15–20 | 5,000 |
+| 21–28 | 10,000 |
+| 29–35 | 25,000 |
+| 36–44 | 50,000 |
+| 45–49 | 75,000 |
+| 50–54 | 100,000 |
+| 55–59 | 250,000 |
+| 60+ | Unlimited |
 
-> If the daily warmup limit is exceeded, excess traffic **overflows** to the SES shared pool automatically. No emails are dropped.
+> If the daily warmup limit is reached, the affected row is deferred and
+> retried; no message is silently moved to the shared pool.
 
 ---
 
@@ -575,27 +584,26 @@ async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
 
 ### A. Warmup Verification
 
-**Check the warmup progress** of all active dedicated IPs:
+**Check the warmup state** of all active dedicated IPs:
 
 ```sql
-SELECT tenant_id, ip_address, warmup_progress, status
+SELECT tenant_id, ip_address, warmup_started_at, warmup_progress, status
 FROM dedicated_ips
 WHERE status IN ('warming', 'active')
-ORDER BY tenant_id, warmup_progress;
+ORDER BY tenant_id, warmup_started_at;
 ```
 
-**Check the routing cache** to ensure the trigger is working:
+Warmup admission keys on the `status = 'warming'` rows and on
+`warmup_started_at`. **Alert** if any dedicated IP shows `status = 'suspended'`
+or `'retired'`.
 
-```sql
-SELECT * FROM transport_routing_cache
-WHERE has_dedicated_ips = TRUE;
-```
-
-**Alert** if any dedicated IP shows `status = 'failed'` or `warmup_progress` stops incrementing for more than 1 day.
+> `warmup_progress` is only written by `DedicatedIpProvider::tick_warmup()`,
+> which **nothing schedules today** — do not alert on it "not incrementing"
+> unless an operator runbook actually invokes it.
 
 ### B. SES Bounce/Complaint Monitoring
 
-Suppressions are cached and checked by the [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:275) before sending. Monitor:
+Suppressions are checked by the [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:275) before sending. Monitor:
 
 - **Bounce rate**: Should stay below 5%. Investigate if it exceeds 10%.
 - **Complaint rate**: Should stay below 0.1%. Investigate if it exceeds 0.5%.
@@ -617,23 +625,19 @@ Compare against your Hetzner project quota. If `HETZNER_POOL_MIN_FREE` (default:
 
 ### D. Worker Logs & Metrics
 
-**Key log lines to watch** (from [`processor.rs`](../../services/mail-server/crates/worker-processors/src/email/processor.rs)):
-
-| Log Pattern | What It Means |
-|-------------|---------------|
-| `"Successfully sent email to <recipient>"` | Email sent via the resolved transport |
-| `"Warmup limit reached for <domain>"` | Excess traffic overflowed to SES shared pool |
-| `"Suppressed email to <recipient>: reason"` | Recipient is on the suppression list |
-| `"SMTP endpoint unhealthy, opening circuit breaker"` | MTA server may be down |
-| `"Transport routing cache refreshed: N entries"` | Cache sync completed |
+The worker logs structured fields (job id, tenant, domain, route kind, warmup
+IP and limit) rather than fixed message strings; inspect the worker logs for
+`dispatch route resolved`, `warmup quota for the source IP is exhausted`, and
+`dedicated route/source-IP unverified` events.
 
 **Prometheus metrics** (exposed by the worker):
 
-- `emails_sent_total{transport="ses|smtp"}`
-- `emails_warmup_limited_total`
-- `transport_router_cache_size`
-- `transport_router_cache_stale_seconds`
-- `email_queue_depth`
+- `apexmail_email_queue_depth`
+- `apexmail_worker_info`
+- `apexmail_email_queue_metrics_fresh` / `apexmail_email_queue_metrics_errors`
+
+> The historical `emails_warmup_limited_total`, `transport_router_cache_size`
+> and `transport_router_cache_stale_seconds` metrics no longer exist.
 
 **Grafana dashboard**: Available at `https://monitor.apexmail.ee:3000` (private network).
 
@@ -643,32 +647,41 @@ Compare against your Hetzner project quota. If `HETZNER_POOL_MIN_FREE` (default:
 
 ### Customer's emails are going through SES instead of their dedicated IP
 
-1. **Check the routing cache**:
+1. **Check for a warming dedicated IP for the tenant**:
    ```sql
-   SELECT * FROM transport_routing_cache WHERE tenant_id = '<tenant_id>';
+   SELECT id, ip_address, status, warmup_started_at
+   FROM dedicated_ips
+   WHERE tenant_id = '<tenant_id>' AND status = 'warming';
    ```
-   If the row is missing or `has_dedicated_ips = FALSE`, verify the DB trigger is active.
+   No row means the worker resolves `DeliveryRoute::SesShared` — this is the
+   correct behaviour, not a fault.
 
-2. **Check the trigger**:
-   ```sql
-   SELECT tgname FROM pg_trigger WHERE tgname = 'trg_update_transport_routing';
-   ```
+2. **Check the worker logs** for `dispatch route resolved`: the `dedicated_ip`
+   field names the IP selected for the send. If the route is dedicated but the
+   log then shows `dedicated route/source-IP unverified`, the relay MTA did not
+   report the bound source IP — see the known gap in
+   [delivery-transport.md](../architecture/delivery-transport.md). Every
+   dedicated send fails closed until that relay contract is implemented.
 
-3. **Force a cache refresh** (API endpoint):
-   ```
-   POST /api/v1/admin/transport-cache/invalidate
-   ```
-
-4. **Check the 30-second refresh window**: The [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:252) caches routing for up to 30 seconds. Wait or force invalidate.
+3. **Do not look for a routing cache entry or a cache-refresh endpoint** —
+   neither the `transport_routing_cache` table nor the removed
+   `TransportRouter` cache is consulted by the delivery worker.
 
 ### Warmup progress is stuck
 
-1. **Check `dedicated_ips` table**:
+1. **Check `dedicated_ips`**:
    ```sql
-   SELECT warmup_progress, status, updated_at FROM dedicated_ips WHERE tenant_id = '<tenant_id>';
+   SELECT warmup_started_at, warmup_progress, status, updated_at
+   FROM dedicated_ips WHERE tenant_id = '<tenant_id>';
    ```
+   Note that `warmup_progress` only moves when `tick_warmup()` is invoked;
+   nothing in the running system calls it on a schedule today. This does not
+   block sending: the worker's admission day count comes from
+   `warmup_started_at`, not from `warmup_progress`.
 
-2. **Verify `DedicatedIpProvider::tick_warmup()` is running** (check API server logs for "tick_warmup" entries).
+2. **Check the Redis counter** for the source IP and current UTC day
+   (`apexmail:warmup:ip:{ip_address}:{utc_day}`); a full counter defers rows
+   until the next UTC day rather than overflowing.
 
 3. **Check the Hetzner Cloud API** directly:
    ```bash
@@ -707,7 +720,7 @@ The [`SesConfig`](../../services/mail-server/crates/worker-processors/src/common
 | [`warmup-schedule.md`](../operations/warmup-schedule.md) | Canonical 60-day warmup schedule and code reference |
 | [`HETZNER_SIMULATION_CHECKLIST.md`](HETZNER_SIMULATION_CHECKLIST.md) | Staging simulation runbook for pre-production validation |
 | [`config.rs`](../../services/mail-server/crates/worker-processors/src/common/config.rs) | Rust config structs with defaults |
-| [`transport_router.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) | Per-message routing implementation |
-| [`processor.rs`](../../services/mail-server/crates/worker-processors/src/email/processor.rs) | Email processing pipeline with warmup and suppression |
-| [`transport.rs`](../../services/mail-server/crates/worker-processors/src/email/transport.rs) | SES and SMTP transport implementations |
-| [`types.rs`](../../services/mail-server/crates/worker-processors/src/email/types.rs) | Warmup limit schedule and email types |
+| [`transport_router.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) | Route resolution (route → transport kind); no cache or send path |
+| [`processor.rs`](../../services/mail-server/crates/worker-processors/src/email/processor.rs) | Email processing pipeline with per-source-IP warmup admission |
+| [`transport.rs`](../../services/mail-server/crates/worker-processors/src/email/transport.rs) | The single `EmailTransport` contract (SES and SMTP) |
+| [`types.rs`](../../services/mail-server/crates/worker-processors/src/email/types.rs) | `DeliveryRoute` / `DeliveryReceipt` types |

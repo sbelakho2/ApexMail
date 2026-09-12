@@ -1,5 +1,29 @@
-//! IP warmup schedule management endpoints.
+//! Advisory IP warmup CATALOG management endpoints.
 //!
+//! # These endpoints are NOT an admission control
+//!
+//! This router manages advisory data only: the per-pool warmup PLAN rows in
+//! `isp_warmup_schedules` and the `ip_pools.status` flag. Neither is read by
+//! the send path. Warmup admission is enforced per SOURCE IP in
+//! `worker-processors`:
+//!
+//! * the daily cap is the canonical
+//!   `mail_common::warmup::WarmupSchedule::limit_for_day`, derived from
+//!   `dedicated_ips.warmup_started_at`;
+//! * the reservation is the Redis key
+//!   `apexmail:warmup:ip:{ip_address}:{utc_day}`, taken atomically before
+//!   the transport.
+//!
+//! `start` / `pause` / `reset` here canNOT start, pause, raise, or lower that
+//! admission. Responses carry `"advisory": true` (and the action response
+//! `"admissionControl": false`) so API consumers cannot mistake the plan for
+//! a live control.
+//!
+//! The ISP-specific schedule targets (`isp_warmup_templates`) are advisory
+//! for the same reason: no live path resolves the recipient's provider/MX at
+//! admission time (the SMTP relay performs MX resolution and does not report
+//! it; SES does not report it either), so a `min(canonical, ISP target)` rule
+//! cannot be computed in the send path.
 
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -15,6 +39,9 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_warmup).post(warmup_action))
 }
 
+/// Update a pool's ADVISORY status flag. `ip_pools.status` is not consulted
+/// by the send path (warmup admission keys on `dedicated_ips` + Redis), so
+/// this cannot start or pause enforcement.
 async fn update_pool_status(
     db: &sqlx::PgPool,
     pool_id: &str,
@@ -54,9 +81,13 @@ pub struct IpAddress {
     pub status: String,
 }
 
+/// One ADVISORY plan day for a pool (`isp_warmup_schedules`). Nothing in the
+/// send path reads this row; `actual_volume` has no runtime writer anymore
+/// (the execution runner was removed with the inert ISP execution model), so
+/// it is legacy display data only.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WarmupSchedule {
+pub struct AdvisoryWarmupDay {
     pub id: String,
     pub day: i32,
     pub target_volume: i64,
@@ -64,6 +95,8 @@ pub struct WarmupSchedule {
     pub status: String,
 }
 
+/// Advisory pool view. `advisory` is always `true`: this payload describes a
+/// plan, not an admission control (see the module docs).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IpPool {
@@ -72,9 +105,15 @@ pub struct IpPool {
     pub status: String,
     pub created_at: String,
     pub addresses: Vec<IpAddress>,
-    pub schedules: Vec<WarmupSchedule>,
+    pub schedules: Vec<AdvisoryWarmupDay>,
+    /// Always `true`. Present so API consumers cannot mistake the warmup plan
+    /// for the live per-source-IP admission in `worker-processors`.
+    pub advisory: bool,
 }
 
+/// List the advisory warmup plan for the platform's IP pools. Read-only with
+/// respect to admission: the canonical per-source-IP warmup control lives in
+/// `worker-processors` and is not represented here (see the module docs).
 async fn list_warmup(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -130,10 +169,10 @@ async fn list_warmup(
                 })
                 .collect();
 
-            let schedules: Vec<WarmupSchedule> = schedule_rows
+            let schedules: Vec<AdvisoryWarmupDay> = schedule_rows
                 .iter()
                 .filter(|(_, pool_id, ..)| pool_id == &id)
-                .map(|(sid, _, day, target, actual, sstatus)| WarmupSchedule {
+                .map(|(sid, _, day, target, actual, sstatus)| AdvisoryWarmupDay {
                     id: sid.clone(),
                     day: *day,
                     target_volume: *target,
@@ -149,6 +188,7 @@ async fn list_warmup(
                 created_at: created_at.to_rfc3339(),
                 addresses,
                 schedules,
+                advisory: true,
             }
         })
         .collect();
@@ -156,6 +196,9 @@ async fn list_warmup(
     Ok(Json(pools))
 }
 
+/// Advisory plan action. `start` / `pause` / `reset` toggle the ADVISORY
+/// per-pool plan (`ip_pools.status` + `isp_warmup_schedules` rows) only;
+/// they do not touch the live per-source-IP admission in `worker-processors`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
@@ -164,6 +207,10 @@ pub struct WarmupAction {
     pub action: String,
 }
 
+/// Apply an advisory plan action to a pool. The response states
+/// `"advisory": true` / `"admissionControl": false` explicitly: the live
+/// warmup cap is the canonical per-IP schedule in the send path, not this
+/// row (see the module docs).
 async fn warmup_action(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -223,8 +270,13 @@ async fn warmup_action(
 
     Ok(Json(serde_json::json!({
         "success": true,
+        "advisory": true,
+        "admissionControl": false,
         "status": new_status,
-        "message": format!("Pool {} {}", body.pool_id, body.action)
+        "message": format!(
+            "Advisory warmup plan for pool {} set to {} — this does not control send admission",
+            body.pool_id, new_status
+        )
     })))
 }
 
@@ -274,5 +326,28 @@ mod tests {
             .await
             .expect("failed to fetch updated pool status");
         assert_eq!(row.0, "active");
+    }
+
+    /// Source lock: the admin surface must keep SAYING it is advisory, and
+    /// must keep naming the canonical live path, so the route can never
+    /// silently imply it controls admission. Needles are assembled so this
+    /// test's own text cannot satisfy them.
+    #[test]
+    fn warmup_routes_document_advisory_only_semantics() {
+        let source = include_str!("warmup.rs");
+        for needle in [
+            concat!("NOT an admission", " control"),
+            concat!("does not control", " send admission"),
+            concat!("\"advisory\": ", "true"),
+            concat!("\"admissionControl\": ", "false"),
+            concat!("apexmail:warmup:ip:", "{ip_address}:{utc_day}"),
+            concat!("mail_common::warmup::WarmupSchedule", "::limit_for_day"),
+        ] {
+            assert!(
+                source.contains(needle),
+                "admin warmup routes must state {needle:?}: the endpoint is \
+                 advisory and the live control is the canonical per-IP path"
+            );
+        }
     }
 }

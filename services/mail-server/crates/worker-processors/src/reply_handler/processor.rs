@@ -118,36 +118,60 @@ const RESET_CLAIM_SQL: &str = r#"
 
 /// Resolve the enrollment behind an inbound reply.
 ///
-/// Resolution order, matching the links the existing code already uses:
+/// Resolution order:
 ///
-/// 1. the canonical lead bridge — `inbound_messages.lead_id` →
-///    `sales_leads.contact_id` (migration 200 added the bridge columns), then
-///    the live-most enrollment for that contact;
-/// 2. the contact's email — the candidate addresses (`from_email`, plus the
-///    DSN `Final-Recipient` / `X-Failed-Recipients` for a bounce, whose own
-///    `From:` is MAILER-DAEMON rather than the prospect) →
-///    `sales_contact_points.normalized_value` (`channel = 'email'`) →
-///    `sales_contact_id` → `sales_enrollments`.
+/// 1. the canonical address link — the candidate addresses (`from_email`,
+///    plus the DSN `Final-Recipient` / `X-Failed-Recipients` for a bounce,
+///    whose own `From:` is MAILER-DAEMON rather than the prospect) matched
+///    against `sales_contact_points.normalized_value` (`channel = 'email'`).
+///    Candidate order wins first (the `From:` address is the sender), then
+///    unsuppressed over suppressed, then highest confidence and newest;
+/// 2. TRANSITION FALLBACK — `inbound_messages.lead_id` →
+///    `sales_leads.contact_id` (the bridge columns migration 200 added).
+///    Consulted ONLY when step 1 found no canonical contact, i.e. while a
+///    legacy lead row can still exist without a contact point.
+///
+/// [`LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION`] names when step 2 (and the
+/// `lead_contact` CTE plus its `NOT EXISTS` guard) can be deleted: once the
+/// transition migration has backfilled every bridge column, no lead row has
+/// a NULL `contact_id` and the legacy link resolves nothing the canonical
+/// lookup would not.
 ///
 /// Live enrollments win over terminal ones so a re-delivered reply resolves
 /// to the same row it locked the first time instead of an older completed
 /// enrollment.
+// The constant is referenced by the SQL-shape test, not the runtime path;
+// keeping it in production source (rather than only in a comment) is the
+// point: the fallback's removal condition travels with the code.
+#[allow(dead_code)]
+pub const LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION: &str =
+    "when no sales_leads row has a NULL contact_id (after the transition migration \
+     backfills the account_id/contact_id bridge), remove the lead_contact CTE and its \
+     NOT EXISTS guard from RESOLVE_ENROLLMENT_SQL";
+
 const RESOLVE_ENROLLMENT_SQL: &str = r#"
-            WITH lead_contact AS (
-                SELECT contact_id
-                FROM sales_leads
-                WHERE id = $2 AND tenant_id = $1 AND contact_id IS NOT NULL
+            WITH canonical_contact AS (
+                SELECT cp.contact_id
+                FROM sales_contact_points cp
+                WHERE cp.tenant_id = $1 AND cp.channel = 'email'
+                  AND lower(cp.normalized_value) = ANY($3)
+                ORDER BY array_position($3::text[], lower(cp.normalized_value)) NULLS LAST,
+                         (cp.suppressed_at IS NULL) DESC,
+                         cp.confidence DESC,
+                         cp.created_at DESC
+                LIMIT 1
+            ),
+            -- Transitional only; see LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION.
+            lead_contact AS (
+                SELECT l.contact_id
+                FROM sales_leads l
+                WHERE l.id = $2 AND l.tenant_id = $1 AND l.contact_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM canonical_contact)
             ),
             target AS (
                 SELECT COALESCE(
-                    (SELECT contact_id FROM lead_contact),
-                    (SELECT cp.contact_id
-                     FROM sales_contact_points cp
-                     WHERE cp.tenant_id = $1 AND cp.channel = 'email'
-                       AND lower(cp.normalized_value) = ANY($3)
-                     ORDER BY array_position($3::text[], lower(cp.normalized_value)) NULLS LAST,
-                              (cp.suppressed_at IS NULL) DESC, cp.created_at DESC
-                     LIMIT 1)
+                    (SELECT contact_id FROM canonical_contact),
+                    (SELECT contact_id FROM lead_contact)
                 ) AS contact_id
             )
             SELECT e.id, e.contact_id, e.contact_point_id, e.account_id, e.state
@@ -278,34 +302,20 @@ impl ReplyHandler {
         self.classifier.name()
     }
 
-    /// Ensure the timestamped-claim column exists (F2).
-    ///
-    /// `inbound_messages` historically carried only the bare `processing`
-    /// boolean (no expiry). The timestamped claim needs `processing_at`,
-    /// which the migration chain only added to `analytics_queue`. Schema
-    /// changes are owned by SQL migrations, but the claim cannot be made
-    /// expirable without the column, so — exactly like migration 088's own
-    /// guarded reconciliation ALTERs — the column is added idempotently
-    /// (`IF NOT EXISTS`) at startup. On an already-migrated database this
-    /// is a no-op.
-    async fn ensure_timestamped_claim_column(&self) -> ProcessorResult<()> {
-        sqlx::query(
-            "ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS processing_at TIMESTAMPTZ",
-        )
-        .execute(&self.db)
-        .await?;
-        Ok(())
-    }
-
     /// Start the processor.
+    ///
+    /// `inbound_messages.processing_at` (used by the timestamped claim in
+    /// [`FETCH_MESSAGES_SQL`]) is schema-owned: migration 203 creates the
+    /// column and its partial stale-claim index. The worker runs DML only —
+    /// no runtime schema reconciliation — so a deployment that skipped a
+    /// migration fails its first query loudly instead of silently repairing
+    /// the schema with privileges the service role does not need.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
         info!(
             concurrency = self.config.base.concurrency,
             classifier = self.classifier.name(),
             "Starting reply handler"
         );
-
-        self.ensure_timestamped_claim_column().await?;
 
         self.is_running.store(true, Ordering::SeqCst);
         self.poll_loop().await;
@@ -1381,24 +1391,74 @@ mod tests {
         );
     }
 
+    /// Item 23: the reply worker must run DML only. `processing_at` and
+    /// `idx_inbound_messages_processing_stale` are owned by migration 203,
+    /// and a service role without DDL privileges must be able to start and
+    /// process. A source scan (the same technique as the SQL-shape tests
+    /// above) keeps the last runtime schema statement from creeping back:
+    /// the needles are assembled at runtime so this test's own source text
+    /// is not what the scan finds.
+    #[test]
+    fn reply_handler_issues_no_runtime_schema_ddl() {
+        let source = include_str!("processor.rs");
+        for needle in [
+            concat!("ALTER", " TABLE"),
+            concat!("CREATE", " TABLE"),
+            concat!("DROP", " TABLE"),
+            concat!("CREATE", " INDEX"),
+            concat!("DROP", " INDEX"),
+        ] {
+            assert!(
+                !source.contains(needle),
+                "runtime schema statement {needle:?} must not appear in the reply handler; \
+                 schema is owned by the migration chain"
+            );
+        }
+    }
+
     // ── §21: the lock SQL shape ──────────────────────────────────────
 
     #[test]
-    fn resolution_uses_the_lead_bridge_then_the_email_link() {
-        assert!(RESOLVE_ENROLLMENT_SQL.contains("sales_leads"));
-        assert!(RESOLVE_ENROLLMENT_SQL.contains("contact_id"));
+    fn resolution_prefers_the_canonical_contact_point_then_falls_back_to_the_bridge() {
+        // Canonical identity first: the contact point lookup is the primary
+        // link and is defined BEFORE the lead bridge in the SQL.
+        let canonical_at = RESOLVE_ENROLLMENT_SQL
+            .find("canonical_contact")
+            .expect("canonical contact-point lookup");
+        let bridge_at = RESOLVE_ENROLLMENT_SQL
+            .find("lead_contact")
+            .expect("transitional lead bridge");
+        assert!(
+            canonical_at < bridge_at,
+            "sales_contact_points must be resolved BEFORE the sales_leads bridge"
+        );
         assert!(
             RESOLVE_ENROLLMENT_SQL.contains("sales_contact_points")
                 && RESOLVE_ENROLLMENT_SQL.contains("lower(cp.normalized_value) = ANY($3)"),
             "the email link must match any candidate address (from_email or DSN recipient)"
         );
+        // The bridge is a fallback: it must be guarded by the canonical miss.
+        assert!(
+            RESOLVE_ENROLLMENT_SQL.contains("NOT EXISTS (SELECT 1 FROM canonical_contact)"),
+            "the sales_leads bridge must only fire when no canonical contact matched"
+        );
         assert!(
             RESOLVE_ENROLLMENT_SQL.contains("COALESCE"),
-            "lead bridge takes precedence over the email link"
+            "the target contact must coalesce canonical first, bridge second"
         );
         assert!(
             RESOLVE_ENROLLMENT_SQL.contains("'completed', 'failed', 'suppressed'"),
             "live enrollments must sort before terminal ones"
+        );
+        // The fallback's removal condition is stated in code, not only in a
+        // comment, so it cannot be forgotten: it must name the NULL bridge.
+        assert!(
+            LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION.contains("NULL contact_id"),
+            "the fallback's removal condition must name the NULL contact_id state"
+        );
+        assert!(
+            LEAD_BRIDGE_FALLBACK_REMOVAL_CONDITION.contains("lead_contact"),
+            "the removal condition must name what gets deleted"
         );
     }
 
@@ -1505,12 +1565,8 @@ mod tests {
         .expect("seed inbound fixture");
 
         let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
-        // start() ensures the timestamped-claim column at startup; the test
-        // drives the fetch/process path directly so it does the same.
-        handler
-            .ensure_timestamped_claim_column()
-            .await
-            .expect("ensure claim column");
+        // `processing_at` is migration-owned (203), so the test drives the
+        // fetch/process path directly with no schema setup.
 
         // Claim + process through the production entry point.
         let messages = handler.fetch_messages(10).await.expect("fetch");
@@ -1623,6 +1679,195 @@ mod tests {
         assert_eq!(status.pending_inbound, 0);
         assert!(status.has_events);
         assert!(status.latest_reply_at.is_some());
+
+        pool.close().await;
+    }
+
+    // =======================================================================
+    // Item 17: canonical-first identity resolution
+    // =======================================================================
+
+    /// Inbound identity must resolve through `sales_contact_points` FIRST and
+    /// only use the `sales_leads` bridge as a transition fallback.
+    ///
+    /// Proved adversarially: the legacy bridge row points at a DIFFERENT
+    /// contact (B) with its own live enrollment, so a resolver that still
+    /// preferred the bridge would return B. Canonical-first must return A.
+    /// Then the bridge row is deleted and resolution must still succeed —
+    /// proving the fallback was not load-bearing.
+    ///
+    /// DB-backed via the canonical migrator fixture (soft-skips without
+    /// `TEST_DATABASE_URL`, like the F67 handoff test above).
+    #[tokio::test]
+    async fn reply_identity_resolves_canonically_without_the_lead_bridge() {
+        let pool =
+            match migrator::test_support::fresh_canonical_pool("worker_item17", "reply_canonical")
+                .await
+            {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            };
+        let Some(pool) = pool else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("item17{suffix}");
+        let account_id = Uuid::new_v4();
+        let contact_a = Uuid::new_v4();
+        let point_a = Uuid::new_v4();
+        let contact_b = Uuid::new_v4();
+        let point_b = Uuid::new_v4();
+        let sequence_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let enrollment_a = Uuid::new_v4();
+        let enrollment_b = Uuid::new_v4();
+        let email_a = format!("canonical-{suffix}@example.com");
+        let email_b = format!("bridge-{suffix}@example.com");
+        // `inbound_messages.lead_id` is VARCHAR(26) (migration 088:98).
+        let lead_id = format!("lead{suffix}");
+        let inbound_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..18]);
+
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+             VALUES ($1, $2, 'Item17 Co', $3)",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{suffix}.example"))
+        .execute(&pool)
+        .await
+        .expect("seed account");
+        for (contact_id, point_id, email) in [
+            (contact_a, point_a, &email_a),
+            (contact_b, point_b, &email_b),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+                 VALUES ($1, $2, $3, 'Item17 Contact')",
+            )
+            .bind(contact_id)
+            .bind(&tenant)
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .expect("seed contact");
+            sqlx::query(
+                "INSERT INTO sales_contact_points \
+                     (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+                 VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid')",
+            )
+            .bind(point_id)
+            .bind(&tenant)
+            .bind(contact_id)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("seed contact point");
+        }
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, status) \
+             VALUES ($1, $2, 'Item17 Sequence', 'active')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed sequence");
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions \
+                 (id, tenant_id, sequence_id, version, status, locale, approved_by, approved_at) \
+             VALUES ($1, $2, $3, 1, 'active', 'en', 'item17', NOW())",
+        )
+        .bind(version_id)
+        .bind(&tenant)
+        .bind(sequence_id)
+        .execute(&pool)
+        .await
+        .expect("seed version");
+        for (enrollment_id, contact_id, point_id) in [
+            (enrollment_a, contact_a, point_a),
+            (enrollment_b, contact_b, point_b),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_enrollments \
+                     (id, tenant_id, sequence_version_id, account_id, contact_id, \
+                      contact_point_id, state, current_step_index) \
+                 VALUES ($1, $2, $3, $4, $5, $6, 'active', 0)",
+            )
+            .bind(enrollment_id)
+            .bind(&tenant)
+            .bind(version_id)
+            .bind(account_id)
+            .bind(contact_id)
+            .bind(point_id)
+            .execute(&pool)
+            .await
+            .expect("seed enrollment");
+        }
+        // The transitional bridge points at contact B, NOT at the sender's
+        // canonical contact A: canonical-first must ignore it.
+        sqlx::query(
+            "INSERT INTO sales_leads \
+                 (id, tenant_id, company_name, domain, contact_email, status, account_id, contact_id) \
+             VALUES ($1, $2, 'Item17 Co', $3, $4, 'new', $5, $6)",
+        )
+        .bind(&lead_id)
+        .bind(&tenant)
+        .bind(format!("{suffix}.example"))
+        .bind(&email_b)
+        .bind(account_id)
+        .bind(contact_b)
+        .execute(&pool)
+        .await
+        .expect("seed bridge lead");
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, lead_id, from_email, to_email, subject, body_text, \
+                  headers, received_at) \
+             VALUES ($1, $2, $3, $4, 'sales@apex.example', 'Re: item17', 'hello there', \
+                     '{}'::jsonb, NOW() - INTERVAL '1 minute')",
+        )
+        .bind(&inbound_id)
+        .bind(&tenant)
+        .bind(&lead_id)
+        .bind(&email_a)
+        .execute(&pool)
+        .await
+        .expect("seed inbound");
+
+        let handler = ReplyHandler::new(pool.clone(), ReplyHandlerConfig::default());
+        let msg = fetch_message_by_id(&handler, &inbound_id)
+            .await
+            .expect("claim the inbound reply");
+        assert_eq!(msg.lead_id.as_deref(), Some(lead_id.as_str()));
+
+        let resolved = handler
+            .resolve_enrollment(&msg)
+            .await
+            .expect("resolve")
+            .expect("the canonical contact point must resolve");
+        assert_eq!(
+            resolved.contact_id, contact_a,
+            "the sender's contact point must win over the lead bridge (which points at B)"
+        );
+        assert_eq!(resolved.enrollment_id, enrollment_a);
+
+        // Remove the bridge row entirely: canonical resolution must not need
+        // the fallback.
+        sqlx::query("DELETE FROM sales_leads WHERE id = $1")
+            .bind(&lead_id)
+            .execute(&pool)
+            .await
+            .expect("delete the bridge lead");
+        let resolved_without_bridge = handler
+            .resolve_enrollment(&msg)
+            .await
+            .expect("resolve without the bridge")
+            .expect("resolution must still succeed with no sales_leads row at all");
+        assert_eq!(resolved_without_bridge.contact_id, contact_a);
+        assert_eq!(resolved_without_bridge.enrollment_id, enrollment_a);
 
         pool.close().await;
     }
@@ -1907,7 +2152,8 @@ mod tests {
         handler: &ReplyHandler,
         msg_id: &str,
     ) -> ProcessorResult<InboundMessage> {
-        handler.ensure_timestamped_claim_column().await?;
+        // `inbound_messages.processing_at` is migration-owned (203); the
+        // worker issues no schema statements.
         let messages = handler.fetch_messages(10).await?;
         messages
             .into_iter()

@@ -35,10 +35,11 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::campaigns::{CampaignEmailDispatcher, DispatchRecipient};
+use crate::campaigns::DispatchRecipient;
 use crate::config::DispatchConfig;
 use crate::types::SalesError;
 
@@ -169,13 +170,155 @@ impl QuotaGateway for BillingQuotaGateway {
 }
 
 // ---------------------------------------------------------------------------
-// Unsubscribe tokens (HMAC-SHA256, no plaintext PII)
+// Unsubscribe tokens
+//
+// Two generations exist:
+//
+// * **v2 (current)** — an opaque 32-byte random token, URL-safe base64. Only
+//   its SHA-256 hash is persisted (`sales_unsubscribe_tokens`, migration
+//   203), so a database/backup leak does not disclose recipient addresses
+//   and the URL itself carries no tenant id, no email, and no reversible
+//   encoding of either.
+// * **v1 (legacy, read-only)** — `v1.{tenant_hex}.{email_hex}.{expiry}.{sig}`.
+//   Hex is reversible, so every v1 URL is a portable copy of the recipient
+//   address. No new token may be minted with it; the verifier is retained
+//   only so links in already-delivered mail keep working for ONE expiry
+//   cycle ([`UNSUB_TOKEN_TTL_SECS`], 365 days) after the v2 rollout. Delete
+//   the legacy block (and the handler fallback in `routes.rs`) once
+//   `Utc::now() > rollout + 365 days` and no v1 signer callers remain —
+//   grep for `sign_unsubscribe_token` / `verify_unsubscribe_token` first.
 // ---------------------------------------------------------------------------
+
+/// Default token lifetime: 365 days (recipients keep emails a long time).
+const UNSUB_TOKEN_TTL_SECS: i64 = 365 * 24 * 3600;
+
+/// Entropy per v2 token. 32 bytes = 256 bits; brute-forcing the hash
+/// preimage is not feasible.
+const UNSUB_TOKEN_V2_BYTES: usize = 32;
+
+/// URL-safe unpadded base64 length of [`UNSUB_TOKEN_V2_BYTES`].
+const UNSUB_TOKEN_V2_LEN: usize = 43;
+
+/// Create an opaque v2 unsubscribe token for (tenant, recipient) and persist
+/// ONLY its SHA-256 hash. Returns the public token (the only form that ever
+/// leaves this process); the raw token is never written to the database, a
+/// log, or an error.
+///
+/// The recipient address is canonicalized (trim + lowercase) exactly like
+/// the suppression stores' canonical form, so a click resolves to the same
+/// (tenant, email) pair that would be suppressed.
+pub async fn create_unsubscribe_token(
+    db: &PgPool,
+    tenant_id: &str,
+    email: &str,
+) -> Result<String, SalesError> {
+    use base64::Engine as _;
+    use rand::TryRngCore as _;
+
+    let mut raw = [0u8; UNSUB_TOKEN_V2_BYTES];
+    rand::rngs::OsRng.try_fill_bytes(&mut raw).map_err(|e| {
+        tracing::error!(error = %e, "OsRng failed while generating an unsubscribe token");
+        SalesError::ServiceUnavailable("secure randomness unavailable".into())
+    })?;
+
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+    let hash = Sha256::digest(raw);
+    let expires_at = Utc::now() + chrono::Duration::seconds(UNSUB_TOKEN_TTL_SECS);
+
+    sqlx::query(
+        "INSERT INTO sales_unsubscribe_tokens (token_hash, tenant_id, email, expires_at) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (token_hash) DO NOTHING",
+    )
+    .bind(hash.as_slice())
+    .bind(tenant_id.trim())
+    .bind(email.trim().to_ascii_lowercase())
+    .bind(expires_at)
+    .execute(db)
+    .await
+    .map_err(|e| {
+        // The message contains no token material.
+        tracing::error!(error = %e, "failed to persist an unsubscribe token");
+        SalesError::Database(e.to_string())
+    })?;
+
+    Ok(token)
+}
+
+/// Decode the URL-safe base64 shape of a v2 token into its raw bytes.
+/// `None` for anything that is not exactly a 43-character URL-safe base64
+/// string (lengths, padding, and invalid characters are all rejected before
+/// any database work).
+fn decode_v2_token(token: &str) -> Option<[u8; UNSUB_TOKEN_V2_BYTES]> {
+    use base64::Engine as _;
+
+    let token = token.trim();
+    if token.len() != UNSUB_TOKEN_V2_LEN {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .ok()?;
+    decoded.try_into().ok()
+}
+
+/// Resolve an opaque v2 token: decode → SHA-256 → look up the persisted hash
+/// `WHERE expires_at > now()`. Returns `Ok(None)` for a malformed, unknown,
+/// or expired token; a database failure is an `Err` (the caller must not
+/// treat it as "no such token" and fall through to the legacy verifier on a
+/// transient outage).
+///
+/// # `used_at` semantics (documented choice)
+///
+/// The first successful redemption stamps `used_at = NOW()`; later
+/// redemptions keep the original timestamp and still resolve. Single-use
+/// enforcement is deliberately NOT applied: mail clients and security
+/// scanners prefetch `List-Unsubscribe` URLs, and RFC 8058 clients retry,
+/// so burning the link on first read would break the actual recipient's
+/// click. Suppression itself is idempotent on both stores, so replaying a
+/// redeemed token has no additional effect.
+pub async fn resolve_unsubscribe_token(
+    db: &PgPool,
+    token: &str,
+) -> Result<Option<UnsubscribeTokenData>, SalesError> {
+    let Some(raw) = decode_v2_token(token) else {
+        return Ok(None);
+    };
+    let hash = Sha256::digest(raw);
+
+    // One statement: the UPDATE both marks first use and selects the row.
+    let row: Option<(String, String, DateTime<Utc>)> = sqlx::query_as(
+        "UPDATE sales_unsubscribe_tokens \
+         SET used_at = COALESCE(used_at, NOW()) \
+         WHERE token_hash = $1 AND expires_at > NOW() \
+         RETURNING tenant_id, email, expires_at",
+    )
+    .bind(hash.as_slice())
+    .fetch_optional(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    Ok(
+        row.map(|(tenant_id, email, expires_at)| UnsubscribeTokenData {
+            tenant_id,
+            email,
+            expires_at: expires_at.timestamp(),
+        }),
+    )
+}
+
+/// A verified unsubscribe token's contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsubscribeTokenData {
+    pub tenant_id: String,
+    pub email: String,
+    pub expires_at: i64,
+}
+
+// ── Legacy v1 tokens (read-only compatibility; do not mint) ────────────────
 
 /// Token version prefix; embedded in the signed payload.
 const UNSUB_TOKEN_VERSION: &str = "v1";
-/// Default token lifetime: 365 days (recipients keep emails a long time).
-const UNSUB_TOKEN_TTL_SECS: i64 = 365 * 24 * 3600;
 
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -206,8 +349,11 @@ fn unsub_signed_payload(tenant_hex: &str, email_hex: &str, expires_at: i64) -> S
     format!("{UNSUB_TOKEN_VERSION}.{tenant_hex}.{email_hex}.{expires_at}")
 }
 
-/// Sign an unsubscribe token for (tenant, recipient). Deterministic for a
-/// given expiry, carries no plaintext PII, and is safe to embed in a URL.
+/// **Deprecated (v1)** — the payload hex-encodes the tenant id and recipient
+/// address, so the token is a reversible copy of the address. Kept ONLY for
+/// the legacy dry-run preview path (`campaigns::legacy_unsubscribe_link`),
+/// which never enqueues, and for v1 verification tests. Never call this from
+/// a send path: use [`create_unsubscribe_token`] instead.
 pub fn sign_unsubscribe_token(
     secret: &str,
     tenant_id: &str,
@@ -223,19 +369,14 @@ pub fn sign_unsubscribe_token(
     format!("{payload}.{sig}")
 }
 
-/// A verified unsubscribe token's contents.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnsubscribeTokenData {
-    pub tenant_id: String,
-    pub email: String,
-    pub expires_at: i64,
-}
-
-/// Verify + decode an unsubscribe token. Returns `None` for malformed
-/// input, a bad signature (constant-time compare), or an expired token.
+/// **Deprecated (v1, read-only compatibility)** — verifies tokens that were
+/// already delivered in email before the v2 rollout. Returns `None` for
+/// malformed input, a bad signature (constant-time compare), or an expired
+/// token.
 ///
 /// Wire format: `v1.{tenant_hex}.{email_hex}.{expiry_unix}.{sig_hex}` —
-/// five dot-separated segments.
+/// five dot-separated segments. Remove together with the handler fallback
+/// once every v1 token is past its 365-day TTL (see the section comment).
 pub fn verify_unsubscribe_token(secret: &str, token: &str) -> Option<UnsubscribeTokenData> {
     let token = token.trim();
     if token.len() < 16 || token.len() > 2048 {
@@ -280,9 +421,9 @@ pub fn verify_unsubscribe_token(secret: &str, token: &str) -> Option<Unsubscribe
     })
 }
 
-/// Convenience: sign a token expiring [`UNSUB_TOKEN_TTL_SECS`] from now. The
-/// recipient address is canonicalized (trim + lowercase) so the token always
-/// matches the suppression stores' canonical form.
+/// **Deprecated (v1)** — convenience signer expiring
+/// [`UNSUB_TOKEN_TTL_SECS`] from now, used only by the legacy dry-run
+/// preview path. New sends must use [`create_unsubscribe_token`].
 pub fn sign_unsubscribe_token_default_ttl(secret: &str, tenant_id: &str, email: &str) -> String {
     let expires_at = Utc::now().timestamp() + UNSUB_TOKEN_TTL_SECS;
     sign_unsubscribe_token(
@@ -788,6 +929,12 @@ pub enum EnqueueOutcome {
     /// attempt (or an older code path that stamped the ledger first) already
     /// enqueued this recipient; nothing sent again.
     DuplicateIdempotency,
+    /// The worker no longer holds the action lease (recovered by another
+    /// process, expired, or the action left `executing`). This is the
+    /// ANTI-DUPLICATE GUARD: the stale worker produced NO external effect —
+    /// nothing was inserted into `messages` or `email_queue` — and the
+    /// recovered worker owns the retry.
+    LeaseLost,
 }
 
 /// `email_queue` insert for campaign mail. `campaign_id` is set on the COLUMN
@@ -802,6 +949,114 @@ const CAMPAIGN_EMAIL_QUEUE_INSERT_SQL: &str = r#"
                 $6, $7, $9, $10, $11, $12, $13, $14, 5, 'pending', $15, $15
              )
         "#;
+
+/// `messages` insert for a sequenced (autonomous/worker) send.
+///
+/// The four typed provenance columns added by migration 202
+/// (`sales_decision_id`, `sales_sender_identity_id`, `sales_step_execution_id`,
+/// `sales_enrollment_id`) are written on the ROW itself, so a feedback
+/// consumer can attribute a bounce/complaint/reply without parsing JSON
+/// metadata at delivery speed. Parameterized (`$16`..`$19`), never
+/// interpolated. Idempotency is unchanged: `ON CONFLICT (tenant_id,
+/// idempotency_key) DO NOTHING` still collapses a duplicate logical send.
+const SEQUENCE_MESSAGES_INSERT_SQL: &str = r#"
+            INSERT INTO messages (
+                id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
+                subject, html_body, text_body, status, tags, metadata,
+                scheduled_at, created_at, idempotency_key,
+                sales_decision_id, sales_sender_identity_id,
+                sales_step_execution_id, sales_enrollment_id
+             ) VALUES (
+                $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15,
+                $16::uuid, $17::uuid, $18::uuid, $19::uuid
+             )
+             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        "#;
+
+/// `email_queue` insert for a sequenced send: the same four typed provenance
+/// columns as [`SEQUENCE_MESSAGES_INSERT_SQL`], so delivery events are
+/// attributable at the queue row too. `campaign_id` stays NULL — sequence mail
+/// is attributed to a step execution, not a campaign.
+const SEQUENCE_EMAIL_QUEUE_INSERT_SQL: &str = r#"
+            INSERT INTO email_queue (
+                id, message_id, tenant_id, domain_id, campaign_id, from_address, to_addresses, subject,
+                "from", "to", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at,
+                sales_decision_id, sales_sender_identity_id,
+                sales_step_execution_id, sales_enrollment_id
+             ) VALUES (
+                $1::uuid, $2::uuid, $3, $4::uuid, NULL, $5, ARRAY[$6], $7,
+                $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $13, $13,
+                $14::uuid, $15::uuid, $16::uuid, $17::uuid
+             )
+        "#;
+
+/// Statement order inside the sequenced-send transaction: the lease fence is
+/// deliberately FIRST — before either insert — so a stale worker aborts with
+/// no external effect. Test-only data so the ordering is asserted in tests;
+/// the implementation below follows it literally.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequencedTxStep {
+    VerifyActionLeaseFence,
+    InsertMessages,
+    InsertEmailQueue,
+}
+
+#[cfg(test)]
+const SEQUENCED_TX_ORDER: [SequencedTxStep; 3] = [
+    SequencedTxStep::VerifyActionLeaseFence,
+    SequencedTxStep::InsertMessages,
+    SequencedTxStep::InsertEmailQueue,
+];
+
+/// The envelope identity of one sequenced send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SequencedEnvelope {
+    from_email: String,
+    from_name: String,
+}
+
+/// Derive the envelope identity for a sequenced send.
+///
+/// The sender is ALWAYS the resolved identity (`sender.from_email`). The
+/// deployment-wide `DispatchConfig::from_email`
+/// (`SALES_CAMPAIGN_FROM_EMAIL`) is deliberately not consulted here: it is the
+/// legacy campaign/manual-reply default, and using it for autonomous sequence
+/// mail is exactly the defect this path exists to fix. The config only
+/// supplies a display-name fallback when the identity sets no `from_name`.
+///
+/// Pure so the "send from the resolved identity, never the config" rule is
+/// unit-testable without a database.
+fn sequenced_envelope(
+    sender: &crate::types::SenderIdentity,
+    cfg: &DispatchConfig,
+) -> SequencedEnvelope {
+    SequencedEnvelope {
+        from_email: sender.from_email.clone(),
+        from_name: sender.display_name(&cfg.from_name),
+    }
+}
+
+/// Refuse a sequenced send whose sender is not a real sales identity for the
+/// requesting tenant.
+///
+/// The pool-isolation resolver (`crate::sender_pool`) already enforces both
+/// rules; this is a second, cheap gate at the send site so a caller cannot
+/// hand the dispatcher a transactional-pool or cross-tenant identity.
+fn ensure_sequenced_sender(
+    sender: &crate::types::SenderIdentity,
+    tenant_id: &str,
+) -> Result<(), SalesError> {
+    crate::sender_pool::ensure_sales_pool(sender.pool)?;
+    if sender.tenant_id != tenant_id {
+        return Err(SalesError::PolicyDenied(format!(
+            "sender identity {} belongs to tenant '{}', not '{tenant_id}'; refusing to send",
+            sender.id, sender.tenant_id
+        )));
+    }
+    Ok(())
+}
 
 /// The production dispatcher: enqueues campaign mail through the platform's
 /// own pipeline (messages + email_queue), mirroring api-server's REST send.
@@ -919,7 +1174,12 @@ impl ProductionCampaignDispatcher {
 
         match &outcome {
             Ok(EnqueueOutcome::Enqueued) => {}
-            Ok(EnqueueOutcome::AlreadyClaimed) | Ok(EnqueueOutcome::DuplicateIdempotency) => {
+            // `LeaseLost` is unreachable on the campaign path (no action lease
+            // is involved) but is handled as a no-send so the reservation is
+            // always released when nothing was enqueued.
+            Ok(EnqueueOutcome::AlreadyClaimed)
+            | Ok(EnqueueOutcome::DuplicateIdempotency)
+            | Ok(EnqueueOutcome::LeaseLost) => {
                 // Nothing will be delivered for this reservation — release it.
                 if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
                     tracing::error!(error = %e, tenant_id = %tenant_id, "failed to release quota for skipped recipient");
@@ -947,6 +1207,10 @@ impl ProductionCampaignDispatcher {
     ) -> Result<EnqueueOutcome, SalesError> {
         let message_id = Uuid::new_v4();
         let created_at = Utc::now();
+        // LEGACY PATH (the audit intends to retire it): campaign mail still
+        // sends from the deployment-wide SALES_CAMPAIGN_FROM_EMAIL. New
+        // autonomous/sequence mail must name the resolved sender identity
+        // instead — see `enqueue_sequenced`.
         let from = self.cfg.from_email.clone();
         let idempotency_key = campaign_idempotency_key(campaign_id, recipient_email);
 
@@ -1110,11 +1374,23 @@ impl ProductionCampaignDispatcher {
     /// Enqueue ONE sequence step execution.
     ///
     /// This is the canonical send path for sequence mail. It differs from
-    /// [`Self::enqueue_recipient`] in exactly one way that matters: the send
-    /// identity is the caller's logical step execution (see
-    /// [`SendIdentity::StepExecution`]), not `(campaign, recipient)`, so a
-    /// later legitimate touch to the same person is a different message rather
-    /// than a suppressed duplicate.
+    /// [`Self::enqueue_recipient`] in three ways that matter:
+    ///
+    /// 1. **The envelope sender is the RESOLVED `sender` identity**
+    ///    (`sender.from_email`), never the deployment-wide
+    ///    `SALES_CAMPAIGN_FROM_EMAIL` (`DispatchConfig::from_email`).
+    ///    `SALES_CAMPAIGN_FROM_EMAIL` remains only for the legacy campaign and
+    ///    manual-reply paths; a sequenced/autonomous send must name the
+    ///    identity it sends from, or the message's domain/DKIM/health
+    ///    attribution is a lie.
+    /// 2. The send identity is the caller's logical step execution (see
+    ///    [`SendIdentity::StepExecution`]), not `(campaign, recipient)`, so a
+    ///    later legitimate touch to the same person is a different message
+    ///    rather than a suppressed duplicate.
+    /// 3. It is fenced: the caller passes the [`crate::actions::ActionFence`]
+    ///    of the claimed action, and the fence is verified inside the enqueue
+    ///    transaction BEFORE any insert. A worker whose lease was recovered
+    ///    returns [`EnqueueOutcome::LeaseLost`] and enqueues nothing.
     ///
     /// The caller (the action worker) has already claimed the
     /// `sales_step_executions` row, so that row — not a campaign ledger — is
@@ -1129,8 +1405,18 @@ impl ProductionCampaignDispatcher {
         rendered: &RenderedMessage,
         recipient_email: &str,
         unsubscribe_link: &str,
+        sender: &crate::types::SenderIdentity,
+        decision_id: Uuid,
+        step_execution_id: Uuid,
+        enrollment_id: Uuid,
+        action_fence: &crate::actions::ActionFence,
         metadata_extra: serde_json::Value,
     ) -> Result<EnqueueOutcome, SalesError> {
+        // The sender must be a real sales identity for THIS tenant: the
+        // resolver (`sender_pool`) already enforces this, but the dispatcher
+        // refuses again rather than trusting an arbitrary caller.
+        ensure_sequenced_sender(sender, tenant_id)?;
+
         let reservation = self.quota.reserve(tenant_id).await?;
 
         let outcome = self
@@ -1140,6 +1426,11 @@ impl ProductionCampaignDispatcher {
                 rendered,
                 recipient_email,
                 unsubscribe_link,
+                sender,
+                decision_id,
+                step_execution_id,
+                enrollment_id,
+                action_fence,
                 metadata_extra,
                 &reservation,
             )
@@ -1147,7 +1438,12 @@ impl ProductionCampaignDispatcher {
 
         match &outcome {
             Ok(EnqueueOutcome::Enqueued) => {}
-            Ok(EnqueueOutcome::AlreadyClaimed) | Ok(EnqueueOutcome::DuplicateIdempotency) => {
+            Ok(EnqueueOutcome::AlreadyClaimed)
+            | Ok(EnqueueOutcome::DuplicateIdempotency)
+            | Ok(EnqueueOutcome::LeaseLost) => {
+                // Nothing will be delivered for this reservation — release it.
+                // LeaseLost in particular aborts before any insert, so the
+                // reservation bought nothing.
                 if let Err(e) = self.quota.rollback(tenant_id, &reservation).await {
                     tracing::error!(error = %e, tenant_id = %tenant_id, "failed to release quota for skipped step send");
                 }
@@ -1170,18 +1466,33 @@ impl ProductionCampaignDispatcher {
         rendered: &RenderedMessage,
         recipient_email: &str,
         unsubscribe_link: &str,
+        sender: &crate::types::SenderIdentity,
+        decision_id: Uuid,
+        step_execution_id: Uuid,
+        enrollment_id: Uuid,
+        action_fence: &crate::actions::ActionFence,
         metadata_extra: serde_json::Value,
         reservation: &QuotaReservation,
     ) -> Result<EnqueueOutcome, SalesError> {
         let message_id = Uuid::new_v4();
         let created_at = Utc::now();
-        let from = self.cfg.from_email.clone();
+        // The envelope identity is the resolved sender, never the legacy
+        // deployment-wide default (see the method doc comment).
+        let envelope = sequenced_envelope(sender, &self.cfg);
+        let from = envelope.from_email.clone();
 
         let mut metadata = serde_json::json!({
             "source": "sales-autopilot",
             "sales_tenant_id": tenant_id,
-            "from_name": self.cfg.from_name,
+            "from_name": envelope.from_name,
             "quota_event_id": reservation.event_id.to_string(),
+            // Belt and braces: the typed columns below are authoritative, but
+            // the same provenance is also visible in metadata for consumers
+            // that only read JSON.
+            "sales_decision_id": decision_id.to_string(),
+            "sales_sender_identity_id": sender.id.to_string(),
+            "sales_sender_pool": sender.pool.as_str(),
+            "sales_sender_source_ip": sender.source_ip.map(|ip| ip.to_string()),
         });
         if let (Some(base), Some(extra)) = (metadata.as_object_mut(), metadata_extra.as_object()) {
             for (key, value) in extra {
@@ -1199,6 +1510,23 @@ impl ProductionCampaignDispatcher {
             .begin()
             .await
             .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        // STEP 1: execution fence, BEFORE any insert.
+        // `verify_fence_in_tx` takes `FOR SHARE` on the sales_actions row, so
+        // the lease cannot be recovered by another worker while this
+        // transaction (and therefore the external effect) is being produced.
+        // No row → the worker no longer owns the action: abort with NO
+        // external effect. Dropping `tx` rolls back; nothing was written.
+        if !crate::actions::verify_fence_in_tx(&mut tx, action_fence).await? {
+            tracing::warn!(
+                action_id = %action_fence.action_id,
+                tenant_id = %tenant_id,
+                recipient = %recipient_email,
+                "sequence step send refused: action lease fence is stale (work recovered by another worker)"
+            );
+            metrics::counter!("sales_sequence_send_lease_lost_total").increment(1);
+            return Ok(EnqueueOutcome::LeaseLost);
+        }
 
         // Re-check suppression inside the transaction: a bounce, complaint or
         // unsubscribe that arrived between the decision and now is honored.
@@ -1231,30 +1559,31 @@ impl ProductionCampaignDispatcher {
                 ))
             })?;
 
-        let result = sqlx::query(
-            "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
-             subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key)
-             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-             ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
-        )
-        .bind(message_id)
-        .bind(tenant_id)
-        .bind(&from)
-        .bind(serde_json::json!([recipient_email]))
-        .bind(None::<serde_json::Value>)
-        .bind(None::<serde_json::Value>)
-        .bind(&rendered.subject)
-        .bind(&rendered.html)
-        .bind(&rendered.text)
-        .bind("queued")
-        .bind(serde_json::json!(tags))
-        .bind(&metadata)
-        .bind(None::<DateTime<Utc>>)
-        .bind(created_at)
-        .bind(idempotency_key)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        // STEP 2: `messages` insert with the typed sales provenance columns
+        // and idempotency preserved.
+        let result = sqlx::query(SEQUENCE_MESSAGES_INSERT_SQL)
+            .bind(message_id)
+            .bind(tenant_id)
+            .bind(&from)
+            .bind(serde_json::json!([recipient_email]))
+            .bind(None::<serde_json::Value>)
+            .bind(None::<serde_json::Value>)
+            .bind(&rendered.subject)
+            .bind(&rendered.html)
+            .bind(&rendered.text)
+            .bind("queued")
+            .bind(serde_json::json!(tags))
+            .bind(&metadata)
+            .bind(None::<DateTime<Utc>>)
+            .bind(created_at)
+            .bind(idempotency_key)
+            .bind(decision_id)
+            .bind(sender.id)
+            .bind(step_execution_id)
+            .bind(enrollment_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         if result.rows_affected() == 0 {
             // This logical step execution was already enqueued. Never send it
@@ -1271,33 +1600,30 @@ impl ProductionCampaignDispatcher {
             return Ok(EnqueueOutcome::DuplicateIdempotency);
         }
 
+        // STEP 3: `email_queue` insert, same four typed provenance columns.
         // campaign_id is NULL: sequence mail is attributed to a step
         // execution, not to a campaign.
-        sqlx::query(
-            "INSERT INTO email_queue (
-                id, message_id, tenant_id, domain_id, campaign_id, from_address, to_addresses, subject,
-                \"from\", \"to\", html, text, tags, metadata, headers, scheduled_at, priority, status, created_at, updated_at
-             ) VALUES (
-                $1::uuid, $2::uuid, $3, $4::uuid, NULL, $5, ARRAY[$6], $7,
-                $5, $6, $8, $9, $10, $11, $12, $13, 5, 'pending', $13, $13
-             )",
-        )
-        .bind(Uuid::new_v4())
-        .bind(message_id)
-        .bind(tenant_id)
-        .bind(&domain_id)
-        .bind(&from)
-        .bind(recipient_email)
-        .bind(&rendered.subject)
-        .bind(&rendered.html)
-        .bind(&rendered.text)
-        .bind(&tags)
-        .bind(&metadata)
-        .bind(&headers)
-        .bind(created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| SalesError::Database(e.to_string()))?;
+        sqlx::query(SEQUENCE_EMAIL_QUEUE_INSERT_SQL)
+            .bind(Uuid::new_v4())
+            .bind(message_id)
+            .bind(tenant_id)
+            .bind(&domain_id)
+            .bind(&from)
+            .bind(recipient_email)
+            .bind(&rendered.subject)
+            .bind(&rendered.html)
+            .bind(&rendered.text)
+            .bind(&tags)
+            .bind(&metadata)
+            .bind(&headers)
+            .bind(created_at)
+            .bind(decision_id)
+            .bind(sender.id)
+            .bind(step_execution_id)
+            .bind(enrollment_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| SalesError::Database(e.to_string()))?;
 
         tx.commit()
             .await
@@ -1353,6 +1679,13 @@ impl ProductionCampaignDispatcher {
                     metrics::counter!("sales_campaign_dispatch_skipped_total", "reason" => "duplicate")
                         .increment(1);
                 }
+                // Unreachable on the campaign path (no action lease is
+                // involved), but handled honestly rather than panicking: a
+                // lease loss never enqueued anything, so the batch continues.
+                Ok(EnqueueOutcome::LeaseLost) => {
+                    metrics::counter!("sales_campaign_dispatch_skipped_total", "reason" => "lease_lost")
+                        .increment(1);
+                }
                 // Quota exhaustion and hard configuration errors abort the
                 // batch — the campaign is paused with an error state by the
                 // caller; transient DB errors are retried on the next tick.
@@ -1361,42 +1694,28 @@ impl ProductionCampaignDispatcher {
         }
         Ok(enqueued)
     }
-}
 
-impl CampaignEmailDispatcher for ProductionCampaignDispatcher {
-    fn dispatch(
-        &self,
-        tenant_id: &str,
-        campaign_id: Uuid,
-        template_id: &str,
-        recipients: &[DispatchRecipient],
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>
-    {
-        let tenant_id = tenant_id.to_string();
-        let template_id = template_id.to_string();
-        let recipients = recipients.to_vec();
-        let this = self.clone();
-        Box::pin(async move {
-            this.dispatch_batch(&tenant_id, campaign_id, &template_id, &recipients)
-                .await
-        })
-    }
-
-    /// HMAC-signed unsubscribe link on this service's public endpoint. The
-    /// campaign id is intentionally not embedded: suppression is
-    /// tenant-level (a recipient opting out of one campaign opts out of all).
-    fn unsubscribe_link(
+    /// Opaque v2 unsubscribe link on this service's public endpoint. The
+    /// campaign id is intentionally not embedded: suppression is tenant-level
+    /// (a recipient opting out of one campaign opts out of all).
+    ///
+    /// Persists only the token hash (see [`create_unsubscribe_token`]), so
+    /// the emitted URL carries no recipient/tenant material. Fails rather
+    /// than falling back to a v1 link when persistence fails — a token that
+    /// cannot be resolved is worse than no link.
+    ///
+    /// Inherent (not trait) method since the legacy `CampaignEmailDispatcher`
+    /// trait was retired by the campaigns refactor: the legacy campaign path
+    /// must not enqueue directly. Kept public for the manual/legacy callers
+    /// that still compose an unsubscribe link.
+    pub async fn unsubscribe_link(
         &self,
         tenant_id: &str,
         _campaign_id: Uuid,
         recipient_email: &str,
-    ) -> String {
-        let token = sign_unsubscribe_token_default_ttl(
-            &self.cfg.unsubscribe_secret,
-            tenant_id,
-            &recipient_email.trim().to_ascii_lowercase(),
-        );
-        format!("{}/u/{}", self.cfg.public_base_url, token)
+    ) -> Result<String, SalesError> {
+        let token = create_unsubscribe_token(&self.db, tenant_id, recipient_email).await?;
+        Ok(format!("{}/u/{}", self.cfg.public_base_url, token))
     }
 }
 
@@ -1531,6 +1850,10 @@ impl ProductionCampaignDispatcher {
     ) -> Result<ReplyOutcome, SalesError> {
         let message_id = Uuid::new_v4();
         let created_at = Utc::now();
+        // LEGACY PATH (retained for 1:1 correspondence): replies to an
+        // inbound inbox message still use the deployment-wide
+        // SALES_CAMPAIGN_FROM_EMAIL. Autonomous sequence mail must send from
+        // the resolved sender identity — see `enqueue_sequenced`.
         let from = self.cfg.from_email.clone();
         let idempotency_key = reply_idempotency_key(inbox_message_id);
 
@@ -1784,6 +2107,241 @@ mod tests {
         let future = Utc::now().timestamp() + 60;
         let token = sign_unsubscribe_token(SECRET, "ten_a", "a@b.c", future);
         assert!(verify_unsubscribe_token(SECRET, &token).is_some());
+    }
+
+    // ── v2 opaque unsubscribe tokens (item 25) ─────────────────────────
+    //
+    // The whole point of v2 is that the URL carries no recipient/tenant
+    // material and that only a hash is persisted. These tests run against
+    // the canonical migrated database and soft-skip when it is unconfigured
+    // (same contract as the rest of the crate's DB tests).
+
+    /// Adversarial 1: the delivered URL contains neither the recipient nor
+    /// the tenant id, nor any hex encoding of either (the v1 payload is
+    /// reversible; v2 must not embed it at all).
+    #[tokio::test]
+    async fn v2_token_url_carries_no_recipient_tenant_or_hex_payload() {
+        let Some(db) = crate::test_db::canonical_test_pool("dispatcher_v2_opacity").await else {
+            return;
+        };
+        let tenant_id = "ten_v2opaque";
+        let email = "opaque.recipient@corp.example";
+
+        let token = create_unsubscribe_token(&db, tenant_id, email)
+            .await
+            .expect("v2 token creation");
+        let url = format!("https://sales.example/u/{token}");
+
+        // Shape: URL-safe base64, 43 chars, no dots (not a v1 payload).
+        assert_eq!(token.len(), UNSUB_TOKEN_V2_LEN);
+        assert!(!token.contains('.'));
+        assert!(token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+
+        // No plaintext and no reversible encoding of either identity.
+        assert!(!url.contains(email), "URL must not embed the recipient");
+        assert!(!url.contains("opaque.recipient"));
+        assert!(!url.contains("corp.example"));
+        assert!(!url.contains(tenant_id), "URL must not embed the tenant id");
+        assert!(
+            !url.contains(&hex_encode(tenant_id.as_bytes())),
+            "the v1 hex tenant payload must not appear"
+        );
+        assert!(
+            !url.contains(&hex_encode(email.as_bytes())),
+            "the v1 hex recipient payload must not appear"
+        );
+
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&db)
+            .await;
+    }
+
+    /// Adversarial 2: one flipped byte (first base64 character ⇒ a different
+    /// decoded hash preimage) resolves to nothing.
+    #[tokio::test]
+    async fn tampered_v2_token_does_not_resolve() {
+        let Some(db) = crate::test_db::canonical_test_pool("dispatcher_v2_tamper").await else {
+            return;
+        };
+        let tenant_id = "ten_v2tamper";
+        let token = create_unsubscribe_token(&db, tenant_id, "tamper@corp.example")
+            .await
+            .expect("v2 token creation");
+
+        // Sanity: the untampered token resolves.
+        assert!(
+            resolve_unsubscribe_token(&db, &token)
+                .await
+                .expect("lookup")
+                .is_some(),
+            "the untampered token must resolve"
+        );
+
+        let mut chars: Vec<char> = token.chars().collect();
+        chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+        assert_ne!(tampered, token);
+
+        assert!(
+            resolve_unsubscribe_token(&db, &tampered)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "a tampered token must not resolve"
+        );
+
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&db)
+            .await;
+    }
+
+    /// Adversarial 3: an expired v2 row does not resolve.
+    #[tokio::test]
+    async fn expired_v2_token_does_not_resolve() {
+        use base64::Engine as _;
+
+        let Some(db) = crate::test_db::canonical_test_pool("dispatcher_v2_expired").await else {
+            return;
+        };
+        let tenant_id = "ten_v2expired";
+        let raw = [0x42u8; UNSUB_TOKEN_V2_BYTES];
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        let hash = Sha256::digest(raw);
+        sqlx::query(
+            "INSERT INTO sales_unsubscribe_tokens (token_hash, tenant_id, email, expires_at) \
+             VALUES ($1, $2, $3, NOW() - INTERVAL '1 second')",
+        )
+        .bind(hash.as_slice())
+        .bind(tenant_id)
+        .bind("expired@corp.example")
+        .execute(&db)
+        .await
+        .expect("seed an expired token");
+
+        assert!(
+            resolve_unsubscribe_token(&db, &token)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "an expired token must not resolve"
+        );
+
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&db)
+            .await;
+    }
+
+    /// Adversarial 4: the legacy v1 verifier still accepts an already-sent
+    /// v1 token, while every NEW send mints a v2 token that the v1 verifier
+    /// rejects.
+    #[tokio::test]
+    async fn legacy_v1_resolves_and_new_sends_are_v2() {
+        // Compatibility half: an old v1 link still resolves.
+        let v1 = sign_unsubscribe_token_default_ttl(SECRET, "ten_legacy", "old.link@corp.example");
+        let data = verify_unsubscribe_token(SECRET, &v1).expect("v1 compatibility verifier");
+        assert_eq!(data.tenant_id, "ten_legacy");
+        assert_eq!(data.email, "old.link@corp.example");
+
+        // New-send half.
+        let Some(db) = crate::test_db::canonical_test_pool("dispatcher_v2_new_send").await else {
+            return;
+        };
+        let tenant_id = "ten_v2newsend";
+        let token = create_unsubscribe_token(&db, tenant_id, "new.send@corp.example")
+            .await
+            .expect("v2 token creation");
+
+        assert_eq!(token.len(), UNSUB_TOKEN_V2_LEN);
+        assert!(
+            verify_unsubscribe_token(SECRET, &token).is_none(),
+            "a v2 opaque token is not a v1 payload and must not verify as one"
+        );
+        let resolved = resolve_unsubscribe_token(&db, &token)
+            .await
+            .expect("lookup")
+            .expect("new send's v2 token resolves");
+        assert_eq!(resolved.tenant_id, tenant_id);
+        assert_eq!(resolved.email, "new.send@corp.example");
+
+        // The whole token is not persisted anywhere: the row's key is the hash.
+        let stored_hash: Vec<u8> = sqlx::query_scalar(
+            "SELECT token_hash FROM sales_unsubscribe_tokens WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&db)
+        .await
+        .expect("read stored hash");
+        assert_ne!(
+            stored_hash,
+            token.as_bytes(),
+            "the raw token must never be stored"
+        );
+
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&db)
+            .await;
+    }
+
+    /// Adversarial 5 (documented `used_at` semantics): the FIRST redemption
+    /// stamps `used_at`; a replay still resolves and never rewrites the
+    /// original timestamp (idempotent suppression, not single-use — mail
+    /// scanners prefetch links).
+    #[tokio::test]
+    async fn used_at_is_stamped_on_first_redemption_and_replay_still_resolves() {
+        let Some(db) = crate::test_db::canonical_test_pool("dispatcher_v2_used_at").await else {
+            return;
+        };
+        let tenant_id = "ten_v2usedat";
+        let token = create_unsubscribe_token(&db, tenant_id, "used.at@corp.example")
+            .await
+            .expect("v2 token creation");
+
+        let used_before: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT used_at FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&db)
+                .await
+                .expect("read used_at before redemption");
+        assert!(used_before.is_none(), "a fresh token is unused");
+
+        assert!(resolve_unsubscribe_token(&db, &token)
+            .await
+            .expect("first redemption")
+            .is_some());
+        let used_after: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT used_at FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&db)
+                .await
+                .expect("read used_at after redemption");
+        assert!(used_after.is_some(), "first redemption stamps used_at");
+
+        // Replay: still resolves, and COALESCE keeps the first timestamp.
+        assert!(resolve_unsubscribe_token(&db, &token)
+            .await
+            .expect("replay")
+            .is_some());
+        let used_replay: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT used_at FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .fetch_one(&db)
+                .await
+                .expect("read used_at after replay");
+        assert_eq!(
+            used_replay, used_after,
+            "a replay must not rewrite the first-redemption timestamp"
+        );
+
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(&db)
+            .await;
     }
 
     #[test]
@@ -2211,5 +2769,671 @@ mod tests {
         // The statement still mirrors the REST send path shape.
         assert!(sql.contains("'pending'"));
         assert!(sql.contains("ARRAY[$7]"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sequenced send: identity sender, execution fence, typed provenance
+    // -----------------------------------------------------------------------
+
+    fn test_dispatch_config() -> DispatchConfig {
+        DispatchConfig {
+            from_email: "legacy-global@apexmail.example".into(),
+            from_name: "Legacy Deployment Default".into(),
+            unsubscribe_secret: "test-unsubscribe-secret-0123456789abcdef".into(),
+            public_base_url: "http://127.0.0.1:3010".into(),
+            unsubscribe_redirect_url: None,
+            dispatch_interval_secs: 30,
+            dispatch_batch_size: 100,
+            dispatch_concurrency: 1,
+        }
+    }
+
+    fn sample_sender(from_email: &str, tenant_id: &str) -> crate::types::SenderIdentity {
+        crate::types::SenderIdentity {
+            id: Uuid::new_v4(),
+            tenant_id: tenant_id.into(),
+            pool: crate::types::SenderPool::SalesOutbound,
+            from_email: from_email.into(),
+            from_name: Some("Resolved Sales Sender".into()),
+            domain: from_email
+                .rsplit_once('@')
+                .map(|(_, domain)| domain)
+                .unwrap_or_default()
+                .to_string(),
+            status: "active".into(),
+            daily_limit: Some(100),
+            source_ip: Some("203.0.113.9".parse().expect("valid test IP")),
+            provider: Some("ses".into()),
+        }
+    }
+
+    /// The defect this test exists for: the sequenced send must name the
+    /// resolved identity, never the deployment-wide
+    /// `SALES_CAMPAIGN_FROM_EMAIL` (`DispatchConfig::from_email`).
+    #[test]
+    fn sequenced_envelope_sender_is_the_resolved_identity_never_the_config() {
+        let cfg = test_dispatch_config();
+        let sender = sample_sender("identity@outbound.example", "tenant-a");
+
+        let envelope = sequenced_envelope(&sender, &cfg);
+
+        assert_eq!(envelope.from_email, "identity@outbound.example");
+        // Two DIFFERENT values: the config one must not win.
+        assert_ne!(sender.from_email, cfg.from_email);
+        assert_ne!(envelope.from_email, cfg.from_email);
+
+        // The display name follows the identity; config is only the fallback
+        // when the identity sets none.
+        assert_eq!(envelope.from_name, "Resolved Sales Sender");
+        let mut unnamed = sender.clone();
+        unnamed.from_name = None;
+        assert_eq!(sequenced_envelope(&unnamed, &cfg).from_name, cfg.from_name);
+    }
+
+    /// A caller cannot hand the dispatcher a transactional-pool or
+    /// cross-tenant identity, even if it bypassed the pool resolver.
+    #[test]
+    fn sequenced_send_refuses_a_non_sales_or_cross_tenant_sender() {
+        let mut wrong_pool = sample_sender("identity@outbound.example", "tenant-a");
+        wrong_pool.pool = crate::types::SenderPool::TransactionalCustomer;
+        let err = ensure_sequenced_sender(&wrong_pool, "tenant-a").unwrap_err();
+        assert!(matches!(err, SalesError::PolicyDenied(_)));
+        assert!(err.to_string().contains("not a sales pool"));
+
+        let cross_tenant = sample_sender("identity@outbound.example", "tenant-b");
+        let err = ensure_sequenced_sender(&cross_tenant, "tenant-a").unwrap_err();
+        assert!(matches!(err, SalesError::PolicyDenied(_)));
+        assert!(err.to_string().contains("tenant-b"));
+    }
+
+    /// The fence is the anti-duplicate guard: a stale claim is not authorized,
+    /// so the transaction returns `LeaseLost` BEFORE either insert, and the
+    /// statement order encodes exactly that.
+    #[test]
+    fn lease_lost_is_the_no_insert_guard_and_the_fence_precedes_the_inserts() {
+        // No other outcome may be mistaken for "sent".
+        assert_ne!(EnqueueOutcome::LeaseLost, EnqueueOutcome::Enqueued);
+        assert_ne!(EnqueueOutcome::LeaseLost, EnqueueOutcome::AlreadyClaimed);
+        assert_ne!(
+            EnqueueOutcome::LeaseLost,
+            EnqueueOutcome::DuplicateIdempotency
+        );
+
+        // The pure predicate behind `verify_fence_in_tx`: an expired lease (or
+        // another owner/token) does not authorize, which is what makes the
+        // transaction abort with no external effect.
+        let now = Utc::now();
+        let fence = crate::actions::ActionFence {
+            action_id: Uuid::new_v4(),
+            lease_owner: "worker-a".into(),
+            lease_token: Uuid::new_v4(),
+        };
+        assert!(
+            !fence.authorizes(
+                Some("worker-a"),
+                Some(fence.lease_token),
+                Some(now - chrono::Duration::seconds(1)),
+                "executing",
+                now,
+            ),
+            "an expired lease must not authorize a send"
+        );
+        assert!(
+            !fence.authorizes(
+                Some("worker-b"),
+                Some(fence.lease_token),
+                Some(now + chrono::Duration::seconds(30)),
+                "executing",
+                now,
+            ),
+            "a recovered claim (different owner) must not authorize a send"
+        );
+
+        // Fence first, then messages, then email_queue.
+        assert_eq!(
+            SEQUENCED_TX_ORDER,
+            [
+                SequencedTxStep::VerifyActionLeaseFence,
+                SequencedTxStep::InsertMessages,
+                SequencedTxStep::InsertEmailQueue,
+            ]
+        );
+    }
+
+    /// Typed provenance (migration 202): all four columns on BOTH inserts,
+    /// parameterized as UUIDs — a feedback consumer must not have to parse
+    /// JSON metadata. Idempotency and the envelope columns are preserved.
+    #[test]
+    fn sequenced_inserts_write_all_four_typed_provenance_columns() {
+        let typed = [
+            "sales_decision_id",
+            "sales_sender_identity_id",
+            "sales_step_execution_id",
+            "sales_enrollment_id",
+        ];
+        for sql in [
+            SEQUENCE_MESSAGES_INSERT_SQL,
+            SEQUENCE_EMAIL_QUEUE_INSERT_SQL,
+        ] {
+            for column in typed {
+                assert!(
+                    sql.contains(column),
+                    "typed provenance column {column} missing from: {sql}"
+                );
+            }
+            assert!(
+                sql.contains("::uuid"),
+                "typed ids must be bound as UUID params, not interpolated: {sql}"
+            );
+        }
+        for placeholder in ["$16::uuid", "$17::uuid", "$18::uuid", "$19::uuid"] {
+            assert!(SEQUENCE_MESSAGES_INSERT_SQL.contains(placeholder));
+        }
+        for placeholder in ["$14::uuid", "$15::uuid", "$16::uuid", "$17::uuid"] {
+            assert!(SEQUENCE_EMAIL_QUEUE_INSERT_SQL.contains(placeholder));
+        }
+        // Envelope columns are present (bound from the resolved sender).
+        assert!(SEQUENCE_MESSAGES_INSERT_SQL.contains("from_email"));
+        assert!(SEQUENCE_EMAIL_QUEUE_INSERT_SQL.contains("from_address"));
+        // A duplicate logical send still collapses.
+        assert!(SEQUENCE_MESSAGES_INSERT_SQL
+            .contains("ON CONFLICT (tenant_id, idempotency_key) DO NOTHING"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Live-DB proofs (ignored by default)
+    // -----------------------------------------------------------------------
+
+    /// Deterministic quota gateway: records reserve/release without billing.
+    #[derive(Debug, Default)]
+    struct FakeQuota {
+        reserved: std::sync::atomic::AtomicUsize,
+        released: std::sync::atomic::AtomicUsize,
+    }
+
+    impl QuotaGateway for FakeQuota {
+        fn reserve(
+            &self,
+            _tenant_id: &str,
+        ) -> QuotaFuture<'_, Result<QuotaReservation, SalesError>> {
+            self.reserved
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(QuotaReservation {
+                    event_id: Uuid::new_v4(),
+                    recorded_at: Utc::now(),
+                })
+            })
+        }
+
+        fn rollback(
+            &self,
+            _tenant_id: &str,
+            _reservation: &QuotaReservation,
+        ) -> QuotaFuture<'_, Result<(), SalesError>> {
+            self.released
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn test_rendered() -> RenderedMessage {
+        RenderedMessage {
+            subject: "Sequenced binding test".into(),
+            html: Some("<p>Hello</p>".into()),
+            text: Some("Hello".into()),
+        }
+    }
+
+    struct SequencedFixture {
+        tenant: String,
+        sender: crate::types::SenderIdentity,
+        decision_id: Uuid,
+        step_execution_id: Uuid,
+        enrollment_id: Uuid,
+        fence: crate::actions::ActionFence,
+        key: String,
+    }
+
+    /// Seed every row the sequenced send path needs: tenant, verified/DKIM
+    /// sender domain, sales sender identity, decision packet, sequence +
+    /// enrollment + step execution, and a claimed (`executing`) action whose
+    /// lease is live or expired.
+    ///
+    /// Every id/name is unique per run (the canonical database is shared and
+    /// reused), so leftovers from a failed assertion cannot make a later run
+    /// flaky.
+    async fn seed_sequenced_fixture(
+        pool: &PgPool,
+        label: &str,
+        lease_live: bool,
+    ) -> SequencedFixture {
+        let tenant = crate::test_db::unique_test_tenant(label);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'starter', 'active') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(format!("test {tenant}"))
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("seeding a tenant must succeed");
+
+        // Verified + DKIM-ready domain for the RESOLVED sender identity (the
+        // legacy config address deliberately has no domain).
+        let domain = format!(
+            "mail-{}.example.com",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, ses_verified, \
+             dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'test-selector', 'test-public-key', 'dkim:v1:test')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&domain)
+        .execute(pool)
+        .await
+        .expect("inserting a verified domain must succeed");
+
+        let sender_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sender_identities \
+             (id, tenant_id, pool, from_email, from_name, domain, source_ip, provider, status, daily_limit) \
+             VALUES ($1, $2, 'sales_outbound', $3, 'Resolved Sales Sender', $4, \
+                     '203.0.113.7'::inet, 'test-provider', 'active', 100)",
+        )
+        .bind(sender_id)
+        .bind(&tenant)
+        .bind(format!("sender@{domain}"))
+        .bind(&domain)
+        .execute(pool)
+        .await
+        .expect("inserting a sender identity must succeed");
+
+        // Reload through the resolver: proves `host(source_ip)` decodes into
+        // `IpAddr` and the sales-pool gate passes on the new fields.
+        let sender = crate::sender_pool::load_sales_sender(pool, &tenant, sender_id)
+            .await
+            .expect("the seeded sender must resolve as a sales identity");
+        assert_eq!(
+            sender.source_ip,
+            Some("203.0.113.7".parse().expect("valid test IP")),
+            "host(source_ip) must decode INET into IpAddr"
+        );
+        assert_eq!(sender.provider.as_deref(), Some("test-provider"));
+
+        let account_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
+             VALUES ($1, $2, 'Prospect Co', $3)",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!(
+            "prospect-{}.example",
+            &Uuid::new_v4().simple().to_string()[..8]
+        ))
+        .execute(pool)
+        .await
+        .expect("inserting an account must succeed");
+
+        let contact_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Ada Prospect')",
+        )
+        .bind(contact_id)
+        .bind(&tenant)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("inserting a contact must succeed");
+
+        let sequence_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, status) \
+             VALUES ($1, $2, 'Binding Test', 'active')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .expect("inserting a sequence must succeed");
+
+        let version_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions (id, tenant_id, sequence_id, version, status) \
+             VALUES ($1, $2, $3, 1, 'active')",
+        )
+        .bind(version_id)
+        .bind(&tenant)
+        .bind(sequence_id)
+        .execute(pool)
+        .await
+        .expect("inserting a sequence version must succeed");
+
+        let step_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequence_steps (id, tenant_id, version_id, step_index, kind, template_id) \
+             VALUES ($1, $2, $3, 0, 'email', 'tpl-binding-test')",
+        )
+        .bind(step_id)
+        .bind(&tenant)
+        .bind(version_id)
+        .execute(pool)
+        .await
+        .expect("inserting a sequence step must succeed");
+
+        let enrollment_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_enrollments (id, tenant_id, sequence_version_id, contact_id, state) \
+             VALUES ($1, $2, $3, $4, 'active')",
+        )
+        .bind(enrollment_id)
+        .bind(&tenant)
+        .bind(version_id)
+        .bind(contact_id)
+        .execute(pool)
+        .await
+        .expect("inserting an enrollment must succeed");
+
+        let step_execution_id = Uuid::new_v4();
+        let key = format!(
+            "sa:test:{}:{}",
+            tenant,
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
+        sqlx::query(
+            "INSERT INTO sales_step_executions \
+             (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, step_index, state, idempotency_key) \
+             VALUES ($1, $2, $3, $4, $5, 0, 'executing', $6)",
+        )
+        .bind(step_execution_id)
+        .bind(&tenant)
+        .bind(enrollment_id)
+        .bind(version_id)
+        .bind(step_id)
+        .bind(&key)
+        .execute(pool)
+        .await
+        .expect("inserting a step execution must succeed");
+
+        let decision_id = Uuid::new_v4();
+        // `enforcement`/`review_status` are NOT NULL as of migration 204 (the
+        // Decision Packet must carry a verdict); a fixture that omits them is
+        // not a valid packet.
+        sqlx::query(
+            "INSERT INTO sales_decisions \
+                 (id, tenant_id, action, autonomy_mode, enforcement, review_status, rationale) \
+             VALUES ($1, $2, 'contact', 'autonomous_guarded', 'execute', 'not_required', 'binding test')",
+        )
+        .bind(decision_id)
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .expect("inserting a decision must succeed");
+
+        let action_id = Uuid::new_v4();
+        let lease_owner = format!(
+            "worker-{label}-{}",
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let lease_token = Uuid::new_v4();
+        let action_sql = if lease_live {
+            "INSERT INTO sales_actions \
+             (id, tenant_id, action_type, entity_type, entity_id, due_at, priority, state, attempt, \
+              max_attempts, lease_owner, lease_token, lease_expires_at, idempotency_key, payload, decision_id) \
+             VALUES ($1, $2, 'send_step', 'enrollment', $3, NOW(), 100, 'executing', 1, 5, $4, $5, \
+                     NOW() + INTERVAL '10 minutes', $6, '{}'::jsonb, $7)"
+        } else {
+            "INSERT INTO sales_actions \
+             (id, tenant_id, action_type, entity_type, entity_id, due_at, priority, state, attempt, \
+              max_attempts, lease_owner, lease_token, lease_expires_at, idempotency_key, payload, decision_id) \
+             VALUES ($1, $2, 'send_step', 'enrollment', $3, NOW(), 100, 'executing', 1, 5, $4, $5, \
+                     NOW() - INTERVAL '1 minute', $6, '{}'::jsonb, $7)"
+        };
+        sqlx::query(action_sql)
+            .bind(action_id)
+            .bind(&tenant)
+            .bind(enrollment_id)
+            .bind(&lease_owner)
+            .bind(lease_token)
+            .bind(format!("action:{key}"))
+            .bind(decision_id)
+            .execute(pool)
+            .await
+            .expect("inserting a claimed action must succeed");
+
+        SequencedFixture {
+            tenant,
+            sender,
+            decision_id,
+            step_execution_id,
+            enrollment_id,
+            fence: crate::actions::ActionFence {
+                action_id,
+                lease_owner,
+                lease_token,
+            },
+            key,
+        }
+    }
+
+    async fn cleanup_sequenced_fixture(pool: &PgPool, tenant: &str) {
+        for sql in [
+            "DELETE FROM email_queue WHERE tenant_id = $1",
+            "DELETE FROM messages WHERE tenant_id = $1",
+            "DELETE FROM sales_actions WHERE tenant_id = $1",
+            "DELETE FROM sales_step_executions WHERE tenant_id = $1",
+            "DELETE FROM sales_enrollments WHERE tenant_id = $1",
+            "DELETE FROM sales_sequence_steps WHERE tenant_id = $1",
+            "DELETE FROM sales_sequence_versions WHERE tenant_id = $1",
+            "DELETE FROM sales_sequences WHERE tenant_id = $1",
+            "DELETE FROM sales_decisions WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+            "DELETE FROM sales_sender_identities WHERE tenant_id = $1",
+            "DELETE FROM domains WHERE tenant_id = $1",
+            "DELETE FROM tenants WHERE id = $1",
+        ] {
+            sqlx::query(sql)
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("fixture cleanup must succeed");
+        }
+    }
+
+    /// Live proof for defects 1+2: the sequenced send writes the four typed
+    /// provenance columns on BOTH `messages` and `email_queue`, and the
+    /// envelope sender is the resolved identity (never
+    /// `SALES_CAMPAIGN_FROM_EMAIL`).
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn sequenced_send_binds_typed_provenance_and_the_resolved_sender() {
+        let Some(pool) = crate::test_db::canonical_test_pool("sequenced_binding").await else {
+            return;
+        };
+        let fx = seed_sequenced_fixture(&pool, "seqbind", true).await;
+        let quota = Arc::new(FakeQuota::default());
+        let dispatcher =
+            ProductionCampaignDispatcher::new(test_dispatch_config(), pool.clone(), quota.clone())
+                .expect("the test dispatch config is configured");
+
+        let outcome = dispatcher
+            .enqueue_sequenced(
+                &fx.tenant,
+                &fx.key,
+                &test_rendered(),
+                "prospect@example.com",
+                "https://sales.example/u/token",
+                &fx.sender,
+                fx.decision_id,
+                fx.step_execution_id,
+                fx.enrollment_id,
+                &fx.fence,
+                serde_json::json!({ "test": "binding" }),
+            )
+            .await
+            .expect("a fenced sequenced send must succeed");
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+
+        let (decision, sender_id, step_id, enrollment, from_email, metadata): (
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<Uuid>,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT sales_decision_id, sales_sender_identity_id, sales_step_execution_id, \
+                    sales_enrollment_id, from_email, metadata \
+             FROM messages WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(&fx.tenant)
+        .bind(&fx.key)
+        .fetch_one(&pool)
+        .await
+        .expect("the messages row must exist");
+
+        assert_eq!(decision, Some(fx.decision_id), "typed decision id");
+        assert_eq!(sender_id, Some(fx.sender.id), "typed sender identity id");
+        assert_eq!(
+            step_id,
+            Some(fx.step_execution_id),
+            "typed step execution id"
+        );
+        assert_eq!(enrollment, Some(fx.enrollment_id), "typed enrollment id");
+        assert_eq!(
+            from_email, fx.sender.from_email,
+            "the envelope sender must be the resolved identity"
+        );
+        assert_ne!(
+            from_email,
+            dispatcher.config().from_email,
+            "SALES_CAMPAIGN_FROM_EMAIL must never be used for a sequenced send"
+        );
+
+        // Belt and braces: the same provenance in metadata.
+        assert_eq!(
+            metadata["sales_decision_id"],
+            serde_json::json!(fx.decision_id.to_string())
+        );
+        assert_eq!(
+            metadata["sales_sender_identity_id"],
+            serde_json::json!(fx.sender.id.to_string())
+        );
+        assert_eq!(metadata["sales_sender_pool"], "sales_outbound");
+        assert_eq!(metadata["sales_sender_source_ip"], "203.0.113.7");
+
+        // The queue row carries the same typed provenance, and its
+        // from_address is the identity's address.
+        let (q_decision, q_sender, q_step, q_enrollment, q_from): (
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<Uuid>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT sales_decision_id, sales_sender_identity_id, sales_step_execution_id, \
+                    sales_enrollment_id, from_address \
+             FROM email_queue WHERE tenant_id = $1 AND message_id = \
+                 (SELECT id FROM messages WHERE tenant_id = $1 AND idempotency_key = $2)",
+        )
+        .bind(&fx.tenant)
+        .bind(&fx.key)
+        .fetch_one(&pool)
+        .await
+        .expect("the email_queue row must exist");
+
+        assert_eq!(q_decision, Some(fx.decision_id));
+        assert_eq!(q_sender, Some(fx.sender.id));
+        assert_eq!(q_step, Some(fx.step_execution_id));
+        assert_eq!(q_enrollment, Some(fx.enrollment_id));
+        assert_eq!(q_from, fx.sender.from_email);
+
+        assert_eq!(
+            quota.reserved.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the send reserves quota exactly once"
+        );
+        assert_eq!(
+            quota.released.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an enqueued send keeps its reservation"
+        );
+
+        cleanup_sequenced_fixture(&pool, &fx.tenant).await;
+    }
+
+    /// Live proof for defect 3: a worker whose lease was recovered (here:
+    /// expired) gets `LeaseLost` and produces NO external effect — zero new
+    /// rows in `messages` and `email_queue` — and its quota reservation is
+    /// released.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn stale_fence_returns_lease_lost_and_writes_nothing() {
+        let Some(pool) = crate::test_db::canonical_test_pool("stale_send_fence").await else {
+            return;
+        };
+        let fx = seed_sequenced_fixture(&pool, "stalefence", false).await;
+        let quota = Arc::new(FakeQuota::default());
+        let dispatcher =
+            ProductionCampaignDispatcher::new(test_dispatch_config(), pool.clone(), quota.clone())
+                .expect("the test dispatch config is configured");
+
+        let outcome = dispatcher
+            .enqueue_sequenced(
+                &fx.tenant,
+                &fx.key,
+                &test_rendered(),
+                "prospect@example.com",
+                "https://sales.example/u/token",
+                &fx.sender,
+                fx.decision_id,
+                fx.step_execution_id,
+                fx.enrollment_id,
+                &fx.fence,
+                serde_json::json!({ "test": "stale-fence" }),
+            )
+            .await
+            .expect("a stale fence is a refusal, not a database error");
+        assert_eq!(
+            outcome,
+            EnqueueOutcome::LeaseLost,
+            "the anti-duplicate guard must fire for a stale lease"
+        );
+
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("counting messages must succeed");
+        assert_eq!(messages, 0, "a stale worker must not insert into messages");
+
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_queue WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("counting email_queue must succeed");
+        assert_eq!(queued, 0, "a stale worker must not insert into email_queue");
+
+        assert_eq!(
+            quota.reserved.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the reservation is taken before the fence check"
+        );
+        assert_eq!(
+            quota.released.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a refused send must release its quota reservation"
+        );
+
+        cleanup_sequenced_fixture(&pool, &fx.tenant).await;
     }
 }

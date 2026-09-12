@@ -236,34 +236,10 @@ async fn categorize_spam_message() {
     assert_eq!(msg.category, MessageCategory::Spam);
 }
 
-/// No-op dispatcher: the lifecycle test exercises status transitions, not
-/// delivery — but Fix I-1 correctly refuses to start a campaign with no
-/// dispatcher configured, so a stub must be attached (same pattern as the
-/// sales-autopilot can_spam tests' RecordingDispatcher).
-#[derive(Debug)]
-struct NoopDispatcher;
-
-impl sales_autopilot::campaigns::CampaignEmailDispatcher for NoopDispatcher {
-    fn dispatch(
-        &self,
-        _tenant_id: &str,
-        _campaign_id: uuid::Uuid,
-        _template_id: &str,
-        _recipients: &[sales_autopilot::campaigns::DispatchRecipient],
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<usize, sales_autopilot::types::SalesError>>
-                + Send,
-        >,
-    > {
-        let _ = (_tenant_id, _campaign_id, _template_id, _recipients);
-        Box::pin(async { Ok(0) })
-    }
-
-    fn unsubscribe_link(&self, _tenant_id: &str, _campaign_id: uuid::Uuid, _email: &str) -> String {
-        "https://sales.apexmail.ee/unsubscribe".to_string()
-    }
-}
+// Campaign start no longer dispatches mail: it materializes canonical
+// enrollments and the durable action worker performs the sending, so no
+// dispatcher stub is needed (and the `CampaignEmailDispatcher` trait it would
+// have implemented no longer exists).
 
 // ── Campaign state transitions ─────────────────────────────────
 
@@ -272,8 +248,9 @@ async fn campaign_lifecycle_draft_active_paused() {
     let Some(db) = optional_db("campaign_lifecycle_draft_active_paused").await else {
         return;
     };
-    let mgr =
-        CampaignManager::new(10, db).with_email_dispatcher(std::sync::Arc::new(NoopDispatcher));
+    // No dispatcher is attached: campaign start materializes canonical
+    // enrollments rather than dispatching, so the manager needs none.
+    let mgr = CampaignManager::new(10, db);
     let tenant_id = unique_tenant("tenant-campaign-lifecycle");
     let c = mgr
         .create_campaign(

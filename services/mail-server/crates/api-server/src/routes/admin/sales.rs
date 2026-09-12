@@ -215,6 +215,100 @@ pub struct LeadsResponse {
     pub stats_by_status: serde_json::Value,
 }
 
+/// Canonical CP lead read (audit item 17): identity and status come from the
+/// canonical account/contact model, `sales_leads` is only the bridge for
+/// lead-only concepts.
+///
+/// Column mapping, preserved so the CP UI keeps rendering the same
+/// [`LeadEntry`] shape:
+///
+/// | `LeadEntry` field | canonical source | fallback |
+/// |---|---|---|
+/// | `id` | `sales_leads.id` (the API row key; lead-only) | — |
+/// | `contact_email` | newest unsuppressed `sales_contact_points.value` (migration 200:279) | legacy `sales_leads.contact_email` when the row predates the bridge |
+/// | `contact_name` | `sales_contacts.full_name` | legacy `sales_leads.contact_name` |
+/// | `company_name` | `sales_accounts.company` | legacy `sales_leads.company_name` |
+/// | `domain` | `sales_accounts.domain` | legacy `sales_leads.domain` |
+/// | `status` | `CASE` over canonical contact/account/enrollment lifecycle (below) | `'new'` when no canonical state exists |
+/// | `source`, `score`, `notes`, `tags`, `deal_value`, timestamps | `sales_leads` (lead-only fields with no canonical home yet) | — |
+///
+/// The legacy `sales_leads.status` column is deliberately NOT selected: it is
+/// still writable by the transitional CP admin update and the reply worker,
+/// so rendering it would present an independently mutable value as truth.
+/// Rows without a canonical `contact_id` (only possible for pre-upgrade data)
+/// are not listed until the transition migration backfills the bridge.
+///
+/// The CTE projects `tenant_id`; callers scope with
+/// `WHERE tenant_id = $n` in the outer query (the positional binds are
+/// emitted by `QueryBuilder` at the call site, so a `$1` inside this raw
+/// string would not line up with them).
+const CANONICAL_LEAD_CTE: &str = r#"
+    WITH canonical_leads AS (
+        SELECT
+            c.tenant_id AS tenant_id,
+            l.id,
+            l.source,
+            l.score,
+            l.notes,
+            COALESCE(to_jsonb(l.tags), '[]'::jsonb) AS tags,
+            l.deal_value,
+            l.created_at,
+            l.updated_at,
+            COALESCE(NULLIF(cp.value, ''), NULLIF(l.contact_email, '')) AS contact_email,
+            COALESCE(NULLIF(c.full_name, ''), NULLIF(l.contact_name, '')) AS contact_name,
+            COALESCE(NULLIF(a.company, ''), NULLIF(l.company_name, '')) AS company_name,
+            COALESCE(NULLIF(a.domain, ''), NULLIF(l.domain, '')) AS domain,
+            CASE
+                WHEN c.lifecycle = 'customer' OR a.lifecycle = 'customer' THEN 'converted'
+                WHEN c.lifecycle = 'meeting_booked' OR e.state = 'meeting_booked' THEN 'demo_scheduled'
+                WHEN c.lifecycle = 'replied' OR e.state = 'replied' THEN 'engaged'
+                WHEN c.lifecycle = 'do_not_contact'
+                     OR e.state IN ('suppressed', 'failed') THEN 'lost'
+                WHEN c.lifecycle = 'left_company'
+                     OR a.lifecycle = 'disqualified' THEN 'unqualified'
+                WHEN a.lifecycle = 'qualified' THEN 'qualified'
+                WHEN a.lifecycle = 'nurturing' THEN 'prospect'
+                WHEN e.state IN ('active', 'waiting', 'pending', 'completed')
+                     OR c.lifecycle = 'snoozed' THEN 'contacted'
+                ELSE 'new'
+            END AS status
+        FROM sales_contacts c
+        LEFT JOIN sales_accounts a
+               ON a.id = c.account_id AND a.tenant_id = c.tenant_id
+        LEFT JOIN LATERAL (
+            SELECT cp.value
+            FROM sales_contact_points cp
+            WHERE cp.contact_id = c.id
+              AND cp.tenant_id = c.tenant_id
+              AND cp.channel = 'email'
+            ORDER BY (cp.suppressed_at IS NULL) DESC,
+                     cp.confidence DESC,
+                     cp.created_at DESC
+            LIMIT 1
+        ) cp ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT e.state
+            FROM sales_enrollments e
+            WHERE e.contact_id = c.id AND e.tenant_id = c.tenant_id
+            ORDER BY CASE
+                         WHEN e.state IN ('completed', 'failed', 'suppressed') THEN 1
+                         ELSE 0
+                     END,
+                     e.updated_at DESC, e.id
+            LIMIT 1
+        ) e ON TRUE
+        JOIN LATERAL (
+            SELECT l.id, l.source, l.score, l.notes, l.tags, l.deal_value,
+                   l.contact_email, l.contact_name, l.company_name, l.domain,
+                   l.created_at, l.updated_at
+            FROM sales_leads l
+            WHERE l.contact_id = c.id AND l.tenant_id = c.tenant_id
+            ORDER BY l.created_at DESC, l.id DESC
+            LIMIT 1
+        ) l ON TRUE
+    )
+"#;
+
 async fn list_leads(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -233,11 +327,9 @@ async fn list_leads(
     // Scope reads to the caller's tenant so listing matches the tenant-scoped
     // writes in update_leads/start_outreach (require_system_tenant guarantees
     // the system tenant here).
-    let mut count_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT COUNT(*)::bigint FROM sales_leads WHERE tenant_id = ",
-    );
+    let mut count_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(CANONICAL_LEAD_CTE);
+    count_builder.push(" SELECT COUNT(*)::bigint FROM canonical_leads WHERE tenant_id = ");
     count_builder.push_bind(auth.tenant_id.clone());
-    count_builder.push(" AND 1=1");
     if let Some(status) = params.status.as_deref() {
         count_builder.push(" AND status = ").push_bind(status);
     }
@@ -250,23 +342,84 @@ async fn list_leads(
         .await
         .unwrap_or(0);
 
-    // deal_value is canonical (migration 200) — selected directly.
-    let mut leads_builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT id, company_name, domain, contact_email, contact_name,
-                status, source, score, notes, COALESCE(to_jsonb(tags), '[]'::jsonb),
-                deal_value, created_at, updated_at
-         FROM sales_leads WHERE tenant_id = ",
+    // LeadEntry shape preserved; identity/status are canonical (see
+    // CANONICAL_LEAD_CTE), lead-only fields still come from the bridge row.
+    let leads = load_lead_entries(
+        &state.db,
+        &auth.tenant_id,
+        params.status.as_deref(),
+        params.source.as_deref(),
+        limit,
+        offset,
+    )
+    .await?;
+
+    // Aggregate stats over the SAME canonical row set (tenant-scoped the same
+    // way), so the list and its KPIs cannot disagree. `source` is a lead-only
+    // concept (bridge), `status` is the canonical derivation.
+    let source_stats: Vec<(String, String)> = sqlx::query_as(&format!(
+        "{CANONICAL_LEAD_CTE} SELECT COALESCE(source, 'unknown'), COUNT(*)::text \
+         FROM canonical_leads WHERE tenant_id = $1 GROUP BY source"
+    ))
+    .bind(&auth.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let status_stats: Vec<(String, String)> = sqlx::query_as(&format!(
+        "{CANONICAL_LEAD_CTE} SELECT status, COUNT(*)::text \
+         FROM canonical_leads WHERE tenant_id = $1 GROUP BY status"
+    ))
+    .bind(&auth.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let stats_by_source: serde_json::Value = source_stats
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::json!(v.parse::<i64>().unwrap_or(0))))
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
+
+    let stats_by_status: serde_json::Value = status_stats
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::json!(v.parse::<i64>().unwrap_or(0))))
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
+
+    Ok(Json(LeadsResponse {
+        leads,
+        total,
+        stats_by_source,
+        stats_by_status,
+    }))
+}
+
+/// Run the canonical lead list query with the CP's filters and pagination.
+/// Extracted from [`list_leads`] so DB-backed tests exercise the production
+/// SQL directly (no handler/auth scaffolding).
+async fn load_lead_entries(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    status: Option<&str>,
+    source: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<LeadEntry>, sqlx::Error> {
+    let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(CANONICAL_LEAD_CTE);
+    builder.push(
+        " SELECT id, company_name, domain, contact_email, contact_name,
+                 status, source, score, notes, tags,
+                 deal_value, created_at, updated_at
+          FROM canonical_leads WHERE tenant_id = ",
     );
-    leads_builder.push_bind(auth.tenant_id.clone());
-    leads_builder.push(" AND 1=1");
-    if let Some(status) = params.status.as_deref() {
-        leads_builder.push(" AND status = ").push_bind(status);
+    builder.push_bind(tenant_id);
+    if let Some(status) = status {
+        builder.push(" AND status = ").push_bind(status);
     }
-    if let Some(source) = params.source.as_deref() {
-        leads_builder.push(" AND source = ").push_bind(source);
+    if let Some(source) = source {
+        builder.push(" AND source = ").push_bind(source);
     }
-    leads_builder
-        .push(" ORDER BY created_at DESC LIMIT ")
+    builder
+        .push(" ORDER BY created_at DESC, id DESC LIMIT ")
         .push_bind(limit)
         .push(" OFFSET ")
         .push_bind(offset);
@@ -285,9 +438,9 @@ async fn list_leads(
         Option<f64>,
         chrono::DateTime<chrono::Utc>,
         chrono::DateTime<chrono::Utc>,
-    )> = leads_builder.build_query_as().fetch_all(&state.db).await?;
+    )> = builder.build_query_as().fetch_all(db).await?;
 
-    let leads: Vec<LeadEntry> = rows
+    Ok(rows
         .into_iter()
         .map(
             |(
@@ -322,41 +475,7 @@ async fn list_leads(
                 }
             },
         )
-        .collect();
-
-    // Aggregate stats (scoped to the same tenant as the rows above)
-    let source_stats: Vec<(String, String)> = sqlx::query_as(
-        "SELECT COALESCE(source, 'unknown'), COUNT(*)::text FROM sales_leads WHERE tenant_id = $1 GROUP BY source",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let status_stats: Vec<(String, String)> = sqlx::query_as(
-        "SELECT status, COUNT(*)::text FROM sales_leads WHERE tenant_id = $1 GROUP BY status",
-    )
-    .bind(&auth.tenant_id)
-    .fetch_all(&state.db)
-    .await?;
-
-    let stats_by_source: serde_json::Value = source_stats
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::json!(v.parse::<i64>().unwrap_or(0))))
-        .collect::<serde_json::Map<String, serde_json::Value>>()
-        .into();
-
-    let stats_by_status: serde_json::Value = status_stats
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::json!(v.parse::<i64>().unwrap_or(0))))
-        .collect::<serde_json::Map<String, serde_json::Value>>()
-        .into();
-
-    Ok(Json(LeadsResponse {
-        leads,
-        total,
-        stats_by_source,
-        stats_by_status,
-    }))
+        .collect())
 }
 
 // ──────────────────────────────────────────
@@ -950,6 +1069,10 @@ async fn run_discovery(
 
         discovered += 1;
 
+        // Canonical key for the account upsert; the imported lead's domain
+        // column is normalized too so the dedupe check below matches.
+        let domain = crate::routes::contact::normalize_domain(&domain);
+
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM sales_leads WHERE domain = $1 AND tenant_id = $2 LIMIT 1",
         )
@@ -963,19 +1086,45 @@ async fn run_discovery(
         }
 
         let lead_id = apexmail_lib::id::generate_id("", 26);
+        let company = company_name.unwrap_or_else(|| domain.clone());
+
+        // Imported leads arrive without an email address, so they can only be
+        // linked to their canonical account: there is no address to put in a
+        // `sales_contact_points` row and none is fabricated — the lead has no
+        // reachable contact point until enrichment supplies one. The account
+        // write and the lead row share one transaction: if the lead insert
+        // fails, the account is not left behind either.
+        let mut tx = state.db.begin().await?;
+        let account_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO sales_accounts
+                 (id, tenant_id, company, domain, lifecycle, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'discovered', NOW(), NOW())
+             ON CONFLICT (tenant_id, domain) DO UPDATE SET updated_at = NOW()
+             RETURNING id",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&auth.tenant_id)
+        .bind(&company)
+        .bind(&domain)
+        .fetch_one(&mut *tx)
+        .await?;
+
         sqlx::query(
             "INSERT INTO sales_leads (
-                tenant_id, id, company_name, domain, status, source, notes, created_at, updated_at
-             ) VALUES ($1, $2, $3, $4, 'new', $5, $6, NOW(), NOW())",
+                tenant_id, id, company_name, domain, status, source, notes,
+                account_id, contact_id, created_at, updated_at
+             ) VALUES ($1, $2, $3, $4, 'new', $5, $6, $7, NULL, NOW(), NOW())",
         )
         .bind(&auth.tenant_id)
         .bind(&lead_id)
-        .bind(company_name.unwrap_or_else(|| domain.clone()))
+        .bind(&company)
         .bind(&domain)
         .bind(&primary_source)
         .bind(description.or(industry.clone()))
-        .execute(&state.db)
+        .bind(account_id)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         imported += 1;
     }
 
@@ -1323,6 +1472,130 @@ mod tests {
                 !source.contains(&fragment),
                 "sales.rs must not contain the retired artifact `{fragment}`"
             );
+        }
+    }
+
+    /// Item 17 test 7: CP read parity. For a seeded lead, the canonical-join
+    /// read returns the same identity/email the old lead-only query returned —
+    /// so the UI shape does not change — while `status` now derives from the
+    /// canonical lifecycle instead of the legacy independently mutable column.
+    ///
+    /// DB-backed on the api-server canonical test pool; soft-skips without
+    /// `TEST_DATABASE_URL`.
+    #[tokio::test]
+    async fn canonical_lead_read_is_parity_with_the_legacy_read_on_identity() {
+        let Some(pool) = crate::test_db::optional_pg_pool("cp_canonical_lead_parity").await else {
+            return;
+        };
+        let tenant = format!("cp17{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        let account_id = uuid::Uuid::new_v4();
+        let contact_id = uuid::Uuid::new_v4();
+        let point_id = uuid::Uuid::new_v4();
+        let lead_id = format!("lead_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
+
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, lifecycle) \
+             VALUES ($1, $2, 'Canonical Co', 'acme.example', 'discovered')",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Ada Lovelace')",
+        )
+        .bind(contact_id)
+        .bind(&tenant)
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("seed contact");
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification, confidence) \
+             VALUES ($1, $2, $3, 'email', 'ada@acme.example', 'ada@acme.example', 'valid', 0.95)",
+        )
+        .bind(point_id)
+        .bind(&tenant)
+        .bind(contact_id)
+        .execute(&pool)
+        .await
+        .expect("seed contact point");
+        // The legacy status is deliberately `qualified`: the canonical read
+        // must NOT surface it (the canonical lifecycle says 'new').
+        sqlx::query(
+            "INSERT INTO sales_leads \
+                 (id, tenant_id, company_name, domain, contact_email, contact_name, \
+                  score, source, status, notes, tags, deal_value, \
+                  account_id, contact_id, created_at, updated_at) \
+             VALUES ($1, $2, 'Legacy Co', 'legacy.example', 'ada@acme.example', 'Ada Lovelace', \
+                     42, 'import', 'qualified', 'seed notes', '[\"vip\"]'::jsonb, 1234.5, \
+                     $3, $4, NOW(), NOW())",
+        )
+        .bind(&lead_id)
+        .bind(&tenant)
+        .bind(account_id)
+        .bind(contact_id)
+        .execute(&pool)
+        .await
+        .expect("seed lead bridge row");
+
+        let old: (String, String, String) = sqlx::query_as(
+            "SELECT id, COALESCE(email, contact_email, ''), COALESCE(contact_name, '') \
+             FROM sales_leads WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(&tenant)
+        .bind(&lead_id)
+        .fetch_one(&pool)
+        .await
+        .expect("legacy-shaped read");
+
+        let rows = load_lead_entries(&pool, &tenant, None, None, 50, 0)
+            .await
+            .expect("canonical read");
+        assert_eq!(rows.len(), 1, "one canonical lead for one contact");
+
+        let entry = &rows[0];
+        assert_eq!(entry.id, old.0, "row identity");
+        assert_eq!(
+            entry.contact_email.as_deref().unwrap_or_default(),
+            old.1,
+            "email identity is unchanged for a linked lead"
+        );
+        assert_eq!(
+            entry.contact_name.as_deref().unwrap_or_default(),
+            old.2,
+            "contact name identity is unchanged"
+        );
+        // Canonical fields win over stale legacy duplicates.
+        assert_eq!(entry.company_name, "Canonical Co");
+        assert_eq!(entry.domain, "acme.example");
+        // Lead-only fields still come from the bridge.
+        assert_eq!(entry.source, "import");
+        assert_eq!(entry.score, Some(42));
+        assert_eq!(entry.notes.as_deref(), Some("seed notes"));
+        assert_eq!(entry.tags, vec!["vip".to_string()]);
+        assert_eq!(entry.deal_value, Some(1234.5));
+        // Status is canonical (contact active, account discovered → 'new'),
+        // NOT the legacy 'qualified' still sitting in sales_leads.status.
+        assert_eq!(
+            entry.status, "new",
+            "the legacy status column must not be presented as truth"
+        );
+
+        for statement in [
+            "DELETE FROM sales_leads WHERE tenant_id = $1",
+            "DELETE FROM sales_contact_points WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup parity fixture");
         }
     }
 }

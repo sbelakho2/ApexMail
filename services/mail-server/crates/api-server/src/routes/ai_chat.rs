@@ -23,6 +23,29 @@ pub fn router() -> Router<AppState> {
         .route("/chat/history", get(chat_history))
 }
 
+/// Feature-flag name managing the customer-facing assistant capability.
+/// Default `true`: the capability predates flag evaluation, so absence of a
+/// row must preserve today's behaviour; operators disable it per tenant with
+/// a `feature_flag_overrides` row (JSON boolean) or globally with an
+/// `enabled = false` `feature_flags` row.
+pub(crate) const AI_CHAT_FEATURE_FLAG: &str = "ai_chat";
+
+/// Evaluate the assistant capability for the authenticated tenant. Returns
+/// 403 (not 404) so a disabled tenant knows the capability exists but is
+/// switched off for them.
+async fn require_ai_chat_enabled(state: &AppState, tenant_id: &str) -> Result<(), ApiError> {
+    if state
+        .feature_flags
+        .enabled(tenant_id, AI_CHAT_FEATURE_FLAG, true)
+        .await?
+    {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden(
+        "the AI assistant is not enabled for this tenant".into(),
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ChatBody {
     pub message: String,
@@ -53,12 +76,13 @@ const MAX_HISTORY: usize = 12;
 const CHAT_RATE_LIMIT: i64 = 20;
 const CHAT_RATE_WINDOW_SECS: i64 = 60;
 
-async fn chat(
+pub(crate) async fn chat(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<ChatBody>,
 ) -> Result<Json<ChatOut>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
 
     let message = body.message.trim().to_string();
     if message.is_empty() {
@@ -150,11 +174,12 @@ async fn chat(
     }
 }
 
-async fn chat_history(
+pub(crate) async fn chat_history(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["ai:read"])?;
+    require_ai_chat_enabled(&state, &auth.tenant_id).await?;
 
     let ai_url = state.config.ai_service_base_url.trim().to_string();
     if ai_url.is_empty() {

@@ -8,16 +8,21 @@
 //! The pipeline, in order:
 //!
 //! ```text
-//! discovery (provider-backed)
-//!   → enrichment (waterfall, provenance preserved in sales_enrichment_facts)
-//!   → evidence + signals (sales_evidence, sales_signals)
-//!   → scoring (explainable feature vector, reason codes)
-//!   → decision engine (hard gates → Decision Packet)
-//!   → durable actions (sales_actions, leased, SKIP LOCKED)
-//!   → sequences (sales_sequence_* + sales_enrollments + sales_step_executions)
-//!   → dispatcher (messages + email_queue)
-//!   → outcomes (sales_outcomes) → attribution → experiments/calibration
+//! canonical account/contact
+//!   → evidence + score + next-best-action (sales_evidence, sales_signals)
+//!   → sales SenderIdentity (sender_pool; sales pools only)
+//!   → Decision Packet (autonomy + legal + sender health → sales_decisions)
+//!   → durable fenced action (sales_actions, lease token, SKIP LOCKED)
+//!   → dispatcher with the resolved sender (enqueue_sequenced → messages)
+//!   → email_queue with typed decision/sender/step provenance
+//!   → worker: delivery route + per-source-IP warmup admission
+//!   → events / sales_outcomes / sales_sender_events
+//!   → experiment + sender-health projectors (outcome_projector)
 //! ```
+//!
+//! Delivery itself (route resolution, transport, MTA source-IP binding) lives
+//! in `worker-processors`; its dedicated-route MTA side is not implemented in
+//! this repository.
 
 pub mod account_coordination;
 pub mod actions;
@@ -40,6 +45,7 @@ pub mod inbox;
 pub mod intelligence;
 pub mod knowledge;
 pub mod legal_policy;
+pub mod outcome_projector;
 pub mod personalization;
 pub mod research;
 pub mod routes;

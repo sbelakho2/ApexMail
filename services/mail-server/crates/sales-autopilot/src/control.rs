@@ -14,6 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::actions::ActionQueue;
@@ -192,8 +193,12 @@ pub async fn decisions(
 
 /// `GET /control/exceptions` — decisions a human must act on.
 ///
-/// Two kinds qualify: blocked decisions (a hard gate refused them, so an
-/// operator needs to fix the cause) and pending-approval decisions.
+/// Two kinds qualify: decisions a hard gate refused
+/// (`enforcement = 'denied'`) and decisions waiting for an operator
+/// (`enforcement = 'await_approval'`, or any decision whose review is still
+/// `pending`). The predicate is the decision's OWN recorded state — autonomy
+/// mode is context, not authority, and an `execute` decision recorded under an
+/// old mode must not surface as an exception forever.
 pub async fn exceptions(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -203,23 +208,7 @@ pub async fn exceptions(
     let limit = paging.limit.clamp(1, 200);
     let offset = paging.offset.max(0);
 
-    let rows: Vec<DecisionRow> = sqlx::query_as(
-        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
-                confidence::float8, score_total::float8, selected_offer, selected_sequence, \
-                selected_variant, selected_sender, evidence_ids::text[] AS evidence_ids, \
-                policy_id, model_version, autonomy_mode, rationale, blocked, block_reasons, \
-                execute_after, created_at \
-         FROM sales_decisions \
-         WHERE tenant_id = $1 \
-           AND (blocked OR autonomy_mode IN ('assisted', 'approval_required')) \
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(&tenant)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    let rows = exception_decisions(&state.db, &tenant, limit, offset).await?;
 
     // Dead letters are the other class of thing a human must see: work the
     // engine could not complete on its own.
@@ -241,6 +230,36 @@ pub async fn exceptions(
         "limit": limit,
         "offset": offset,
     })))
+}
+
+/// Decisions that qualify as exceptions: refused by a hard gate, waiting for
+/// approval, or with a review that was never decided.
+///
+/// Extracted from the handler so the predicate is testable against a real
+/// database without HTTP plumbing.
+async fn exception_decisions(
+    db: &PgPool,
+    tenant: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<DecisionRow>, SalesError> {
+    sqlx::query_as(
+        "SELECT id, account_id, contact_id, action, expected_value_eur::float8, \
+                confidence::float8, score_total::float8, selected_offer, selected_sequence, \
+                selected_variant, selected_sender, evidence_ids::text[] AS evidence_ids, \
+                policy_id, model_version, autonomy_mode, rationale, blocked, block_reasons, \
+                execute_after, created_at \
+         FROM sales_decisions \
+         WHERE tenant_id = $1 \
+           AND (enforcement IN ('denied', 'await_approval') OR review_status = 'pending') \
+         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+    )
+    .bind(tenant)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))
 }
 
 /// `GET /control/actions` — the durable queue's visible state.
@@ -474,11 +493,358 @@ pub struct ReviewBody {
     pub note: Option<String>,
 }
 
+/// The operator's requested review outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewAction {
+    Approve,
+    Reject,
+}
+
+impl ReviewAction {
+    fn parse(raw: &str) -> Result<Self, SalesError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "approved" | "approve" => Ok(Self::Approve),
+            "rejected" | "reject" => Ok(Self::Reject),
+            other => Err(SalesError::InvalidInput(format!(
+                "outcome must be 'approved' or 'rejected', got '{other}'"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approved",
+            Self::Reject => "rejected",
+        }
+    }
+
+    /// The authoritative `sales_decisions.review_status` value for this
+    /// outcome. Approval and rejection are the only review statuses an
+    /// operator can write; `pending` and `not_required` are set elsewhere.
+    fn review_status(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// Why a decision cannot be reviewed, if it cannot. Pure mirror of the
+/// authoritative SQL guard
+/// (`enforcement = 'await_approval' AND review_status = 'pending'`), so a
+/// refused review names the exact condition instead of silently no-oping.
+fn review_guard_violation(
+    enforcement: Option<&str>,
+    review_status: Option<&str>,
+) -> Option<String> {
+    match enforcement {
+        None => Some(
+            "no enforcement verdict is recorded; only a decision recorded as \
+             'await_approval' can be reviewed"
+                .to_string(),
+        ),
+        Some(value) if value != "await_approval" => Some(format!(
+            "enforcement is '{value}', not 'await_approval'; approval is not required for \
+             this decision and it will not be replayed"
+        )),
+        Some(_) => match review_status {
+            Some("pending") => None,
+            Some(value) => Some(format!(
+                "review_status is already '{value}'; a review is terminal and cannot be overwritten"
+            )),
+            None => Some(
+                "review_status is NULL; only a decision awaiting review can be decided".to_string(),
+            ),
+        },
+    }
+}
+
+/// The gates' verdict on whether an approved decision may now execute.
+///
+/// Mirrors [`crate::decision_engine::ExecutionRevalidation`] (the `checked`
+/// gate names are `&'static str` there by design), so the CP can render why
+/// the release was or was not allowed.
+#[derive(Debug, Clone)]
+struct RevalidationReport {
+    allowed: bool,
+    reasons: Vec<String>,
+    checked: Vec<&'static str>,
+}
+
+impl RevalidationReport {
+    fn denied(reason: impl Into<String>) -> Self {
+        Self {
+            allowed: false,
+            reasons: vec![reason.into()],
+            checked: Vec::new(),
+        }
+    }
+
+    fn into_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "allowed": self.allowed,
+            "reasons": self.reasons,
+            "checked": self.checked,
+        })
+    }
+}
+
+/// Result of applying one operator review.
+#[derive(Debug, Clone)]
+struct ReviewOutcome {
+    decision_id: Uuid,
+    /// The authoritative final `review_status` ("approved" or "rejected").
+    status: String,
+    actions_affected: u64,
+    revalidation: RevalidationReport,
+}
+
+/// Who performed the review, for `sales_decisions.reviewed_by`.
+///
+/// The CP proxy currently forwards no user header, so the fallback names the
+/// authenticated control plane itself rather than inventing an operator id.
+fn reviewer_identity(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-user-id")
+        .or_else(|| headers.get("x-operator-id"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("control-plane")
+        .to_string()
+}
+
+/// Move the decision's linked actions out of `awaiting_approval` back into the
+/// queue.
+///
+/// The lease columns are ASSERTED NULL in the predicate rather than cleared:
+/// an `awaiting_approval` row written by `ActionQueue::finish` never carries a
+/// lease, so a non-null owner/token here means the row was mutated outside the
+/// contract. Clearing it silently would overwrite that writer; refusing is the
+/// only safe response. Returns the number of actions released.
+async fn release_actions(db: &PgPool, tenant: &str, decision_id: Uuid) -> Result<u64, SalesError> {
+    let still_leased: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM sales_actions \
+         WHERE tenant_id = $1 AND decision_id = $2 AND state = 'awaiting_approval' \
+           AND (lease_owner IS NOT NULL OR lease_token IS NOT NULL \
+                OR lease_expires_at IS NOT NULL)",
+    )
+    .bind(tenant)
+    .bind(decision_id)
+    .fetch_one(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    if still_leased > 0 {
+        return Err(SalesError::Database(format!(
+            "refusing to release decision {decision_id}: {still_leased} action(s) awaiting \
+             approval still carry lease ownership; reconcile the queue before approving"
+        )));
+    }
+
+    let affected = sqlx::query(
+        "UPDATE sales_actions \
+         SET state = 'queued', due_at = NOW(), attempt = 0, last_error = NULL \
+         WHERE tenant_id = $1 AND decision_id = $2 AND state = 'awaiting_approval' \
+           AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL",
+    )
+    .bind(tenant)
+    .bind(decision_id)
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?
+    .rows_affected();
+    Ok(affected)
+}
+
+/// Cancel every non-terminal action linked to the decision, recording the
+/// reason. This is the "did not release the work" transition: an action that
+/// was queued by a review must not run after the review was refused.
+async fn cancel_linked_actions(
+    db: &PgPool,
+    tenant: &str,
+    decision_id: Uuid,
+    reason: &str,
+) -> Result<u64, SalesError> {
+    let affected = sqlx::query(
+        "UPDATE sales_actions \
+         SET state = 'cancelled', last_error = $3, \
+             lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, \
+             completed_at = NOW() \
+         WHERE tenant_id = $1 AND decision_id = $2 \
+           AND state IN ('queued', 'awaiting_approval', 'leased', 'executing')",
+    )
+    .bind(tenant)
+    .bind(decision_id)
+    .bind(reason)
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?
+    .rows_affected();
+    Ok(affected)
+}
+
+/// Apply an operator review to a decision and its linked actions.
+///
+/// Flow:
+/// 1. Write the authoritative review state, guarded by the decision's own
+///    recorded state (`enforcement = 'await_approval' AND
+///    review_status = 'pending'`). Zero rows is a hard error, never a fallback
+///    to replaying actions.
+/// 2. On approve, re-check every gate with
+///    [`crate::decision_engine::revalidate_execution`] BEFORE releasing the
+///    work. Approval is not a bypass: if the gates now refuse, the actions are
+///    cancelled and the review is durably recorded as `rejected` with the
+///    reasons in `review_note`.
+/// 3. On reject, cancel the linked actions with the operator's note.
+///
+/// The revalidation happens before the requeue on purpose: releasing the
+/// actions first would open a window in which a worker claims work that the
+/// gates refuse, which is exactly the defect this transition exists to
+/// prevent.
+async fn apply_review(
+    db: &PgPool,
+    tenant: &str,
+    decision_id: Uuid,
+    action: ReviewAction,
+    note: &str,
+    reviewed_by: &str,
+) -> Result<ReviewOutcome, SalesError> {
+    // 1. The only path that may write a review decision.
+    let updated: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE sales_decisions \
+         SET review_status = $3, reviewed_by = $4, reviewed_at = NOW(), review_note = $5 \
+         WHERE id = $1 AND tenant_id = $2 \
+           AND enforcement = 'await_approval' AND review_status = 'pending' \
+         RETURNING id",
+    )
+    .bind(decision_id)
+    .bind(tenant)
+    .bind(action.review_status())
+    .bind(reviewed_by)
+    .bind(note)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    if updated.is_none() {
+        // Diagnose which condition failed. A silent no-op here would let the
+        // CP believe a review happened when nothing was written.
+        let current: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT enforcement, review_status FROM sales_decisions \
+             WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(decision_id)
+        .bind(tenant)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| SalesError::Database(e.to_string()))?;
+
+        return match current {
+            None => Err(SalesError::InvalidInput(format!(
+                "decision {decision_id} not found for this tenant"
+            ))),
+            Some((enforcement, review_status)) => Err(SalesError::InvalidInput(format!(
+                "decision {decision_id} cannot be reviewed: {}",
+                review_guard_violation(enforcement.as_deref(), review_status.as_deref())
+                    .unwrap_or_else(|| "the review transition was refused".to_string())
+            ))),
+        };
+    }
+
+    match action {
+        ReviewAction::Reject => {
+            let reason = if note.trim().is_empty() {
+                "operator rejected the decision".to_string()
+            } else {
+                note.trim().to_string()
+            };
+            let affected = cancel_linked_actions(db, tenant, decision_id, &reason).await?;
+            Ok(ReviewOutcome {
+                decision_id,
+                status: ReviewAction::Reject.as_str().to_string(),
+                actions_affected: affected,
+                revalidation: RevalidationReport::denied("operator rejected the decision"),
+            })
+        }
+        ReviewAction::Approve => {
+            // 2. Approval is not a bypass: re-run every hard gate before the
+            // work is released. A failure to re-check fails closed.
+            let report = match crate::decision_engine::revalidate_execution(db, decision_id).await {
+                Ok(result) => RevalidationReport {
+                    allowed: result.allowed,
+                    reasons: result.reasons,
+                    checked: result.checked,
+                },
+                Err(error) => RevalidationReport::denied(format!(
+                    "revalidation_failed: the gates could not be re-checked ({error}); \
+                         refusing to release the work"
+                )),
+            };
+
+            if report.allowed {
+                let affected = release_actions(db, tenant, decision_id).await?;
+                Ok(ReviewOutcome {
+                    decision_id,
+                    status: ReviewAction::Approve.as_str().to_string(),
+                    actions_affected: affected,
+                    revalidation: report,
+                })
+            } else {
+                let reasons = if report.reasons.is_empty() {
+                    "revalidation returned allowed=false without naming a failed gate".to_string()
+                } else {
+                    report.reasons.join("; ")
+                };
+                let refusal = format!("approval refused by revalidation: {reasons}");
+                let affected = cancel_linked_actions(db, tenant, decision_id, &refusal).await?;
+
+                // The durable review record must say the approval was refused,
+                // or a later reader would see an approved decision with
+                // cancelled work and no explanation.
+                let note = if note.trim().is_empty() {
+                    refusal
+                } else {
+                    format!("{refusal} | operator note: {}", note.trim())
+                };
+                let updated = sqlx::query(
+                    "UPDATE sales_decisions \
+                     SET review_status = 'rejected', review_note = $3 \
+                     WHERE id = $1 AND tenant_id = $2 AND review_status = 'approved'",
+                )
+                .bind(decision_id)
+                .bind(tenant)
+                .bind(&note)
+                .execute(db)
+                .await
+                .map_err(|e| SalesError::Database(e.to_string()))?
+                .rows_affected();
+                if updated == 0 {
+                    tracing::warn!(
+                        decision_id = %decision_id,
+                        "revalidation refusal could not be recorded on the decision"
+                    );
+                }
+
+                Ok(ReviewOutcome {
+                    decision_id,
+                    status: ReviewAction::Reject.as_str().to_string(),
+                    actions_affected: affected,
+                    revalidation: report,
+                })
+            }
+        }
+    }
+}
+
 /// `POST /control/decisions/:id/review` — operator review of one decision.
 ///
-/// Approving replays the decision's queued work; rejecting cancels it. The
-/// review note is appended to the decision's block reasons so the explanation
-/// the CP renders stays truthful about who decided what.
+/// The decision's `review_status` is the authority: only a decision recorded
+/// as `await_approval` with `review_status = 'pending'` can be decided, and
+/// only the durable transition releases (or cancels) its linked actions.
+/// Approval re-runs the hard gates first — an approval that the gates now
+/// refuse cancels the work and is recorded as a rejection with the reasons.
+///
+/// The response reports `outcome` (the final authoritative status),
+/// `actionsAffected`, and `revalidation: {allowed, reasons, checked}` so the
+/// CP can show why an approval did or did not release the work.
 pub async fn review_decision(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -487,89 +853,29 @@ pub async fn review_decision(
 ) -> Result<Json<serde_json::Value>, SalesError> {
     let tenant = tenant_of(&headers)?;
     let decision_id = parse_uuid(&id, "decision id")?;
-
-    let outcome = body.outcome.trim().to_ascii_lowercase();
-    if outcome != "approved" && outcome != "rejected" {
-        return Err(SalesError::InvalidInput(
-            "outcome must be 'approved' or 'rejected'".into(),
-        ));
-    }
-
-    let exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM sales_decisions WHERE id = $1 AND tenant_id = $2")
-            .bind(decision_id)
-            .bind(&tenant)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    if exists.is_none() {
-        return Err(SalesError::InvalidInput(format!(
-            "decision {decision_id} not found for this tenant"
-        )));
-    }
-
-    let queue = queue_for(&state, "control-review");
-    let mut affected = 0u64;
-
-    let linked: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM sales_actions WHERE tenant_id = $1 AND decision_id = $2",
-    )
-    .bind(&tenant)
-    .bind(decision_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-
-    for action_id in linked {
-        if outcome == "approved" {
-            if queue.replay(&tenant, action_id).await? {
-                affected += 1;
-            }
-        } else {
-            affected += queue
-                .cancel_for_entity(
-                    &tenant,
-                    "decision",
-                    decision_id,
-                    "operator rejected the decision",
-                )
-                .await?;
-            break;
-        }
-    }
-
-    // Record the review on the decision itself so the rendered explanation
-    // reflects the human input.
+    let action = ReviewAction::parse(&body.outcome)?;
     let note = body.note.unwrap_or_default();
-    sqlx::query(
-        "UPDATE sales_decisions \
-         SET block_reasons = block_reasons || $3::jsonb \
-         WHERE id = $1 AND tenant_id = $2",
-    )
-    .bind(decision_id)
-    .bind(&tenant)
-    .bind(serde_json::json!([format!(
-        "operator {outcome}{}",
-        if note.is_empty() {
-            String::new()
-        } else {
-            format!(": {note}")
-        }
-    )]))
-    .execute(&state.db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
+    let reviewed_by = reviewer_identity(&headers);
+
+    let result = apply_review(&state.db, &tenant, decision_id, action, &note, &reviewed_by).await?;
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "decisionId": decision_id,
-        "outcome": outcome,
-        "actionsAffected": affected,
+        "decisionId": result.decision_id,
+        "outcome": result.status,
+        "reviewStatus": result.status,
+        "actionsAffected": result.actions_affected,
+        "revalidation": result.revalidation.into_json(),
     })))
 }
 
 /// `POST /control/actions/:id/replay` — retry one dead-lettered or failed action.
+///
+/// Deliberately restricted to `failed`/`dead_letter`
+/// ([`crate::actions::ActionQueue::replay`]): actions in `awaiting_approval`
+/// are waiting for a human decision, and replaying them would be a second path
+/// around the approval gate. Approval-gated work is released only by
+/// [`review_decision`].
 pub async fn replay_action(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -581,7 +887,9 @@ pub async fn replay_action(
     let queue = queue_for(&state, "control-replay");
     if !queue.replay(&tenant, action_id).await? {
         return Err(SalesError::InvalidInput(format!(
-            "action {action_id} is not replayable for this tenant (not found, or still in flight)"
+            "action {action_id} is not replayable for this tenant (only failed or \
+             dead-lettered actions can be replayed; approval-gated work must be released \
+             through decision review)"
         )));
     }
 
@@ -754,5 +1062,450 @@ mod tests {
         );
         assert!(!AutonomyMode::ApprovalRequired.may_execute_autonomously());
         assert!(AutonomyMode::ApprovalRequired.runs_brain());
+    }
+
+    // -----------------------------------------------------------------------
+    // Review transition guards (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn review_action_parses_only_approve_and_reject() {
+        assert_eq!(
+            ReviewAction::parse("approved").unwrap(),
+            ReviewAction::Approve
+        );
+        assert_eq!(
+            ReviewAction::parse("  REJECTED ").unwrap(),
+            ReviewAction::Reject
+        );
+        for bad in ["", "pending", "maybe", "approvee"] {
+            assert!(
+                ReviewAction::parse(bad).is_err(),
+                "'{bad}' must not parse as a review outcome"
+            );
+        }
+        assert_eq!(ReviewAction::Approve.review_status(), "approved");
+        assert_eq!(ReviewAction::Reject.review_status(), "rejected");
+    }
+
+    /// The SQL guard is `enforcement = 'await_approval' AND
+    /// review_status = 'pending'`; this pure mirror must agree exactly so the
+    /// error message names the condition that actually failed.
+    #[test]
+    fn review_guard_names_the_failed_condition() {
+        assert_eq!(
+            review_guard_violation(Some("await_approval"), Some("pending")),
+            None
+        );
+        assert!(review_guard_violation(Some("execute"), Some("pending"))
+            .unwrap_or_default()
+            .contains("execute"));
+        assert!(review_guard_violation(Some("denied"), Some("pending"))
+            .unwrap_or_default()
+            .contains("denied"));
+        assert!(
+            review_guard_violation(Some("await_approval"), Some("approved"))
+                .unwrap_or_default()
+                .contains("already")
+        );
+        assert!(review_guard_violation(Some("await_approval"), Some("rejected")).is_some());
+        assert!(review_guard_violation(Some("await_approval"), None).is_some());
+        assert!(review_guard_violation(None, Some("pending")).is_some());
+    }
+
+    #[test]
+    fn reviewer_identity_falls_back_to_the_control_plane() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert_eq!(reviewer_identity(&headers), "control-plane");
+
+        headers.insert("x-user-id", "user-42".parse().unwrap());
+        assert_eq!(reviewer_identity(&headers), "user-42");
+
+        // A blank header must not be recorded as the reviewer.
+        let mut blank = axum::http::HeaderMap::new();
+        blank.insert("x-user-id", "   ".parse().unwrap());
+        assert_eq!(reviewer_identity(&blank), "control-plane");
+    }
+
+    // -----------------------------------------------------------------------
+    // Live-DB proofs
+    // -----------------------------------------------------------------------
+
+    async fn set_autonomy(pool: &PgPool, tenant: &str, mode: &str, kill_switch: bool) {
+        sqlx::query(
+            "INSERT INTO sales_autonomy_state (tenant_id, mode, kill_switch) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (tenant_id) DO UPDATE SET mode = EXCLUDED.mode, \
+                 kill_switch = EXCLUDED.kill_switch",
+        )
+        .bind(tenant)
+        .bind(mode)
+        .bind(kill_switch)
+        .execute(pool)
+        .await
+        .expect("seed autonomy state");
+    }
+
+    async fn insert_decision(
+        pool: &PgPool,
+        tenant: &str,
+        action_type: &str,
+        enforcement: &str,
+        review_status: Option<&str>,
+        autonomy_mode: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_decisions \
+                 (id, tenant_id, action, autonomy_mode, rationale, enforcement, review_status) \
+             VALUES ($1, $2, $3, $4, 'control-test decision', $5, $6)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(action_type)
+        .bind(autonomy_mode)
+        .bind(enforcement)
+        .bind(review_status)
+        .execute(pool)
+        .await
+        .expect("insert decision");
+        id
+    }
+
+    /// Claim one specific action.
+    ///
+    /// Scoped to the id rather than taking the global claim: retrying the broad
+    /// claim both raced every other test sharing this database and could steal
+    /// their work.
+    async fn claim_one(queue: &ActionQueue, action_id: Uuid) -> crate::actions::LeasedAction {
+        queue
+            .claim_filtered(1, crate::actions::DEFAULT_LEASE_SECS, Some(&[action_id]))
+            .await
+            .expect("claim")
+            .into_iter()
+            .find(|leased| leased.id() == action_id)
+            .unwrap_or_else(|| panic!("action {action_id} was never claimable"))
+    }
+
+    /// A decision recorded as awaiting a human, with one linked action parked
+    /// in `awaiting_approval` through the real queue machinery.
+    async fn seed_awaiting_approval(
+        pool: &PgPool,
+        tenant: &str,
+        label: &str,
+        decision_action: &str,
+    ) -> (Uuid, Uuid) {
+        let decision_id = insert_decision(
+            pool,
+            tenant,
+            decision_action,
+            "await_approval",
+            Some("pending"),
+            "approval_required",
+        )
+        .await;
+        let queue = ActionQueue::new(pool.clone(), format!("seed-{label}-{tenant}"));
+        let action = queue
+            .enqueue(
+                tenant,
+                crate::actions::action_type::ENRICH,
+                crate::actions::entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("review-test:{tenant}:{label}"),
+                serde_json::json!({}),
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+                100,
+                Some(decision_id),
+            )
+            .await
+            .expect("enqueue action");
+        let leased = claim_one(&queue, action.id).await;
+        assert!(
+            queue
+                .finish(
+                    &leased.fence(),
+                    crate::actions::ActionOutcome::AwaitApproval
+                )
+                .await
+                .expect("finish awaiting approval"),
+            "the claim must still be live"
+        );
+        (decision_id, action.id)
+    }
+
+    async fn cleanup(pool: &PgPool, tenant: &str) {
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM sales_decisions WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM sales_autonomy_state WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .ok();
+    }
+
+    /// (c) Approving a legitimate pending review releases the parked work.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn approve_releases_awaiting_approval_actions_to_queued() {
+        let Some(pool) = crate::test_db::canonical_test_pool("review_approve").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("approve");
+        set_autonomy(&pool, &tenant, "approval_required", false).await;
+        let (decision_id, action_id) =
+            seed_awaiting_approval(&pool, &tenant, "approve", "enrich").await;
+
+        let result = apply_review(
+            &pool,
+            &tenant,
+            decision_id,
+            ReviewAction::Approve,
+            "ship it",
+            "tester",
+        )
+        .await
+        .expect("approve must succeed");
+
+        assert_eq!(result.status, "approved");
+        assert_eq!(
+            result.actions_affected, 1,
+            "the linked action must be released"
+        );
+        assert!(
+            result.revalidation.allowed,
+            "the gates must permit an approved enrich action: {:?}",
+            result.revalidation.reasons
+        );
+
+        let (state, attempt, last_error, due_at, owner, token, expires): (
+            String,
+            i32,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+            Option<String>,
+            Option<Uuid>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT state, attempt, last_error, due_at, lease_owner, lease_token, lease_expires_at \
+             FROM sales_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "queued");
+        assert_eq!(attempt, 0, "a released action gets a fresh attempt budget");
+        assert_eq!(last_error, None);
+        assert!(due_at <= chrono::Utc::now());
+        assert_eq!(owner, None);
+        assert_eq!(token, None);
+        assert_eq!(expires, None);
+
+        let (review_status, reviewed_by, reviewed_at, review_note): (
+            Option<String>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT review_status, reviewed_by, reviewed_at, review_note \
+             FROM sales_decisions WHERE id = $1",
+        )
+        .bind(decision_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(review_status.as_deref(), Some("approved"));
+        assert_eq!(reviewed_by.as_deref(), Some("tester"));
+        assert!(reviewed_at.is_some());
+        assert_eq!(review_note.as_deref(), Some("ship it"));
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    /// (c) Rejecting moves the parked work to `cancelled` with the note.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn reject_cancels_awaiting_approval_actions() {
+        let Some(pool) = crate::test_db::canonical_test_pool("review_reject").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("reject");
+        set_autonomy(&pool, &tenant, "approval_required", false).await;
+        let (decision_id, action_id) =
+            seed_awaiting_approval(&pool, &tenant, "reject", "enrich").await;
+
+        let result = apply_review(
+            &pool,
+            &tenant,
+            decision_id,
+            ReviewAction::Reject,
+            "not now",
+            "tester",
+        )
+        .await
+        .expect("reject must succeed");
+
+        assert_eq!(result.status, "rejected");
+        assert!(!result.revalidation.allowed);
+        assert_eq!(result.actions_affected, 1);
+
+        let (state, last_error, completed): (
+            String,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        ) = sqlx::query_as(
+            "SELECT state, last_error, completed_at FROM sales_actions WHERE id = $1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "cancelled");
+        assert_eq!(last_error.as_deref(), Some("not now"));
+        assert!(completed.is_some());
+
+        let (review_status, note): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT review_status, review_note FROM sales_decisions WHERE id = $1")
+                .bind(decision_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(review_status.as_deref(), Some("rejected"));
+        assert_eq!(note.as_deref(), Some("not now"));
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    /// (d) Approval is not a bypass: a decision whose gates now refuse is
+    /// cancelled, durably recorded as rejected, and the reasons are reported.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn approval_refused_by_gates_cancels_work_and_reports_reasons() {
+        let Some(pool) = crate::test_db::canonical_test_pool("review_revalidate").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("gates");
+        // Both hard stops fire: no autonomy, kill switch engaged.
+        set_autonomy(&pool, &tenant, "disabled", true).await;
+        let (decision_id, action_id) =
+            seed_awaiting_approval(&pool, &tenant, "gates", "contact").await;
+
+        let result = apply_review(
+            &pool,
+            &tenant,
+            decision_id,
+            ReviewAction::Approve,
+            "please send",
+            "tester",
+        )
+        .await
+        .expect("the call itself succeeds; the gates refuse the work");
+
+        assert!(!result.revalidation.allowed, "the gates must refuse");
+        assert!(
+            !result.revalidation.reasons.is_empty(),
+            "the refusal must name the failed gate(s)"
+        );
+        assert_eq!(result.actions_affected, 1);
+
+        let state: String = sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+            .bind(action_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "cancelled", "refused approval must not release work");
+
+        let (review_status, note): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT review_status, review_note FROM sales_decisions WHERE id = $1")
+                .bind(decision_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(review_status.as_deref(), Some("rejected"));
+        let note = note.unwrap_or_default();
+        assert!(
+            note.contains("revalidation"),
+            "the refusal reasons must be durable on the decision, got: {note}"
+        );
+
+        // A second review attempt must not be able to flip the terminal state.
+        let again = apply_review(
+            &pool,
+            &tenant,
+            decision_id,
+            ReviewAction::Approve,
+            "",
+            "tester",
+        )
+        .await;
+        assert!(again.is_err(), "a terminal review must not be overwritten");
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    /// (e) Exceptions select on the decision's own recorded state, not the
+    /// autonomy mode: an `execute` decision recorded under `assisted` must not
+    /// be an exception.
+    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    #[tokio::test]
+    async fn exceptions_select_decision_state_not_autonomy_mode() {
+        let Some(pool) = crate::test_db::canonical_test_pool("exceptions_predicate").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exceptions");
+
+        let awaiting = insert_decision(
+            &pool,
+            &tenant,
+            "contact",
+            "await_approval",
+            Some("pending"),
+            "approval_required",
+        )
+        .await;
+        let denied = insert_decision(
+            &pool,
+            &tenant,
+            "contact",
+            "denied",
+            Some("not_required"),
+            "autonomous_guarded",
+        )
+        .await;
+        // The trap: the old predicate matched this row via autonomy_mode.
+        let executed = insert_decision(
+            &pool,
+            &tenant,
+            "contact",
+            "execute",
+            Some("not_required"),
+            "assisted",
+        )
+        .await;
+
+        let rows = exception_decisions(&pool, &tenant, 50, 0)
+            .await
+            .expect("exceptions query");
+        let ids: Vec<Uuid> = rows.into_iter().map(|row| row.id).collect();
+
+        assert!(
+            ids.contains(&awaiting),
+            "await_approval must be an exception"
+        );
+        assert!(ids.contains(&denied), "denied must be an exception");
+        assert!(
+            !ids.contains(&executed),
+            "an execute decision must not be an exception regardless of autonomy mode"
+        );
+
+        cleanup(&pool, &tenant).await;
     }
 }

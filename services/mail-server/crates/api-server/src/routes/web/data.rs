@@ -15,13 +15,12 @@
 //!   "data unavailable" state so required financial and operational data
 //!   never reports false zeroes (audit F14).
 
-use std::collections::HashMap;
-
 use ui_foundation::axum_router::RouteData;
 use ui_foundation::view_data::{
     BulkActionData, DataCell, DataRowData, FilterSelectData, KpiCardData, ListPageData, TableData,
 };
 
+use crate::analytics_metrics::SendCohortCounts;
 use crate::middleware::auth::AuthUser;
 use crate::state::AppState;
 
@@ -1350,44 +1349,31 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) ->
     data
 }
 
+/// The canonical send-cohort aggregate (ONE KPI definition) for the last 30
+/// days, scoped to one tenant or fleet-wide. Delegates to
+/// [`crate::analytics_metrics::send_cohort_counts`] so the console cannot
+/// drift from the JSON analytics API; a failed read stays
+/// [`LoadState::Unavailable`] (never a fabricated all-zero map).
 async fn event_aggregate(
     state: &AppState,
     query_id: &str,
     cid: &str,
-    where_sql: &str,
-    binds: &[String],
-) -> LoadState<HashMap<String, i64>> {
-    let sql = format!(
-        "SELECT
-            COALESCE(SUM(CASE WHEN event_type = 'sent' THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN event_type = 'delivered' THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN event_type = 'opened' THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN event_type = 'clicked' THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN event_type = 'bounced' THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN event_type = 'complained' THEN 1 ELSE 0 END), 0)::bigint
-         FROM events WHERE {where_sql}"
-    );
-    let mut query = sqlx::query_as::<_, (i64, i64, i64, i64, i64, i64)>(&sql);
-    for value in binds {
-        query = query.bind(value);
-    }
-    let row = load_query(query_id, cid, query.fetch_optional(&state.db)).await;
-    match row {
-        // A missing optional events relation (or an aggregate over zero
-        // rows) is an honest all-zero map; query failures stay
-        // Unavailable (audit F14).
-        LoadState::Loaded(None) => LoadState::Loaded(HashMap::new()),
-        LoadState::Loaded(Some((sent, delivered, opened, clicked, bounced, complained))) => {
-            let mut out = HashMap::new();
-            out.insert("sent".to_string(), sent);
-            out.insert("delivered".to_string(), delivered);
-            out.insert("opened".to_string(), opened);
-            out.insert("clicked".to_string(), clicked);
-            out.insert("bounced".to_string(), bounced);
-            out.insert("complained".to_string(), complained);
-            LoadState::Loaded(out)
+    tenant_id: Option<&str>,
+) -> LoadState<SendCohortCounts> {
+    let columns = crate::analytics_metrics::detect_event_columns(state).await;
+    match crate::analytics_metrics::send_cohort_counts(&state.db, tenant_id, "30 days", columns)
+        .await
+    {
+        Ok(counts) => LoadState::Loaded(counts),
+        Err(error) => {
+            tracing::error!(
+                query = query_id,
+                correlation_id = cid,
+                error = %error,
+                "web data query failed; data unavailable"
+            );
+            LoadState::Unavailable
         }
-        LoadState::Unavailable => LoadState::Unavailable,
     }
 }
 
@@ -1410,20 +1396,13 @@ fn rate(part: i64, whole: i64) -> String {
 }
 
 async fn web_analytics(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
-    let agg_state = event_aggregate(
-        state,
-        "web.analytics.aggregate",
-        cid,
-        "tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval",
-        &[tenant.to_string()],
-    )
-    .await;
+    let agg_state = event_aggregate(state, "web.analytics.aggregate", cid, Some(tenant)).await;
     let agg_loaded = !agg_state.is_unavailable();
     let agg = agg_state.unwrap_or_default();
-    let sent = *agg.get("sent").unwrap_or(&0);
-    let delivered = agg.get("delivered").copied().unwrap_or(0);
-    let opened = agg.get("opened").copied().unwrap_or(0);
-    let clicked = agg.get("clicked").copied().unwrap_or(0);
+    let sent = agg.sent;
+    let delivered = agg.delivered;
+    let opened = agg.opened;
+    let clicked = agg.clicked;
 
     let mut data = base_list(
         "Analytics",
@@ -1443,19 +1422,12 @@ async fn web_analytics(state: &AppState, tenant: &str, cid: &str) -> ListPageDat
 }
 
 async fn web_reports(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
-    let agg_state = event_aggregate(
-        state,
-        "web.reports.aggregate",
-        cid,
-        "tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval",
-        &[tenant.to_string()],
-    )
-    .await;
+    let agg_state = event_aggregate(state, "web.reports.aggregate", cid, Some(tenant)).await;
     let agg_loaded = !agg_state.is_unavailable();
     let agg = agg_state.unwrap_or_default();
-    let sent = *agg.get("sent").unwrap_or(&0);
-    let bounced = agg.get("bounced").copied().unwrap_or(0);
-    let delivered = agg.get("delivered").copied().unwrap_or(0);
+    let sent = agg.sent;
+    let bounced = agg.bounced;
+    let delivered = agg.delivered;
     let campaigns = loaded_count(
         state,
         "web.reports.campaigns",
@@ -1549,20 +1521,13 @@ async fn web_reports(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
 }
 
 async fn web_deliverability(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
-    let agg_state = event_aggregate(
-        state,
-        "web.deliverability.aggregate",
-        cid,
-        "tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval",
-        &[tenant.to_string()],
-    )
-    .await;
+    let agg_state = event_aggregate(state, "web.deliverability.aggregate", cid, Some(tenant)).await;
     let agg_loaded = !agg_state.is_unavailable();
     let agg = agg_state.unwrap_or_default();
-    let sent = *agg.get("sent").unwrap_or(&0);
-    let delivered = agg.get("delivered").copied().unwrap_or(0);
-    let bounced = agg.get("bounced").copied().unwrap_or(0);
-    let complained = agg.get("complained").copied().unwrap_or(0);
+    let sent = agg.sent;
+    let delivered = agg.delivered;
+    let bounced = agg.bounced;
+    let complained = agg.complained;
 
     let rows = load_query(
         "web.deliverability.event_rows",
@@ -3035,6 +3000,82 @@ async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageDat
     data
 }
 
+/// Canonical join for the CP's lead-shaped SSR loaders (`cp_sales`,
+/// `cp_discovery`).
+///
+/// Identity and status come from the canonical contact/account/enrollment
+/// model; `sales_leads` is only the bridge providing the row id and the
+/// lead-only fields (`source`, `score`, timestamps — `notes`/`tags`/
+/// `deal_value` exist there too and stay available to the API surface).
+/// The derived `status` is the same mapping the admin API uses, expressed in
+/// the legacy label set the UI already renders, so the page shape does not
+/// change. Rows without a canonical `contact_id` (pre-upgrade data only) are
+/// not listed until the transition migration backfills the bridge.
+const CP_LEADS_CANONICAL_CTE: &str = r#"
+    WITH canonical_leads AS (
+        SELECT
+            l.id,
+            l.source,
+            l.score,
+            l.notes,
+            l.deal_value,
+            l.created_at,
+            l.updated_at,
+            COALESCE(NULLIF(cp.value, ''), NULLIF(l.contact_email, '')) AS contact_email,
+            COALESCE(NULLIF(c.full_name, ''), NULLIF(l.contact_name, '')) AS contact_name,
+            COALESCE(NULLIF(a.company, ''), NULLIF(l.company_name, '')) AS company_name,
+            COALESCE(NULLIF(a.domain, ''), NULLIF(l.domain, '')) AS domain,
+            CASE
+                WHEN c.lifecycle = 'customer' OR a.lifecycle = 'customer' THEN 'converted'
+                WHEN c.lifecycle = 'meeting_booked' OR e.state = 'meeting_booked' THEN 'demo_scheduled'
+                WHEN c.lifecycle = 'replied' OR e.state = 'replied' THEN 'engaged'
+                WHEN c.lifecycle = 'do_not_contact'
+                     OR e.state IN ('suppressed', 'failed') THEN 'lost'
+                WHEN c.lifecycle = 'left_company'
+                     OR a.lifecycle = 'disqualified' THEN 'unqualified'
+                WHEN a.lifecycle = 'qualified' THEN 'qualified'
+                WHEN a.lifecycle = 'nurturing' THEN 'prospect'
+                WHEN e.state IN ('active', 'waiting', 'pending', 'completed')
+                     OR c.lifecycle = 'snoozed' THEN 'contacted'
+                ELSE 'new'
+            END AS status
+        FROM sales_contacts c
+        LEFT JOIN sales_accounts a
+               ON a.id = c.account_id AND a.tenant_id = c.tenant_id
+        LEFT JOIN LATERAL (
+            SELECT cp.value
+            FROM sales_contact_points cp
+            WHERE cp.contact_id = c.id
+              AND cp.tenant_id = c.tenant_id
+              AND cp.channel = 'email'
+            ORDER BY (cp.suppressed_at IS NULL) DESC,
+                     cp.confidence DESC,
+                     cp.created_at DESC
+            LIMIT 1
+        ) cp ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT e.state
+            FROM sales_enrollments e
+            WHERE e.contact_id = c.id AND e.tenant_id = c.tenant_id
+            ORDER BY CASE
+                         WHEN e.state IN ('completed', 'failed', 'suppressed') THEN 1
+                         ELSE 0
+                     END,
+                     e.updated_at DESC, e.id
+            LIMIT 1
+        ) e ON TRUE
+        JOIN LATERAL (
+            SELECT l.id, l.source, l.score, l.notes, l.deal_value,
+                   l.contact_email, l.contact_name, l.company_name, l.domain,
+                   l.created_at, l.updated_at
+            FROM sales_leads l
+            WHERE l.contact_id = c.id AND l.tenant_id = c.tenant_id
+            ORDER BY l.created_at DESC, l.id DESC
+            LIMIT 1
+        ) l ON TRUE
+    )
+"#;
+
 async fn cp_sales(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let stage = if q.stage.is_empty() {
         q.status.clone()
@@ -3062,7 +3103,10 @@ async fn cp_sales(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
         state,
         "cp.sales.count",
         cid,
-        &format!("SELECT COUNT(*)::bigint FROM sales_leads WHERE {where_clause}"),
+        &format!(
+            "{CP_LEADS_CANONICAL_CTE} SELECT COUNT(*)::bigint FROM canonical_leads \
+             WHERE {where_clause}"
+        ),
         &where_sql.binds,
     )
     .await;
@@ -3074,7 +3118,8 @@ async fn cp_sales(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
             cid,
             async {
             let q5 = format!(
-                "SELECT id, company_name, COALESCE(status, ''), score, created_at FROM sales_leads WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                "{CP_LEADS_CANONICAL_CTE} SELECT id, company_name, COALESCE(status, ''), score, created_at \
+                 FROM canonical_leads WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
@@ -3101,7 +3146,10 @@ async fn cp_sales(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
         state,
         "cp.sales.qualified",
         cid,
-        "SELECT COUNT(*)::bigint FROM sales_leads WHERE status = 'qualified'",
+        &format!(
+            "{CP_LEADS_CANONICAL_CTE} SELECT COUNT(*)::bigint FROM canonical_leads \
+             WHERE status = 'qualified'"
+        ),
         &[],
     )
     .await;
@@ -4031,17 +4079,17 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
 }
 
 async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
-    let rows = load_query(
-        "cp.discovery.list",
-        cid,
-        async {
-            sqlx::query_as::<_, (String, i64)>(
-                "SELECT COALESCE(source, 'unknown'), COUNT(*)::bigint FROM sales_leads GROUP BY 1 ORDER BY 2 DESC LIMIT 25",
-            )
-            .fetch_all(&state.db)
-            .await
-        },
-    )
+    // Same canonical row set as cp_sales (source is a lead-only field on the
+    // bridge), so the discovery page cannot count leads the pipeline page
+    // would not show.
+    let rows = load_query("cp.discovery.list", cid, async {
+        sqlx::query_as::<_, (String, i64)>(&format!(
+            "{CP_LEADS_CANONICAL_CTE} SELECT COALESCE(source, 'unknown'), COUNT(*)::bigint \
+                 FROM canonical_leads GROUP BY 1 ORDER BY 2 DESC LIMIT 25"
+        ))
+        .fetch_all(&state.db)
+        .await
+    })
     .await
     .rows_or_unavailable();
     let rows_unavailable = rows.1;
@@ -4051,7 +4099,7 @@ async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
         state,
         "cp.discovery.total",
         cid,
-        "SELECT COUNT(*)::bigint FROM sales_leads",
+        &format!("{CP_LEADS_CANONICAL_CTE} SELECT COUNT(*)::bigint FROM canonical_leads"),
         &[],
     )
     .await;
@@ -4081,20 +4129,13 @@ async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
 }
 
 async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
-    let agg_state = event_aggregate(
-        state,
-        "cp.analytics.aggregate",
-        cid,
-        "timestamp >= NOW() - '30 days'::interval",
-        &[],
-    )
-    .await;
+    let agg_state = event_aggregate(state, "cp.analytics.aggregate", cid, None).await;
     let agg_loaded = !agg_state.is_unavailable();
     let agg = agg_state.unwrap_or_default();
-    let sent = *agg.get("sent").unwrap_or(&0);
-    let delivered = agg.get("delivered").copied().unwrap_or(0);
-    let bounced = agg.get("bounced").copied().unwrap_or(0);
-    let complained = agg.get("complained").copied().unwrap_or(0);
+    let sent = agg.sent;
+    let delivered = agg.delivered;
+    let bounced = agg.bounced;
+    let complained = agg.complained;
 
     let mut data = base_list(
         "Analytics",

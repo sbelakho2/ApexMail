@@ -5,9 +5,12 @@
 //! comparison returns no data, the insight is not generated (no fabricated content).
 //!
 //! Metric conventions come from [`crate::analytics_metrics`]: comparisons use
-//! event-occurrence windows over DISTINCT messages, so repeat opens/clicks on
-//! one message cannot fake an engagement change and current message status is
-//! never mixed into a historical cohort.
+//! SEND-COHORT windows (`(message_id, lower(recipient))` rows whose `sent`
+//! event falls in the window, outcomes attached to that send), so repeat
+//! opens/clicks on one recipient-send cannot fake an engagement change,
+//! current message status is never mixed into a historical cohort, and the
+//! previous period is frozen at its own end (a later outcome cannot rewrite
+//! it).
 
 use axum::extract::{Query, State};
 use axum::routing::get;
@@ -16,7 +19,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::analytics_metrics::{
-    detect_event_columns, distinct_message_counts, distinct_message_counts_previous, EventColumns,
+    detect_event_columns, send_cohort_counts, send_cohort_counts_previous, send_cohort_time_series,
+    AnalyticsRange, EventColumns,
 };
 use crate::error::ApiError;
 use crate::middleware::auth::AuthUser;
@@ -114,26 +118,20 @@ fn calc_change_pct(current: f64, previous: f64) -> (f64, String) {
     (pct, direction.into())
 }
 
-/// Successful sends per day, by event occurrence (DISTINCT messages).
-/// `days` is bound, never rendered into SQL.
+/// Successful sends per day from the canonical send-cohort time series —
+/// the same definition the analytics API serves (ONE KPI definition). A
+/// failed query propagates as an error instead of masquerading as "no
+/// sends".
 async fn sent_volume_by_day(
     db: &sqlx::PgPool,
     columns: EventColumns,
-    days: i32,
-) -> Vec<(String, i64)> {
-    let type_col = columns.type_col.as_sql();
-    let time_col = columns.time_col.as_sql();
-
-    sqlx::query_as::<_, (String, i64)>(&format!(
-        "SELECT DATE({time_col})::text, COUNT(DISTINCT message_id)::bigint
-         FROM events
-         WHERE {type_col} = 'sent' AND {time_col} >= NOW() - make_interval(days => $1::int)
-         GROUP BY DATE({time_col}) ORDER BY 1"
-    ))
-    .bind(days)
-    .fetch_all(db)
-    .await
-    .unwrap_or_default()
+    range: AnalyticsRange,
+) -> Result<Vec<(String, i64)>, ApiError> {
+    let series = send_cohort_time_series(db, None, range, columns).await?;
+    Ok(series
+        .into_iter()
+        .map(|point| (point.date, point.sent))
+        .collect())
 }
 
 async fn get_insights(
@@ -151,75 +149,87 @@ async fn get_insights(
     let mut trends: Vec<TrendInsight> = Vec::new();
     let mut recommendations: Vec<Recommendation> = Vec::new();
 
-    // Canonical, like-for-like period comparison: DISTINCT messages bucketed
-    // by event occurrence, current window vs the immediately preceding one.
+    // Canonical, like-for-like period comparison: send cohorts in the
+    // current window vs the immediately preceding one. The previous period's
+    // outcome cutoff is its OWN end, so outcomes that happened after it
+    // cannot rewrite it.
     let columns: EventColumns = detect_event_columns(&state).await;
-    let current = distinct_message_counts(db, None, &interval, columns).await?;
-    let previous = distinct_message_counts_previous(db, None, &interval, columns).await?;
+    let current = send_cohort_counts(db, None, &interval, columns).await?;
+    let previous = send_cohort_counts_previous(db, None, &interval, columns).await?;
 
     // ─── Delivery Rate Insight ──────────────────────────────────────────
+    // Both rates must exist to compare: an empty send cohort yields None,
+    // which is not a 0% delivery rate.
     if current.sent > 10 {
-        let (pct, dir) = calc_change_pct(current.delivery_rate(), previous.delivery_rate());
-        if pct.abs() > 2.0 {
-            insights.push(Insight {
-                category: "deliverability".into(),
-                title: if dir == "down" {
-                    "Delivery rate decreased".into()
-                } else {
-                    "Delivery rate improved".into()
-                },
-                description: format!(
-                    "Delivery rate is {:.1}% vs {:.1}% in the previous period ({:+.1}% change)",
-                    current.delivery_rate() * 100.0,
-                    previous.delivery_rate() * 100.0,
-                    pct
-                ),
-                severity: if dir == "down" && pct < -5.0 {
-                    "warning"
-                } else if dir == "down" {
-                    "info"
-                } else {
-                    "positive"
-                }
-                .into(),
-                metric_name: "delivery_rate".into(),
-                current_value: format!("{:.1}%", current.delivery_rate() * 100.0),
-                previous_value: format!("{:.1}%", previous.delivery_rate() * 100.0),
-                change_pct: pct,
-                direction: dir,
-            });
+        if let (Some(current_rate), Some(previous_rate)) =
+            (current.delivery_rate(), previous.delivery_rate())
+        {
+            let (pct, dir) = calc_change_pct(current_rate, previous_rate);
+            if pct.abs() > 2.0 {
+                insights.push(Insight {
+                    category: "deliverability".into(),
+                    title: if dir == "down" {
+                        "Delivery rate decreased".into()
+                    } else {
+                        "Delivery rate improved".into()
+                    },
+                    description: format!(
+                        "Delivery rate is {:.1}% vs {:.1}% in the previous period ({:+.1}% change)",
+                        current_rate * 100.0,
+                        previous_rate * 100.0,
+                        pct
+                    ),
+                    severity: if dir == "down" && pct < -5.0 {
+                        "warning"
+                    } else if dir == "down" {
+                        "info"
+                    } else {
+                        "positive"
+                    }
+                    .into(),
+                    metric_name: "delivery_rate".into(),
+                    current_value: format!("{:.1}%", current_rate * 100.0),
+                    previous_value: format!("{:.1}%", previous_rate * 100.0),
+                    change_pct: pct,
+                    direction: dir,
+                });
+            }
         }
     }
 
     // ─── Bounce Rate Insight ────────────────────────────────────────────
     if current.sent > 0 {
-        let (pct, dir) = calc_change_pct(current.bounce_rate(), previous.bounce_rate());
-        if pct.abs() > 10.0 || (dir == "up" && current.bounced > 5) {
-            insights.push(Insight {
-                category: "deliverability".into(),
-                title: if dir == "up" {
-                    "Bounce rate increased".into()
-                } else {
-                    "Bounce rate decreased".into()
-                },
-                description: format!(
-                    "Bounce rate changed {:+2.1}% this period — check DNS configuration for affected domains",
-                    pct
-                ),
-                severity: if dir == "up" && pct > 20.0 {
-                    "critical"
-                } else if dir == "up" {
-                    "warning"
-                } else {
-                    "positive"
-                }
-                .into(),
-                metric_name: "bounce_rate".into(),
-                current_value: format!("{:.1}%", current.bounce_rate() * 100.0),
-                previous_value: format!("{:.1}%", previous.bounce_rate() * 100.0),
-                change_pct: pct,
-                direction: dir,
-            });
+        if let (Some(current_rate), Some(previous_rate)) =
+            (current.bounce_rate(), previous.bounce_rate())
+        {
+            let (pct, dir) = calc_change_pct(current_rate, previous_rate);
+            if pct.abs() > 10.0 || (dir == "up" && current.bounced > 5) {
+                insights.push(Insight {
+                    category: "deliverability".into(),
+                    title: if dir == "up" {
+                        "Bounce rate increased".into()
+                    } else {
+                        "Bounce rate decreased".into()
+                    },
+                    description: format!(
+                        "Bounce rate changed {:+2.1}% this period — check DNS configuration for affected domains",
+                        pct
+                    ),
+                    severity: if dir == "up" && pct > 20.0 {
+                        "critical"
+                    } else if dir == "up" {
+                        "warning"
+                    } else {
+                        "positive"
+                    }
+                    .into(),
+                    metric_name: "bounce_rate".into(),
+                    current_value: format!("{:.1}%", current_rate * 100.0),
+                    previous_value: format!("{:.1}%", previous_rate * 100.0),
+                    change_pct: pct,
+                    direction: dir,
+                });
+            }
         }
     }
 
@@ -355,9 +365,9 @@ async fn get_insights(
     }
 
     // ─── Send Volume Growth Trend ───────────────────────────────────────
-    // Successful sends bucketed by event occurrence — never message
+    // Successful sends from the canonical send-cohort series — never message
     // creation, which counts mail that may never have left the queue.
-    let volume_rows = sent_volume_by_day(db, columns, 30).await;
+    let volume_rows = sent_volume_by_day(db, columns, AnalyticsRange::Days30).await?;
 
     if volume_rows.len() >= 7 {
         let recent_vol: Vec<i64> = volume_rows.iter().rev().take(7).map(|(_, c)| *c).collect();
@@ -490,9 +500,9 @@ async fn get_trends(
     let db = &state.db;
     let mut trends: Vec<TrendInsight> = Vec::new();
 
-    // Send volume trend — successful sends by event occurrence.
+    // Send volume trend — successful sends from the canonical cohort series.
     let columns: EventColumns = detect_event_columns(&state).await;
-    let volume_rows = sent_volume_by_day(db, columns, 30).await;
+    let volume_rows = sent_volume_by_day(db, columns, AnalyticsRange::Days30).await?;
 
     if volume_rows.len() >= 7 {
         let recent: Vec<i64> = volume_rows.iter().rev().take(7).map(|(_, c)| *c).collect();
@@ -618,13 +628,12 @@ async fn get_recommendations(
     let db = &state.db;
     let mut recommendations: Vec<Recommendation> = Vec::new();
 
-    // Check bounce rate for DNS recommendation — canonical distinct-message
-    // rate over event occurrence (fraction 0..1).
+    // Check bounce rate for DNS recommendation — canonical send-cohort rate
+    // (fraction 0..1, absent when there is no send cohort).
     let columns = detect_event_columns(&state).await;
-    let counts = distinct_message_counts(db, None, "7 days", columns).await?;
-    let bounce_rate = counts.bounce_rate();
+    let counts = send_cohort_counts(db, None, "7 days", columns).await?;
 
-    if bounce_rate > 0.05 {
+    if let Some(bounce_rate) = counts.bounce_rate().filter(|rate| *rate > 0.05) {
         recommendations.push(Recommendation {
             category: "deliverability".into(),
             priority: "high".into(),
@@ -764,13 +773,17 @@ mod tests {
         assert_eq!(parse_lookback_days("30d"), 30);
     }
 
-    /// The volume trend counts DISTINCT successfully-sent messages by event
-    /// occurrence: two send copies of one message on one day count once.
+    /// UPDATED to the send-cohort truth: the volume trend counts
+    /// recipient-send cohort rows (message_id + lowercased recipient). The
+    /// OLD assertion counted one row per message PER DAY (a duplicate send
+    /// copy on another day was a second row); the cohort unit collapses all
+    /// sent events of one recipient-send into a single row bucketed at its
+    /// FIRST send (`MIN(sent_at)`), so the expected total is 2, not 3.
     /// Gated on TEST_DATABASE_URL.
     #[tokio::test]
-    async fn sent_volume_by_day_counts_distinct_messages() {
+    async fn sent_volume_by_day_counts_send_cohort_rows() {
         let Some(pool) = crate::test_db::canonical_pool("insights_sent_volume").await else {
-            eprintln!("skipping sent_volume_by_day_counts_distinct_messages: no TEST_DATABASE_URL");
+            eprintln!("skipping sent_volume_by_day_counts_send_cohort_rows: no TEST_DATABASE_URL");
             return;
         };
 
@@ -797,17 +810,31 @@ mod tests {
             }
         };
 
-        // Two copies of message A today (count once), one copy of B today,
-        // one copy of B three days ago (separate day bucket).
+        // Two copies of message A today (one cohort row); one copy of B
+        // today and one three days ago — the SAME recipient-send, so one
+        // cohort row bucketed at its first send.
         seed(message_a.clone(), 2).await;
         seed(message_a, 3).await;
         seed(message_b.clone(), 4).await;
         seed(message_b, 3 * 24 * 60 + 5).await;
 
         let columns = crate::analytics_metrics::EventColumns::default();
-        let rows = sent_volume_by_day(&pool, columns, 30).await;
+        let rows = sent_volume_by_day(&pool, columns, AnalyticsRange::Days30)
+            .await
+            .expect("canonical series must load");
         let total: i64 = rows.iter().map(|(_, c)| *c).sum();
-        assert_eq!(total, 3, "duplicate send copies must count once: {rows:?}");
+        assert_eq!(
+            total, 2,
+            "one cohort row per recipient-send, bucketed at MIN(sent_at): {rows:?}"
+        );
+        // A buckets today (both copies today); B buckets on its FIRST send,
+        // three days ago — the second copy does not create a new cohort row
+        // or a second day bucket.
+        assert_eq!(
+            rows.len(),
+            2,
+            "two cohort rows on two distinct send days: {rows:?}"
+        );
 
         pool.close().await;
     }

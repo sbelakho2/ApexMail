@@ -46,6 +46,12 @@ futures.workspace          = true
 # The experiment engine draws Thompson samples through the ONE Beta sampler
 # (analytics::campaign_autopilot::sample_beta), which takes a `rand::Rng`.
 rand.workspace             = true
+# Opaque v2 unsubscribe tokens: 32 random bytes (rand::rngs::OsRng) are
+# URL-safe base64-encoded for the link and only their SHA-256 hash is stored
+# (migration 203's sales_unsubscribe_tokens). Both crates are already in the
+# workspace dependency table.
+base64.workspace           = true
+sha2.workspace             = true
 
 [dev-dependencies]
 # Test databases bootstrap through the REAL production migrator (audit F01):

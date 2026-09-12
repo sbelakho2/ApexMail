@@ -31,6 +31,8 @@ use crate::{
     dispatcher::ProductionCampaignDispatcher,
     enrichment::EnrichmentService,
     inbox::InboxManager,
+    intelligence::SalesIntelligence,
+    personalization::MessageStrategist,
     types::{CreateConversionBody, LeadStatus, SalesError},
 };
 
@@ -56,6 +58,12 @@ pub struct AppState {
     pub config: SalesConfig,
     /// In-memory rate limit fallback used when Redis is unavailable.
     pub rate_limit_fallback: Arc<Mutex<HashMap<String, RateLimitEntry>>>,
+    /// §12 — the configured evidence-grounded intelligence provider (or the
+    /// deterministic offline implementation when no AI service is configured).
+    pub intelligence: Arc<dyn SalesIntelligence>,
+    /// §13/§14 — the structured message strategist, bound to the canonical
+    /// verified knowledge base.
+    pub strategist: Arc<MessageStrategist>,
 }
 
 /// An in-memory rate-limit window entry (count + window start).
@@ -1236,16 +1244,32 @@ async fn start_campaign(
     let tenant_id = tenant_id.0;
     let span = tracing::info_span!("start_campaign", tenant_id = %tenant_id, campaign_id = %id, operation = "start_campaign");
     async move {
-        // Fix I-1: without a dispatcher the campaign would flip to 'active'
-        // and silently send nothing. Fail loudly with 503 instead.
-        if !state.campaigns.has_email_dispatcher() {
-            return Err(SalesError::ServiceUnavailable(
-                "email dispatcher not configured — campaign start refused (no emails would be sent)"
-                    .into(),
-            ));
+        // A legacy campaign no longer dispatches mail itself: starting it
+        // materializes canonical enrollments, which the durable action worker
+        // then executes through the Decision Packet. There is therefore no
+        // dispatcher requirement here any more — the old 503 guard existed only
+        // because this route used to flip the campaign to 'active' and send
+        // from its own loop.
+        let (campaign, outreach) = state
+            .campaigns
+            .start_campaign_with_outreach(&tenant_id, id)
+            .await?;
+        let mut body = serde_json::to_value(&campaign)
+            .map_err(|e| SalesError::Internal(anyhow::anyhow!("serialize campaign: {e}")))?;
+        if let Some(outreach) = outreach {
+            // Surfacing the enrollment outcome is the point: an operator must
+            // see which recipients could not be enrolled and why, rather than a
+            // bare 'active' status hiding a partial start.
+            if let Some(object) = body.as_object_mut() {
+                object.insert(
+                    "enrollment".to_string(),
+                    serde_json::to_value(&outreach).map_err(|e| {
+                        SalesError::Internal(anyhow::anyhow!("serialize enrollment: {e}"))
+                    })?,
+                );
+            }
         }
-        let campaign = state.campaigns.start_campaign(&tenant_id, id).await?;
-        json_response(&campaign)
+        json_response(&body)
     }
     .instrument(span)
     .await
@@ -1307,21 +1331,56 @@ async fn dry_run_campaign(
 /// Shared suppression logic for GET and POST. Idempotent by construction
 /// (`ON CONFLICT DO NOTHING` in both suppression stores) — a second click
 /// succeeds without duplicating rows.
+///
+/// Token resolution order:
+///
+/// 1. **v2 opaque token** — decoded, SHA-256'd, looked up in
+///    `sales_unsubscribe_tokens` (only the hash is stored). This is what
+///    every NEW send emits; the URL contains no recipient or tenant data.
+/// 2. **v1 legacy token** — read-only compatibility for links already
+///    delivered in email. The v1 verifier is retained for ONE expiry cycle
+///    (365 days, [`crate::dispatcher::sign_unsubscribe_token_default_ttl`]'s
+///    TTL) after the v2 rollout; remove this fallback once every v1 token is
+///    past its TTL and no legacy signer callers remain.
+///
+/// Neither the raw token nor the decoded PII is logged; the only log line
+/// carries the tenant id.
 async fn apply_unsubscribe(
     state: &AppState,
     token: &str,
 ) -> Result<crate::dispatcher::UnsubscribeTokenData, SalesError> {
-    let secret = &state.config.dispatch.unsubscribe_secret;
-    if secret.trim().is_empty() {
-        // No secret configured ⇒ tokens cannot be validated ⇒ refuse.
-        return Err(SalesError::ServiceUnavailable(
-            "unsubscribe tokens are not configured".into(),
-        ));
-    }
-    let data = crate::dispatcher::verify_unsubscribe_token(secret, token).ok_or_else(|| {
-        tracing::warn!("unsubscribe request with invalid or expired token");
-        SalesError::InvalidInput("invalid or expired unsubscribe token".into())
-    })?;
+    // v2 first: a malformed/unknown v2 token is `Ok(None)`, a DB failure is
+    // an `Err` (never silently fall through to the legacy verifier on a
+    // transient outage — that could reject a valid v2 link).
+    let data = match crate::dispatcher::resolve_unsubscribe_token(&state.db, token).await? {
+        Some(data) => data,
+        None => {
+            // Legacy v1 fallback (old emails in inboxes). Without a secret
+            // the v1 verifier cannot run, but that must not turn an invalid
+            // token into a 5xx: v2 is secret-independent, so an unresolvable
+            // token is a client error in every deployment.
+            let secret = &state.config.dispatch.unsubscribe_secret;
+            let legacy = if secret.trim().is_empty() {
+                tracing::warn!(
+                    "unsubscribe request rejected: no legacy v1 secret configured (v2 tokens \
+                     remain valid)"
+                );
+                None
+            } else {
+                crate::dispatcher::verify_unsubscribe_token(secret, token)
+            };
+            match legacy {
+                Some(data) => data,
+                None => {
+                    // The log line intentionally omits the token.
+                    tracing::warn!("unsubscribe request with invalid or expired token");
+                    return Err(SalesError::InvalidInput(
+                        "invalid or expired unsubscribe token".into(),
+                    ));
+                }
+            }
+        }
+    };
 
     ProductionCampaignDispatcher::suppress(
         &state.db,
@@ -1781,38 +1840,6 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use tower::ServiceExt;
 
-    /// Test dispatcher reporting every requested recipient as enqueued, so
-    /// `CampaignManager::start_campaign` completes the Active transition.
-    /// Production wiring uses `ProductionCampaignDispatcher`; this double
-    /// never sends anything.
-    #[derive(Debug)]
-    struct TestCampaignDispatcher;
-
-    impl crate::campaigns::CampaignEmailDispatcher for TestCampaignDispatcher {
-        fn dispatch(
-            &self,
-            _tenant_id: &str,
-            _campaign_id: Uuid,
-            _template_id: &str,
-            recipients: &[crate::campaigns::DispatchRecipient],
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<usize, SalesError>> + Send>>
-        {
-            let enqueued = recipients.len();
-            Box::pin(async move { Ok(enqueued) })
-        }
-
-        fn unsubscribe_link(
-            &self,
-            tenant_id: &str,
-            campaign_id: Uuid,
-            recipient_email: &str,
-        ) -> String {
-            format!(
-                "https://sales.apexmail.ee/unsubscribe/{tenant_id}/{campaign_id}/{recipient_email}"
-            )
-        }
-    }
-
     /// App harness on the canonical provisioned test database. Async so it can
     /// be awaited directly inside `#[tokio::test]` — the previous
     /// `Runtime::new().block_on(..)` inside the test runtime panicked with
@@ -1822,10 +1849,14 @@ mod tests {
         test_app_impl(test_name, "test-key", false).await
     }
 
-    /// App harness with a working test dispatcher attached, so campaign start
-    /// reaches the state machine instead of the Fix I-1 503 short-circuit.
+    /// App harness for campaign-start flows.
+    ///
+    /// Previously this attached a test dispatcher to get past the Fix I-1 503
+    /// short-circuit. Campaign start no longer dispatches mail — it
+    /// materializes enrollments — so no dispatcher is involved and this is now
+    /// the same harness as [`test_app`].
     async fn test_app_with_dispatcher(test_name: &str) -> Option<Router> {
-        test_app_impl(test_name, "test-key", true).await
+        test_app_impl(test_name, "test-key", false).await
     }
 
     async fn test_app_with_service_token(test_name: &str, service_token: &str) -> Option<Router> {
@@ -1835,16 +1866,13 @@ mod tests {
     async fn test_app_impl(
         test_name: &str,
         service_token: &str,
-        with_dispatcher: bool,
+        _with_dispatcher: bool,
     ) -> Option<Router> {
         let db = crate::test_db::canonical_test_pool(test_name).await?;
         let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("failed to create lazy test redis pool");
-        let mut campaigns = CampaignManager::new(10, db.clone());
-        if with_dispatcher {
-            campaigns = campaigns.with_email_dispatcher(Arc::new(TestCampaignDispatcher));
-        }
+        let campaigns = CampaignManager::new(10, db.clone());
         let state = AppState {
             db: db.clone(),
             redis,
@@ -1854,9 +1882,14 @@ mod tests {
             campaigns,
             dispatcher: None,
             calendar: CalendarService::new(db.clone()),
-            inbox: InboxManager::new(db),
+            inbox: InboxManager::new(db.clone()),
             service_token: service_token.into(),
             rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
+            intelligence: Arc::new(crate::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(MessageStrategist::new(
+                db,
+                crate::knowledge::SalesKnowledgeBase::canonical(),
+            )),
         };
         Some(router(state))
     }
@@ -1885,9 +1918,14 @@ mod tests {
             campaigns: CampaignManager::new(10, db.clone()),
             dispatcher: None,
             calendar: CalendarService::new(db.clone()),
-            inbox: InboxManager::new(db),
+            inbox: InboxManager::new(db.clone()),
             service_token: "test-key".into(),
             rate_limit_fallback: Arc::new(Mutex::new(HashMap::new())),
+            intelligence: Arc::new(crate::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(MessageStrategist::new(
+                db,
+                crate::knowledge::SalesKnowledgeBase::canonical(),
+            )),
         };
         router(state)
     }
@@ -1896,10 +1934,17 @@ mod tests {
         lazy_test_app_with_config(crate::config::SalesConfig::default())
     }
 
-    /// Fix I-1: without a dispatcher wired, campaign start must fail loudly
-    /// with 503 instead of returning 200 'active' while sending nothing.
+    /// Campaign start no longer requires a dispatcher.
+    ///
+    /// Fix I-1 guarded a route that used to flip the campaign to 'active' and
+    /// send from its own loop, so an unwired dispatcher meant a campaign that
+    /// silently sent nothing. Campaign start now materializes canonical
+    /// enrollments and the durable action worker performs the sending, so the
+    /// correct behaviour on an unwired deployment is a normal error from the
+    /// enrollment path — never the old blanket 503, which would refuse a start
+    /// that can legitimately succeed.
     #[tokio::test]
-    async fn test_campaign_start_returns_503_without_dispatcher() {
+    async fn test_campaign_start_no_longer_requires_a_dispatcher() {
         let app = lazy_test_app();
         let resp = app
             .oneshot(
@@ -1911,7 +1956,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "an unwired dispatcher must no longer refuse a campaign start"
+        );
         let body: serde_json::Value = serde_json::from_slice(
             &axum::body::to_bytes(resp.into_body(), usize::MAX)
                 .await
@@ -1919,8 +1968,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            body["error"].as_str().unwrap().contains("dispatcher"),
-            "error must name the missing dispatcher: {body}"
+            !body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("dispatcher"),
+            "the response must not blame a dispatcher that is no longer involved: {body}"
         );
     }
 
@@ -2602,5 +2654,160 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Item 25: v2 opaque tokens through the public handler ────────────
+
+    /// A NEW send's opaque token (no tenant, no email, no hex payload in the
+    /// URL) redeems through the PUBLIC `/u/:token` handler: both suppression
+    /// stores get the canonical lowercased address, `used_at` is stamped,
+    /// and a replay stays idempotent.
+    #[tokio::test]
+    async fn v2_opaque_token_redeems_through_the_public_handler() {
+        let Some(db) = crate::test_db::canonical_test_pool("unsub_v2_http").await else {
+            return;
+        };
+        let tenant_id = crate::test_db::unique_test_tenant("unsubv2");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, 'Unsub V2 Test', $2, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("unsub-v2-{tenant_id}"))
+        .execute(&db)
+        .await
+        .expect("insert test tenant");
+
+        let app = test_app_impl("unsub_v2_http", "test-key", false)
+            .await
+            .expect("canonical test app");
+
+        let email = "V2.Click@Example.COM";
+        let token = crate::dispatcher::create_unsubscribe_token(&db, &tenant_id, email)
+            .await
+            .expect("v2 token creation");
+
+        // The URL that goes into the email carries no tenant/email material.
+        let url = format!("/u/{token}");
+        assert!(!url.contains(&tenant_id));
+        assert!(!url.contains("v2.click"));
+        assert!(!url.contains("example.com"));
+        assert!(
+            !url.contains('.'),
+            "v2 tokens are not v1 dot-separated payloads"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(Request::get(&url).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "branded page renders");
+
+        // Both suppression stores carry the canonical lowercased address.
+        let sales_sup: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant_id)
+        .bind("v2.click@example.com")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(sales_sup, 1, "sales-side suppression recorded");
+        let platform_sup: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant_id)
+        .bind("v2.click@example.com")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(platform_sup, 1, "platform suppression mirrored");
+
+        // First redemption stamps `used_at` (documented semantics).
+        let used_at: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT used_at FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(used_at.is_some(), "redemption stamps used_at");
+
+        // Replay (RFC 8058 POST) succeeds and duplicates nothing.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post(&url)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("List-Unsubscribe=One-Click"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sales_sup2: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(sales_sup2, 1, "no duplicate suppression row");
+
+        // Cleanup (tenant delete cascades the platform suppression mirror).
+        let _ = sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&db)
+            .await;
+    }
+
+    /// A tampered v2 token is rejected by the handler (400) and suppresses
+    /// nothing — the v2 path is checked BEFORE the legacy v1 fallback.
+    #[tokio::test]
+    async fn tampered_v2_token_is_rejected_by_the_public_handler() {
+        let Some(db) = crate::test_db::canonical_test_pool("unsub_v2_http_bad").await else {
+            return;
+        };
+        let app = test_app_impl("unsub_v2_http_bad", "test-key", false)
+            .await
+            .expect("canonical test app");
+
+        let tenant_id = crate::test_db::unique_test_tenant("unsubv2bad");
+        let token = crate::dispatcher::create_unsubscribe_token(&db, &tenant_id, "bad@example.com")
+            .await
+            .expect("v2 token creation");
+        let mut chars: Vec<char> = token.chars().collect();
+        chars[0] = if chars[0] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/u/{tampered}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let sup: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(sup, 0, "a tampered token must suppress nothing");
+
+        let _ = sqlx::query("DELETE FROM sales_unsubscribe_tokens WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .execute(&db)
+            .await;
     }
 }

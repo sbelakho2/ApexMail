@@ -23,6 +23,46 @@ SENDER_PATTERNS = [
 ]
 
 
+# Files allowed to mention the retired package by name: the dated decision
+# records and audit artifacts that describe it as it was at the time, the
+# frozen migrations that reference it historically, and this guardrail.
+RETIRED_NAME_ALLOWLIST = (
+    "docs/adr/",
+    "docs/audit/",
+    "tools/check_outbound_delivery_contract.py",
+    "migrations/",
+)
+# A path-shaped reference is what actually implies a package that exists
+# ("crates/outbound-queue/src/..."), which is how broken doc links looked.
+RETIRED_PATH_PATTERN = re.compile(r"crates/outbound-queue/")
+
+
+def _scan_for_retired_references() -> list[str]:
+    """Docs and comments must not point at the deleted package again.
+
+    Deleting the package was not enough: the first cleanup pass found ~22 live
+    references (runbooks, secret-rotation docs, code comments) still pointing at
+    files that no longer exist. This gate keeps them from creeping back.
+    """
+    violations: list[str] = []
+    suffixes = {".md", ".rs", ".toml", ".yml", ".yaml", ".sh", ".py", ".json"}
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file() or path.suffix not in suffixes:
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        if any(relative.startswith(prefix) for prefix in RETIRED_NAME_ALLOWLIST):
+            continue
+        if "/target/" in relative or relative.startswith("target/"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if RETIRED_PATH_PATTERN.search(text):
+            violations.append(f"{relative} (references the deleted outbound-queue package)")
+    return violations
+
+
 def main() -> int:
     violations: list[str] = []
     # The outbound-queue package was retired and its sources deleted. The
@@ -32,6 +72,8 @@ def main() -> int:
     retired_manifest = CRATES / "outbound-queue" / "Cargo.toml"
     if retired_manifest.exists():
         violations.append("outbound-queue/Cargo.toml (retired delivery package restored)")
+
+    violations.extend(_scan_for_retired_references())
 
     for path in sorted(CRATES.rglob("*.rs")):
         relative = path.relative_to(CRATES).as_posix()

@@ -24,8 +24,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::actions::{action_type, entity_type, ActionQueue};
+use crate::decision_engine::ContactPolicyInputOwned;
 use crate::sequences::{load_active_version, sales_step_idempotency_key, schedule_delay_secs};
-use crate::types::{EnrollmentState, ReplyDisposition, SalesError};
+use crate::types::{ContactDecision, EnrollmentState, ReplyDisposition, SalesError};
 
 /// The exact rejection-reason vocabulary the CP renders. These strings are an
 /// API contract; do not rename them without changing the CP.
@@ -35,9 +36,16 @@ pub mod rejection_reason {
     /// The contact's email address is unsubscribed/suppressed (sales fast
     /// path, contact-point suppression, or the platform suppression list).
     pub const SUPPRESSED: &str = "suppressed";
-    /// A recorded legal-policy decision denies this contact, or the selected
-    /// policy is `prohibited`.
+    /// The policy resolved from the CURRENT canonical store for this contact
+    /// is `prohibited`. A past `sales_contact_policy_decisions` row is never
+    /// consulted: only the live policy can prohibit.
     pub const LEGAL_POLICY: &str = "legal_policy";
+    /// The request's `autonomy_policy_id` is not the policy the canonical
+    /// store currently resolves for this contact. The caller states what it
+    /// believes applies but cannot force a stale policy; re-resolve the policy
+    /// and retry. NOT used when no authoritative policy exists at all (the
+    /// fail-closed `ApprovalRequired` default is not a "different" policy).
+    pub const STALE_POLICY: &str = "stale_policy";
     /// The email contact point is not verified good (`valid` or `risky`).
     pub const UNVERIFIED_CONTACT: &str = "unverified_contact";
     /// A live enrollment already exists for (tenant, version, contact).
@@ -62,6 +70,15 @@ const FIRST_STEP_ACTION_PRIORITY: i16 = 100;
 pub struct StartOutreachRequest {
     pub sequence_id: Uuid,
     pub contact_ids: Vec<Uuid>,
+    /// The policy the OPERATOR BELIEVES applies to this batch.
+    ///
+    /// It is advisory, not an authorization: `start_outreach` resolves the
+    /// applicable policy for every contact from the current canonical
+    /// `sales_jurisdiction_policies` store and rejects with `stale_policy`
+    /// when this id is not that policy. The caller may state what it believes
+    /// applies but cannot force it. (The whole field should eventually be
+    /// removed from the command — the machine can always resolve the policy
+    /// itself — but the CP still sends it today.)
     pub autonomy_policy_id: Uuid,
     pub experiment_id: Option<Uuid>,
 }
@@ -105,17 +122,31 @@ pub struct EnrollmentSummary {
 /// 3. `suppressed` — the chosen address is in `sales_unsubscribes`, the
 ///    contact point has `suppressed_at` set, or the address is in the platform
 ///    `suppressions` table (all compared tenant + lower(email)).
-/// 4. `legal_policy` — the latest recorded
-///    `sales_contact_policy_decisions` row for the contact is `prohibited` or
-///    `approval_required` (or an unrecognised value — fail closed), or no
-///    decision is recorded and the selected policy is `prohibited`.
-/// 5. `unverified_contact` — the email point's `verification` is neither
+/// 4. `legal_policy` — the policy resolved from the CURRENT canonical
+///    `sales_jurisdiction_policies` store for this contact (jurisdiction from
+///    the account's country/confidence with the contact's country as
+///    fallback, contact type, channel) is `prohibited`. A historical
+///    `sales_contact_policy_decisions` row is never read as permission.
+/// 5. `stale_policy` — the resolved policy is not `prohibited`, but the
+///    request's `autonomy_policy_id` is not the resolved policy row. The
+///    caller's id is advisory; the machine resolves what applies.
+/// 6. `unverified_contact` — the email point's `verification` is neither
 ///    `valid` nor `risky`. `unknown` is therefore rejected too. `risky` is
 ///    accepted (reachable but lower confidence) and counted as accepted.
-/// 6. `already_enrolled` — a `sales_enrollments` row for (tenant, version,
+/// 7. `already_enrolled` — a `sales_enrollments` row for (tenant, version,
 ///    contact) exists in a state other than
 ///    `completed`/`failed`/`suppressed`. Those terminal states may be
 ///    re-enrolled; the upsert resets the row.
+///
+/// # `ApprovalRequired` is planned, not rejected (audit item 9)
+///
+/// An `ApprovalRequired` verdict is NOT a rejection. The enrollment is
+/// accepted and planned; the first external action will come back as
+/// `AwaitApproval` from the decision engine (and `revalidate_execution`
+/// re-evaluates the policy under the current store immediately before the
+/// send). The enrollment-time verdict is never a capability token: it is
+/// advisory input to sequence planning only. Only `Prohibited` rejects a
+/// contact outright. Do not attempt to enforce the approval here.
 ///
 /// # Validation (whole request)
 ///
@@ -123,12 +154,10 @@ pub struct EnrollmentSummary {
 ///   (first occurrence wins) so each contact is processed and counted once.
 /// * `sequence_id` must resolve to an approved ACTIVE version (see
 ///   [`load_active_version`]); otherwise the call fails.
-/// * `autonomy_policy_id` must resolve to an approved, in-date
-///   `sales_jurisdiction_policies` row for the email channel; otherwise
-///   [`SalesError::PolicyDenied`] names it. An unapproved policy is never a
-///   usable basis for outreach. An `approval_required` policy is accepted:
-///   the authenticated operator's explicit command with an approved in-date
-///   policy is the approval for this batch.
+/// * `autonomy_policy_id` is the caller's belief about the applicable policy.
+///   It is verified per contact against the resolved verdict (`stale_policy`
+///   on mismatch) but never used as the authorization itself; the canonical
+///   store decides.
 ///
 /// # Atomicity and idempotency
 ///
@@ -167,26 +196,22 @@ pub async fn start_outreach(
         ))
     })?;
 
-    // The legal basis for the whole batch must be an approved, in-date policy.
-    let policy_row: Option<PolicyRow> = sqlx::query_as(
-        "SELECT channel, decision, approved_by, approved_at, valid_from, valid_until \
-         FROM sales_jurisdiction_policies \
-         WHERE id = $1",
-    )
-    .bind(request.autonomy_policy_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?;
-    let policy_prohibited =
-        policy_verdict(policy_row.as_ref(), request.autonomy_policy_id, Utc::now())?;
-
     // ---------------------------------------------------------------------
-    // Bulk gate inputs (one round trip each, never per contact).
+    // Bulk gate inputs (one round trip each, never per contact). The legal
+    // policy is NOT bulk-fetched from history: it is evaluated per contact
+    // from the current canonical store below.
     // ---------------------------------------------------------------------
+    // The recipient-country facts mirror the worker's `build_policy_input`:
+    // `COALESCE(account.country, contact.country)` with the account's
+    // confidence (a missing confidence is 0, which fails closed to UNKNOWN).
     let contacts: HashMap<Uuid, ContactRow> = sqlx::query_as::<_, ContactRow>(
-        "SELECT id, account_id, full_name \
-         FROM sales_contacts \
-         WHERE tenant_id = $1 AND id = ANY($2)",
+        "SELECT c.id, c.account_id, c.full_name, \
+                COALESCE(a.country, c.country) AS recipient_country, \
+                COALESCE(a.country_confidence, 0)::float4 AS country_confidence, \
+                COALESCE(a.lifecycle = 'customer', FALSE) AS has_existing_relationship \
+         FROM sales_contacts c \
+         LEFT JOIN sales_accounts a ON a.id = c.account_id \
+         WHERE c.tenant_id = $1 AND c.id = ANY($2)",
     )
     .bind(tenant_id)
     .bind(&contact_ids)
@@ -257,20 +282,6 @@ pub async fn start_outreach(
     .into_iter()
     .collect();
 
-    let legal_decisions: HashMap<Uuid, String> = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT DISTINCT ON (contact_id) contact_id, decision \
-         FROM sales_contact_policy_decisions \
-         WHERE tenant_id = $1 AND contact_id = ANY($2) \
-         ORDER BY contact_id, created_at DESC",
-    )
-    .bind(tenant_id)
-    .bind(&contact_ids)
-    .fetch_all(db)
-    .await
-    .map_err(|e| SalesError::Database(e.to_string()))?
-    .into_iter()
-    .collect();
-
     // ---------------------------------------------------------------------
     // Per-contact gates and enrollment.
     // ---------------------------------------------------------------------
@@ -289,39 +300,50 @@ pub async fn start_outreach(
                 suppressed_addresses.contains(&point.normalized_value.to_ascii_lowercase())
             })
             .unwrap_or(false);
-        let legal_denied = match legal_decisions.get(&contact_id).map(String::as_str) {
-            Some("allowed") => false,
-            // prohibited, approval_required, or an unknown value: fail closed.
-            Some(_) => true,
-            None => policy_prohibited,
-        };
 
-        if let Some(reason) = evaluate_contact_gates(ContactGateInput {
-            contact_found: contact.is_some(),
-            email: point.map(|point| EmailGate {
-                verification: point.verification.as_str(),
+        // Cheap, policy-independent gates reject first, so a contact that can
+        // never be enrolled does not cost a policy evaluation.
+        let cheap_gate = evaluate_pre_policy_gates(
+            contact.is_some(),
+            point.map(|point| EmailGate {
                 suppressed: point.suppressed_at.is_some(),
             }),
             address_suppressed,
-            legal_denied,
-            already_enrolled,
-        }) {
+        );
+        if let Some(reason) = cheap_gate {
             *rejection_reasons.entry(reason.to_string()).or_insert(0) += 1;
             rejected += 1;
             continue;
         }
 
-        // The gates guaranteed both are present.
-        let Some(contact) = contact else {
+        // The gates above guaranteed both are present.
+        let (Some(contact), Some(point)) = (contact, point) else {
             return Err(SalesError::Internal(anyhow::anyhow!(
-                "contact {contact_id} disappeared between gate evaluation and enrollment"
+                "contact {contact_id} passed the existence and email gates without a row"
             )));
         };
-        let Some(point) = point else {
-            return Err(SalesError::Internal(anyhow::anyhow!(
-                "email point for contact {contact_id} disappeared between gate evaluation and enrollment"
-            )));
+
+        // Legal hard gate, re-evaluated for THIS contact from the current
+        // canonical policy store. The input is recipient FACTS (mirroring the
+        // worker's `build_policy_input`), never a stored verdict.
+        let verdict = evaluate_contact_policy(db, tenant_id, contact, point).await?;
+        let gate = policy_gate(
+            verdict.decision,
+            verdict.policy_id,
+            request.autonomy_policy_id,
+        );
+        let legal_reason = match gate {
+            PolicyGate::Prohibited => Some(rejection_reason::LEGAL_POLICY),
+            PolicyGate::StalePolicy => Some(rejection_reason::STALE_POLICY),
+            PolicyGate::Proceed => None,
         };
+        if let Some(reason) = legal_reason
+            .or_else(|| evaluate_post_policy_gates(point.verification.as_str(), already_enrolled))
+        {
+            *rejection_reasons.entry(reason.to_string()).or_insert(0) += 1;
+            rejected += 1;
+            continue;
+        }
 
         // ONE transaction per contact: enrollment + first step execution +
         // queued action commit together, so a failure on this contact cannot
@@ -702,48 +724,115 @@ pub async fn lock_on_reply(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
-struct EmailGate<'a> {
-    /// `sales_contact_points.verification`.
-    verification: &'a str,
+struct EmailGate {
     /// `sales_contact_points.suppressed_at IS NOT NULL`.
     suppressed: bool,
 }
 
-/// Everything the per-contact gates need, reduced to plain values so the
-/// precedence is unit-testable.
-#[derive(Debug, Clone, Copy)]
-struct ContactGateInput<'a> {
+/// Gates evaluated BEFORE the legal-policy evaluation, so a contact that can
+/// never be enrolled does not cost a policy lookup. `None` = the contact may
+/// proceed to the legal gate, `Some(key)` = the exact rejection reason key.
+fn evaluate_pre_policy_gates(
     contact_found: bool,
-    email: Option<EmailGate<'a>>,
+    email: Option<EmailGate>,
     address_suppressed: bool,
-    legal_denied: bool,
-    already_enrolled: bool,
-}
-
-/// Evaluate the per-contact gates in contract precedence. `None` = accepted,
-/// `Some(key)` = the exact rejection reason key.
-fn evaluate_contact_gates(input: ContactGateInput<'_>) -> Option<&'static str> {
-    if !input.contact_found {
+) -> Option<&'static str> {
+    if !contact_found {
         return Some(rejection_reason::NOT_FOUND);
     }
-    let Some(email) = input.email else {
+    let Some(email) = email else {
         return Some(rejection_reason::NO_EMAIL);
     };
-    if email.suppressed || input.address_suppressed {
+    if email.suppressed || address_suppressed {
         return Some(rejection_reason::SUPPRESSED);
     }
-    if input.legal_denied {
-        return Some(rejection_reason::LEGAL_POLICY);
-    }
+    None
+}
+
+/// Gates evaluated AFTER the legal-policy verdict. `None` = accepted.
+fn evaluate_post_policy_gates(verification: &str, already_enrolled: bool) -> Option<&'static str> {
     // Accept `valid` and `risky`; reject `unverified`, `invalid` and anything
     // unrecognised (including `unknown`), because a send needs a good address.
-    if !matches!(email.verification, "valid" | "risky") {
+    if !matches!(verification, "valid" | "risky") {
         return Some(rejection_reason::UNVERIFIED_CONTACT);
     }
-    if input.already_enrolled {
+    if already_enrolled {
         return Some(rejection_reason::ALREADY_ENROLLED);
     }
     None
+}
+
+/// What the per-contact legal gate concluded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyGate {
+    /// The current policy allows contact, or merely requires approval. The
+    /// enrollment may be planned; an `ApprovalRequired` verdict becomes
+    /// `AwaitApproval` at the first external action (decision engine), never
+    /// an enrollment rejection.
+    Proceed,
+    /// The current policy prohibits contacting this person.
+    Prohibited,
+    /// The caller's `autonomy_policy_id` is not the policy the store resolves.
+    StalePolicy,
+}
+
+/// Map the resolved verdict plus the caller's believed policy id to a gate
+/// result.
+///
+/// * `Prohibited` always prohibits — a caller naming the prohibiting policy
+///   does not make the contact contactable, and a caller naming another
+///   policy does not soften it.
+/// * When an authoritative policy resolved (`Some(id)`), the caller's id must
+///   be exactly that policy or the belief is stale.
+/// * When NO authoritative policy exists (`policy_id == None`), the verdict is
+///   the fail-closed `ApprovalRequired`; there is nothing for the caller's id
+///   to be "stale" against, so the enrollment proceeds on the resolved
+///   verdict alone.
+fn policy_gate(
+    decision: ContactDecision,
+    resolved_policy_id: Option<Uuid>,
+    requested_policy_id: Uuid,
+) -> PolicyGate {
+    match decision {
+        ContactDecision::Prohibited => PolicyGate::Prohibited,
+        ContactDecision::Allowed | ContactDecision::ApprovalRequired => match resolved_policy_id {
+            Some(resolved) if resolved != requested_policy_id => PolicyGate::StalePolicy,
+            _ => PolicyGate::Proceed,
+        },
+    }
+}
+
+/// Evaluate the legal hard gate for one contact from CURRENT canonical facts.
+///
+/// The input mirrors the worker's `build_policy_input`: account country with
+/// the contact country as fallback, the account's country confidence, the
+/// canonical professional contact type, the chosen email contact point, the
+/// canonical sequence source, and the account-lifecycle relationship fact.
+/// Consent state is not recorded on the canonical model, so the gate
+/// evaluates `consent_status = None`, `soft_opt_in = false` and the recorded
+/// legitimate-interest assessment, exactly like the send path.
+async fn evaluate_contact_policy(
+    db: &PgPool,
+    tenant_id: &str,
+    contact: &ContactRow,
+    point: &EmailPointRow,
+) -> Result<crate::legal_policy::ContactPolicyVerdict, SalesError> {
+    let input = ContactPolicyInputOwned {
+        account_id: contact.account_id,
+        contact_id: Some(contact.id),
+        contact_point_id: Some(point.id),
+        recipient_country: contact.recipient_country.clone(),
+        country_confidence: contact.country_confidence,
+        contact_type: "b2b_professional".to_string(),
+        channel: "email".to_string(),
+        source: Some("sequence".to_string()),
+        purpose: Some("outbound_sales".to_string()),
+        has_existing_relationship: contact.has_existing_relationship,
+        consent_status: None,
+        soft_opt_in: false,
+        legitimate_interest_assessed: true,
+    };
+    crate::legal_policy::evaluate(db, &input.as_borrowed(tenant_id)).await
 }
 
 /// Is an enrollment row in a state that blocks a new enrollment?
@@ -835,71 +924,6 @@ fn dedup_preserving_order(ids: &[Uuid]) -> Vec<Uuid> {
     unique
 }
 
-/// The resolved `sales_jurisdiction_policies` row (global, not tenant-scoped).
-#[derive(sqlx::FromRow)]
-struct PolicyRow {
-    channel: String,
-    decision: String,
-    approved_by: Option<String>,
-    approved_at: Option<DateTime<Utc>>,
-    valid_from: DateTime<Utc>,
-    valid_until: Option<DateTime<Utc>>,
-}
-
-/// Validate the selected autonomy policy as a legal basis for outreach.
-///
-/// Returns `Ok(true)` when the policy's decision is `prohibited` (the caller
-/// then rejects each contact with `legal_policy`), `Ok(false)` when outreach
-/// may proceed. Any reason the policy is not a valid basis — missing,
-/// unapproved, out of date, wrong channel, unknown decision — is
-/// [`SalesError::PolicyDenied`] naming the policy.
-fn policy_verdict(
-    row: Option<&PolicyRow>,
-    policy_id: Uuid,
-    now: DateTime<Utc>,
-) -> Result<bool, SalesError> {
-    let Some(policy) = row else {
-        return Err(SalesError::PolicyDenied(format!(
-            "autonomy policy {policy_id} does not exist"
-        )));
-    };
-    if policy.channel != "email" {
-        return Err(SalesError::PolicyDenied(format!(
-            "autonomy policy {policy_id} governs channel '{}', not email outreach",
-            policy.channel
-        )));
-    }
-    if policy.approved_by.is_none() || policy.approved_at.is_none() {
-        return Err(SalesError::PolicyDenied(format!(
-            "autonomy policy {policy_id} is not approved: an unapproved policy cannot be the \
-             basis for outreach"
-        )));
-    }
-    if policy.valid_from > now {
-        return Err(SalesError::PolicyDenied(format!(
-            "autonomy policy {policy_id} is not in effect until {}",
-            policy.valid_from
-        )));
-    }
-    if let Some(valid_until) = policy.valid_until {
-        if valid_until <= now {
-            return Err(SalesError::PolicyDenied(format!(
-                "autonomy policy {policy_id} expired at {valid_until}"
-            )));
-        }
-    }
-    match policy.decision.as_str() {
-        "prohibited" => Ok(true),
-        // An approved, in-date `approval_required` policy is usable: the
-        // authenticated operator's explicit outreach command is the approval
-        // for this batch. Per-contact recorded decisions still override.
-        "allowed" | "approval_required" => Ok(false),
-        other => Err(SalesError::PolicyDenied(format!(
-            "autonomy policy {policy_id} has unknown decision '{other}' — refusing to guess"
-        ))),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -910,6 +934,15 @@ struct ContactRow {
     account_id: Option<Uuid>,
     #[allow(dead_code)]
     full_name: String,
+    /// `COALESCE(account.country, contact.country)` — the recipient country
+    /// the policy engine resolves.
+    recipient_country: Option<String>,
+    /// `COALESCE(account.country_confidence, 0)`: a missing confidence fails
+    /// closed to the UNKNOWN jurisdiction.
+    country_confidence: f32,
+    /// `account.lifecycle = 'customer'` — the relationship fact the policy
+    /// engine consumes (same as the worker's `build_policy_input`).
+    has_existing_relationship: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1016,6 +1049,7 @@ mod tests {
         assert_eq!(rejection_reason::NOT_FOUND, "not_found");
         assert_eq!(rejection_reason::SUPPRESSED, "suppressed");
         assert_eq!(rejection_reason::LEGAL_POLICY, "legal_policy");
+        assert_eq!(rejection_reason::STALE_POLICY, "stale_policy");
         assert_eq!(rejection_reason::UNVERIFIED_CONTACT, "unverified_contact");
         assert_eq!(rejection_reason::ALREADY_ENROLLED, "already_enrolled");
         assert_eq!(rejection_reason::NO_EMAIL, "no_email");
@@ -1038,30 +1072,23 @@ mod tests {
     // Per-contact gate precedence
     // -----------------------------------------------------------------------
 
-    fn gate_input<'a>(
+    fn pre_gate(
         contact_found: bool,
-        verification: Option<&'a str>,
+        has_email: bool,
         suppressed: bool,
         address_suppressed: bool,
-        legal_denied: bool,
-        already_enrolled: bool,
-    ) -> ContactGateInput<'a> {
-        ContactGateInput {
+    ) -> Option<&'static str> {
+        evaluate_pre_policy_gates(
             contact_found,
-            email: verification.map(|verification| EmailGate {
-                verification,
-                suppressed,
-            }),
+            has_email.then_some(EmailGate { suppressed }),
             address_suppressed,
-            legal_denied,
-            already_enrolled,
-        }
+        )
     }
 
     #[test]
     fn gate_not_found_wins_over_everything() {
         assert_eq!(
-            evaluate_contact_gates(gate_input(false, None, true, true, true, true)),
+            pre_gate(false, false, true, true),
             Some(rejection_reason::NOT_FOUND)
         );
     }
@@ -1069,7 +1096,7 @@ mod tests {
     #[test]
     fn gate_no_email_wins_after_not_found() {
         assert_eq!(
-            evaluate_contact_gates(gate_input(true, None, false, true, true, true)),
+            pre_gate(true, false, false, true),
             Some(rejection_reason::NO_EMAIL)
         );
     }
@@ -1077,43 +1104,31 @@ mod tests {
     #[test]
     fn gate_suppressed_wins_over_legal_and_verification() {
         assert_eq!(
-            evaluate_contact_gates(gate_input(true, Some("invalid"), true, false, true, true)),
+            pre_gate(true, true, true, false),
             Some(rejection_reason::SUPPRESSED)
         );
         // Suppression can also come from the unsubscribe/platform tables.
         assert_eq!(
-            evaluate_contact_gates(gate_input(true, Some("valid"), false, true, false, false)),
+            pre_gate(true, true, false, true),
             Some(rejection_reason::SUPPRESSED)
         );
     }
 
     #[test]
-    fn gate_legal_policy_wins_over_verification() {
-        assert_eq!(
-            evaluate_contact_gates(gate_input(
-                true,
-                Some("unverified"),
-                false,
-                false,
-                true,
-                false
-            )),
-            Some(rejection_reason::LEGAL_POLICY)
-        );
+    fn illegal_policy_rejection_precedes_verification_and_duplicate_gates() {
+        // The caller computes the legal reason first; a prohibited contact is
+        // rejected with `legal_policy` even when its address is unverified and
+        // an enrollment already exists.
+        let legal_reason = Some(rejection_reason::LEGAL_POLICY)
+            .or_else(|| evaluate_post_policy_gates("unverified", true));
+        assert_eq!(legal_reason, Some(rejection_reason::LEGAL_POLICY));
     }
 
     #[test]
     fn gate_unverified_rejects_unverified_invalid_and_unknown() {
         for verification in ["unverified", "invalid", "unknown", "weird"] {
             assert_eq!(
-                evaluate_contact_gates(gate_input(
-                    true,
-                    Some(verification),
-                    false,
-                    false,
-                    false,
-                    false
-                )),
+                evaluate_post_policy_gates(verification, false),
                 Some(rejection_reason::UNVERIFIED_CONTACT),
                 "verification '{verification}' must be rejected"
             );
@@ -1124,14 +1139,7 @@ mod tests {
     fn gate_accepts_valid_and_risky_verification() {
         for verification in ["valid", "risky"] {
             assert_eq!(
-                evaluate_contact_gates(gate_input(
-                    true,
-                    Some(verification),
-                    false,
-                    false,
-                    false,
-                    false
-                )),
+                evaluate_post_policy_gates(verification, false),
                 None,
                 "verification '{verification}' must be accepted"
             );
@@ -1141,13 +1149,66 @@ mod tests {
     #[test]
     fn gate_already_enrolled_only_after_quality_gates() {
         assert_eq!(
-            evaluate_contact_gates(gate_input(true, Some("valid"), false, false, false, true)),
+            evaluate_post_policy_gates("valid", true),
             Some(rejection_reason::ALREADY_ENROLLED)
         );
         // A fully clean contact is accepted.
+        assert_eq!(evaluate_post_policy_gates("risky", false), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Current-policy gate (audit item 8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn policy_gate_prohibited_rejects_regardless_of_requested_policy() {
+        let resolved = Uuid::new_v4();
+        for requested in [resolved, Uuid::new_v4()] {
+            assert_eq!(
+                policy_gate(ContactDecision::Prohibited, Some(resolved), requested),
+                PolicyGate::Prohibited,
+                "a prohibited verdict is absolute"
+            );
+        }
+        // Even the fail-closed no-policy case cannot produce Prohibited here;
+        // Prohibited always comes from a real policy row.
         assert_eq!(
-            evaluate_contact_gates(gate_input(true, Some("risky"), false, false, false, false)),
-            None
+            policy_gate(ContactDecision::Prohibited, None, Uuid::new_v4()),
+            PolicyGate::Prohibited
+        );
+    }
+
+    #[test]
+    fn policy_gate_requested_policy_must_match_the_resolved_policy() {
+        let resolved = Uuid::new_v4();
+        assert_eq!(
+            policy_gate(ContactDecision::Allowed, Some(resolved), resolved),
+            PolicyGate::Proceed
+        );
+        assert_eq!(
+            policy_gate(ContactDecision::ApprovalRequired, Some(resolved), resolved),
+            PolicyGate::Proceed,
+            "ApprovalRequired is planned, not rejected (audit item 9)"
+        );
+        let other = Uuid::new_v4();
+        assert_eq!(
+            policy_gate(ContactDecision::Allowed, Some(resolved), other),
+            PolicyGate::StalePolicy
+        );
+        assert_eq!(
+            policy_gate(ContactDecision::ApprovalRequired, Some(resolved), other),
+            PolicyGate::StalePolicy
+        );
+    }
+
+    #[test]
+    fn policy_gate_without_authoritative_policy_proceeds_on_the_verdict() {
+        // No policy row resolved (unlisted jurisdiction / unapproved row):
+        // the fail-closed ApprovalRequired default is not a policy the caller
+        // can be "stale" against.
+        assert_eq!(
+            policy_gate(ContactDecision::ApprovalRequired, None, Uuid::new_v4()),
+            PolicyGate::Proceed
         );
     }
 
@@ -1326,93 +1387,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Policy validation
-    // -----------------------------------------------------------------------
-
-    fn policy_row(decision: &str) -> PolicyRow {
-        PolicyRow {
-            channel: "email".into(),
-            decision: decision.into(),
-            approved_by: Some("counsel".into()),
-            approved_at: Some(Utc::now() - chrono::Duration::days(1)),
-            valid_from: Utc::now() - chrono::Duration::days(1),
-            valid_until: None,
-        }
-    }
-
-    #[test]
-    fn policy_missing_is_denied() {
-        let now = Utc::now();
-        let err = policy_verdict(None, Uuid::new_v4(), now).unwrap_err();
-        assert!(matches!(err, SalesError::PolicyDenied(_)));
-        assert!(err.to_string().contains("does not exist"));
-    }
-
-    #[test]
-    fn policy_unapproved_is_denied() {
-        let now = Utc::now();
-        let mut row = policy_row("allowed");
-        row.approved_by = None;
-        let err = policy_verdict(Some(&row), Uuid::new_v4(), now).unwrap_err();
-        assert!(matches!(err, SalesError::PolicyDenied(_)));
-        assert!(err.to_string().contains("not approved"));
-
-        let mut row = policy_row("allowed");
-        row.approved_at = None;
-        let err = policy_verdict(Some(&row), Uuid::new_v4(), now).unwrap_err();
-        assert!(err.to_string().contains("not approved"));
-    }
-
-    #[test]
-    fn policy_out_of_date_is_denied() {
-        let now = Utc::now();
-        let mut row = policy_row("allowed");
-        row.valid_from = now + chrono::Duration::days(1);
-        assert!(policy_verdict(Some(&row), Uuid::new_v4(), now).is_err());
-
-        let mut row = policy_row("allowed");
-        row.valid_until = Some(now - chrono::Duration::seconds(1));
-        let err = policy_verdict(Some(&row), Uuid::new_v4(), now).unwrap_err();
-        assert!(err.to_string().contains("expired"));
-    }
-
-    #[test]
-    fn policy_wrong_channel_is_denied() {
-        let now = Utc::now();
-        let mut row = policy_row("allowed");
-        row.channel = "phone".into();
-        let err = policy_verdict(Some(&row), Uuid::new_v4(), now).unwrap_err();
-        assert!(err.to_string().contains("phone"));
-    }
-
-    #[test]
-    fn policy_prohibited_is_reported_but_not_a_request_error() {
-        let now = Utc::now();
-        assert_eq!(
-            policy_verdict(Some(&policy_row("prohibited")), Uuid::new_v4(), now).unwrap(),
-            true
-        );
-        assert_eq!(
-            policy_verdict(Some(&policy_row("allowed")), Uuid::new_v4(), now).unwrap(),
-            false
-        );
-        // approval_required is usable by an explicit operator command.
-        assert_eq!(
-            policy_verdict(Some(&policy_row("approval_required")), Uuid::new_v4(), now).unwrap(),
-            false
-        );
-    }
-
-    #[test]
-    fn policy_unknown_decision_fails_closed() {
-        let now = Utc::now();
-        let err = policy_verdict(Some(&policy_row("maybe")), Uuid::new_v4(), now).unwrap_err();
-        assert!(matches!(err, SalesError::PolicyDenied(_)));
-        assert!(err.to_string().contains("maybe"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Live-database tests (ignored by default)
+    // Live-database tests
+    //
+    // These follow the crate's canonical bootstrap (`test_db::canonical_test_pool`)
+    // and SOFT-SKIP when no test database is configured, so they run for real
+    // wherever `SALES_TEST_DATABASE_URL` points at the canonical schema.
     // -----------------------------------------------------------------------
 
     struct Fixture {
@@ -1424,7 +1403,10 @@ mod tests {
         version_id: Uuid,
         #[allow(dead_code)]
         step_id: Uuid,
-        policy_id: Uuid,
+        /// The `allowed`/`legitimate_interest` policy the fixture seeded for
+        /// the contact's jurisdiction, when it seeded one.
+        policy_id: Option<Uuid>,
+        jurisdiction: String,
     }
 
     /// Canonically provisioned pool for the enrollment live tests.
@@ -1436,34 +1418,74 @@ mod tests {
         crate::test_db::canonical_test_pool(test_name).await
     }
 
-    async fn seed_fixture(pool: &PgPool, tenant: &str) -> Fixture {
+    /// Pick an unused two-letter jurisdiction code that resolves to itself
+    /// (not EU/EEA, whose seeded row would apply instead).
+    ///
+    /// The canonical database is shared across tests and runs, so the code
+    /// must not collide with another policy row; the fixture deletes its own
+    /// row afterwards, and an unused code makes any leftover from a crashed
+    /// run harmless.
+    /// Seed a working enrollment fixture.
+    ///
+    /// `policy`: when `Some((decision, basis))`, an approved in-date policy
+    /// row for the contact's jurisdiction/channel/type is created and its id
+    /// returned; when `None`, the jurisdiction has NO policy at all (the
+    /// fail-closed `ApprovalRequired` case).
+    async fn seed_fixture_with(
+        pool: &PgPool,
+        tenant: &str,
+        policy: Option<(&str, &str)>,
+    ) -> Fixture {
         let account_id = Uuid::new_v4();
         let contact_id = Uuid::new_v4();
         let contact_point_id = Uuid::new_v4();
         let sequence_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
         let step_id = Uuid::new_v4();
-        let policy_id = Uuid::new_v4();
+
+        // Resolve the policy FIRST and use the jurisdiction it actually landed
+        // under as the recipient's country. The policy insert is race-tolerant
+        // (the 2-letter fixture namespace is shared across parallel test
+        // processes), so the code it returns is the authoritative one — writing
+        // a country chosen beforehand could leave the row without a policy.
+        let (policy_id, jurisdiction) = match policy {
+            Some((decision, basis)) => {
+                let (code, id) = crate::test_db::insert_unique_jurisdiction_policy_returning_id(
+                    pool, decision, basis,
+                )
+                .await;
+                (Some(id), code)
+            }
+            // The fail-closed case needs a jurisdiction guaranteed to have no
+            // policy, which a randomly chosen free code cannot promise.
+            None => (
+                None,
+                crate::test_db::ensure_no_policy_jurisdiction(pool).await,
+            ),
+        };
+
         let contact_email = format!("prospect-{contact_id}@example.com");
 
         sqlx::query(
-            "INSERT INTO sales_accounts (id, tenant_id, company, domain) \
-             VALUES ($1, $2, 'Fixture Co', $3)",
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, country, country_confidence) \
+             VALUES ($1, $2, 'Fixture Co', $3, $4, 0.95)",
         )
         .bind(account_id)
         .bind(tenant)
         .bind(format!("{account_id}.example"))
+        .bind(&jurisdiction)
         .execute(pool)
         .await
         .unwrap();
 
         sqlx::query(
-            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
-             VALUES ($1, $2, $3, 'Fixture Prospect')",
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, country) \
+             VALUES ($1, $2, $3, 'Fixture Prospect', $4)",
         )
         .bind(contact_id)
         .bind(tenant)
         .bind(account_id)
+        .bind(&jurisdiction)
         .execute(pool)
         .await
         .unwrap();
@@ -1515,19 +1537,6 @@ mod tests {
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO sales_jurisdiction_policies \
-                 (id, jurisdiction, channel, contact_type, decision, basis, version, \
-                  approved_by, approved_at) \
-             VALUES ($1, $2, 'email', 'b2b_professional', 'allowed', 'consent', 1, \
-                     'fixture', NOW())",
-        )
-        .bind(policy_id)
-        .bind(format!("TEST-{policy_id}"))
-        .execute(pool)
-        .await
-        .unwrap();
-
         Fixture {
             account_id,
             contact_id,
@@ -1537,11 +1546,18 @@ mod tests {
             version_id,
             step_id,
             policy_id,
+            jurisdiction,
         }
     }
 
-    async fn cleanup_fixture(pool: &PgPool, tenant: &str, policy_id: Uuid) {
+    /// The pre-audit happy path: an allowed `legitimate_interest` policy.
+    async fn seed_fixture(pool: &PgPool, tenant: &str) -> Fixture {
+        seed_fixture_with(pool, tenant, Some(("allowed", "legitimate_interest"))).await
+    }
+
+    async fn cleanup_fixture(pool: &PgPool, tenant: &str, policy_id: Option<Uuid>) {
         for statement in [
+            "DELETE FROM sales_contact_policy_decisions WHERE tenant_id = $1",
             "DELETE FROM sales_actions WHERE tenant_id = $1",
             "DELETE FROM sales_step_executions WHERE tenant_id = $1",
             "DELETE FROM sales_enrollments WHERE tenant_id = $1",
@@ -1559,14 +1575,271 @@ mod tests {
                 .await
                 .unwrap();
         }
+        if let Some(policy_id) = policy_id {
+            sqlx::query("DELETE FROM sales_jurisdiction_policies WHERE id = $1")
+                .bind(policy_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A historical `sales_contact_policy_decisions` row saying `allowed` must
+    /// NOT rescue a contact whose CURRENT policy is `prohibited`. This is the
+    /// exact defect audit item 8 deletes.
+    #[tokio::test]
+    async fn historical_allowed_decision_does_not_rescue_a_prohibited_contact() {
+        let Some(pool) = live_pool("historical_policy").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("historical");
+        let fixture =
+            seed_fixture_with(&pool, &tenant, Some(("prohibited", "not_permitted"))).await;
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+
+        // The stale audit history: the contact was once (wrongly) allowed.
+        sqlx::query(
+            "INSERT INTO sales_contact_policy_decisions \
+                 (id, tenant_id, account_id, contact_id, contact_point_id, jurisdiction, \
+                  decision, basis, reason, inputs) \
+             VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, 'allowed', 'consent', \
+                     'historical row from before the policy was tightened', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .bind(fixture.account_id)
+        .bind(fixture.contact_id)
+        .bind(fixture.contact_point_id)
+        .bind(&fixture.jurisdiction)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let response = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: fixture.policy_id.unwrap_or_else(Uuid::new_v4),
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.accepted, 0, "the current policy prohibits");
+        assert_eq!(response.rejected, 1);
+        assert_eq!(
+            response
+                .rejection_reasons
+                .get(rejection_reason::LEGAL_POLICY),
+            Some(&1),
+            "reasons: {:?}",
+            response.rejection_reasons
+        );
+        let enrollments: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_enrollments WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(enrollments, 0, "no enrollment for a prohibited contact");
+
+        cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
+    }
+
+    /// A contact in a jurisdiction with no policy at all resolves to the
+    /// fail-closed `ApprovalRequired` (never `Allowed`) and is accepted but
+    /// gated — not rejected (audit item 9).
+    #[tokio::test]
+    async fn no_policy_anywhere_is_planned_under_approval_required() {
+        let Some(pool) = live_pool("no_policy").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("nopolicy");
+        let fixture = seed_fixture_with(&pool, &tenant, None).await;
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+
+        // The caller may believe any policy applies; with no authoritative row
+        // there is nothing to be stale against, so the verdict stands alone.
+        let response = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: Uuid::new_v4(),
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.accepted, 1, "ApprovalRequired is planned");
+        assert_eq!(response.rejected, 0);
+
+        // The first action is queued; the decision engine will return
+        // `AwaitApproval` for it (revalidate_execution re-evaluates the
+        // policy under the current store immediately before any send).
+        let actions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_actions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            actions, 1,
+            "the enrollment must be planned, not silently dropped"
+        );
+
+        cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
+    }
+
+    /// `autonomy_policy_id` naming a DIFFERENT policy than the resolved one is
+    /// `stale_policy`; naming the resolved one is accepted. The same contact
+    /// proves both halves.
+    #[tokio::test]
+    async fn autonomy_policy_id_must_match_the_resolved_policy() {
+        let Some(pool) = live_pool("stale_policy").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("stale");
+        let fixture = seed_fixture(&pool, &tenant).await;
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+        let resolved_policy_id = fixture.policy_id.expect("fixture seeds a policy");
+
+        // A second, unrelated but real policy the caller might mistakenly name.
+        // Inserted through the race-tolerant helper rather than a probe plus a
+        // plain INSERT: the 2-letter namespace is shared across parallel test
+        // processes, so the probe can lose the code between check and insert.
+        let (_other_jurisdiction, other_policy_id) =
+            crate::test_db::insert_unique_jurisdiction_policy_returning_id(
+                &pool,
+                "allowed",
+                "legitimate_interest",
+            )
+            .await;
+
+        let stale = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: other_policy_id,
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale.accepted, 0);
+        assert_eq!(
+            stale.rejection_reasons.get(rejection_reason::STALE_POLICY),
+            Some(&1),
+            "reasons: {:?}",
+            stale.rejection_reasons
+        );
+
+        // The caller cannot force the unrelated policy; naming the resolved
+        // policy is accepted.
+        let accepted = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: resolved_policy_id,
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.accepted, 1, "the resolved policy is accepted");
+        assert_eq!(accepted.rejected, 0);
+
+        cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
         sqlx::query("DELETE FROM sales_jurisdiction_policies WHERE id = $1")
-            .bind(policy_id)
-            .execute(pool)
+            .bind(other_policy_id)
+            .execute(&pool)
             .await
             .unwrap();
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
+    /// An `approval_required` current policy is accepted (planned) even when
+    /// the caller names it — item 9's enrollment-side contract.
+    #[tokio::test]
+    async fn approval_required_policy_is_accepted_and_gated_at_execution() {
+        let Some(pool) = live_pool("approval_required_planned").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("approval");
+        let fixture = seed_fixture_with(
+            &pool,
+            &tenant,
+            Some(("approval_required", "legitimate_interest")),
+        )
+        .await;
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+
+        let response = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: fixture.policy_id.expect("fixture seeds a policy"),
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.accepted, 1);
+        assert_eq!(response.rejected, 0);
+
+        cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
+    }
+
+    /// `Prohibited` is rejected with `legal_policy`, even if the caller names
+    /// the prohibiting policy as its "applicable" policy.
+    #[tokio::test]
+    async fn prohibited_current_policy_rejects_with_legal_policy() {
+        let Some(pool) = live_pool("prohibited").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("prohibited");
+        let fixture =
+            seed_fixture_with(&pool, &tenant, Some(("prohibited", "not_permitted"))).await;
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+
+        let response = start_outreach(
+            &pool,
+            &queue,
+            &tenant,
+            &StartOutreachRequest {
+                sequence_id: fixture.sequence_id,
+                contact_ids: vec![fixture.contact_id],
+                autonomy_policy_id: fixture.policy_id.expect("fixture seeds a policy"),
+                experiment_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.accepted, 0);
+        assert_eq!(
+            response
+                .rejection_reasons
+                .get(rejection_reason::LEGAL_POLICY),
+            Some(&1)
+        );
+
+        cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
+    }
+
     #[tokio::test]
     async fn start_outreach_rerun_reports_already_enrolled_without_duplicates() {
         let Some(pool) = live_pool("outreach_rerun").await else {
@@ -1578,7 +1851,7 @@ mod tests {
         let request = StartOutreachRequest {
             sequence_id: fixture.sequence_id,
             contact_ids: vec![fixture.contact_id],
-            autonomy_policy_id: fixture.policy_id,
+            autonomy_policy_id: fixture.policy_id.expect("fixture seeds a policy"),
             experiment_id: None,
         };
 

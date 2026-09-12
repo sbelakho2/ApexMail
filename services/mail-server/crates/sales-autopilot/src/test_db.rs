@@ -119,3 +119,94 @@ async fn connect(url: &str) -> Option<PgPool> {
         _ => None,
     }
 }
+
+/// Insert an approved jurisdiction policy under a fresh 2-letter jurisdiction
+/// code, returning the code used.
+///
+/// `legal_policy::resolve_jurisdiction` only passes through a 2-letter ASCII
+/// key (anything else normalizes to the `UNKNOWN` fail-closed default), so the
+/// fixture namespace is 676 codes. A check-then-insert cannot be made safe
+/// under parallel test processes — it intermittently produced duplicate-key
+/// (23505) failures on `sales_jurisdiction_policies`. The insert is therefore
+/// optimistic: a unique violation means another test claimed that code, so
+/// generate another.
+pub(crate) async fn insert_unique_jurisdiction_policy(
+    pool: &PgPool,
+    policy_decision: &str,
+    policy_basis: &str,
+) -> String {
+    insert_unique_jurisdiction_policy_returning_id(pool, policy_decision, policy_basis)
+        .await
+        .0
+}
+
+/// A jurisdiction deliberately kept free of any policy row.
+///
+/// The "no policy at all" case cannot be established by probing for a free code
+/// in a namespace other tests are concurrently inserting into — a probe
+/// followed by another process's insert is exactly the race that made the
+/// fail-closed fixture flaky. This code is excluded from the code generator
+/// below, so nothing else ever writes a policy for it.
+pub(crate) const NO_POLICY_JURISDICTION: &str = "QQ";
+
+/// The reserved no-policy jurisdiction, with any stray row removed.
+///
+/// Deleting is safe and idempotent: every caller wants this jurisdiction to have
+/// no policy, so concurrent callers converge on the same state.
+pub(crate) async fn ensure_no_policy_jurisdiction(pool: &PgPool) -> String {
+    sqlx::query("DELETE FROM sales_jurisdiction_policies WHERE jurisdiction = $1")
+        .bind(NO_POLICY_JURISDICTION)
+        .execute(pool)
+        .await
+        .expect("clear the reserved no-policy jurisdiction");
+    NO_POLICY_JURISDICTION.to_string()
+}
+
+/// Insert an approved policy and return `(jurisdiction, policy_id)`.
+pub(crate) async fn insert_unique_jurisdiction_policy_returning_id(
+    pool: &PgPool,
+    policy_decision: &str,
+    policy_basis: &str,
+) -> (String, uuid::Uuid) {
+    for _ in 0..256 {
+        let bytes = *uuid::Uuid::new_v4().as_bytes();
+        let code = format!(
+            "{}{}",
+            (b'A' + (bytes[0] % 26)) as char,
+            (b'A' + (bytes[1] % 26)) as char
+        );
+        // Skip codes that resolve elsewhere (an EU/EEA member normalizes to the
+        // shared `EU` policy key, which would collide with the seeded default).
+        if crate::legal_policy::resolve_jurisdiction(Some(&code), 1.0) != code {
+            continue;
+        }
+        // Never hand out the reserved no-policy jurisdiction: a policy row
+        // there would falsify every fail-closed fixture.
+        if code == NO_POLICY_JURISDICTION {
+            continue;
+        }
+        let policy_id: Option<uuid::Uuid> = sqlx::query_scalar(
+            "INSERT INTO sales_jurisdiction_policies \
+                 (id, jurisdiction, channel, contact_type, decision, basis, version, approved_by, \
+                  approved_at, valid_from) \
+             VALUES (gen_random_uuid(), $1, 'email', 'b2b_professional', $2, $3, 1, 'fixture', \
+                     NOW(), NOW()) \
+             ON CONFLICT (jurisdiction, channel, contact_type, version) DO NOTHING \
+             RETURNING id",
+        )
+        .bind(&code)
+        .bind(policy_decision)
+        .bind(policy_basis)
+        .fetch_optional(pool)
+        .await
+        .expect("insert sales_jurisdiction_policies");
+
+        // NULL means the code was taken between generation and insert; try
+        // another rather than reusing another test's policy (which would make
+        // that test's verdict the one in force here).
+        if let Some(policy_id) = policy_id {
+            return (code, policy_id);
+        }
+    }
+    panic!("could not find an unused two-letter jurisdiction code");
+}

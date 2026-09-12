@@ -244,7 +244,20 @@ mod sales {
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
             calendar: CalendarService::new(db.clone()),
-            inbox: InboxManager::new(db),
+            inbox: InboxManager::new(db.clone()),
+            // The planner requires an intelligence provider and a knowledge
+            // base. The offline provider is the honest default here: it is what
+            // an unconfigured deployment gets, and it keeps the send path
+            // working without an AI service.
+            intelligence: std::sync::Arc::new(
+                sales_autopilot::intelligence::OfflineIntelligence::new(),
+            ),
+            strategist: std::sync::Arc::new(
+                sales_autopilot::personalization::MessageStrategist::new(
+                    db.clone(),
+                    sales_autopilot::knowledge::SalesKnowledgeBase::canonical(),
+                ),
+            ),
             service_token: "test-key".into(),
             rate_limit_fallback: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -356,7 +369,20 @@ mod sales {
             enrichment: EnrichmentService::mock(),
             campaigns: CampaignManager::new(10, db.clone()),
             calendar: CalendarService::new(db.clone()),
-            inbox: InboxManager::new(db),
+            inbox: InboxManager::new(db.clone()),
+            // The planner requires an intelligence provider and a knowledge
+            // base. The offline provider is the honest default here: it is what
+            // an unconfigured deployment gets, and it keeps the send path
+            // working without an AI service.
+            intelligence: std::sync::Arc::new(
+                sales_autopilot::intelligence::OfflineIntelligence::new(),
+            ),
+            strategist: std::sync::Arc::new(
+                sales_autopilot::personalization::MessageStrategist::new(
+                    db.clone(),
+                    sales_autopilot::knowledge::SalesKnowledgeBase::canonical(),
+                ),
+            ),
             service_token: "test-key".into(),
             rate_limit_fallback: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),

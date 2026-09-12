@@ -18,9 +18,10 @@ pub use processor::EmailProcessor;
 pub use tracking::{add_tracking_pixel, encode_tracking_id, rewrite_links, TrackingPayload};
 pub use transport::{
     create_transport, create_transport_from_config, EmailTransport, SesTransport, SmtpTransport,
+    APEXMAIL_ROUTE_HEADER, APEXMAIL_ROUTE_VALUE_PREFIX, APEXMAIL_SOURCE_IP_REPLY_HEADER,
 };
-pub use transport_router::{RoutingTransport, TransportRouter};
+pub use transport_router::{transport_kind_for, TransportKind};
 pub use types::{
-    Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, PreparedEmail, RateLimitResult,
-    SendOutcome, SendResult, Suppression, WarmupIpIdentity,
+    Attachment, CachedSuppression, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain, EmailJob,
+    PreparedEmail, RateLimitResult, SendOutcome, Suppression, WarmupIpIdentity,
 };

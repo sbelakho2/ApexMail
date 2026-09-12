@@ -192,6 +192,11 @@ async fn create_feature(
     .execute(&state.db)
     .await?;
 
+    // A new row can change the resolved value for every tenant (a previously
+    // unknown flag fell back to the caller default); drop cached entries now
+    // so the create takes effect without waiting for the TTL.
+    state.feature_flags.invalidate(&body.name);
+
     log_feature_audit(
         &state,
         &auth,
@@ -219,18 +224,19 @@ async fn create_feature(
 }
 
 /// One statement per flag: COALESCE leaves omitted fields untouched,
-/// `RETURNING id` makes a missing flag observable (rows-affected was never
-/// checked, so updating a nonexistent UUID reported success), and the whole
-/// batch runs in ONE transaction so a mid-batch failure cannot leave a
-/// partial result.
+/// `RETURNING id, name` makes a missing flag observable (rows-affected was
+/// never checked, so updating a nonexistent UUID reported success), and the
+/// whole batch runs in ONE transaction so a mid-batch failure cannot leave a
+/// partial result. The name is returned so the runtime evaluation cache can
+/// be invalidated for exactly the flipped flag.
 const UPDATE_FEATURE_SQL: &str = "UPDATE feature_flags
      SET enabled = COALESCE($1, enabled),
          description = COALESCE($2, description),
          updated_at = NOW()
      WHERE id = $3
-     RETURNING id";
+     RETURNING id, name";
 
-async fn update_feature(
+pub(crate) async fn update_feature(
     State(state): State<AppState>,
     auth: AuthUser,
     Json(body): Json<FeatureUpdatePayload>,
@@ -241,22 +247,23 @@ async fn update_feature(
     let updates = normalize_feature_updates(body)?;
 
     let mut tx = state.db.begin().await?;
-    let mut applied: Vec<(Uuid, serde_json::Value)> = Vec::new();
+    let mut applied: Vec<(Uuid, String, serde_json::Value)> = Vec::new();
 
     for update in updates {
         let id = update.id;
-        let updated_id: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(UPDATE_FEATURE_SQL)
-            .bind(update.enabled)
-            .bind(update.description.as_deref())
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
+        let updated: Option<(Uuid, String)> =
+            sqlx::query_as::<_, (Uuid, String)>(UPDATE_FEATURE_SQL)
+                .bind(update.enabled)
+                .bind(update.description.as_deref())
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
 
-        if updated_id.is_none() {
+        let Some((updated_id, flag_name)) = updated else {
             // Dropping `tx` without commit rolls the whole batch back:
             // preceding flags in this batch keep their old values.
             return Err(ApiError::NotFound(format!("feature flag {id} not found")));
-        }
+        };
 
         let mut changes = serde_json::Map::new();
         if let Some(enabled) = update.enabled {
@@ -265,14 +272,20 @@ async fn update_feature(
         if let Some(desc) = &update.description {
             changes.insert("description".into(), json!(desc));
         }
-        applied.push((id, serde_json::Value::Object(changes)));
+        applied.push((updated_id, flag_name, serde_json::Value::Object(changes)));
     }
 
     tx.commit().await?;
 
+    // Invalidate only AFTER commit: a rolled-back batch must not evict a
+    // cache entry that still reflects the committed database state.
+    for (_, flag_name, _) in &applied {
+        state.feature_flags.invalidate(flag_name);
+    }
+
     // Audit only AFTER commit: a rolled-back batch must not leave
     // "updated" audit records for changes that never landed.
-    for (id, changes) in applied {
+    for (id, _, changes) in applied {
         if changes.as_object().is_some_and(|fields| !fields.is_empty()) {
             log_feature_audit(&state, &auth, "control_plane.feature.updated", id, changes).await;
         }

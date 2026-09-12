@@ -43,6 +43,9 @@ pub struct AppStateInner {
     pub placement_state: Option<Arc<PlacementState>>,
     /// Circuit breakers and bulkheads for upstream dependency calls.
     pub resilient: ResilientClient,
+    /// Runtime feature-flag evaluation (tenant override → global row →
+    /// default), with a bounded TTL cache invalidated by admin writes.
+    pub feature_flags: crate::feature_flags::FeatureFlagService,
 }
 
 impl AppStateInner {
@@ -150,6 +153,10 @@ impl AppStateInner {
         resilient: ResilientClient,
     ) -> AppState {
         let waf_engine = build_waf_engine(&config);
+        // Built here (not as a constructor argument) so every production and
+        // test AppState constructor gets the service without touching each
+        // call site's signature.
+        let feature_flags = crate::feature_flags::FeatureFlagService::new(db.clone());
         Arc::new(Self {
             db,
             pools,
@@ -164,6 +171,7 @@ impl AppStateInner {
             grader_state,
             placement_state,
             resilient,
+            feature_flags,
         })
     }
 }
