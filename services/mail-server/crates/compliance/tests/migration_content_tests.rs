@@ -42,10 +42,12 @@ fn migration_199_defines_payroll_records_with_per_employee_tax_inputs() {
         "migration 199 must create payroll_records"
     );
 
-    // query_employees selects the per-period inputs the date-effective
-    // policy consumes: the employee's II-pillar choice and the exemption
-    // flags. The pension rate must be constrained to the legal choices
-    // (0/2/4/6%) with NULL = participation unknown.
+    // query_employees (annual/statistical headcount) and tsd_ledger (the
+    // TSD's person facts, joined through payroll_postings.payroll_record_id)
+    // read the per-period inputs the date-effective policy consumes: the
+    // employee's II-pillar choice and the exemption flags. The pension rate
+    // must be constrained to the legal choices (0/2/4/6%) with NULL =
+    // participation unknown.
     assert!(
         MIGRATION_199.contains("funded_pension_rate               DOUBLE PRECISION"),
         "per-employee pension choice column"

@@ -1,9 +1,18 @@
 //! DB-backed tests for the unposted-source sweeps (payroll, expenses, bank).
 //!
-//! Every test provisions the real canonical migration chain through
-//! `migrator::test_support` (the workspace convention). One shared database
-//! per binary; tests isolate by working on their own source rows and, where
-//! the adapter resolves the default entity, through one cached default seed.
+//! Every test provisions its OWN canonical database through
+//! `migrator::test_support::fresh_canonical_pool` (the workspace convention).
+//!
+//! A sweep is a GLOBAL operation: it claims every unposted source row — with
+//! no tenant/entity filter for payroll (the adapter posts to the default
+//! entity) and none for expenses or bank lines. The sweep-level counters
+//! (`claimed`, `posted`, `unpostable`, `skipped_incomplete`) therefore
+//! describe the whole database, so a shared database makes them ambiguous:
+//! a sibling test's rows, or a deliberate leftover from a previous run (a
+//! zero-gross record or zero-amount line is reported unpostable and RETAINED
+//! by design), land in the same counters. These tests originally shared one
+//! database and only passed against a pristine one; each test now owns the
+//! database whose counters it asserts on.
 //!
 //! Set `TEST_DATABASE_URL` to run them; without it each test skips, and a
 //! configured-but-broken provisioning is a hard failure.
@@ -27,33 +36,16 @@ use accounting_core::sweeps::{
 use accounting_core::types::*;
 use chrono::NaiveDate;
 use sqlx::PgPool;
-use std::sync::OnceLock;
 use uuid::Uuid;
 
-const SHARED_DB: &str = "apexmail_accounting_sweeps_test";
-
-fn run_tag() -> &'static str {
-    static TAG: OnceLock<String> = OnceLock::new();
-    TAG.get_or_init(|| Uuid::new_v4().simple().to_string()[..8].to_string())
-}
-
 async fn provision(test_name: &str) -> Option<PgPool> {
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        eprintln!("skipping {test_name}: TEST_DATABASE_URL is not configured");
-        return None;
-    };
-    if url.trim().is_empty() {
-        eprintln!("skipping {test_name}: TEST_DATABASE_URL is not configured");
-        return None;
-    }
-    let (server, db_part) = url
-        .rsplit_once('/')
-        .expect("TEST_DATABASE_URL has a db segment");
-    let db_only = db_part.split('?').next().unwrap_or(db_part);
-    let base_url = format!("{server}/{db_only}");
-    match migrator::test_support::shared_canonical_db(&base_url, SHARED_DB).await {
-        Ok(Some(pool)) => Some(pool),
-        Ok(None) => None,
+    match migrator::test_support::fresh_canonical_pool(
+        test_name,
+        &format!("acct_sweeps_{test_name}"),
+    )
+    .await
+    {
+        Ok(pool) => pool,
         Err(error) => panic!("{}", error.panic_message()),
     }
 }
@@ -62,15 +54,9 @@ fn date(year: i32, month: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
 }
 
-/// The default legal entity is shared by every payroll/expense test (the
-/// adapters resolve it). Serialize its creation and cache it.
-static DEFAULT_SEED: tokio::sync::Mutex<Option<Uuid>> = tokio::sync::Mutex::const_new(None);
-
+/// The default legal entity this test's database posts against (the adapters
+/// resolve it). Create-if-absent, so a test may call it more than once.
 async fn default_entity(pool: &PgPool) -> Uuid {
-    let mut guard = DEFAULT_SEED.lock().await;
-    if let Some(entity) = *guard {
-        return entity;
-    }
     let mut conn = pool.acquire().await.expect("pool acquire");
     let entity = match sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM legal_entities WHERE is_default LIMIT 1",
@@ -112,7 +98,6 @@ async fn default_entity(pool: &PgPool) -> Uuid {
     )
     .await
     .expect("period");
-    *guard = Some(entity);
     entity
 }
 
@@ -348,18 +333,20 @@ async fn expense_sweep_reports_missing_store_then_posts_idempotently() {
 
     // The canonical chain deliberately does not create `operating_costs`; a
     // deployment without the optional store must be reported, not an error.
-    // (The shared database may carry the table from an earlier run.)
+    // The database is provisioned per test, so the store is absent here.
     let existed: Option<String> =
         sqlx::query_scalar("SELECT to_regclass('public.operating_costs')::text")
             .fetch_one(&pool)
             .await
             .expect("regclass");
-    if existed.is_none() {
-        let report = sweeps::sweep_unposted_expenses(&pool, &config)
-            .await
-            .expect("missing store");
-        assert!(report.source_table_missing, "{report:?}");
-    }
+    assert!(
+        existed.is_none(),
+        "the canonical chain must not create the optional operating_costs store"
+    );
+    let report = sweeps::sweep_unposted_expenses(&pool, &config)
+        .await
+        .expect("missing store");
+    assert!(report.source_table_missing, "{report:?}");
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS operating_costs ( \
@@ -372,12 +359,10 @@ async fn expense_sweep_reports_missing_store_then_posts_idempotently() {
     .await
     .expect("optional expense table");
 
-    let tag = run_tag();
     let cost_id: Uuid = sqlx::query_scalar(
         "INSERT INTO operating_costs (category, amount_cents, incurred_at) \
-         VALUES ($1, 4500, TIMESTAMPTZ '2026-06-10 00:00:00+00') RETURNING id",
+         VALUES ('sweep', 4500, TIMESTAMPTZ '2026-06-10 00:00:00+00') RETURNING id",
     )
-    .bind(format!("sweep-{tag}"))
     .fetch_one(&pool)
     .await
     .expect("cost");
@@ -393,7 +378,8 @@ async fn expense_sweep_reports_missing_store_then_posts_idempotently() {
         .await
         .expect("expense sweep");
     assert_eq!(report.posted, 1, "{report:?}");
-    assert!(report.unpostable >= 1, "{report:?}");
+    // The single zero-amount row, and nothing else, is unpostable.
+    assert_eq!(report.unpostable, 1, "{report:?}");
 
     let entry_id: Uuid =
         sqlx::query_scalar("SELECT id FROM journal_entries WHERE idempotency_key = $1")
@@ -437,8 +423,7 @@ async fn bank_sweep_posts_unreconciled_lines_once() {
     let Some(pool) = provision("sweep_bank").await else {
         return;
     };
-    let tag = format!("bank-{}", run_tag());
-    let entity = own_seed(&pool, &tag).await;
+    let entity = own_seed(&pool, "bank").await;
     let config = SweepConfig::default();
 
     let mut conn = pool.acquire().await.expect("conn");
@@ -452,7 +437,7 @@ async fn bank_sweep_posts_unreconciled_lines_once() {
          VALUES ($1, 'Sweep Main', $2, 'EUR', $3) RETURNING id",
     )
     .bind(entity)
-    .bind(format!("EE00{tag}0000000000"))
+    .bind("EE00BANK0000000000".to_string())
     .bind(bank_ledger)
     .fetch_one(&pool)
     .await
@@ -463,7 +448,7 @@ async fn bank_sweep_posts_unreconciled_lines_once() {
          VALUES ($1, $2, DATE '2026-06-20', 5000, 'EUR') RETURNING id",
     )
     .bind(bank_account_id)
-    .bind(format!("sweep-{tag}-1"))
+    .bind("sweep-bank-1".to_string())
     .fetch_one(&pool)
     .await
     .expect("receipt");
@@ -472,7 +457,7 @@ async fn bank_sweep_posts_unreconciled_lines_once() {
          VALUES ($1, $2, DATE '2026-06-21', -2000, 'EUR') RETURNING id",
     )
     .bind(bank_account_id)
-    .bind(format!("sweep-{tag}-2"))
+    .bind("sweep-bank-2".to_string())
     .fetch_one(&pool)
     .await
     .expect("payment");
@@ -481,7 +466,7 @@ async fn bank_sweep_posts_unreconciled_lines_once() {
          VALUES ($1, $2, DATE '2026-06-22', 0, 'EUR') RETURNING id",
     )
     .bind(bank_account_id)
-    .bind(format!("sweep-{tag}-3"))
+    .bind("sweep-bank-3".to_string())
     .fetch_one(&pool)
     .await
     .expect("zero line");

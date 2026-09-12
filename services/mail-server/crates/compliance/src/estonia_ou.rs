@@ -1587,20 +1587,74 @@ impl EstoniaOuCompliance {
         })
     }
 
-    /// Generate a Social Tax Declaration (TSD) for a month.
+    /// Generate a Social Tax Declaration (TSD) for a month of the entity
+    /// whose registry code the declaration prints ([`REGISTRY_CODE`]).
+    ///
+    /// The declaration is derived from the **posted ledger** (see
+    /// [`crate::tsd_ledger`]); a month whose payroll is not booked produces a
+    /// visibly not-ready declaration (`has_sufficient_data = false`, with each
+    /// gap named) rather than a figure recomputed from unposted inputs.
     pub async fn generate_social_tax_declaration(
         &self,
         year: i32,
         month: u32,
     ) -> Result<SocialTaxDeclaration, anyhow::Error> {
-        let employees = self.query_employees(year, Some(month)).await?;
-        let has_payroll = crate::table_exists_fn(&self.db, "payroll_records")
+        self.generate_social_tax_declaration_for_registry_code(REGISTRY_CODE, year, month)
             .await
-            .unwrap_or(false);
-        let mut missing = Vec::new();
-        if !has_payroll {
-            missing.push("payroll_records table");
-        }
+    }
+
+    /// Same as [`Self::generate_social_tax_declaration`] with an explicit
+    /// registry code: the declaration's printed identity must be the identity
+    /// whose books were read.
+    pub async fn generate_social_tax_declaration_for_registry_code(
+        &self,
+        registry_code: &str,
+        year: i32,
+        month: u32,
+    ) -> Result<SocialTaxDeclaration, anyhow::Error> {
+        let source =
+            crate::tsd_ledger::read_month_by_registry_code(&self.db, registry_code, year, month)
+                .await?;
+        Ok(Self::declaration_from_ledger(source, year, month))
+    }
+
+    /// Same as [`Self::generate_social_tax_declaration`] for an explicitly
+    /// identified legal entity (multi-entity deployments, tests).
+    pub async fn generate_social_tax_declaration_for_entity(
+        &self,
+        legal_entity_id: Uuid,
+        year: i32,
+        month: u32,
+    ) -> Result<SocialTaxDeclaration, anyhow::Error> {
+        let source = crate::tsd_ledger::read_month(&self.db, legal_entity_id, year, month).await?;
+        Ok(Self::declaration_from_ledger(source, year, month))
+    }
+
+    /// Map the ledger's answer onto the declaration document. Pure function:
+    /// every amount and every quality flag comes from the source unchanged.
+    pub fn declaration_from_ledger(
+        source: crate::tsd_ledger::TsdLedgerSource,
+        year: i32,
+        month: u32,
+    ) -> SocialTaxDeclaration {
+        let employees: Vec<EmployeeTaxRecord> = source
+            .employees
+            .iter()
+            .map(|e| EmployeeTaxRecord {
+                employee_name: e.employee_name.clone().unwrap_or_default(),
+                personal_code: e.personal_code.clone().unwrap_or_default(),
+                gross_salary_cents: e.gross_salary_cents,
+                social_tax_cents: e.social_tax_cents,
+                unemployment_insurance_employer_cents: e
+                    .unemployment_insurance_employer_cents,
+                unemployment_insurance_employee_cents: e
+                    .unemployment_insurance_employee_cents,
+                funded_pension_cents: e.funded_pension_cents,
+                funded_pension_rate: e.funded_pension_rate,
+                income_tax_withheld_cents: e.income_tax_withheld_cents,
+                net_salary_cents: e.net_salary_cents,
+            })
+            .collect();
 
         let total_gross: i64 = employees.iter().map(|e| e.gross_salary_cents).sum();
         let total_social: i64 = employees.iter().map(|e| e.social_tax_cents).sum();
@@ -1618,18 +1672,12 @@ impl EstoniaOuCompliance {
 
         let employee_count = employees.len() as i32;
 
-        let due =
-            ComplianceCalendar::calculate_due_date(SubmissionType::SocialTax, year, Some(month));
-
-        let note = if employees.is_empty() {
-            "No employment records for this period. If there are team members, add payroll_records."
-        } else {
-            "Employee tax records calculated per Estonian rates."
-        };
-
-        Ok(SocialTaxDeclaration {
-            company_name: COMPANY_NAME.into(),
-            registry_code: REGISTRY_CODE.into(),
+        SocialTaxDeclaration {
+            // Identity from the entity whose books were read, never from a
+            // constant: a declaration that names Bel Consulting OÜ while
+            // summing another entity's ledger would be a false statement.
+            company_name: source.legal_name.clone(),
+            registry_code: source.registry_code.clone(),
             tax_year: year,
             tax_month: month,
             generated_at: Utc::now(),
@@ -1644,13 +1692,17 @@ impl EstoniaOuCompliance {
                 total_employer_cost_cents: total_gross + total_employer,
                 employee_count,
             },
-            due_date: due,
+            due_date: ComplianceCalendar::calculate_due_date(
+                SubmissionType::SocialTax,
+                year,
+                Some(month),
+            ),
             data_quality: DataQualityNote {
-                has_sufficient_data: has_payroll,
-                missing_fields: missing.iter().map(|s| s.to_string()).collect(),
-                note: note.into(),
+                has_sufficient_data: source.has_sufficient_data(),
+                missing_fields: source.missing_fields(),
+                note: source.note(),
             },
-        })
+        }
     }
 
     /// Generate a Statistical Report.
