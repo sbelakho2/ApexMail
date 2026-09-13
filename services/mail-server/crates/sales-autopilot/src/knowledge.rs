@@ -291,13 +291,11 @@ impl SalesKnowledgeBase {
             .single()
             .unwrap_or(v2);
 
-        let mut facts = Vec::new();
-
         // ── Plan catalog: crates/billing-service/src/plans.rs ───────────
         // Values transcribed from `default_plans()` (2026-09-08 pricing
         // review); `docs/pricing-authority.md` names this file (plus the
         // `plans` table and Stripe webhooks) as the operational authority.
-        facts.push(fact(
+        let mut facts = vec![fact(
             "KB-PLAN-FREE",
             "ApexMail Free includes 3,000 emails per month forever plus a one-time 30,000-email launch allowance for the first 30 days.",
             KnowledgeStatus::Verified,
@@ -305,7 +303,7 @@ impl SalesKnowledgeBase {
             None,
             KnowledgeSource::PlanCatalog,
             true,
-        ));
+        )];
         facts.push(fact(
             "KB-PLAN-DEVELOPER",
             "The Developer plan is EUR 29 per month (EUR 290 per year) and includes 50,000 emails per month.",

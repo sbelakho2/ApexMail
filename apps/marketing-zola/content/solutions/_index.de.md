@@ -16,7 +16,7 @@ ApexMail liefert Transaktions-E-Mail-Infrastruktur mit EU/EWR-orientierten Berei
 ## Lösungen nach Anwendungsfall
 
 - **[Transaktions-E-Mails](transactional-email/)** — Anwendungsgesteuerte E-Mails: Passwort-Resets, Bestellbestätigungen, Benachrichtigungen, Konto-Warnmeldungen. REST-API und SMTP-Relay mit signierten Webhooks, Idempotenz und Konfiguration je Anwendungsfall.
-- **[SaaS-Plattformen](saas-platforms/)** — Multi-Tenant-E-Mail-Infrastruktur für B2B- und B2C-SaaS-Produkte. Subaccounts, Domain-Isolation, benutzerdefiniertes RBAC, SSO und White-Label-Zustellung.
+- **[SaaS-Plattformen](saas-platforms/)** — Multi-Tenant-E-Mail-Infrastruktur für B2B- und B2C-SaaS-Produkte. Tenant-Isolation, Domain-Isolation, benutzerdefiniertes RBAC, SSO und White-Label-Zustellung.
 - **[Regulierte Branchen](regulated-industries/)** — DSGVO-orientierte und vertragliche Prüfung. AVV-Support, Datenresidenz-Review, Audit-Kontrollen und private Bereitstellungsoptionen. HIPAA-Verfügbarkeit wird derzeit nicht angeboten.
 - **[Massenversand](high-volume-sending/)** — Millionen E-Mails pro Monat. Verwaltete dedizierte IPs, automatisches Warm-up, Warteschlangen-Priorisierung, Batch-APIs und vertragliche SLAs.
 - **[Migration](migration/)** — Wechsel von SendGrid, Postmark, Mailgun, SES oder Resend. IP-Warm-up, Domain-Übergang, Vorlagen-Migration, Webhook-Kompatibilität und Parallelversand-Validierung.

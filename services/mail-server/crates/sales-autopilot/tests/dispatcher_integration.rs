@@ -371,6 +371,36 @@ async fn enqueue_step(
 // Happy path: real enqueue through the platform pipeline
 // ---------------------------------------------------------------------------
 
+/// `messages` row read back to prove the enqueue provenance.
+#[derive(sqlx::FromRow)]
+struct EnqueuedMessageRow {
+    idempotency_key: String,
+    status: String,
+    from_email: String,
+    sales_step_execution_id: Option<Uuid>,
+    sales_enrollment_id: Option<Uuid>,
+    sales_decision_id: Option<Uuid>,
+    sales_sender_identity_id: Option<Uuid>,
+    /// `to_emails->>0` (aliased `recipient`).
+    recipient: Option<String>,
+}
+
+/// `email_queue` row read back to prove the platform-pipeline handoff.
+#[derive(sqlx::FromRow)]
+struct QueuedEmailRow {
+    /// `"to"` (aliased `recipient`).
+    recipient: String,
+    status: String,
+    /// `headers->>'List-Unsubscribe'`.
+    list_unsubscribe: Option<String>,
+    /// `headers->>'List-Unsubscribe-Post'`.
+    list_unsubscribe_post: Option<String>,
+    sales_step_execution_id: Option<Uuid>,
+    sales_enrollment_id: Option<Uuid>,
+    sales_decision_id: Option<Uuid>,
+    campaign_id: Option<Uuid>,
+}
+
 /// The dispatcher's real job is unchanged: enqueue through the platform
 /// pipeline with List-Unsubscribe headers, escaped personalization, the
 /// compliance footer, typed sales provenance — but the envelope sender is now
@@ -434,19 +464,10 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
 
     // `messages`: one row, the canonical step-execution idempotency key (NOT
     // `sacmp:...`), status queued, envelope = resolved identity.
-    let messages: Vec<(
-        String,
-        String,
-        String,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let messages: Vec<EnqueuedMessageRow> = sqlx::query_as(
         "SELECT idempotency_key, status, from_email, sales_step_execution_id, \
                 sales_enrollment_id, sales_decision_id, sales_sender_identity_id, \
-                to_emails->>0 \
+                to_emails->>0 AS recipient \
          FROM messages WHERE tenant_id = $1",
     )
     .bind(&tenant)
@@ -454,37 +475,44 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     .await
     .unwrap();
     assert_eq!(messages.len(), 1, "one messages row per step execution");
-    let (key, status, from_email, msg_step, msg_enrollment, msg_decision, msg_sender, recipient) =
-        &messages[0];
-    assert_eq!(key, &fixture_key(&fx), "logical step identity");
+    let message = &messages[0];
+    assert_eq!(
+        message.idempotency_key,
+        fixture_key(&fx),
+        "logical step identity"
+    );
     assert!(
-        key.starts_with(&format!(
+        message.idempotency_key.starts_with(&format!(
             "sa:{enrollment_id}:{version}:",
             version = seq.version_id
         )),
-        "key namespace is the step execution: {key}"
+        "key namespace is the step execution: {}",
+        message.idempotency_key
     );
-    assert_eq!(status, "queued");
+    assert_eq!(message.status, "queued");
     assert_eq!(
-        from_email,
-        &format!("sales@{identity_domain}"),
+        message.from_email,
+        format!("sales@{identity_domain}"),
         "the RESOLVED identity must be the envelope sender"
     );
     assert_ne!(
-        from_email,
-        &fx.dispatcher.config().from_email,
+        message.from_email,
+        fx.dispatcher.config().from_email,
         "the deployment-wide SALES_CAMPAIGN_FROM_EMAIL must not be the sender"
     );
-    assert_eq!(msg_step, &Some(step_execution_id));
-    assert_eq!(msg_enrollment, &Some(enrollment_id));
-    assert!(msg_decision.is_some(), "a Decision Packet must be linked");
-    assert_eq!(msg_sender, &seq.sender_id);
-    assert_eq!(recipient.as_deref(), Some(seq.email.as_str()));
+    assert_eq!(message.sales_step_execution_id, Some(step_execution_id));
+    assert_eq!(message.sales_enrollment_id, Some(enrollment_id));
+    assert!(
+        message.sales_decision_id.is_some(),
+        "a Decision Packet must be linked"
+    );
+    assert_eq!(message.sales_sender_identity_id, seq.sender_id);
+    assert_eq!(message.recipient.as_deref(), Some(seq.email.as_str()));
 
     // The Decision Packet records the enforcement verdict and the sender used.
     let (enforcement, selected_sender): (Option<String>, Option<Uuid>) =
         sqlx::query_as("SELECT enforcement, selected_sender_id FROM sales_decisions WHERE id = $1")
-            .bind(msg_decision.unwrap())
+            .bind(message.sales_decision_id.unwrap())
             .fetch_one(&db)
             .await
             .unwrap();
@@ -494,19 +522,11 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     // `email_queue`: pending, single recipient, RFC 2369 + RFC 8058 headers,
     // typed provenance, campaign_id NULL (sequence mail is attributed to a
     // step execution, not a campaign).
-    let queue: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<Uuid>,
-    )> = sqlx::query_as(
-        "SELECT \"to\", status, headers->>'List-Unsubscribe', \
-                headers->>'List-Unsubscribe-Post', sales_step_execution_id, \
-                sales_enrollment_id, sales_decision_id, campaign_id \
+    let queue: Vec<QueuedEmailRow> = sqlx::query_as(
+        "SELECT \"to\" AS recipient, status, \
+                headers->>'List-Unsubscribe' AS list_unsubscribe, \
+                headers->>'List-Unsubscribe-Post' AS list_unsubscribe_post, \
+                sales_step_execution_id, sales_enrollment_id, sales_decision_id, campaign_id \
          FROM email_queue WHERE tenant_id = $1",
     )
     .bind(&tenant)
@@ -514,10 +534,11 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     .await
     .unwrap();
     assert_eq!(queue.len(), 1);
-    let (to, q_status, list_unsub, post, q_step, q_enrollment, q_decision, campaign_id) = &queue[0];
-    assert_eq!(to, &seq.email);
-    assert_eq!(q_status, "pending");
-    let link = list_unsub
+    let queued = &queue[0];
+    assert_eq!(queued.recipient, seq.email);
+    assert_eq!(queued.status, "pending");
+    let link = queued
+        .list_unsubscribe
         .as_ref()
         .expect("List-Unsubscribe header present");
     assert!(
@@ -528,11 +549,14 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
         link.contains("/u/"),
         "points at the unsubscribe endpoint: {link}"
     );
-    assert_eq!(post.as_deref(), Some("List-Unsubscribe=One-Click"));
-    assert_eq!(q_step, &Some(step_execution_id));
-    assert_eq!(q_enrollment, &Some(enrollment_id));
-    assert_eq!(q_decision, msg_decision);
-    assert_eq!(campaign_id, &None);
+    assert_eq!(
+        queued.list_unsubscribe_post.as_deref(),
+        Some("List-Unsubscribe=One-Click")
+    );
+    assert_eq!(queued.sales_step_execution_id, Some(step_execution_id));
+    assert_eq!(queued.sales_enrollment_id, Some(enrollment_id));
+    assert_eq!(queued.sales_decision_id, message.sales_decision_id);
+    assert_eq!(queued.campaign_id, None);
 
     // The strategy body is plain text rendered through `compose_reply_html`:
     // every interpolated lead/account value must be HTML-escaped, and raw
@@ -540,7 +564,7 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     let (subject, html): (String, Option<String>) = sqlx::query_as(
         "SELECT subject, html_body FROM messages WHERE idempotency_key = $1 AND tenant_id = $2",
     )
-    .bind(key)
+    .bind(&message.idempotency_key)
     .bind(&tenant)
     .fetch_one(&db)
     .await

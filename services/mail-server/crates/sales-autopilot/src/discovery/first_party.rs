@@ -54,8 +54,7 @@ impl DiscoverySource for FirstPartySource {
             .max(0);
         let limit = query
             .effective_max_results()
-            .min(FIRST_PARTY_PAGE_SIZE)
-            .max(1) as i64;
+            .clamp(1, FIRST_PARTY_PAGE_SIZE) as i64;
 
         let mut patterns: Vec<String> = Vec::new();
         for term in query.keywords.iter().chain(query.industries.iter()) {

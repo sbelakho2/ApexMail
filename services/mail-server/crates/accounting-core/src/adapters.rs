@@ -50,6 +50,21 @@ fn split_vat_proportional(amount_cents: i64, invoice_total: i64, invoice_vat: i6
 // Invoices
 // ===========================================================================
 
+/// The bank statement line plus the account facts the posting needs
+/// (named row: an 8-tuple tripped clippy's type-complexity gate).
+#[derive(Debug, sqlx::FromRow)]
+struct BankStatementLineRow {
+    id: Uuid,
+    legal_entity_id: Uuid,
+    /// The bank ledger account (`chart_of_accounts.account_role = bank`).
+    account_id: Uuid,
+    amount_cents: i64,
+    currency: String,
+    statement_date: NaiveDate,
+    reference: Option<String>,
+    counterparty_name: Option<String>,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct InvoiceRow {
     id: Uuid,
@@ -1025,16 +1040,7 @@ pub async fn post_bank_statement_line_in(
     conn: &mut PgConnection,
     line_id: Uuid,
 ) -> Result<PostOutcome> {
-    let row: Option<(
-        Uuid,
-        Uuid,
-        Uuid,
-        i64,
-        String,
-        NaiveDate,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let row: Option<BankStatementLineRow> = sqlx::query_as(
         r#"
             SELECT l.id, ba.legal_entity_id, ba.account_id, l.amount_cents, l.currency,
                    l.statement_date, l.reference, l.counterparty_name
@@ -1047,16 +1053,16 @@ pub async fn post_bank_statement_line_in(
     .fetch_optional(&mut *conn)
     .await?;
 
-    let Some((
-        _id,
+    let Some(BankStatementLineRow {
+        id: _id,
         legal_entity_id,
-        bank_ledger,
+        account_id: bank_ledger,
         amount_cents,
         currency,
         statement_date,
         reference,
-        counterparty,
-    )) = row
+        counterparty_name: counterparty,
+    }) = row
     else {
         return Err(AccountingError::SourceRowMissing {
             table: "bank_statement_lines",

@@ -529,3 +529,116 @@ ci_prune_runs() {
         rm -f "$_pr_h"
     fi
 }
+
+# --- pinned zola -------------------------------------------------------------------------
+# The marketing site is built by apps/marketing-zola/Dockerfile with a PINNED
+# zola, and the templates are written for that Tera version: zola 0.23 removed
+# the `{% import %}` tag, so a newer host zola fails every template with
+# "Unknown tag" and the marketing gates die with a misleading error. The gates
+# therefore use the SAME version the image ships, resolved from the Dockerfile
+# (one source of truth) and fetched on demand when the host's zola differs.
+#
+# ci_zola_expected_version — the pin, e.g. "0.22.1" (empty when unreadable).
+ci_zola_expected_version() {
+    sed -n 's/.*zola-v\([0-9][0-9.]*\)-.*/\1/p' \
+        "$REPO_ROOT/apps/marketing-zola/Dockerfile" 2>/dev/null | head -n 1
+}
+
+# ci_zola_target — the release triple for THIS host (the installer used to
+# hard-code x86_64, which installed a non-runnable binary on arm64 hosts).
+ci_zola_target() {
+    _zt_os=$(uname -s 2>/dev/null || echo unknown)
+    _zt_arch=$(uname -m 2>/dev/null || echo unknown)
+    case "$_zt_os-$_zt_arch" in
+        Darwin-arm64)  echo aarch64-apple-darwin ;;
+        Darwin-x86_64) echo x86_64-apple-darwin ;;
+        Linux-aarch64|Linux-arm64) echo aarch64-unknown-linux-gnu ;;
+        Linux-x86_64)  echo x86_64-unknown-linux-gnu ;;
+        *) return 1 ;;
+    esac
+}
+
+# ci_zola — print the path of a zola matching the Dockerfile pin, downloading
+# it into $CI_ZOLA_DIR (default: a per-user cache) when the host's own zola is
+# absent or a different version. Returns non-zero (1) when no binary can be
+# provided; callers keep their own required/optional policy.
+ci_zola() {
+    _z_ver=$(ci_zola_expected_version)
+    [ -n "$_z_ver" ] || return 1
+    if command -v zola >/dev/null 2>&1; then
+        if [ "$(zola --version 2>/dev/null | awk '{print $2}')" = "v$_z_ver" ]; then
+            command -v zola
+            return 0
+        fi
+    fi
+    _z_dir=${CI_ZOLA_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/apexmail-ci-zola}/v$_z_ver
+    _z_bin=$_z_dir/zola
+    if [ -x "$_z_bin" ] && [ "$("$_z_bin" --version 2>/dev/null | awk '{print $2}')" = "v$_z_ver" ]; then
+        echo "$_z_bin"
+        return 0
+    fi
+    _z_target=$(ci_zola_target) || return 1
+    command -v curl >/dev/null 2>&1 || return 1
+    mkdir -p "$_z_dir" || return 1
+    # stderr, not stdout: the caller captures THIS function's stdout as the
+    # binary path.
+    ci_info "fetching zola v$_z_ver ($_z_target) — the marketing pin; the host's zola is $(zola --version 2>/dev/null || echo 'absent')" >&2
+    if curl -sSL --max-time 180 \
+        "https://github.com/getzola/zola/releases/download/v${_z_ver}/zola-v${_z_ver}-${_z_target}.tar.gz" \
+        | tar xz -C "$_z_dir" zola 2>/dev/null && [ -x "$_z_bin" ]; then
+        echo "$_z_bin"
+        return 0
+    fi
+    rm -f "$_z_bin"
+    return 1
+}
+
+# --- pinned hadolint ---------------------------------------------------------------------
+# The static-lint lane runs hadolint over every tracked Dockerfile and its flag
+# defaults to `required` (lane_tool_status fails closed on a missing tool, on
+# any host). Rather than weaken that flag, the lane provisions the tool: this
+# helper prints a usable hadolint path, downloading the pinned release for the
+# host's OS/architecture when the machine does not carry one.
+CI_HADOLINT_VERSION=2.15.1
+
+# ci_hadolint_target — the release asset suffix for THIS host, or non-zero.
+ci_hadolint_target() {
+    _ht_os=$(uname -s 2>/dev/null || echo unknown)
+    _ht_arch=$(uname -m 2>/dev/null || echo unknown)
+    case "$_ht_os-$_ht_arch" in
+        Darwin-arm64)  echo macos-arm64 ;;
+        Darwin-x86_64) echo macos-x86_64 ;;
+        Linux-aarch64|Linux-arm64) echo linux-arm64 ;;
+        Linux-x86_64)  echo linux-x86_64 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ci_hadolint — print the path of a hadolint binary, fetching the pinned
+# release into a per-user cache when the host has none. Returns 1 when no
+# binary can be provided (the lane keeps its own required/advisory policy).
+ci_hadolint() {
+    if command -v hadolint >/dev/null 2>&1; then
+        command -v hadolint
+        return 0
+    fi
+    _hd_dir=${XDG_CACHE_HOME:-$HOME/.cache}/apexmail-ci-hadolint/v$CI_HADOLINT_VERSION
+    _hd_bin=$_hd_dir/hadolint
+    if [ -x "$_hd_bin" ]; then
+        echo "$_hd_bin"
+        return 0
+    fi
+    _hd_target=$(ci_hadolint_target) || return 1
+    command -v curl >/dev/null 2>&1 || return 1
+    mkdir -p "$_hd_dir" || return 1
+    # stderr: the caller captures stdout as the binary path.
+    ci_info "fetching hadolint v$CI_HADOLINT_VERSION ($_hd_target) — the static-lint lane requires it" >&2
+    if curl -sSL --max-time 180 \
+        "https://github.com/hadolint/hadolint/releases/download/v${CI_HADOLINT_VERSION}/hadolint-${_hd_target}" \
+        -o "$_hd_bin" && chmod +x "$_hd_bin" && "$_hd_bin" --version >/dev/null 2>&1; then
+        echo "$_hd_bin"
+        return 0
+    fi
+    rm -f "$_hd_bin"
+    return 1
+}

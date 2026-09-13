@@ -14,7 +14,7 @@ og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
 verdict_title = "Pourquoi choisir ApexMail plutôt que Resend ?"
 verdict_points = [
-  "Fonctionnalités Enterprise complètes : SSO, marque blanche, sous-comptes",
+  "Fonctionnalités Enterprise complètes : SSO et livraison en marque blanche",
   "Documentation de conformité à jour et contrôles de forfaits auditables",
   "Revues de déploiement personnalisées pour les besoins d’infrastructure dédiée",
   "Analytique avancée, diagnostics de contenu et recommandations sur le moment d’envoi",

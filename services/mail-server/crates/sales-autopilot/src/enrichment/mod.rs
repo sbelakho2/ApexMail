@@ -664,7 +664,7 @@ impl EnrichmentService {
                 .providers
                 .iter()
                 .enumerate()
-                .filter(|(_, provider)| provider.fields().iter().any(|f| *f == field.as_str()))
+                .filter(|(_, provider)| provider.fields().contains(&field.as_str()))
                 .map(|(index, _)| index)
                 .collect();
             if declaring.is_empty() {

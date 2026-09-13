@@ -1645,10 +1645,8 @@ impl EstoniaOuCompliance {
                 personal_code: e.personal_code.clone().unwrap_or_default(),
                 gross_salary_cents: e.gross_salary_cents,
                 social_tax_cents: e.social_tax_cents,
-                unemployment_insurance_employer_cents: e
-                    .unemployment_insurance_employer_cents,
-                unemployment_insurance_employee_cents: e
-                    .unemployment_insurance_employee_cents,
+                unemployment_insurance_employer_cents: e.unemployment_insurance_employer_cents,
+                unemployment_insurance_employee_cents: e.unemployment_insurance_employee_cents,
                 funded_pension_cents: e.funded_pension_cents,
                 funded_pension_rate: e.funded_pension_rate,
                 income_tax_withheld_cents: e.income_tax_withheld_cents,

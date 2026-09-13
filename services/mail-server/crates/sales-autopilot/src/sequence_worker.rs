@@ -277,6 +277,19 @@ impl Default for PlannerFacts {
     }
 }
 
+/// `sales_accounts` row loaded by [`SequenceWorker::load_planner_facts`].
+#[derive(sqlx::FromRow)]
+struct AccountFactsRow {
+    company: String,
+    domain: String,
+    industry: Option<String>,
+    employees: Option<i32>,
+    technologies: Vec<String>,
+    eea_relevance: String,
+    icp_segment: Option<String>,
+    lifecycle: String,
+}
+
 impl PlannerFacts {
     /// The scorer's pure feature vector for the current live state. The legal
     /// dimension is the last recorded policy decision; the real legal gate is
@@ -434,16 +447,7 @@ impl SequenceStepHandler {
         // `sales_accounts` columns: migration 200 lines 212-247 (company 216,
         // domain 217, industry 221, employees 222, technologies 225,
         // eea_relevance 227, icp_segment 229, lifecycle 235).
-        let account_row: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<i32>,
-            Vec<String>,
-            String,
-            Option<String>,
-            String,
-        )> = sqlx::query_as(
+        let account_row: Option<AccountFactsRow> = sqlx::query_as(
             "SELECT company, domain, industry, employees, technologies, eea_relevance, \
                     icp_segment, lifecycle \
              FROM sales_accounts WHERE id = $1 AND tenant_id = $2",
@@ -453,7 +457,7 @@ impl SequenceStepHandler {
         .fetch_optional(&self.db)
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
-        if let Some((
+        if let Some(AccountFactsRow {
             company,
             domain,
             industry,
@@ -462,7 +466,7 @@ impl SequenceStepHandler {
             eea_relevance,
             icp_segment,
             lifecycle,
-        )) = account_row
+        }) = account_row
         {
             facts.account = Some(AccountFacts {
                 company,

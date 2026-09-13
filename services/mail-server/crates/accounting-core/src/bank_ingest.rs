@@ -412,11 +412,12 @@ fn outcome_from_import(
 
 async fn resolve_account(pool: &PgPool, account_ref: &str) -> Result<AccountRow, IngestError> {
     if let Ok(id) = Uuid::parse_str(account_ref) {
-        let row: Option<AccountRow> =
-            sqlx::query_as("SELECT id, btrim(currency) AS currency FROM bank_accounts WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await?;
+        let row: Option<AccountRow> = sqlx::query_as(
+            "SELECT id, btrim(currency) AS currency FROM bank_accounts WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
         return row.ok_or_else(|| IngestError::UnknownAccount(account_ref.to_string()));
     }
 
@@ -458,10 +459,9 @@ async fn find_import(
 }
 
 async fn load_known_accounts(pool: &PgPool) -> Result<KnownAccounts, IngestError> {
-    let rows: Vec<(Uuid, Option<String>)> =
-        sqlx::query_as("SELECT id, iban FROM bank_accounts")
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as("SELECT id, iban FROM bank_accounts")
+        .fetch_all(pool)
+        .await?;
     let mut known = KnownAccounts::default();
     for (id, iban) in rows {
         known.ids.insert(id);
@@ -477,7 +477,11 @@ async fn load_known_accounts(pool: &PgPool) -> Result<KnownAccounts, IngestError
 /// Resolve the optional per-row `bank_account` cell to the statement's
 /// account. Returns `Err(message)` for an unknown, ambiguous, or different
 /// account.
-fn check_row_account(value: &str, account: &AccountRow, known: &KnownAccounts) -> Result<(), String> {
+fn check_row_account(
+    value: &str,
+    account: &AccountRow,
+    known: &KnownAccounts,
+) -> Result<(), String> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(());
@@ -599,7 +603,11 @@ fn parse_rows(
             .trim()
             .to_string();
         if external_id.is_empty() {
-            row_errors.push(row_error(row, "external_id", "external_id is required".into()));
+            row_errors.push(row_error(
+                row,
+                "external_id",
+                "external_id is required".into(),
+            ));
         } else if !seen.insert(external_id.clone()) {
             row_errors.push(row_error(
                 row,
@@ -721,10 +729,7 @@ async fn existing_line_conflicts(
     if lines.is_empty() {
         return Ok(Vec::new());
     }
-    let external_ids: Vec<String> = lines
-        .iter()
-        .map(|line| line.external_id.clone())
-        .collect();
+    let external_ids: Vec<String> = lines.iter().map(|line| line.external_id.clone()).collect();
     let existing: Vec<String> = sqlx::query_scalar(
         "SELECT external_id FROM bank_statement_lines \
          WHERE bank_account_id = $1 AND external_id = ANY($2)",

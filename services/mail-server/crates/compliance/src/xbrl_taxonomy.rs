@@ -133,9 +133,7 @@ pub enum TaxonomyError {
     InvalidSource { value: String, reason: String },
     #[error("cannot read taxonomy document {location}: {detail}")]
     Io { location: String, detail: String },
-    #[error(
-        "taxonomy location {location} is unsupported by this resolver: {detail}"
-    )]
+    #[error("taxonomy location {location} is unsupported by this resolver: {detail}")]
     UnsupportedLocation { location: String, detail: String },
     #[error("taxonomy reference {reference:?} from {from} cannot be resolved: {detail}")]
     UnresolvableReference {
@@ -423,20 +421,16 @@ impl Concept {
     /// declares a periodType without belonging to another substitution group.
     pub fn is_item(&self) -> bool {
         match &self.substitution_group {
-            Some(group) => {
-                group.namespace == XBRL_INSTANCE_NAMESPACE && group.name == "item"
-            }
+            Some(group) => group.namespace == XBRL_INSTANCE_NAMESPACE && group.name == "item",
             None => self.period_type.is_some(),
         }
     }
 
     /// An XBRL tuple: substitution group `xbrli:tuple`.
     pub fn is_tuple(&self) -> bool {
-        self.substitution_group
-            .as_ref()
-            .is_some_and(|group| {
-                group.namespace == XBRL_INSTANCE_NAMESPACE && group.name == "tuple"
-            })
+        self.substitution_group.as_ref().is_some_and(|group| {
+            group.namespace == XBRL_INSTANCE_NAMESPACE && group.name == "tuple"
+        })
     }
 }
 
@@ -604,10 +598,7 @@ impl XbrlTaxonomy {
                     })?;
             return Ok(QName::new(namespace.clone(), name));
         }
-        Ok(QName::new(
-            self.target_namespace.clone(),
-            value.to_string(),
-        ))
+        Ok(QName::new(self.target_namespace.clone(), value.to_string()))
     }
 
     /// Numeric category of a concept's declared type, walking custom type
@@ -872,13 +863,12 @@ impl TaxonomyResolver for MemoryResolver {
                 });
             }
         };
-        let base_url = url::Url::parse(base_uri).map_err(|error| {
-            TaxonomyError::UnresolvableReference {
+        let base_url =
+            url::Url::parse(base_uri).map_err(|error| TaxonomyError::UnresolvableReference {
                 from: base.as_string(),
                 reference: reference.to_string(),
                 detail: error.to_string(),
-            }
-        })?;
+            })?;
         let joined =
             base_url
                 .join(reference)
@@ -1001,7 +991,11 @@ fn load_document<R: TaxonomyResolver>(
     is_entry: bool,
 ) -> Result<(), TaxonomyError> {
     if state.stack.iter().any(|on_stack| on_stack == location) {
-        let mut chain: Vec<String> = state.stack.iter().map(TaxonomyLocation::as_string).collect();
+        let mut chain: Vec<String> = state
+            .stack
+            .iter()
+            .map(TaxonomyLocation::as_string)
+            .collect();
         chain.push(location.as_string());
         return Err(TaxonomyError::ImportCycle {
             chain: chain.join(" -> "),
@@ -1041,7 +1035,9 @@ fn load_document<R: TaxonomyResolver>(
         sha256: digest,
         bytes: bytes.len(),
     });
-    state.loaded.insert(location.clone(), accumulator.documents.len() - 1);
+    state
+        .loaded
+        .insert(location.clone(), accumulator.documents.len() - 1);
     let first_reference = accumulator.references.len();
     accumulator.merge(raw, location, is_entry)?;
     let references: Vec<(TaxonomyLocation, RawReference)> =
@@ -1239,12 +1235,13 @@ fn parse_document(location: &TaxonomyLocation, bytes: &[u8]) -> Result<RawDocume
         label_buffer: None,
     };
     loop {
-        let (resolved, event) = reader
-            .read_resolved_event()
-            .map_err(|error| TaxonomyError::MalformedXml {
-                location: location.as_string(),
-                detail: error.to_string(),
-            })?;
+        let (resolved, event) =
+            reader
+                .read_resolved_event()
+                .map_err(|error| TaxonomyError::MalformedXml {
+                    location: location.as_string(),
+                    detail: error.to_string(),
+                })?;
         let element_namespace: Option<String> = match &resolved {
             quick_xml::name::ResolveResult::Bound(namespace) => {
                 Some(String::from_utf8_lossy(namespace.as_ref()).into_owned())
@@ -1358,8 +1355,8 @@ impl DocumentParser<'_> {
         start: &quick_xml::events::BytesStart<'_>,
         namespace: Option<&str>,
     ) -> Result<(), TaxonomyError> {
-        let attributes = collect_attributes(start, &self.scope)
-            .map_err(|detail| self.malformed(detail))?;
+        let attributes =
+            collect_attributes(start, &self.scope).map_err(|detail| self.malformed(detail))?;
         let pushed = self.scope.push(attributes.namespace_declarations.clone());
         for (prefix, namespace) in &attributes.namespace_declarations {
             if !namespace.is_empty() {
@@ -1435,16 +1432,14 @@ impl DocumentParser<'_> {
                         location: attributes.get("schemaLocation").map(str::to_string),
                     });
                 }
-                "include" if parent_is_schema_root => {
-                    match attributes.get("schemaLocation") {
-                        Some(reference) => self.document.references.push(RawReference::Include {
-                            location: reference.to_string(),
-                        }),
-                        None => {
-                            return Err(self.malformed("xs:include without schemaLocation"));
-                        }
+                "include" if parent_is_schema_root => match attributes.get("schemaLocation") {
+                    Some(reference) => self.document.references.push(RawReference::Include {
+                        location: reference.to_string(),
+                    }),
+                    None => {
+                        return Err(self.malformed("xs:include without schemaLocation"));
                     }
-                }
+                },
                 _ => {}
             }
         } else if qname.namespace == XBRL_LINKBASE_NAMESPACE {
@@ -1505,12 +1500,17 @@ impl DocumentParser<'_> {
                         "labelArc" => ArcKind::Label,
                         _ => ArcKind::Other,
                     };
-                    let from = attributes
-                        .get_ns(XBRL_XLINK_NAMESPACE, "from")
-                        .ok_or_else(|| self.malformed(format!("{} without xlink:from", qname.name)))?;
+                    let from =
+                        attributes
+                            .get_ns(XBRL_XLINK_NAMESPACE, "from")
+                            .ok_or_else(|| {
+                                self.malformed(format!("{} without xlink:from", qname.name))
+                            })?;
                     let to = attributes
                         .get_ns(XBRL_XLINK_NAMESPACE, "to")
-                        .ok_or_else(|| self.malformed(format!("{} without xlink:to", qname.name)))?;
+                        .ok_or_else(|| {
+                            self.malformed(format!("{} without xlink:to", qname.name))
+                        })?;
                     let arcrole = attributes
                         .get_ns(XBRL_XLINK_NAMESPACE, "arcrole")
                         .unwrap_or("")
@@ -1741,12 +1741,11 @@ impl TaxonomyAccumulator {
 
     fn finish(self, source: &TaxonomySource) -> Result<XbrlTaxonomy, TaxonomyError> {
         let entry_location = source.location();
-        let target_namespace =
-            self.entry_target_namespace
-                .clone()
-                .ok_or_else(|| TaxonomyError::MissingTargetNamespace {
-                    location: entry_location.as_string(),
-                })?;
+        let target_namespace = self.entry_target_namespace.clone().ok_or_else(|| {
+            TaxonomyError::MissingTargetNamespace {
+                location: entry_location.as_string(),
+            }
+        })?;
 
         // Resolve linkbase locators (document#id) to the declared concepts.
         let mut locator_concepts: BTreeMap<(usize, String), QName> = BTreeMap::new();
@@ -1804,13 +1803,14 @@ impl TaxonomyAccumulator {
                     });
                 }
                 ArcKind::Calculation if arc.arcrole == SUMMATION_ITEM_ARCROLE => {
-                    let weight_text = arc.weight.as_deref().ok_or_else(|| {
-                        TaxonomyError::Malformed {
-                            location: arc.location.clone(),
-                            detail: "calculationArc with arcrole summation-item has no weight"
-                                .to_string(),
-                        }
-                    })?;
+                    let weight_text =
+                        arc.weight
+                            .as_deref()
+                            .ok_or_else(|| TaxonomyError::Malformed {
+                                location: arc.location.clone(),
+                                detail: "calculationArc with arcrole summation-item has no weight"
+                                    .to_string(),
+                            })?;
                     let weight = DecimalAmount::parse(weight_text).ok_or_else(|| {
                         TaxonomyError::InvalidWeight {
                             value: weight_text.to_string(),
@@ -1991,9 +1991,9 @@ fn collect_attributes(
         match key.prefix() {
             Some(prefix) => {
                 let prefix = String::from_utf8_lossy(prefix.as_ref()).into_owned();
-                let namespace = scope
-                    .resolve(&prefix)
-                    .ok_or_else(|| format!("attribute {key_name} uses unbound prefix {prefix:?}"))?;
+                let namespace = scope.resolve(&prefix).ok_or_else(|| {
+                    format!("attribute {key_name} uses unbound prefix {prefix:?}")
+                })?;
                 let local = String::from_utf8_lossy(key.local_name().as_ref()).into_owned();
                 attributes
                     .namespaced

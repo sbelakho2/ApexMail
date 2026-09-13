@@ -90,11 +90,11 @@ pub struct ComplaintInfo {
     pub authentication_results: Option<String>,
 }
 
-/// Well‑known FBL sender domains are now registry rows
-/// (`fbl_provider_registry`, seeded from the pre-existing
-/// `TRUSTED_FBL_SENDERS` list) — see [`super::fbl_registry`]. Trust is no
-/// longer a compile-time suffix list: only a provider entry matching the
-/// source's rDNS AND its registered expectations can authorize suppression.
+// Well‑known FBL sender domains are now registry rows
+// (`fbl_provider_registry`, seeded from the pre-existing
+// `TRUSTED_FBL_SENDERS` list) — see `super::fbl_registry`. Trust is no
+// longer a compile-time suffix list: only a provider entry matching the
+// source's rDNS AND its registered expectations can authorize suppression.
 
 /// Outcome of the FBL source verification for one client IP.
 #[derive(Debug, Clone, PartialEq, Eq)]

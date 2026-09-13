@@ -891,7 +891,7 @@ mod tests {
             .into_iter(),
         );
         assert_eq!(breakdown.source, ProviderSource::Persisted);
-        assert!(breakdown.providers[0].inferred == false);
+        assert!(!breakdown.providers[0].inferred);
         assert!(breakdown.providers[1].inferred);
         assert!(breakdown
             .note
@@ -907,15 +907,15 @@ mod tests {
 
     // ── DB-backed adversarial tests (canonical schema) ─────────────────
 
-    fn seed_event(
+    async fn seed_event(
         pool: sqlx::PgPool,
         tenant: String,
         message: String,
         event: &'static str,
         recipient: Option<&'static str>,
         minutes_ago: i64,
-    ) -> impl std::future::Future<Output = ()> {
-        async move {
+    ) {
+        {
             sqlx::query(
                 "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
                  VALUES ($1, $2, $3, $4, $5, NOW() - make_interval(mins => $6::int))",

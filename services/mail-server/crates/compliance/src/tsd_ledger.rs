@@ -87,10 +87,7 @@ pub enum TsdSourceError {
     /// No `legal_entities` row with the requested id.
     EntityIdNotFound { legal_entity_id: Uuid },
     /// A ledger read failed.
-    Lookup {
-        what: &'static str,
-        detail: String,
-    },
+    Lookup { what: &'static str, detail: String },
 }
 
 impl fmt::Display for TsdSourceError {
@@ -204,10 +201,7 @@ impl TsdLedgerSource {
 
     /// Periods that are still `open`, i.e. the figures are not frozen.
     pub fn open_periods(&self) -> Vec<&TsdPeriod> {
-        self.periods
-            .iter()
-            .filter(|p| p.status == "open")
-            .collect()
+        self.periods.iter().filter(|p| p.status == "open").collect()
     }
 
     /// True when the derived declaration reproduces the books completely.
@@ -219,7 +213,7 @@ impl TsdLedgerSource {
             && self
                 .currencies
                 .iter()
-                .all(|c| c == &self.currency.as_str())
+                .all(|c| c.as_str() == self.currency.as_str())
     }
 
     /// The reporting period label (`YYYY-MM`).
@@ -285,10 +279,7 @@ impl TsdLedgerSource {
         let ready = if self.has_sufficient_data() {
             String::new()
         } else {
-            format!(
-                " NOT READY TO FILE: {}.",
-                self.missing_fields().join("; ")
-            )
+            format!(" NOT READY TO FILE: {}.", self.missing_fields().join("; "))
         };
 
         if self.employees.is_empty() {
@@ -513,8 +504,10 @@ async fn read_month_for_entity(
             detail: error.to_string(),
         })?
     };
-    let persons: std::collections::HashMap<Uuid, PersonRow> =
-        persons.into_iter().map(|p| (p.payroll_record_id, p)).collect();
+    let persons: std::collections::HashMap<Uuid, PersonRow> = persons
+        .into_iter()
+        .map(|p| (p.payroll_record_id, p))
+        .collect();
 
     let mut employees = Vec::with_capacity(postings.len());
     let mut incomplete = Vec::new();

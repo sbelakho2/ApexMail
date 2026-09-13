@@ -115,7 +115,6 @@ cargo_vet() {
 # window. Scan set: repo code dirs — the vendored/generated trees
 # (marketing build output, node_modules, cargo target, vendored libs, .git)
 # are excluded: they are not reviewable product code and drown the signal.
-# .github/workflows-archive is excluded too: archived, never-executed
 # workflow YAML (the validate stage enforces .github/workflows/ stays
 # empty), so findings there are inert by construction.
 # Host pin: semgrep 1.176.x (ci/install.sh venv recipe).
@@ -125,8 +124,7 @@ semgrep_sast() {
     (cd "$REPO_ROOT" && ci_check "semgrep SAST (p/default, p/rust)" \
         semgrep scan --config p/default --config p/rust --error --quiet \
             --exclude apps/marketing-zola/public \
-            --exclude node_modules --exclude target --exclude vendor \
-            --exclude .github/workflows-archive) || _sg_rc=$?
+            --exclude node_modules --exclude target --exclude vendor) || _sg_rc=$?
     if [ "$_sg_rc" -eq 0 ]; then
         return "$CI_EXIT_OK"
     fi

@@ -29,6 +29,18 @@ use sha2::Digest;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// `(external_id, statement_date, value_date, amount_cents, currency,
+///   bank_account_id, import_id)` — named so the test row shape reads.
+type BankLineRow = (
+    String,
+    NaiveDate,
+    Option<NaiveDate>,
+    i64,
+    String,
+    Uuid,
+    Option<Uuid>,
+);
+
 async fn provision(test_name: &str) -> Option<PgPool> {
     match migrator::test_support::fresh_canonical_pool(
         test_name,
@@ -133,9 +145,7 @@ async fn ingest_stores_statement_and_reingest_is_a_noop() {
         csv: &csv,
         imported_by: "test-operator",
     };
-    let outcome = ingest_bank_statement(&pool, &input)
-        .await
-        .expect("ingest");
+    let outcome = ingest_bank_statement(&pool, &input).await.expect("ingest");
     assert!(!outcome.already_imported, "{outcome:?}");
     assert_eq!(outcome.bank_account_id, account);
     assert_eq!(outcome.line_count, 4, "{outcome:?}");
@@ -162,16 +172,15 @@ async fn ingest_stores_statement_and_reingest_is_a_noop() {
     assert_eq!(import.2.as_deref(), Some("june-2026.csv"));
 
     // Lines carry the account, the import link, the amounts and the dates.
-    let lines: Vec<(String, NaiveDate, Option<NaiveDate>, i64, String, Uuid, Option<Uuid>)> =
-        sqlx::query_as(
-            "SELECT external_id, statement_date, value_date, amount_cents, btrim(currency), \
+    let lines: Vec<BankLineRow> = sqlx::query_as(
+        "SELECT external_id, statement_date, value_date, amount_cents, btrim(currency), \
                     bank_account_id, import_id \
              FROM bank_statement_lines WHERE bank_account_id = $1 ORDER BY external_id",
-        )
-        .bind(account)
-        .fetch_all(&pool)
-        .await
-        .expect("lines");
+    )
+    .bind(account)
+    .fetch_all(&pool)
+    .await
+    .expect("lines");
     assert_eq!(lines.len(), 4);
     assert_eq!(
         lines[0],
@@ -399,7 +408,10 @@ async fn ingest_rejects_malformed_rows_and_writes_nothing() {
         .fetch_one(&pool)
         .await
         .expect("line count after conflict");
-    assert_eq!(line_count, 1, "the conflicting file must not be partially imported");
+    assert_eq!(
+        line_count, 1,
+        "the conflicting file must not be partially imported"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -426,9 +438,7 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
         csv: &csv,
         imported_by: "test-operator",
     };
-    let outcome = ingest_bank_statement(&pool, &input)
-        .await
-        .expect("ingest");
+    let outcome = ingest_bank_statement(&pool, &input).await.expect("ingest");
 
     let line_ids: Vec<(Uuid, String, i64)> = sqlx::query_as(
         "SELECT id, external_id, amount_cents FROM bank_statement_lines \
@@ -484,7 +494,10 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
         .fetch_one(&pool)
         .await
         .expect("source document");
-        assert_eq!(sources, 1, "the posting must be registered as a source document");
+        assert_eq!(
+            sources, 1,
+            "the posting must be registered as a source document"
+        );
     }
 
     // The zero-amount line is unpostable: retained, unstamped, reported.
@@ -495,13 +508,12 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
             .await
             .expect("zero line");
     assert!(zero_stamp.is_none());
-    let zero_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM bank_statement_lines WHERE id = $1",
-    )
-    .bind(zero)
-    .fetch_one(&pool)
-    .await
-    .expect("zero retained");
+    let zero_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM bank_statement_lines WHERE id = $1")
+            .bind(zero)
+            .fetch_one(&pool)
+            .await
+            .expect("zero retained");
     assert_eq!(zero_rows, 1, "an unpostable line is never deleted");
 
     // Replay: nothing to claim; the idempotency keys still hold one entry.
@@ -532,7 +544,11 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
     .expect("movement");
     // receipts 125000 + 100000 Dr bank / Cr AR; payment 9950 Dr expense /
     // Cr bank.
-    assert_eq!(movement, (234_950, 234_950), "view must show the posted entries balanced");
+    assert_eq!(
+        movement,
+        (234_950, 234_950),
+        "view must show the posted entries balanced"
+    );
     let bank_movement: (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(debit_cents),0)::bigint, COALESCE(SUM(credit_cents),0)::bigint \
          FROM v_accounting_period_movement \

@@ -2689,12 +2689,12 @@ async fn dsr_outbox_flush_retries_then_caps_attempts() {
 
 // ── B: breach notification state machine ───────────────────────────────────
 
-/// The breach workflow moved to the canonical-schema release tests
-/// (`tests/gdpr_governance_release_tests.rs`): the state machine
-/// (detected → triage → notifiable → authority_queued → authority_submitted →
-/// authority_acknowledged), the mandatory receipt gate and the Art. 34
-/// subject-notification outbox are exercised there against the REAL migration
-/// chain, not a hand-written subset.
+// The breach workflow moved to the canonical-schema release tests
+// (`tests/gdpr_governance_release_tests.rs`): the state machine
+// (detected → triage → notifiable → authority_queued → authority_submitted →
+// authority_acknowledged), the mandatory receipt gate and the Art. 34
+// subject-notification outbox are exercised there against the REAL migration
+// chain, not a hand-written subset.
 
 // ── F82: invoice identity via the immutable billing snapshot ───────────────
 

@@ -243,6 +243,20 @@ pub fn choose_provider_from_stats(candidates: &[RoutingCandidate<'_>]) -> Option
     best
 }
 
+/// Query row of `sales_provider_stats` for one provider; `provider` is kept
+/// separate so the row can be matched to the candidate.
+#[derive(sqlx::FromRow)]
+struct ProviderStatsRow {
+    provider: String,
+    attempts: i64,
+    fills: i64,
+    verified_correct: i64,
+    total_latency_ms: i64,
+    total_cost_eur: f64,
+    errors: i64,
+    last_success_at: Option<DateTime<Utc>>,
+}
+
 /// Load the rolling statistics for one field and choose a provider.
 ///
 /// `candidates` arrive in waterfall priority order; ties keep that order.
@@ -262,7 +276,7 @@ pub async fn choose_provider(
         .map(|provider| provider.id().as_str().to_string())
         .collect();
 
-    let rows: Vec<(String, i64, i64, i64, i64, f64, i64, Option<DateTime<Utc>>)> = sqlx::query_as(
+    let rows: Vec<ProviderStatsRow> = sqlx::query_as(
         "SELECT provider, attempts, fills, verified_correct, total_latency_ms,
                     total_cost_eur::float8, errors, last_success_at
              FROM sales_provider_stats
@@ -280,29 +294,16 @@ pub async fn choose_provider(
         .map(|provider| {
             let stats = rows
                 .iter()
-                .find(|(provider_name, ..)| provider_name == provider.id().as_str())
-                .map(
-                    |(
-                        _,
-                        attempts,
-                        fills,
-                        verified_correct,
-                        total_latency_ms,
-                        total_cost_eur,
-                        errors,
-                        last_success_at,
-                    )| {
-                        ProviderStats {
-                            attempts: *attempts,
-                            fills: *fills,
-                            verified_correct: *verified_correct,
-                            total_latency_ms: *total_latency_ms,
-                            total_cost_eur: *total_cost_eur,
-                            errors: *errors,
-                            last_success_at: *last_success_at,
-                        }
-                    },
-                );
+                .find(|row| row.provider == provider.id().as_str())
+                .map(|row| ProviderStats {
+                    attempts: row.attempts,
+                    fills: row.fills,
+                    verified_correct: row.verified_correct,
+                    total_latency_ms: row.total_latency_ms,
+                    total_cost_eur: row.total_cost_eur,
+                    errors: row.errors,
+                    last_success_at: row.last_success_at,
+                });
             RoutingCandidate {
                 provider: *provider,
                 stats,

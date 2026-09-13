@@ -87,19 +87,24 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         "Pro", 8_900, 89_000, 150_000, 2_000_000, 25, 10, 60, 0, "Email",
         {
             "dedicated_ip": True,
-            "custom_tracking_domain": True,
             "send_time_optimization": True,
             "priority_onboarding": True,
+            # `custom_tracking_domain` was EXPECTED here until 2026-09-13 and
+            # drifted: it is classified NotYetImplemented and is deliberately
+            # not seeded (billing-service/src/plans.rs), so the catalog — and
+            # now this expectation — reports false. Selling it again requires
+            # the runtime gate, not an edit to this table.
         },
     ),
     "growth": PlanExpectation(
         "Growth", 22_900, 229_000, 500_000, 5_000_000, 100, 25, 90, 1, "Email",
         {
             "dedicated_ip": True,
-            "audit_logs": True,
-            "ab_testing": True,
-            "time_travel_debugging": True,
-            "custom_retention": True,
+            # `audit_logs`, `ab_testing`, `time_travel_debugging` and
+            # `custom_retention` were EXPECTED here until 2026-09-13 and
+            # drifted: all four are classified NotYetImplemented and are
+            # deliberately not seeded. The marketing copy that promised them
+            # was corrected in the same change.
         },
     ),
     "scale": PlanExpectation(
@@ -108,8 +113,9 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
             "dedicated_ip": True,
             "sso_enabled": True,
             "inbound_email": True,
-            "subaccounts": True,
             "sla_guarantee": True,
+            # `subaccounts` was EXPECTED here until 2026-09-13 and drifted:
+            # classified NotYetImplemented, not seeded, not sold.
         },
     ),
     "enterprise": PlanExpectation(

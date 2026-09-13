@@ -252,7 +252,16 @@ install_zola() {
     # host zolas (0.20) do not clean orphan output files from public/ —
     # deleted pages then linger and fail the forbidden-pattern gate with
     # stale content. Replace a mismatched version instead of keeping it.
-    _v=0.22.1
+    # Version and ARCHITECTURE both come from the shared helpers: the pin
+    # lives in apps/marketing-zola/Dockerfile (one source of truth) and the
+    # target triple is the host's own (the previous hard-coded x86_64 URL
+    # installed a non-runnable binary on arm64 hosts).
+    _v=$(ci_zola_expected_version)
+    _t=$(ci_zola_target) || { log "unsupported host architecture for zola — install it manually"; return 1; }
+    if [ -z "$_v" ]; then
+        log "could not read the zola pin from apps/marketing-zola/Dockerfile — skipping"
+        return 1
+    fi
     if have zola; then
         if [ "$(zola --version 2>/dev/null | awk '{print $2}')" = "v$_v" ]; then
             log "zola present: $(zola --version)"
@@ -261,9 +270,10 @@ install_zola() {
         log "zola version mismatch ($(zola --version)) — replacing with v$_v"
     fi
     _tmp=$(mktemp -d)
-    log "installing zola v$_v"
-    curl -sSL "https://github.com/getzola/zola/releases/download/v${_v}/zola-v${_v}-x86_64-unknown-linux-gnu.tar.gz" \
-        | tar xz -C "$_tmp"
+    log "installing zola v$_v ($_t)"
+    curl -sSL "https://github.com/getzola/zola/releases/download/v${_v}/zola-v${_v}-${_t}.tar.gz" \
+        | tar xz -C "$_tmp" zola \
+        || { log "zola download failed"; rm -rf "$_tmp"; return 1; }
     install -m 0755 "$_tmp/zola" /usr/local/bin/zola
     rm -rf "$_tmp"
 }

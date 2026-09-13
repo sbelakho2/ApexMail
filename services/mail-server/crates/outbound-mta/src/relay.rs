@@ -1550,13 +1550,15 @@ mod tests {
 
     #[tokio::test]
     async fn data_5xx_produces_dsn_and_never_retries() {
-        let mut server_config = FakeSmtpConfig::default();
         // First DATA (the original) is rejected after transmission; the
         // second (the DSN) is accepted.
-        server_config.end_of_data = ScriptedReply::sequence(vec![
-            ReplySpec::new(550, "5.7.1 message rejected after DATA"),
-            ReplySpec::new(250, "2.0.0 queued"),
-        ]);
+        let server_config = FakeSmtpConfig {
+            end_of_data: ScriptedReply::sequence(vec![
+                ReplySpec::new(550, "5.7.1 message rejected after DATA"),
+                ReplySpec::new(250, "2.0.0 queued"),
+            ]),
+            ..FakeSmtpConfig::default()
+        };
         let harness = harness(relay_config(), server_config).await;
 
         let error = harness

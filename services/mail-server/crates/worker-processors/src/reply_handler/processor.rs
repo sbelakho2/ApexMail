@@ -1838,12 +1838,12 @@ mod tests {
     /// update lands" contract now that the handler writes no lead row.
     #[tokio::test]
     async fn reply_lock_is_visible_through_the_derived_lead_view() {
-        let pool =
-            match migrator::test_support::fresh_canonical_pool("worker_item17", "reply_view").await
-            {
-                Ok(pool) => pool,
-                Err(error) => panic!("{}", error.panic_message()),
-            };
+        let pool = match migrator::test_support::fresh_canonical_pool("worker_item17", "reply_view")
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
         let Some(pool) = pool else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;

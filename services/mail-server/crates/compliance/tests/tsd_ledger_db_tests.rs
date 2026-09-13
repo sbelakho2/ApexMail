@@ -19,12 +19,6 @@
 //! Skips unless TEST_DATABASE_URL is set (workspace convention); a
 //! CONFIGURED provisioning failure panics (audit F01).
 
-use chrono::{DateTime, NaiveDate, Utc};
-use compliance::estonia_ou::{EstoniaOuCompliance, REGISTRY_CODE};
-use compliance::ledger_sweep::EstonianPayrollPolicy;
-use compliance::tsd_ledger::{
-    month_bounds, read_month, read_month_by_registry_code, TsdSourceError,
-};
 use accounting_core::chart::{self, LegalEntityInput};
 use accounting_core::periods;
 use accounting_core::sweeps::{PayrollAmountsPolicy, PayrollRecordFacts};
@@ -33,6 +27,12 @@ use accounting_core::types::{
     ROLE_SOCIAL_TAX_PAYABLE, ROLE_UNEMPLOYMENT_PAYABLE,
 };
 use accounting_core::PayrollAmounts;
+use chrono::{DateTime, NaiveDate, Utc};
+use compliance::estonia_ou::{EstoniaOuCompliance, REGISTRY_CODE};
+use compliance::ledger_sweep::EstonianPayrollPolicy;
+use compliance::tsd_ledger::{
+    month_bounds, read_month, read_month_by_registry_code, TsdSourceError,
+};
 use sha2::Digest;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -138,11 +138,9 @@ async fn insert_payroll_record(
 }
 
 fn stamp(year: i32, month: u32, day: u32) -> DateTime<Utc> {
-    chrono::DateTime::parse_from_rfc3339(&format!(
-        "{year:04}-{month:02}-{day:02}T12:00:00Z"
-    ))
-    .expect("timestamp")
-    .with_timezone(&Utc)
+    chrono::DateTime::parse_from_rfc3339(&format!("{year:04}-{month:02}-{day:02}T12:00:00Z"))
+        .expect("timestamp")
+        .with_timezone(&Utc)
 }
 
 /// Post a balanced journal entry (draft → lines → posted) and return its id.
@@ -200,11 +198,13 @@ async fn post_balanced_entry(
         .expect("credit line");
     }
 
-    sqlx::query("UPDATE journal_entries SET posted_at = NOW(), posted_by = 'tsd-test' WHERE id = $1")
-        .bind(entry_id)
-        .execute(pool)
-        .await
-        .expect("post entry");
+    sqlx::query(
+        "UPDATE journal_entries SET posted_at = NOW(), posted_by = 'tsd-test' WHERE id = $1",
+    )
+    .bind(entry_id)
+    .execute(pool)
+    .await
+    .expect("post entry");
     entry_id
 }
 
@@ -371,19 +371,18 @@ async fn tsd_reports_the_posted_ledger_amounts_exactly() {
 
     // What the policy computed (the books' own arithmetic), for comparison.
     let policy = EstonianPayrollPolicy;
-    let facts = |id: Uuid,
-                 name: &str,
-                 gross: i64,
-                 pension_rate: Option<f64>,
-                 pension_exemption: bool| PayrollRecordFacts {
-        id,
-        employee_name: Some(name.to_string()),
-        gross_salary_cents: gross,
-        funded_pension_rate: pension_rate,
-        pension_exemption,
-        unemployment_insurance_exemption: false,
-        pay_period: stamp(2026, 6, 30),
-    };
+    let facts =
+        |id: Uuid, name: &str, gross: i64, pension_rate: Option<f64>, pension_exemption: bool| {
+            PayrollRecordFacts {
+                id,
+                employee_name: Some(name.to_string()),
+                gross_salary_cents: gross,
+                funded_pension_rate: pension_rate,
+                pension_exemption,
+                unemployment_insurance_exemption: false,
+                pay_period: stamp(2026, 6, 30),
+            }
+        };
     let expected_standard = policy
         .amounts_for(&facts(
             standard,
@@ -417,10 +416,7 @@ async fn tsd_reports_the_posted_ledger_amounts_exactly() {
     );
     // Identity comes from the entity whose books were read.
     assert_eq!(tsd.registry_code, REGISTRY_CODE);
-    assert_eq!(
-        tsd.company_name,
-        format!("TSD Test OÜ {REGISTRY_CODE}")
-    );
+    assert_eq!(tsd.company_name, format!("TSD Test OÜ {REGISTRY_CODE}"));
     assert_eq!(tsd.totals.employee_count, 2);
     assert_eq!(tsd.totals.total_gross_salary_cents, 350_000);
     assert_eq!(
@@ -437,8 +433,7 @@ async fn tsd_reports_the_posted_ledger_amounts_exactly() {
     );
     assert_eq!(
         tsd.totals.total_unemployment_employee_cents,
-        expected_standard.unemployment_employee_cents
-            + expected_exempt.unemployment_employee_cents
+        expected_standard.unemployment_employee_cents + expected_exempt.unemployment_employee_cents
     );
     assert_eq!(
         tsd.totals.total_employer_cost_cents,
@@ -509,7 +504,11 @@ async fn tsd_warns_only_while_the_period_is_still_open() {
 
     let source_open = read_month(&pool, entity, 2026, 5).await.expect("read");
     assert_eq!(source_open.open_periods().len(), 1);
-    assert!(source_open.note().contains("still OPEN"), "{}", source_open.note());
+    assert!(
+        source_open.note().contains("still OPEN"),
+        "{}",
+        source_open.note()
+    );
     assert!(source_open.has_sufficient_data());
 
     sqlx::query("UPDATE fiscal_periods SET status = 'closed' WHERE id = $1")
@@ -521,7 +520,11 @@ async fn tsd_warns_only_while_the_period_is_still_open() {
     let source_closed = read_month(&pool, entity, 2026, 5).await.expect("read");
     assert!(source_closed.open_periods().is_empty());
     assert!(!source_closed.note().contains("still OPEN"));
-    assert!(source_closed.note().contains("closed"), "{}", source_closed.note());
+    assert!(
+        source_closed.note().contains("closed"),
+        "{}",
+        source_closed.note()
+    );
     assert!(source_closed.has_sufficient_data());
     // Same amounts: closing a period changes the warning, not the figures.
     assert_eq!(source_open.employees, source_closed.employees);
@@ -578,7 +581,11 @@ async fn tsd_reports_an_unbooked_month_as_not_ready_without_inventing_amounts() 
     );
     // The unposted input is named, so the operator knows the sweep has not run.
     assert!(missing.contains("not posted to the ledger"), "{missing}");
-    assert!(tsd.data_quality.note.contains("NOT READY TO FILE"), "{}", tsd.data_quality.note);
+    assert!(
+        tsd.data_quality.note.contains("NOT READY TO FILE"),
+        "{}",
+        tsd.data_quality.note
+    );
 }
 
 /// A payroll input added after the sweep is counted and named: the ledger is
@@ -742,7 +749,10 @@ async fn tsd_flags_postings_missing_person_facts() {
     assert_eq!(incomplete.posting_id, posting);
     assert_eq!(
         incomplete.missing,
-        vec!["personal_code".to_string(), "funded_pension_rate".to_string()]
+        vec![
+            "personal_code".to_string(),
+            "funded_pension_rate".to_string()
+        ]
     );
     assert!(!source.has_sufficient_data());
     let missing = source.missing_fields().join(" | ");

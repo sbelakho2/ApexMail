@@ -22,11 +22,8 @@ use sqlx::PgPool;
 /// Provision the canonical database for one test, or `None` when
 /// `TEST_DATABASE_URL` is unset (the caller soft-skips).
 pub(crate) async fn canonical_pool(test_name: &str) -> Option<PgPool> {
-    match migrator::test_support::fresh_canonical_pool(
-        test_name,
-        &format!("mailstore_{test_name}"),
-    )
-    .await
+    match migrator::test_support::fresh_canonical_pool(test_name, &format!("mailstore_{test_name}"))
+        .await
     {
         Ok(pool) => pool,
         Err(error) => panic!("{}", error.panic_message()),

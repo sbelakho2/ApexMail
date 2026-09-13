@@ -83,13 +83,8 @@ pub enum InstanceError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextPeriod {
-    Instant {
-        date: NaiveDate,
-    },
-    Duration {
-        start: NaiveDate,
-        end: NaiveDate,
-    },
+    Instant { date: NaiveDate },
+    Duration { start: NaiveDate, end: NaiveDate },
 }
 
 impl ContextPeriod {
@@ -240,11 +235,12 @@ pub fn parse_instance(xml: &str) -> Result<InstanceDocument, InstanceError> {
         text_buffer: String::new(),
     };
     loop {
-        let (resolved, event) = reader
-            .read_resolved_event()
-            .map_err(|error| InstanceError::MalformedXml {
-                detail: error.to_string(),
-            })?;
+        let (resolved, event) =
+            reader
+                .read_resolved_event()
+                .map_err(|error| InstanceError::MalformedXml {
+                    detail: error.to_string(),
+                })?;
         let element_namespace: Option<String> = match &resolved {
             quick_xml::name::ResolveResult::Bound(namespace) => {
                 Some(String::from_utf8_lossy(namespace.as_ref()).into_owned())
@@ -365,10 +361,8 @@ impl InstanceParser {
         start: &quick_xml::events::BytesStart<'_>,
         namespace: Option<&str>,
     ) -> Result<(), InstanceError> {
-        let attributes =
-            collect_attributes(start, &self.scope).map_err(|detail| InstanceError::MalformedXml {
-                detail,
-            })?;
+        let attributes = collect_attributes(start, &self.scope)
+            .map_err(|detail| InstanceError::MalformedXml { detail })?;
         let pushed = self.scope.push(attributes.namespace_declarations.clone());
         let local = String::from_utf8_lossy(start.local_name().as_ref()).into_owned();
         let qname = QName::new(namespace.unwrap_or(""), local);
@@ -442,10 +436,7 @@ impl InstanceParser {
                 } else {
                     self.pending_fact = Some(PartialFact {
                         concept: qname.clone(),
-                        context_ref: attributes
-                            .get("contextRef")
-                            .unwrap_or("")
-                            .to_string(),
+                        context_ref: attributes.get("contextRef").unwrap_or("").to_string(),
                         unit_ref: attributes.get("unitRef").map(str::to_string),
                         decimals: attributes.get("decimals").and_then(Decimals::parse),
                         id: attributes.get("id").map(str::to_string),
@@ -648,9 +639,7 @@ fn parse_date(value: &str, context_id: &str) -> Result<NaiveDate, InstanceError>
 /// One validation failure. `code` is a stable machine identifier, `message`
 /// names the concepts/contexts and amounts involved, and the concept/amount
 /// vectors carry the raw values for machine consumers.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ValidationFailure {
     pub code: String,
     pub message: String,
@@ -926,9 +915,7 @@ pub fn validate_instance(
                     );
                 }
                 // Period type must match the context.
-                if let (Some(declared_period), Some(context)) =
-                    (declared.period_type, context)
-                {
+                if let (Some(declared_period), Some(context)) = (declared.period_type, context) {
                     if let Some(actual_period) = context.period {
                         let actual_type = actual_period.period_type();
                         if declared_period != actual_type {
@@ -1113,10 +1100,7 @@ pub fn validate_instance(
                         ),
                     )
                     .with_concepts(concepts)
-                    .with_amounts(vec![
-                        parent_value.to_display(),
-                        sum.to_display(),
-                    ]),
+                    .with_amounts(vec![parent_value.to_display(), sum.to_display()]),
                 );
             }
         }

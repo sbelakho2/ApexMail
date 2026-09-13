@@ -2055,10 +2055,12 @@ mod tests {
     fn legacy_recipient_point_never_claims_valid() {
         assert_ne!(LEGACY_RECIPIENT_VERIFICATION, "valid");
         assert_eq!(LEGACY_RECIPIENT_VERIFICATION, "unknown");
-        assert!(
-            LEGACY_RECIPIENT_CONFIDENCE > 0.0 && LEGACY_RECIPIENT_CONFIDENCE <= 0.25,
-            "the confidence must be documented as low"
-        );
+        const {
+            assert!(
+                LEGACY_RECIPIENT_CONFIDENCE > 0.0 && LEGACY_RECIPIENT_CONFIDENCE <= 0.25,
+                "the confidence must be documented as low"
+            );
+        }
         assert_eq!(LEGACY_RECIPIENT_SOURCE, "legacy_campaign");
     }
 

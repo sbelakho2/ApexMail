@@ -115,7 +115,7 @@ use crate::filing_package::{
     VdEntryDeclaration, VdReturnDeclaration, VdTotals,
 };
 use crate::signing::timestamp::{
-    timestamp_document, HashAlgorithm, TimeStampError, TsaConfig, TimeStampEvidence,
+    timestamp_document, HashAlgorithm, TimeStampError, TimeStampEvidence, TsaConfig,
 };
 use crate::signing::CheckVerdict;
 use crate::vat_oss::{transition_return_in, FilingStatus};
@@ -156,8 +156,7 @@ pub const TIMESTAMP_STATUS_FAILED: &str = "failed";
 
 /// The plain-language record stored when no TSA is configured. The exact
 /// wording is part of the contract (tests pin it).
-pub const NO_TRUSTED_TIMESTAMP_NOTE: &str =
-    "no trusted timestamp obtained (no TSA configured)";
+pub const NO_TRUSTED_TIMESTAMP_NOTE: &str = "no trusted timestamp obtained (no TSA configured)";
 
 /// The persisted timestamp record for a submission. Serde/JSONB round-trippable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -748,8 +747,15 @@ pub async fn submit_filing(
     config: &FilingTransportConfig,
     transport: Option<&dyn FilingTransport>,
 ) -> Result<SubmissionOutcome, String> {
-    submit_filing_with_policy(db, kind, return_id, config, transport, TimestampPolicy::FromEnv)
-        .await
+    submit_filing_with_policy(
+        db,
+        kind,
+        return_id,
+        config,
+        transport,
+        TimestampPolicy::FromEnv,
+    )
+    .await
 }
 
 /// [`submit_filing`] with an explicit trusted-timestamp policy (tests,
@@ -1149,9 +1155,9 @@ fn verify_stored_package(evidence: &StoredPackageEvidence) -> Result<(), String>
 
     match evidence.timestamp_outcome.as_deref() {
         Some(TIMESTAMP_STATUS_OBTAINED) | Some(TIMESTAMP_STATUS_NOT_CONFIGURED) => Ok(()),
-        Some(TIMESTAMP_STATUS_FAILED) => Err(
-            "refusing to submit package: its trusted timestamp failed verification".to_string(),
-        ),
+        Some(TIMESTAMP_STATUS_FAILED) => {
+            Err("refusing to submit package: its trusted timestamp failed verification".to_string())
+        }
         Some(other) => Err(format!(
             "refusing to submit package: unknown timestamp status {other:?}"
         )),
@@ -1286,7 +1292,7 @@ pub async fn record_manual_submission(
     // A human submission records the exact validated package; a package whose
     // payload was mutated after validation (or that was never validated) is
     // refused here, before the task is completed and the return moved.
-    let evidence = load_stored_package_evidence(&mut *tx, package_id).await?;
+    let evidence = load_stored_package_evidence(&mut tx, package_id).await?;
     verify_stored_package(&evidence)?;
 
     let payload = receipt_payload.unwrap_or_else(|| {

@@ -362,11 +362,12 @@ impl OutcomeProjector {
         &self,
         config: &ProjectorConfig,
     ) -> Result<SenderProjectionReport, SalesError> {
-        let mut report = SenderProjectionReport::default();
-
-        report.recovered = self
-            .recover_unapplied_claims(config.lease_secs, config.recovery_window_secs)
-            .await?;
+        let mut report = SenderProjectionReport {
+            recovered: self
+                .recover_unapplied_claims(config.lease_secs, config.recovery_window_secs)
+                .await?,
+            ..Default::default()
+        };
         if report.recovered > 0 {
             tracing::warn!(
                 worker_id = self.worker_id.as_str(),
@@ -1057,6 +1058,35 @@ mod tests {
         }
     }
 
+    /// Tick the sender projector until `done` says this test's work is
+    /// projected, up to `max_ticks`.
+    ///
+    /// A FIXED tick count is not enough here: the ledger lives in a SHARED
+    /// test database and the projector claims globally, bounded per tick by
+    /// `batch_size`. A parallel test's unprojected rows therefore consume this
+    /// test's batch budget, so "50 rows are projected within 4 ticks" is a
+    /// statement about the whole database, not about this test — it failed
+    /// exactly that way under a full-workspace run (46 of 50 rows after 4
+    /// ticks). Ticking until THIS test's own rows are in makes the assertion
+    /// deterministic; the exactly-once property it asserts is unchanged.
+    async fn drain_until<F, Fut>(projector: &OutcomeProjector, max_ticks: usize, mut done: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..max_ticks {
+            projector
+                .project_sender_events(&ProjectorConfig::default())
+                .await
+                .expect("sender projection tick");
+            if done().await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("sender projection did not drain this test's rows within {max_ticks} ticks");
+    }
+
     /// Run reward-projection passes (see [`drain`]).
     async fn drain_rewards(projector: &OutcomeProjector, ticks: usize) {
         for _ in 0..ticks {
@@ -1396,7 +1426,17 @@ mod tests {
         }
 
         let projector = OutcomeProjector::new(pool.clone(), "test-worker-pause");
-        drain(&projector, 4).await;
+        let probe_pool = pool.clone();
+        let probe_tenant = tenant.clone();
+        drain_until(&projector, 60, move || {
+            let pool = probe_pool.clone();
+            let tenant = probe_tenant.clone();
+            async move {
+                let (volume, _, _, _, _, _, _, _) = health_counters(&pool, &tenant, sender).await;
+                volume >= 50
+            }
+        })
+        .await;
 
         let (volume, hard_bounces, _, _, _, _, _, state) =
             health_counters(&pool, &tenant, sender).await;

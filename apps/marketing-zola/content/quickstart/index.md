@@ -356,7 +356,6 @@ def verify_webhook(body: bytes, signature: str, timestamp: str, secret: str) -> 
 Before moving to production:
 
 1. **Upgrade from Free plan** if you exceed 30,000 emails/month. See [Pricing](/pricing/).
-2. **Add a custom tracking domain** for branded open/click tracking links (Pro plan and above).
 3. **Configure DMARC** for your sending domain with a policy of at least `p=none` initially, progressing to `p=quarantine` or `p=reject`.
 4. **Set up SPF alignment** by ensuring your `Return-Path` domain matches your `From` domain.
 5. **Rotate API keys** — create production-specific keys with minimal scopes and expiry dates.

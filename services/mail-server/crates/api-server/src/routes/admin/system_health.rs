@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn response_notes_label_activity_heartbeats_and_mta_nodes() {
         // Mirror the notes construction in the handler.
-        let notes = vec![
+        let notes = [
             format!(
                 "serviceHeartbeats are real process leases from service_heartbeats; status live means a beat within the last {HEARTBEAT_STALE_AFTER_SECS} seconds. A service with no rows is reported as no_heartbeat — process liveness is never inferred from queue traffic."
             ),

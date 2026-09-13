@@ -80,7 +80,7 @@ pub struct VatAccountingBasis {
 
 impl VatAccountingBasis {
     fn covers(&self, at: NaiveDate) -> bool {
-        self.effective_from <= at && self.effective_to.map_or(true, |to| at <= to)
+        self.effective_from <= at && self.effective_to.is_none_or(|to| at <= to)
     }
 
     fn is_authorised(&self) -> bool {
@@ -132,7 +132,7 @@ pub fn resolve_accounting_scheme(
 /// Supports any month count; used with `3` for the cash-accounting fallback
 /// (supply 2026-01-15 → 2026-04-01).
 pub fn first_day_of_month_after(months: u32, date: NaiveDate) -> NaiveDate {
-    let zero_based = u32::from(date.month0()) + months;
+    let zero_based = date.month0() + months;
     let year = date.year() + (zero_based / 12) as i32;
     let month = (zero_based % 12) + 1;
     NaiveDate::from_ymd_opt(year, month, 1)

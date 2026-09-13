@@ -46,6 +46,17 @@ use super::{BookedEvent, CalendarConfig, CalendarError, CalendarProvider, Create
 /// `proposal` guard: a single booking may not exceed this duration.
 const MAX_BOOKING_MINUTES: i64 = 12 * 60;
 
+/// `sales_meetings` columns read when rescheduling an existing event.
+#[derive(sqlx::FromRow)]
+struct MeetingRecordRow {
+    tenant_id: String,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+    conferencing_link: Option<String>,
+    provider: String,
+    provider_event_id: Option<String>,
+}
+
 pub struct InternalCalendarProvider {
     db: PgPool,
     config: CalendarConfig,
@@ -201,7 +212,7 @@ impl InternalCalendarProvider {
         .bind(event_id)
         .bind(&request.tenant_id)
         .bind(&request.title)
-        .bind(&request.attendees_all())
+        .bind(request.attendees_all())
         .bind(request.start)
         .bind(request.end)
         .bind(&conferencing_link)
@@ -262,14 +273,7 @@ impl InternalCalendarProvider {
     ) -> Result<BookedEvent, CalendarError> {
         let id = Uuid::parse_str(event_id)
             .map_err(|_| CalendarError::InvalidInput("event id must be a UUID".into()))?;
-        let row: Option<(
-            String,
-            DateTime<Utc>,
-            DateTime<Utc>,
-            Option<String>,
-            String,
-            Option<String>,
-        )> = sqlx::query_as(
+        let row: Option<MeetingRecordRow> = sqlx::query_as(
             "SELECT tenant_id, start_at, end_at, conferencing_link, provider, provider_event_id \
                  FROM sales_meetings WHERE id = $1",
         )
@@ -277,8 +281,14 @@ impl InternalCalendarProvider {
         .fetch_optional(&self.db)
         .await
         .map_err(|e| CalendarError::Database(e.to_string()))?;
-        let (tenant_id, old_start, old_end, link, provider, provider_event_id) =
-            row.ok_or_else(|| CalendarError::EventNotFound(event_id.to_string()))?;
+        let MeetingRecordRow {
+            tenant_id,
+            start_at: old_start,
+            end_at: old_end,
+            conferencing_link: link,
+            provider,
+            provider_event_id,
+        } = row.ok_or_else(|| CalendarError::EventNotFound(event_id.to_string()))?;
         let duration = old_end - old_start;
         if duration <= Duration::zero() || duration > Duration::minutes(MAX_BOOKING_MINUTES) {
             return Err(CalendarError::InvalidInput(

@@ -1237,6 +1237,17 @@ async fn gate_08_replica_worker_identities_are_distinct_and_fences_are_per_claim
 // Gate 9 — no-dispatcher preservation
 // ---------------------------------------------------------------------------
 
+/// Leased `sales_actions` row read back to prove the queue was untouched.
+#[derive(sqlx::FromRow)]
+struct PreservedActionRow {
+    state: String,
+    attempt: i32,
+    lease_owner: Option<String>,
+    lease_token: Option<Uuid>,
+    lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Gate 9: "Without a dispatcher, queued send_step work is preserved."
 ///
 /// `bin/server.rs` does not start the action worker at all when the dispatcher
@@ -1264,14 +1275,7 @@ async fn gate_09_without_a_dispatcher_queued_work_is_preserved() {
         .expect("the recovery sweep");
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let (state, attempt, owner, token, expires, completed): (
-        String,
-        i32,
-        Option<String>,
-        Option<Uuid>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    ) = sqlx::query_as(
+    let row: PreservedActionRow = sqlx::query_as(
         "SELECT state, attempt, lease_owner, lease_token, lease_expires_at, completed_at \
          FROM sales_actions WHERE id = $1",
     )
@@ -1279,12 +1283,12 @@ async fn gate_09_without_a_dispatcher_queued_work_is_preserved() {
     .fetch_one(&db)
     .await
     .expect("read preserved action");
-    assert_eq!(state, "queued", "queued work must remain queued");
-    assert_eq!(attempt, 0, "the action must never have been claimed");
-    assert_eq!(owner, None);
-    assert_eq!(token, None);
-    assert_eq!(expires, None);
-    assert_eq!(completed, None, "queued work is not complete");
+    assert_eq!(row.state, "queued", "queued work must remain queued");
+    assert_eq!(row.attempt, 0, "the action must never have been claimed");
+    assert_eq!(row.lease_owner, None);
+    assert_eq!(row.lease_token, None);
+    assert_eq!(row.lease_expires_at, None);
+    assert_eq!(row.completed_at, None, "queued work is not complete");
 
     let stats = ActionQueue::new(db.clone(), "gate09-observer")
         .stats(&tenant_id)
@@ -1846,11 +1850,12 @@ async fn gate_20_lead_uniqueness_and_search_indexes_are_schema_owned() {
         .execute(&db)
         .await
         .expect("map the first lead id");
-    let duplicate_mapping = sqlx::query("UPDATE sales_contacts SET legacy_lead_id = $1 WHERE id = $2")
-        .bind(format!("gate20-a-{suffix}"))
-        .bind(contact_b)
-        .execute(&db)
-        .await;
+    let duplicate_mapping =
+        sqlx::query("UPDATE sales_contacts SET legacy_lead_id = $1 WHERE id = $2")
+            .bind(format!("gate20-a-{suffix}"))
+            .bind(contact_b)
+            .execute(&db)
+            .await;
     assert!(
         duplicate_mapping.is_err(),
         "the (tenant_id, legacy_lead_id) unique index must reject a reused lead id"

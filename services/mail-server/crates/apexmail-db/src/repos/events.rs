@@ -16,6 +16,19 @@ pub struct EventTypeCount {
 /// Repository for event operations.
 pub struct EventsRepo;
 
+/// The fields a new event is created from (named struct: the parameter list
+/// tripped clippy's too-many-arguments gate).
+#[derive(Debug, Clone)]
+pub struct NewEvent<'a> {
+    pub tenant_id: &'a str,
+    pub message_id: Option<&'a str>,
+    pub event_type: &'a str,
+    pub recipient: Option<&'a str>,
+    pub metadata: Option<serde_json::Value>,
+    pub recipient_provider: Option<&'a str>,
+    pub provider_source: Option<&'a str>,
+}
+
 impl EventsRepo {
     /// Create a new event, optionally carrying recipient-mailbox-provider
     /// provenance.
@@ -27,16 +40,16 @@ impl EventsRepo {
     /// value was actually obtained (e.g. MX resolved at delivery time) with
     /// the matching source; unknown stays `None`. NEVER infer a provider
     /// from the visible recipient domain here.
-    pub async fn create(
-        pool: &PgPool,
-        tenant_id: &str,
-        message_id: Option<&str>,
-        event_type: &str,
-        recipient: Option<&str>,
-        metadata: Option<serde_json::Value>,
-        recipient_provider: Option<&str>,
-        provider_source: Option<&str>,
-    ) -> Result<Event, sqlx::Error> {
+    pub async fn create(pool: &PgPool, event: NewEvent<'_>) -> Result<Event, sqlx::Error> {
+        let NewEvent {
+            tenant_id,
+            message_id,
+            event_type,
+            recipient,
+            metadata,
+            recipient_provider,
+            provider_source,
+        } = event;
         sqlx::query_as::<_, Event>(
             "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, metadata, \
                                  recipient_provider, provider_source, timestamp) \

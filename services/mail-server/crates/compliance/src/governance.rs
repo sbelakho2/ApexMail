@@ -761,9 +761,10 @@ const SEEDED_TRANSFERS: &[TransferSeed] = &[TransferSeed {
 /// Seed the registry. Idempotent (`ON CONFLICT DO NOTHING`): records edited
 /// by Legal are never overwritten.
 pub async fn seed_registry(db: &PgPool) -> Result<SeedSummary, String> {
-    let mut summary = SeedSummary::default();
-
-    summary.retention_classes_inserted = retention_classes::ensure_seeded(db).await?;
+    let mut summary = SeedSummary {
+        retention_classes_inserted: retention_classes::ensure_seeded(db).await?,
+        ..SeedSummary::default()
+    };
 
     for seed in SEEDED_ACTIVITIES {
         let inserted = sqlx::query(

@@ -177,6 +177,30 @@ struct SourceBatch {
     error: Option<String>,
 }
 
+/// The outcome one batch pass writes through
+/// [`DiscoveryJobRunner::finish_batch`].
+struct BatchOutcome<'a> {
+    /// `running` | `completed` | `failed`.
+    status: &'a str,
+    /// Serialized pagination state, `None` once every source is done.
+    cursor: Option<String>,
+    /// Candidates newly persisted in this batch.
+    new_total: i64,
+    /// Failure summary when every attempted source failed.
+    job_error: Option<&'a str>,
+    /// Set only for terminal statuses.
+    completed_at: Option<DateTime<Utc>>,
+}
+
+/// One source's pass within a batch: the source, its resumable pagination
+/// state and the page budget.
+struct SourceBatchContext<'a> {
+    source: &'a dyn DiscoverySource,
+    query: &'a DiscoveryQuery,
+    state: &'a mut CursorState,
+    max_pages: usize,
+}
+
 /// The result of an atomic claim: the job now owned by this runner plus the
 /// fencing token every later write must carry.
 struct ClaimedJob {
@@ -201,9 +225,7 @@ struct ClaimedJobRow {
 fn unknown_source_names(configured: &[&str], requested: &[String]) -> Vec<String> {
     let mut unknown: Vec<String> = Vec::new();
     for name in requested {
-        if !configured.iter().any(|id| *id == name.as_str())
-            && !unknown.iter().any(|seen| seen == name)
-        {
+        if !configured.contains(&name.as_str()) && !unknown.iter().any(|seen| seen == name) {
             unknown.push(name.clone());
         }
     }
@@ -388,10 +410,12 @@ impl DiscoveryJobRunner {
                     tenant_id,
                     job_id,
                     lease_token,
-                    source.as_ref(),
-                    &query,
-                    &mut state,
-                    max_pages,
+                    SourceBatchContext {
+                        source: source.as_ref(),
+                        query: &query,
+                        state: &mut state,
+                        max_pages,
+                    },
                 )
                 .await?;
             if batch.status == "succeeded" {
@@ -432,11 +456,13 @@ impl DiscoveryJobRunner {
             tenant_id,
             job_id,
             lease_token,
-            status,
-            state.to_json(),
-            new_total,
-            job_error.as_deref(),
-            completed_at,
+            BatchOutcome {
+                status,
+                cursor: state.to_json(),
+                new_total,
+                job_error: job_error.as_deref(),
+                completed_at,
+            },
         )
         .await?;
 
@@ -549,12 +575,15 @@ impl DiscoveryJobRunner {
         tenant_id: &str,
         job_id: Uuid,
         lease_token: Uuid,
-        status: &str,
-        cursor: Option<String>,
-        new_total: i64,
-        job_error: Option<&str>,
-        completed_at: Option<DateTime<Utc>>,
+        outcome: BatchOutcome<'_>,
     ) -> Result<(), SalesError> {
+        let BatchOutcome {
+            status,
+            cursor,
+            new_total,
+            job_error,
+            completed_at,
+        } = outcome;
         let affected = sqlx::query(
             "UPDATE sales_discovery_jobs SET
                 status = $3,
@@ -689,11 +718,14 @@ impl DiscoveryJobRunner {
         tenant_id: &str,
         job_id: Uuid,
         lease_token: Uuid,
-        source: &dyn DiscoverySource,
-        query: &DiscoveryQuery,
-        state: &mut CursorState,
-        max_pages: usize,
+        context: SourceBatchContext<'_>,
     ) -> Result<SourceBatch, SalesError> {
+        let SourceBatchContext {
+            source,
+            query,
+            state,
+            max_pages,
+        } = context;
         let started = Instant::now();
         let mut cursor = state.cursors.get(source.id()).cloned();
         let mut pages = 0usize;
@@ -937,6 +969,17 @@ async fn upsert_candidate(
 // Promotion
 // ---------------------------------------------------------------------------
 
+/// The candidate row locked for promotion: domain, idempotency marker and the
+/// company/jurisdiction fields copied onto the account.
+#[derive(sqlx::FromRow)]
+struct PromotionCandidateRow {
+    account_domain: Option<String>,
+    promoted_account_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+    company_name: Option<String>,
+    jurisdiction: Option<String>,
+}
+
 /// Promote a discovery candidate into the canonical account model.
 ///
 /// * Refuses (with a precise reason) when the candidate has no usable domain
@@ -956,13 +999,7 @@ pub async fn promote_candidate(
         .await
         .map_err(|error| SalesError::Database(error.to_string()))?;
 
-    let row: Option<(
-        Option<String>,
-        Option<Uuid>,
-        Option<Uuid>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let row: Option<PromotionCandidateRow> = sqlx::query_as(
         "SELECT account_domain, promoted_account_id, job_id, company_name, jurisdiction
              FROM sales_discovery_candidates
              WHERE id = $1 AND tenant_id = $2
@@ -974,7 +1011,14 @@ pub async fn promote_candidate(
     .await
     .map_err(|error| SalesError::Database(error.to_string()))?;
 
-    let Some((raw_domain, already_promoted, job_id, company_name, jurisdiction)) = row else {
+    let Some(PromotionCandidateRow {
+        account_domain: raw_domain,
+        promoted_account_id: already_promoted,
+        job_id,
+        company_name,
+        jurisdiction,
+    }) = row
+    else {
         return Err(SalesError::InvalidInput(format!(
             "discovery candidate {candidate_id} not found for tenant {tenant_id}"
         )));
@@ -1098,9 +1142,7 @@ pub fn sanitize_source_url(raw: Option<&str>) -> Option<String> {
     let parsed = url::Url::parse(raw).ok()?;
     match parsed.scheme() {
         "http" | "https" | "first-party" => {
-            if parsed.host_str().is_none() {
-                return None;
-            }
+            parsed.host_str()?;
         }
         _ => return None,
     }
@@ -1615,11 +1657,13 @@ mod tests {
                 &tenant,
                 job.id,
                 first.lease_token,
-                "completed",
-                Some("{\"done\":[]}".to_string()),
-                1,
-                None,
-                Some(Utc::now()),
+                BatchOutcome {
+                    status: "completed",
+                    cursor: Some("{\"done\":[]}".to_string()),
+                    new_total: 1,
+                    job_error: None,
+                    completed_at: Some(Utc::now()),
+                },
             )
             .await;
         assert!(
@@ -1651,11 +1695,13 @@ mod tests {
                 &tenant,
                 job.id,
                 second.lease_token,
-                "completed",
-                None,
-                0,
-                None,
-                Some(Utc::now()),
+                BatchOutcome {
+                    status: "completed",
+                    cursor: None,
+                    new_total: 0,
+                    job_error: None,
+                    completed_at: Some(Utc::now()),
+                },
             )
             .await
             .is_ok());

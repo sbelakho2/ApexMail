@@ -16,11 +16,11 @@ ApexMail delivers transactional email infrastructure with EU/EEA-oriented deploy
 ## Solutions by Use Case
 
 - **[Transactional Email](transactional-email/)** — Application-driven email: password resets, receipts, notifications, account alerts. REST API and SMTP relay with signed webhooks, idempotency, and per-use-case configuration.
-- **[SaaS Platforms](saas-platforms/)** — Multi-tenant email infrastructure for B2B and B2C SaaS products. Subaccounts, domain isolation, custom RBAC, SSO, and white-label delivery.
+- **[SaaS Platforms](saas-platforms/)** — Multi-tenant email infrastructure for B2B and B2C SaaS products. Tenant isolation, domain isolation, custom RBAC, SSO, and white-label delivery.
 - **[Regulated Industries](regulated-industries/)** — GDPR-oriented and contractual review. DPA support, data-residency review, audit controls, and private-deployment options. HIPAA availability is not currently offered.
 - **[High-Volume Sending](high-volume-sending/)** — Millions of emails per month. Managed dedicated IPs, automated warm-up, queue prioritization, batch APIs, and contractual SLAs.
 - **[Migration](migration/)** — Move from SendGrid, Postmark, Mailgun, SES, or Resend. IP warm-up, domain transition, template migration, webhook compatibility, and parallel-send validation.
-- **[Enterprise](enterprise/)** — Architecture review, dedicated tenancy, BYOC deployment, negotiated support, quarterly business reviews, and custom retention.
+- **[Enterprise](enterprise/)** — Architecture review, dedicated tenancy, BYOC deployment, negotiated support, and quarterly business reviews.
 
 ---
 

@@ -402,8 +402,9 @@ pub struct TaxonomyBinding {
 
 impl TaxonomyBinding {
     pub fn from_json_str(json: &str) -> Result<Self, String> {
-        let raw: BTreeMap<String, String> = serde_json::from_str(json)
-            .map_err(|error| format!("taxonomy binding is not a JSON object of slot -> concept: {error}"))?;
+        let raw: BTreeMap<String, String> = serde_json::from_str(json).map_err(|error| {
+            format!("taxonomy binding is not a JSON object of slot -> concept: {error}")
+        })?;
         let mut entries = BTreeMap::new();
         for (name, reference) in raw {
             let slot = ReportSlot::from_name(&name).ok_or_else(|| {
@@ -419,9 +420,8 @@ impl TaxonomyBinding {
     }
 
     pub fn from_json_file(path: &Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path).map_err(|error| {
-            format!("cannot read taxonomy binding {}: {error}", path.display())
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read taxonomy binding {}: {error}", path.display()))?;
         Self::from_json_str(&content)
     }
 
@@ -727,8 +727,7 @@ pub fn build_annual_report_xbrl(
         },
     }
 
-    let (mut document, extension) = if let (Some(config), Some(bound)) = (config, bound.as_ref())
-    {
+    let (mut document, extension) = if let (Some(config), Some(bound)) = (config, bound.as_ref()) {
         let (candidate, candidate_extension) = build_report_facts(
             company,
             fiscal_year,
@@ -805,8 +804,7 @@ pub fn build_annual_report_xbrl(
     let extension_schema_xml =
         render_extension_schema(&extension, config.map(|config| &config.taxonomy));
     let instance_sha256 = hex::encode(Sha256::digest(instance_xml.as_bytes()));
-    let extension_schema_sha256 =
-        hex::encode(Sha256::digest(extension_schema_xml.as_bytes()));
+    let extension_schema_sha256 = hex::encode(Sha256::digest(extension_schema_xml.as_bytes()));
 
     AnnualReportXbrl {
         instance_xml,
@@ -901,7 +899,9 @@ fn build_report_facts(
 
     match bound {
         Some(bound) => {
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 bound.assets.clone(),
                 &instant_context,
                 balance_sheet.assets_cents,
@@ -909,7 +909,9 @@ fn build_report_facts(
                 None,
                 false,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 bound.liabilities.clone(),
                 &instant_context,
                 balance_sheet.liabilities_cents,
@@ -917,7 +919,9 @@ fn build_report_facts(
                 None,
                 false,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 bound.equity.clone(),
                 &instant_context,
                 balance_sheet.equity_cents,
@@ -925,7 +929,9 @@ fn build_report_facts(
                 None,
                 false,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 bound.revenue.clone(),
                 &duration_context,
                 income_statement.revenue_cents,
@@ -933,7 +939,9 @@ fn build_report_facts(
                 None,
                 false,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 bound.expenses.clone(),
                 &duration_context,
                 income_statement.expenses_cents,
@@ -941,7 +949,9 @@ fn build_report_facts(
                 None,
                 false,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 bound.net_profit.clone(),
                 &duration_context,
                 income_statement.net_profit_cents,
@@ -950,7 +960,9 @@ fn build_report_facts(
                 false,
             );
             if let Some(period_profit) = &bound.period_profit {
-                push_amount(&mut facts, &mut extension, 
+                push_amount(
+                    &mut facts,
+                    &mut extension,
                     period_profit.clone(),
                     &duration_context,
                     balance_sheet.period_profit_cents,
@@ -972,7 +984,9 @@ fn build_report_facts(
         }
         None => {
             let extension_concept = |name: &str| QName::new(XBRL_EXTENSION_NAMESPACE, name);
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("Assets"),
                 &instant_context,
                 balance_sheet.assets_cents,
@@ -980,7 +994,9 @@ fn build_report_facts(
                 Some(Balance::Debit),
                 true,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("Liabilities"),
                 &instant_context,
                 balance_sheet.liabilities_cents,
@@ -988,7 +1004,9 @@ fn build_report_facts(
                 Some(Balance::Credit),
                 true,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("Equity"),
                 &instant_context,
                 balance_sheet.equity_cents,
@@ -996,7 +1014,9 @@ fn build_report_facts(
                 Some(Balance::Credit),
                 true,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("ProfitLossForPeriod"),
                 &duration_context,
                 balance_sheet.period_profit_cents,
@@ -1004,7 +1024,9 @@ fn build_report_facts(
                 Some(Balance::Credit),
                 true,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("Revenue"),
                 &duration_context,
                 income_statement.revenue_cents,
@@ -1012,7 +1034,9 @@ fn build_report_facts(
                 Some(Balance::Credit),
                 true,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("Expenses"),
                 &duration_context,
                 income_statement.expenses_cents,
@@ -1020,7 +1044,9 @@ fn build_report_facts(
                 Some(Balance::Debit),
                 true,
             );
-            push_amount(&mut facts, &mut extension, 
+            push_amount(
+                &mut facts,
+                &mut extension,
                 extension_concept("NetProfit"),
                 &duration_context,
                 income_statement.net_profit_cents,
@@ -1066,7 +1092,9 @@ fn build_report_facts(
             name = format!("Account_{base}_{suffix}");
             suffix += 1;
         }
-        push_amount(&mut facts, &mut extension, 
+        push_amount(
+            &mut facts,
+            &mut extension,
             QName::new(XBRL_EXTENSION_NAMESPACE, name),
             context_ref,
             line.balance_debit_positive,
@@ -1093,10 +1121,7 @@ fn namespace_prefixes(
     config: Option<&AnnualReportXbrlConfig>,
 ) -> BTreeMap<String, String> {
     let mut prefixes: BTreeMap<String, String> = BTreeMap::new();
-    prefixes.insert(
-        XBRL_EXTENSION_NAMESPACE.to_string(),
-        "apex".to_string(),
-    );
+    prefixes.insert(XBRL_EXTENSION_NAMESPACE.to_string(), "apex".to_string());
     let mut next = 0usize;
     for fact in &document.facts {
         if prefixes.contains_key(&fact.concept.namespace) {
@@ -1186,10 +1211,7 @@ fn render_instance(
     }
 
     for unit in &document.units {
-        xml.push_str(&format!(
-            "  <xbrli:unit id=\"{}\">",
-            xml_escape(&unit.id)
-        ));
+        xml.push_str(&format!("  <xbrli:unit id=\"{}\">", xml_escape(&unit.id)));
         for measure in &unit.measures {
             xml.push_str(&format!(
                 "<xbrli:measure>{}</xbrli:measure>",
@@ -1227,10 +1249,7 @@ fn render_instance(
     xml
 }
 
-fn render_extension_schema(
-    extension: &ExtensionSchema,
-    taxonomy: Option<&XbrlTaxonomy>,
-) -> String {
+fn render_extension_schema(extension: &ExtensionSchema, taxonomy: Option<&XbrlTaxonomy>) -> String {
     let mut xml = String::with_capacity(4096);
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str(&format!(
@@ -1240,16 +1259,10 @@ fn render_extension_schema(
          Generated by compliance::annual_report. -->\n",
     ));
     xml.push_str("<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"");
-    xml.push_str(&format!(
-        " xmlns:xbrli=\"{XBRL_INSTANCE_NAMESPACE}\""
-    ));
-    xml.push_str(&format!(
-        " xmlns:link=\"{XBRL_LINKBASE_NAMESPACE}\""
-    ));
+    xml.push_str(&format!(" xmlns:xbrli=\"{XBRL_INSTANCE_NAMESPACE}\""));
+    xml.push_str(&format!(" xmlns:link=\"{XBRL_LINKBASE_NAMESPACE}\""));
     xml.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
-    xml.push_str(&format!(
-        " xmlns:apex=\"{XBRL_EXTENSION_NAMESPACE}\""
-    ));
+    xml.push_str(&format!(" xmlns:apex=\"{XBRL_EXTENSION_NAMESPACE}\""));
     xml.push_str(&format!(
         " targetNamespace=\"{XBRL_EXTENSION_NAMESPACE}\" elementFormDefault=\"qualified\" \
          id=\"apex-ee-annual-report-extension\">\n"
@@ -1370,8 +1383,14 @@ pub async fn generate_annual_report(
     actor: &str,
 ) -> Result<AnnualReport, String> {
     let config = AnnualReportXbrlConfig::from_env()?;
-    generate_annual_report_configured(db, legal_entity_id, fiscal_period_id, actor, config.as_ref())
-        .await
+    generate_annual_report_configured(
+        db,
+        legal_entity_id,
+        fiscal_period_id,
+        actor,
+        config.as_ref(),
+    )
+    .await
 }
 
 /// Generate (or regenerate, while draft) the annual report with an explicit

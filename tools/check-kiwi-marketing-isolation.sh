@@ -67,10 +67,16 @@ for src_path in "${SOURCE_PATHS[@]}"; do
   [ -e "$src_path" ] || continue
 
   # Build a grep exclude list from ALLOWED_PATHS (relative to repo root).
+  # `${arr[@]+...}` guard: the list is legitimately EMPTY today, and bash 3.2
+  # (macOS /bin/bash — what a dev machine's `bash script.sh` resolves to)
+  # treats "${ALLOWED_PATHS[@]}" as an unbound variable under `set -u`,
+  # which aborted this gate everywhere except the Linux CI host.
   excludes=()
-  for ap in "${ALLOWED_PATHS[@]}"; do
-    excludes+=( --exclude="$ap" )
-  done
+  if [ "${#ALLOWED_PATHS[@]}" -gt 0 ]; then
+    for ap in "${ALLOWED_PATHS[@]}"; do
+      excludes+=( --exclude="$ap" )
+    done
+  fi
 
   for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
     # -r recursive, -i case-insensitive, -I skip binary files, -l list files.

@@ -480,16 +480,18 @@ async fn score_persist_and_latest_roundtrip() {
     let account = insert_account(&pool, &tenant, 2, false, 0).await;
     let contact = insert_contact(&pool, &tenant, account, Some("VP"), "VP Engineering").await;
 
-    let mut features = ScoreFeatures::default();
-    features.segment_match = scoring::SegmentMatch::Strong;
-    features.employees = Some(220);
-    features.industry = Some("B2B SaaS".into());
-    features.intent_signals = vec![sales_autopilot::signals::SignalObservation {
-        signal_type: SignalType::APEXMAIL_MIGRATION_PAGE_VISIT.into(),
-        strength: 0.9,
-        observed_at: Utc::now(),
-    }];
-    features.legal = sales_autopilot::types::ContactDecision::Allowed;
+    let mut features = ScoreFeatures {
+        segment_match: scoring::SegmentMatch::Strong,
+        employees: Some(220),
+        industry: Some("B2B SaaS".into()),
+        intent_signals: vec![sales_autopilot::signals::SignalObservation {
+            signal_type: SignalType::APEXMAIL_MIGRATION_PAGE_VISIT.into(),
+            strength: 0.9,
+            observed_at: Utc::now(),
+        }],
+        legal: sales_autopilot::types::ContactDecision::Allowed,
+        ..Default::default()
+    };
     features.economics.expected_ltv_contribution_eur = 25_000.0;
 
     let opportunity = scoring::score(&features);

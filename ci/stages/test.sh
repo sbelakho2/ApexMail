@@ -51,12 +51,16 @@ ensure_marketing_output() {
         ci_info "dry-run: zola build (marketing output for ui-foundation)"
         return "$CI_EXIT_OK"
     fi
-    if ! command -v zola >/dev/null 2>&1; then
-        ci_die "apps/marketing-zola/public is missing and zola is not installed — \
-ui-foundation cannot compile (install zola or build the site once)"
+    # The PINNED zola (the marketing Dockerfile's version) — a newer host zola
+    # cannot build these templates at all (0.23 dropped `{% import %}`).
+    _emo_zola=''
+    _emo_zola=$(ci_zola 2>/dev/null) || _emo_zola=''
+    if [ -z "$_emo_zola" ]; then
+        ci_die "apps/marketing-zola/public is missing and no pinned zola could be \
+provided — ui-foundation cannot compile (install zola or build the site once)"
     fi
     ci_info "building marketing output (required by ui-foundation include_str!)"
-    (cd "$REPO_ROOT/apps/marketing-zola" && zola build) >>"$CI_STAGE_LOG" 2>&1 \
+    (cd "$REPO_ROOT/apps/marketing-zola" && "$_emo_zola" build) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "zola build failed"; return "$CI_EXIT_FAIL"; }
 }
 
@@ -112,13 +116,30 @@ _provision_test_services() {
         _TEST_ENV="TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
         _TEST_ENV="$_TEST_ENV SALES_TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
         _TEST_ENV="$_TEST_ENV ENTERPRISE_TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
+    elif [ "${CI_TEST_DB:-none}" = service ]; then
+        # A CI executor provides the database (Woodpecker `services:`, a
+        # sidecar, or an operator's instance): TEST_DATABASE_URL is REQUIRED
+        # and is used verbatim — no container is started and nothing is
+        # rewritten. Fail closed when it is absent: a pipeline that silently
+        # ran zero DB-gated tests would be worse than a failed build.
+        [ -n "${TEST_DATABASE_URL:-}" ] \
+            || ci_die "CI_TEST_DB=service requires TEST_DATABASE_URL to be exported by the CI executor"
+        ci_info "CI_TEST_DB=service: using the provided database (canonical chain applied to it)"
+        apply_service_schema
+        _TEST_ENV="TEST_DATABASE_URL=$TEST_DATABASE_URL"
+        _TEST_ENV="$_TEST_ENV SALES_TEST_DATABASE_URL=${SALES_TEST_DATABASE_URL:-$TEST_DATABASE_URL}"
+        _TEST_ENV="$_TEST_ENV ENTERPRISE_TEST_DATABASE_URL=${ENTERPRISE_TEST_DATABASE_URL:-$TEST_DATABASE_URL}"
     else
         _TEST_ENV="SALES_TEST_DATABASE_URL=postgres://127.0.0.1:1/apexmail_test"
         _TEST_ENV="$_TEST_ENV ENTERPRISE_TEST_DATABASE_URL=postgres://127.0.0.1:1/apexmail_test"
         # NOTE: TEST_DATABASE_URL stays UNSET in default mode — the
         # functional-sales suite PANICS when it is set but unreachable.
     fi
-    if [ "${CI_TEST_REDIS:-0}" = 1 ]; then
+    if [ "${CI_TEST_REDIS:-0}" = service ]; then
+        [ -n "${TEST_REDIS_URL:-}" ] \
+            || ci_die "CI_TEST_REDIS=service requires TEST_REDIS_URL to be exported by the CI executor"
+        _TEST_ENV="$_TEST_ENV TEST_REDIS_URL=$TEST_REDIS_URL"
+    elif [ "${CI_TEST_REDIS:-0}" = 1 ]; then
         _redis_port=$(ci_free_port)
         ci_ephem_redis apexmail-ci-test-redis "$_redis_port" \
             || ci_die "ephemeral redis failed to start"
@@ -272,6 +293,37 @@ run_coverage_gate() {
 # migrator at build time) is the single source of truth the production
 # database actually runs — the ephemeral database must be provisioned from
 # the SAME chain or the suite validates a schema that does not exist.
+# Service mode (CI_TEST_DB=service): the canonical chain is applied to the
+# PROVIDED database so suites that use TEST_DATABASE_URL directly find the
+# real schema. The per-test fixtures clone from the chain's template
+# database and need nothing here.
+apply_service_schema() {
+    if ci_dry; then
+        ci_info "dry-run: service-mode schema application skipped"
+        return "$CI_EXIT_OK"
+    fi
+    ci_info "building the migrator (canonical chain embedded at compile time)"
+    touch "$WS/crates/migrator/src/main.rs"
+    (cd "$WS" && cargo build -q -p migrator) >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "cargo build -p migrator failed"; return "$CI_EXIT_FAIL"; }
+    # Retry: a service container that is still initializing accepts a TCP
+    # connection before it can serve queries ("the database system is
+    # starting up"), which the first migrator run would report as a failure.
+    _svc_try=1
+    while [ "$_svc_try" -le 5 ]; do
+        if (cd "$WS" && DATABASE_URL="$TEST_DATABASE_URL" ./target/debug/migrator) \
+            >>"$CI_STAGE_LOG" 2>&1; then
+            ci_info "canonical chain applied to the provided database"
+            return "$CI_EXIT_OK"
+        fi
+        ci_warn "migrator attempt $_svc_try against the provided database failed; retrying"
+        _svc_try=$((_svc_try + 1))
+        sleep 3
+    done
+    ci_err "migrator could not apply the canonical chain to TEST_DATABASE_URL"
+    return "$CI_EXIT_FAIL"
+}
+
 apply_test_schema() {
     # Dry-run (selftest) safety: ci_ephem_postgres only ECHOES its docker run
     # in dry-run mode, so no container exists to resolve a port from — the
@@ -551,11 +603,22 @@ run_static_lint_gates() {
         fail) return "$CI_EXIT_FAIL" ;;
     esac
 
+    # The gate's tool is PROVISIONED, not assumed: hadolint's flag is
+    # `required` (a missing tool fails the lane on any host), so the lane
+    # fetches the pinned release when the machine has none.
+    # `lane_tool_status` decides presence through `ci_have_tool`, which reads
+    # PATH — so the provisioned binary is put ON PATH before asking.
+    _sl_hadolint=$(ci_hadolint 2>/dev/null) || _sl_hadolint=''
+    if [ -n "$_sl_hadolint" ]; then
+        PATH="$(dirname "$_sl_hadolint"):$PATH"
+        export PATH
+    fi
     _sl_st=$(lane_tool_status hadolint hadolint-gate "${CI_STATIC_LINT_CHECK:-required}")
     case $_sl_st in
         run)
+            _sl_hadolint=${_sl_hadolint:-hadolint}
             (cd "$REPO_ROOT" && ci_check "hadolint (all tracked Dockerfiles, .hadolint.yaml)" \
-                sh -c 'git ls-files -z -- "*Dockerfile*" | xargs -0 hadolint --config .hadolint.yaml') \
+                sh -c "git ls-files -z -- '*Dockerfile*' | xargs -0 '$_sl_hadolint' --config .hadolint.yaml") \
                 || return "$CI_EXIT_FAIL"
             ;;
         fail) return "$CI_EXIT_FAIL" ;;

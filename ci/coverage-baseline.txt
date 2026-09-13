@@ -12,4 +12,12 @@
 # From here the gate is a pure ratchet: raise it in the SAME PR as the tests
 # that earned the increase — that is a PR-positive action; lowering it
 # requires a deliberate, reviewed justification.
-63.04
+#
+# 2026-09-13: raised 63.04 → 66.80 after the instrumented run measured
+# 66.8064% (same day's test-stage run, lcov: cargo llvm-cov nextest
+# --workspace). The wave that earned it added the bank-statement ingest, the
+# automations executor, the XBRL taxonomy loader/validator, the RFC 3161 +
+# ASiC signing module, the validated filing packages and the TSD ledger
+# derivation, each with DB-backed tests; the gate had instructed the raise in
+# that run's log. Truncated to two decimals, the ratchet's own convention.
+66.80

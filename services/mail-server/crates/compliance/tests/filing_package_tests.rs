@@ -293,7 +293,10 @@ fn kmd_refuses_missing_entity_identity_and_insufficient_source_data() {
     missing_registry.registry_code = String::new();
     let error =
         build_kmd_package(&missing_registry).expect_err("blank registry code must be refused");
-    assert!(error.to_string().contains("entity.registry_code"), "{error}");
+    assert!(
+        error.to_string().contains("entity.registry_code"),
+        "{error}"
+    );
 
     let mut not_ready = sample_kmd();
     not_ready.ready_for_filing = false;
@@ -321,7 +324,10 @@ fn kmd_refuses_a_summary_that_disagrees_with_its_components() {
         error.to_string().contains("summary.net_vat_payable_cents"),
         "{error}"
     );
-    assert_eq!(error.problems[0].kind, compliance::filing_package::ProblemKind::InvalidValue);
+    assert_eq!(
+        error.problems[0].kind,
+        compliance::filing_package::ProblemKind::InvalidValue
+    );
 }
 
 // ── KMD INF ────────────────────────────────────────────────────────────────
@@ -374,7 +380,10 @@ fn tsd_complete_declaration_is_deterministic_and_records_the_payment_type_gap() 
     assert_eq!(first.form, FilingForm::Tsd);
     assert_eq!(first.period, "2026-01");
     assert_eq!(first.validation.outcome, ValidationOutcome::Valid);
-    assert_eq!(first.canonical_payload_bytes(), second.canonical_payload_bytes());
+    assert_eq!(
+        first.canonical_payload_bytes(),
+        second.canonical_payload_bytes()
+    );
     assert_eq!(first.payload_sha256, second.payload_sha256);
     assert_eq!(first.named_gaps.len(), 1);
     assert_eq!(first.named_gaps[0].field, TSD_PAYMENT_TYPE_GAP);
@@ -386,8 +395,7 @@ fn tsd_refuses_insufficient_ledger_data_and_missing_person_fields() {
     // Ledger says the month is not complete.
     let mut insufficient = sample_tsd();
     insufficient.data_quality.has_sufficient_data = false;
-    insufficient.data_quality.missing_fields =
-        vec!["posted payroll postings for 2026-01".into()];
+    insufficient.data_quality.missing_fields = vec!["posted payroll postings for 2026-01".into()];
     let error = build_tsd_package(&insufficient).expect_err("insufficient TSD must be refused");
     assert!(
         error
@@ -399,8 +407,7 @@ fn tsd_refuses_insufficient_ledger_data_and_missing_person_fields() {
     // Even with the flag true, a non-empty missing_fields is a refusal.
     let mut declared_gap = sample_tsd();
     declared_gap.data_quality.missing_fields = vec!["payroll_records (staff costs)".into()];
-    let error =
-        build_tsd_package(&declared_gap).expect_err("named missing field must be refused");
+    let error = build_tsd_package(&declared_gap).expect_err("named missing field must be refused");
     assert!(
         error.to_string().contains("payroll_records (staff costs)"),
         "{error}"
@@ -452,7 +459,10 @@ fn oss_complete_declaration_is_valid_submittable_and_deterministic() {
     assert_eq!(first.validation.outcome, ValidationOutcome::Valid);
     assert!(first.named_gaps.is_empty(), "OSS has no named gap");
     assert!(first.is_submittable());
-    assert_eq!(first.canonical_payload_bytes(), second.canonical_payload_bytes());
+    assert_eq!(
+        first.canonical_payload_bytes(),
+        second.canonical_payload_bytes()
+    );
     assert_eq!(first.payload_sha256, second.payload_sha256);
     assert_eq!(
         first.entity.registration_number.as_deref(),
@@ -467,7 +477,9 @@ fn oss_refuses_missing_registration_entries_and_inconsistent_totals() {
     let error = build_oss_package(&no_registration)
         .expect_err("missing registration number must be refused");
     assert!(
-        error.to_string().contains("registration.registration_number"),
+        error
+            .to_string()
+            .contains("registration.registration_number"),
         "{error}"
     );
 
@@ -489,7 +501,10 @@ fn oss_refuses_missing_registration_entries_and_inconsistent_totals() {
     let mut bad_total = sample_oss();
     bad_total.totals.total_vat_cents += 1;
     let error = build_oss_package(&bad_total).expect_err("bad total VAT must be refused");
-    assert!(error.to_string().contains("totals.total_vat_cents"), "{error}");
+    assert!(
+        error.to_string().contains("totals.total_vat_cents"),
+        "{error}"
+    );
 
     let mut bad_country = sample_oss();
     bad_country.entries[0].consumption_country = "DEU".into();
@@ -504,7 +519,8 @@ fn oss_refuses_missing_registration_entries_and_inconsistent_totals() {
 
 #[test]
 fn vd_valid_package_is_submittable_and_refuses_bad_lines() {
-    let package = build_vd_package(&sample_vd(Uuid::new_v4(), Uuid::new_v4())).expect("complete VD");
+    let package =
+        build_vd_package(&sample_vd(Uuid::new_v4(), Uuid::new_v4())).expect("complete VD");
     assert_eq!(package.form, FilingForm::Vd);
     assert_eq!(package.validation.outcome, ValidationOutcome::Valid);
     // No named gaps: the VD listing is the intra-Community SUPPLY listing, and
@@ -614,16 +630,7 @@ async fn oss_submission_records_validated_package_and_the_absent_timestamp() {
         other => panic!("expected HumanTaskRequired, got {other:?}"),
     };
 
-    let row: (
-        String,
-        String,
-        Value,
-        Value,
-        String,
-        Value,
-        Value,
-        String,
-    ) = sqlx::query_as(
+    let row: (String, String, Value, Value, String, Value, Value, String) = sqlx::query_as(
         "SELECT form, validation_outcome, validation_report, named_gaps, timestamp_status, \
                 timestamp_evidence, payload, payload_sha256 \
          FROM filing_submission_packages WHERE id = $1",
@@ -711,12 +718,11 @@ async fn machine_submission_without_tsa_proceeds_and_records_no_trusted_timestam
     assert_eq!(note, NO_TRUSTED_TIMESTAMP_NOTE);
     assert!(evidence.is_none(), "never fabricate a timestamp");
 
-    let return_status: String =
-        sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
-            .bind(return_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let return_status: String = sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(return_status, "submitted");
 }
 
@@ -759,12 +765,11 @@ async fn machine_submission_with_a_failing_tsa_is_refused_with_the_check_results
     let _ = server.await.expect("TSA server task");
 
     // The return stays validated and the refusal is recorded with evidence.
-    let return_status: String =
-        sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
-            .bind(return_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let return_status: String = sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(return_status, "validated");
 
     let (package_status, timestamp_status, failure_checks): (String, String, Value) =
@@ -809,7 +814,10 @@ async fn mutated_payload_is_refused_before_manual_submission() {
     .await
     .expect("human task");
     let (package_id, task_id) = match outcome {
-        SubmissionOutcome::HumanTaskRequired { package_id, task_id } => (package_id, task_id),
+        SubmissionOutcome::HumanTaskRequired {
+            package_id,
+            task_id,
+        } => (package_id, task_id),
         other => panic!("expected HumanTaskRequired, got {other:?}"),
     };
     verify_package_row(&pool, package_id).await.expect("clean");
@@ -843,12 +851,11 @@ async fn mutated_payload_is_refused_before_manual_submission() {
     .expect_err("manual submission of a mutated package must be refused");
     assert!(error.contains("digest"), "{error}");
 
-    let return_status: String =
-        sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
-            .bind(return_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let return_status: String = sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(return_status, "validated");
     let task_status: String =
         sqlx::query_scalar("SELECT status FROM filing_human_tasks WHERE id = $1")
@@ -943,7 +950,10 @@ async fn vd_supply_listing_is_submittable_and_persisted_with_its_evidence() {
     assert_eq!(row.0, "vd");
     assert_eq!(row.1, "valid");
     assert_eq!(
-        row.2.as_ref().and_then(|gaps| gaps.as_array()).map(Vec::len),
+        row.2
+            .as_ref()
+            .and_then(|gaps| gaps.as_array())
+            .map(Vec::len),
         Some(0),
         "no named gaps: {:?}",
         row.2
@@ -951,12 +961,11 @@ async fn vd_supply_listing_is_submittable_and_persisted_with_its_evidence() {
     assert_eq!(row.3.as_deref(), Some("not_configured"));
 
     // The return advanced, so the lawful filing actually happened.
-    let return_status: String =
-        sqlx::query_scalar("SELECT status FROM vd_returns WHERE id = $1")
-            .bind(return_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let return_status: String = sqlx::query_scalar("SELECT status FROM vd_returns WHERE id = $1")
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(return_status, "submitted");
 }
 
@@ -1008,7 +1017,9 @@ fn obtained_timestamp_record_round_trips_with_the_required_evidence() {
         "the signer certificate summary must be recorded"
     );
     assert!(
-        value["evidence"]["checks"].as_array().is_some_and(|checks| !checks.is_empty()),
+        value["evidence"]["checks"]
+            .as_array()
+            .is_some_and(|checks| !checks.is_empty()),
         "the per-check verdicts must be recorded"
     );
     assert!(value["evidence"]["proven_properties"]
@@ -1025,7 +1036,10 @@ fn obtained_timestamp_record_round_trips_with_the_required_evidence() {
     assert_eq!(back_evidence.request_nonce, evidence.request_nonce);
     assert_eq!(back_evidence.gen_time_rfc3339, evidence.gen_time_rfc3339);
     assert_eq!(back_evidence.policy_oid, evidence.policy_oid);
-    assert_eq!(back_evidence.signer_certificate, evidence.signer_certificate);
+    assert_eq!(
+        back_evidence.signer_certificate,
+        evidence.signer_certificate
+    );
     assert_eq!(back_evidence.checks, evidence.checks);
 }
 

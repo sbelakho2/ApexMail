@@ -296,10 +296,11 @@ mod tests {
         .unwrap_err();
         assert!(format!("{err:#}").contains("missing or invalid"));
 
-        // Expired certificate.
-        let dir = std::env::temp_dir().join(format!("mta-tls-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cert_path = dir.join("expired.pem");
+        // Expired certificate. A `tempfile::TempDir` (not a predictable name
+        // under the shared temp dir): it is created securely, uniquely, and
+        // removed on drop.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cert_path = dir.path().join("expired.pem");
         let der = self_signed_expiring_in(-1);
         let expired_pem = pem(&der);
         std::fs::write(&cert_path, expired_pem).unwrap();
@@ -314,7 +315,7 @@ mod tests {
         assert!(err.to_string().contains("expired"), "{err}");
 
         // Live certificate passes.
-        let live_path = dir.join("live.pem");
+        let live_path = dir.path().join("live.pem");
         std::fs::write(&live_path, pem(&self_signed_expiring_in(60))).unwrap();
         assert!(enforce_submission_tls_production(
             true,
@@ -325,8 +326,6 @@ mod tests {
         )
         .unwrap()
         .is_some());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn pem(der: &[u8]) -> String {

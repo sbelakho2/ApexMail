@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "GDPR Tools", apex = '<span class="text-brand-600 font-semibold">DSR workflows</span>', comp = '<span class="text-surface-600">Documented DPA</span>', winner = "apexmail" },
     { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
     { feature = "Data Encryption", apex = '<span class="text-brand-600 font-semibold">AES-256 at rest</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
-    { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Growth plan & above</span>', comp = '<span class="text-surface-600">Access logs only</span>', winner = "apexmail" },
+    { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Operator + API audit trail</span>', comp = '<span class="text-surface-600">Access logs only</span>', winner = "apexmail" },
     { feature = "Residency Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-600">Enterprise only</span>', winner = "none" }
   ]},
   { title = "DEVELOPER EXPERIENCE", rows = [

@@ -209,6 +209,15 @@ LEGACY_HEADER = {
     "166_isolation_data_isolation.sql",
     "167_isolation_encryption.sql",
     "168_compliance_contact_persons.sql",
+    # 2026-09-13: 210 was authored after the 2026-09-10 mechanical listing, so
+    # it was never in this set — and it is the one later file whose first line
+    # is not the canonical header (`-- 210_inbound_delivery_ledger.sql`).
+    # Normalizing it is a comment-only edit that CHANGES THE CHECKSUM, which
+    # breaks sqlx's VersionMismatch validation on any database that already
+    # applied it (the deploy host's ledger cannot be inspected from a dev
+    # machine). Grandfathered rather than edited: a suppressed header warning
+    # costs nothing, a broken migrator on the host costs a deployment.
+    "210_inbound_delivery_ledger.sql",
 }
 
 # (a)/(b)/(d) semantic-convention exemptions in ledger files. These are

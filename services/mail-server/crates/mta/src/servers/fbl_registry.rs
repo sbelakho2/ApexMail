@@ -156,6 +156,17 @@ pub struct FblProvider {
     pub enabled: bool,
 }
 
+/// One row from `fbl_provider_registry` (raw column values, before pattern
+/// normalisation and CIDR parsing).
+#[derive(Debug, sqlx::FromRow)]
+struct FblProviderRow {
+    provider: String,
+    rdns_patterns: Vec<String>,
+    source_networks: Vec<String>,
+    validation_method: String,
+    effective_version: i32,
+}
+
 /// Outcome of matching one source IP + PTR set against the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FblAuthority {
@@ -248,7 +259,7 @@ impl FblRegistry {
     /// or empty result is reported as an empty registry (the caller decides
     /// whether to fall back to the compiled seeds).
     pub async fn load_from_db(pool: &PgPool) -> anyhow::Result<Self> {
-        let rows: Vec<(String, Vec<String>, Vec<String>, String, i32)> = sqlx::query_as(
+        let rows: Vec<FblProviderRow> = sqlx::query_as(
             r#"SELECT provider,
                       COALESCE(rdns_patterns, '{}') AS rdns_patterns,
                       COALESCE(source_networks, '{}') AS source_networks,
@@ -264,23 +275,23 @@ impl FblRegistry {
         Ok(Self {
             providers: rows
                 .into_iter()
-                .map(
-                    |(provider, rdns_patterns, source_networks, method, version)| FblProvider {
-                        provider,
-                        rdns_patterns: rdns_patterns
-                            .into_iter()
-                            .map(|p| normalize_pattern(&p))
-                            .filter(|p| !p.is_empty())
-                            .collect(),
-                        source_networks: source_networks
-                            .iter()
-                            .filter_map(|n| IpNet::parse(n))
-                            .collect(),
-                        validation_method: FblValidationMethod::from_db(&method),
-                        effective_version: version,
-                        enabled: true,
-                    },
-                )
+                .map(|row| FblProvider {
+                    provider: row.provider,
+                    rdns_patterns: row
+                        .rdns_patterns
+                        .into_iter()
+                        .map(|p| normalize_pattern(&p))
+                        .filter(|p| !p.is_empty())
+                        .collect(),
+                    source_networks: row
+                        .source_networks
+                        .iter()
+                        .filter_map(|n| IpNet::parse(n))
+                        .collect(),
+                    validation_method: FblValidationMethod::from_db(&row.validation_method),
+                    effective_version: row.effective_version,
+                    enabled: true,
+                })
                 .collect(),
         })
     }

@@ -1038,6 +1038,17 @@ impl From<SalesActionRow> for SalesAction {
 mod tests {
     use super::*;
 
+    /// `sales_actions` row read back after [`ActionQueue::finish`] parks an
+    /// action awaiting approval.
+    #[derive(sqlx::FromRow)]
+    struct ParkedActionRow {
+        state: String,
+        lease_owner: Option<String>,
+        lease_token: Option<Uuid>,
+        lease_expires_at: Option<DateTime<Utc>>,
+        completed_at: Option<DateTime<Utc>>,
+    }
+
     #[test]
     fn action_type_constants_are_distinct() {
         let all = [
@@ -1665,13 +1676,7 @@ mod tests {
             .await
             .unwrap());
 
-        let (state, owner, token, expires, completed): (
-            String,
-            Option<String>,
-            Option<Uuid>,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-        ) = sqlx::query_as(
+        let row: ParkedActionRow = sqlx::query_as(
             "SELECT state, lease_owner, lease_token, lease_expires_at, completed_at \
              FROM sales_actions WHERE id = $1",
         )
@@ -1679,11 +1684,20 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(state, "awaiting_approval");
-        assert_eq!(owner, None, "a parked action holds no lease owner");
-        assert_eq!(token, None, "a parked action holds no lease token");
-        assert_eq!(expires, None);
-        assert_eq!(completed, None, "waiting for a human is not completion");
+        assert_eq!(row.state, "awaiting_approval");
+        assert_eq!(
+            row.lease_owner, None,
+            "a parked action holds no lease owner"
+        );
+        assert_eq!(
+            row.lease_token, None,
+            "a parked action holds no lease token"
+        );
+        assert_eq!(row.lease_expires_at, None);
+        assert_eq!(
+            row.completed_at, None,
+            "waiting for a human is not completion"
+        );
 
         // Not claimable while parked.
         let again = queue

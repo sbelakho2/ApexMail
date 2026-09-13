@@ -1028,8 +1028,10 @@ mod tests {
 
     #[test]
     fn production_requires_verp_secret_with_bounce_enabled() {
-        let mut config = MtaConfig::default();
-        config.node_env = "production".into();
+        let mut config = MtaConfig {
+            node_env: "production".into(),
+            ..Default::default()
+        };
         config.verp.hmac_secret = None;
         let error = config.validate().unwrap_err().to_string();
         assert!(
@@ -1064,8 +1066,10 @@ mod tests {
 
     #[test]
     fn production_submission_requires_tls_material() {
-        let mut config = MtaConfig::default();
-        config.node_env = "production".into();
+        let mut config = MtaConfig {
+            node_env: "production".into(),
+            ..Default::default()
+        };
         config.verp.hmac_secret = Some("s".repeat(32));
 
         let error = config.validate().unwrap_err().to_string();

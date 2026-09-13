@@ -1009,7 +1009,7 @@ mod tests {
     #[test]
     fn active_tenant_ratio_handles_zero_30d_population() {
         // The ratio field is Option: an empty population is absent, not 0.
-        let ratio: Option<f64> = (0 > 0).then(|| 0.0);
+        let ratio: Option<f64> = (0 > 0).then_some(0.0);
         assert_eq!(ratio, None);
 
         let metrics = EngagementMetrics {

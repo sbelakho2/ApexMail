@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use compliance::annual_report::{
     generate_annual_report, generate_annual_report_configured, AnnualReportXbrlConfig,
-    TaxonomyBinding, XBRL_EXTENSION_NAMESPACE, ANNUAL_REPORT_XBRL_TAXONOMY_BINDING_ENV,
-    ANNUAL_REPORT_XBRL_TAXONOMY_ENV,
+    TaxonomyBinding, ANNUAL_REPORT_XBRL_TAXONOMY_BINDING_ENV, ANNUAL_REPORT_XBRL_TAXONOMY_ENV,
+    XBRL_EXTENSION_NAMESPACE,
 };
 use compliance::xbrl_taxonomy::{
     load_taxonomy, parse_instance, validate_instance, TaxonomyLimits, TaxonomySource,
@@ -41,8 +41,7 @@ fn d(year: i32, month: u32, day: u32) -> NaiveDate {
 }
 
 fn fixture_entry_point() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/ee_annual_report/entry.xsd")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ee_annual_report/entry.xsd")
 }
 
 fn fixture_taxonomy() -> compliance::xbrl_taxonomy::XbrlTaxonomy {
@@ -247,10 +246,15 @@ async fn annual_report_records_taxonomy_identity_when_validated() {
     close_period(&pool, period).await;
 
     let config = config();
-    let report =
-        generate_annual_report_configured(&pool, entity_id, period, "system:close-run", Some(&config))
-            .await
-            .expect("generate with a loaded taxonomy");
+    let report = generate_annual_report_configured(
+        &pool,
+        entity_id,
+        period,
+        "system:close-run",
+        Some(&config),
+    )
+    .await
+    .expect("generate with a loaded taxonomy");
 
     let xbrl = &report.structured_document["xbrl"];
     assert_eq!(
@@ -271,13 +275,20 @@ async fn annual_report_records_taxonomy_identity_when_validated() {
         .unwrap()
         .ends_with("entry.xsd"));
     assert_eq!(
-        xbrl["readiness"]["taxonomy"]["digest"].as_str().unwrap().len(),
+        xbrl["readiness"]["taxonomy"]["digest"]
+            .as_str()
+            .unwrap()
+            .len(),
         64
     );
 
     // The instance carries official concepts for statement totals and
     // extension concepts (declared in the extension schema) for accounts.
-    assert!(report.xbrl_instance.contains("<ee:Assets"), "{}", report.xbrl_instance);
+    assert!(
+        report.xbrl_instance.contains("<ee:Assets"),
+        "{}",
+        report.xbrl_instance
+    );
     assert!(report.xbrl_instance.contains("<ee:CompanyName"));
     assert!(!report.xbrl_instance.contains("<apex:Assets"));
     assert!(report.xbrl_instance.contains("<apex:Account_a1020"));
@@ -389,7 +400,11 @@ async fn annual_report_lists_validation_failures_and_stays_not_ready() {
     );
     assert!(xbrl["readiness"]["taxonomy"]["digest"].as_str().is_some());
     // Nothing invented reaches the instance: no official-namespace elements.
-    assert!(!report.xbrl_instance.contains("<ee:"), "{}", report.xbrl_instance);
+    assert!(
+        !report.xbrl_instance.contains("<ee:"),
+        "{}",
+        report.xbrl_instance
+    );
     let warnings = report.structured_document["warnings"]
         .as_array()
         .expect("warnings");

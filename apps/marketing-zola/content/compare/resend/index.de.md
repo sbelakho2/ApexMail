@@ -14,7 +14,7 @@ og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
 verdict_title = "Warum ApexMail statt Resend?"
 verdict_points = [
-  "Vollständige Enterprise-Funktionen: SSO, White-Label, Sub-Accounts",
+  "Vollständige Enterprise-Funktionen: SSO und White-Label-Zustellung",
   "Aktuelle Compliance-Dokumentation und auditfähige Tarif-Kontrollen",
   "Individuelle Bereitstellungsprüfungen für dedizierte Infrastrukturanforderungen",
   "Erweiterte Analytik, Inhaltsdiagnosen und Sendezeit-Empfehlungen",

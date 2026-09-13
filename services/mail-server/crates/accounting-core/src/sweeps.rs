@@ -449,14 +449,17 @@ pub async fn sweep_unposted_bank_statement_lines(
     pool: &PgPool,
     config: &SweepConfig,
 ) -> Result<SweepReport> {
-    let mut report = SweepReport::default();
-
-    report.unpostable = sqlx::query_scalar::<_, i64>(
+    let unpostable_already = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM bank_statement_lines \
          WHERE journal_entry_id IS NULL AND amount_cents = 0",
     )
     .fetch_one(pool)
     .await? as u64;
+
+    let mut report = SweepReport {
+        unpostable: unpostable_already,
+        ..SweepReport::default()
+    };
 
     let mut attempted: Vec<Uuid> = Vec::new();
     for _ in 0..config.batch_size.max(1) {

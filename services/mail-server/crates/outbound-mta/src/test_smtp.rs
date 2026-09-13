@@ -22,7 +22,7 @@ pub struct ReplySpec {
 impl ReplySpec {
     pub fn new(code: u16, text: &str) -> Self {
         Self {
-            code: code,
+            code,
             text: text.to_string(),
         }
     }

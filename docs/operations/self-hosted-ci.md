@@ -2,9 +2,22 @@
 
 The production CI/CD pipeline lives in [`ci/`](../../ci/README.md) and runs
 ON the deploy host — it does not depend on GitHub Actions, GitHub runners,
-GHCR or the GitHub API. The full design, the workflow-by-workflow
-replacement map, and the host installation steps are in
+GHCR or the GitHub API (the GitHub workflows were removed from the tree on
+2026-09-13). The full design, the historical workflow-by-workflow replacement
+map, and the host installation steps are in
 [`ci/README.md`](../../ci/README.md). This page is the operator cheat-sheet.
+
+## Two executors, one set of gates
+
+| Executor | Use | Notes |
+|---|---|---|
+| `ci/pipeline.sh` (this page) | the deploy gate: build → test → security → images → migrate → deploy → verify | on the deploy host, systemd timer + local webhook |
+| Woodpecker CI (`.woodpecker.yml`) | push/PR checks | free + self-hosted; runs `validate`, `test`, `security` via `ci/woodpecker/stage.sh`; **never deploys**. Setup: `ci/README.md` §11 |
+
+Both call the SAME `ci/stages/*.sh` scripts; a gate is added once. Woodpecker
+provisions postgres/redis as `services` and the stages run in
+`CI_TEST_DB=service` / `CI_TEST_REDIS=service` mode, so the DB-gated suites
+run rather than self-skip.
 
 ## Daily operation (on the deploy host)
 

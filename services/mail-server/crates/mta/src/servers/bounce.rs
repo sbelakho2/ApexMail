@@ -547,12 +547,10 @@ impl BounceServer {
                     authoritative = Some(claims);
                     break;
                 }
-                Some(other) => {
-                    if observation.is_none() {
-                        observation = Some(other);
-                    }
+                Some(other) if observation.is_none() => {
+                    observation = Some(other);
                 }
-                None => {}
+                _ => {}
             }
         }
 
@@ -1158,6 +1156,7 @@ pub(crate) fn resolve_verp_address(
 ///    migration 210 deploy);
 /// 2. `rg 'verp_return_path\(' crates/` shows no v1-grammar caller (the
 ///    worker emits v2 only).
+///
 /// Until then, keep parsing v1 so those bounces are still recorded as
 /// observations instead of vanishing from the pipeline.
 fn parse_verp_v1_address(addr: &str, verp_domain: &str) -> Option<(String, String)> {

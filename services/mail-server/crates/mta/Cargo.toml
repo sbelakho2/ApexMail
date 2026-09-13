@@ -93,3 +93,7 @@ psl = "2.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen = "0.13"
+# Securely-created temporary directories for the TLS-certificate fixtures
+# (semgrep rust.lang.security.temp-dir: a predictable name under the shared
+# temp dir is an insecure-temp-file pattern, even in a test).
+tempfile = "3"

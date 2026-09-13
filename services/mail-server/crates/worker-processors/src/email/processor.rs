@@ -3333,14 +3333,16 @@ impl EmailProcessor {
         );
         if let Err(e) = insert_recipient_event(
             &self.db,
-            &job.tenant_id,
-            &job.message_id,
-            &job.domain_id,
-            job.campaign_id.as_deref(),
-            "sent",
-            &job.to,
-            recipient_provider.as_deref(),
-            provider_source,
+            RecipientEvent {
+                tenant_id: &job.tenant_id,
+                message_id: &job.message_id,
+                domain_id: &job.domain_id,
+                campaign_id: job.campaign_id.as_deref(),
+                event_type: "sent",
+                recipient: &job.to,
+                recipient_provider: recipient_provider.as_deref(),
+                provider_source,
+            },
         )
         .await
         {
@@ -3646,14 +3648,16 @@ impl EmailProcessor {
             carried_recipient_provider(&self.db, &job.tenant_id, &job.message_id, &job.to).await;
         insert_recipient_event(
             &self.db,
-            &job.tenant_id,
-            &job.message_id,
-            &job.domain_id,
-            job.campaign_id.as_deref(),
-            "bounced",
-            &job.to,
-            recipient_provider.as_deref(),
-            provider_source.as_deref(),
+            RecipientEvent {
+                tenant_id: &job.tenant_id,
+                message_id: &job.message_id,
+                domain_id: &job.domain_id,
+                campaign_id: job.campaign_id.as_deref(),
+                event_type: "bounced",
+                recipient: &job.to,
+                recipient_provider: recipient_provider.as_deref(),
+                provider_source: provider_source.as_deref(),
+            },
         )
         .await?;
 
@@ -4142,22 +4146,35 @@ fn normalized_provider_columns(
     (Some(provider), Some(source))
 }
 
+/// One recipient-send lifecycle event (named struct: the parameter list
+/// tripped clippy's too-many-arguments gate).
+struct RecipientEvent<'a> {
+    tenant_id: &'a str,
+    message_id: &'a str,
+    domain_id: &'a str,
+    campaign_id: Option<&'a str>,
+    event_type: &'a str,
+    recipient: &'a str,
+    recipient_provider: Option<&'a str>,
+    provider_source: Option<&'a str>,
+}
+
 /// Insert one recipient-send lifecycle event carrying the optional
 /// recipient-provider provenance (columns added by migration
 /// `202_sales_feedback_delivery_binding.sql:150-167`; the event columns are
 /// `075_create_missing_tables.sql:30-49` plus the widened
 /// `domain_id`/`campaign_id` from `090_widen_events_id_columns.sql:25-32`).
-async fn insert_recipient_event(
-    db: &PgPool,
-    tenant_id: &str,
-    message_id: &str,
-    domain_id: &str,
-    campaign_id: Option<&str>,
-    event_type: &str,
-    recipient: &str,
-    recipient_provider: Option<&str>,
-    provider_source: Option<&str>,
-) -> Result<(), sqlx::Error> {
+async fn insert_recipient_event(db: &PgPool, event: RecipientEvent<'_>) -> Result<(), sqlx::Error> {
+    let RecipientEvent {
+        tenant_id,
+        message_id,
+        domain_id,
+        campaign_id,
+        event_type,
+        recipient,
+        recipient_provider,
+        provider_source,
+    } = event;
     sqlx::query(
         r#"
         INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type,
@@ -5801,14 +5818,16 @@ mod tests {
         // The sent event carries MX-resolved evidence.
         insert_recipient_event(
             &pool,
-            &tenant,
-            &message_id,
-            "dom-1",
-            None,
-            "sent",
-            "CEO@Acme-Corp.Example",
-            Some("google_workspace"),
-            Some("mx_resolved"),
+            RecipientEvent {
+                tenant_id: &tenant,
+                message_id: &message_id,
+                domain_id: "dom-1",
+                campaign_id: None,
+                event_type: "sent",
+                recipient: "CEO@Acme-Corp.Example",
+                recipient_provider: Some("google_workspace"),
+                provider_source: Some("mx_resolved"),
+            },
         )
         .await
         .expect("sent event insert must carry provider columns");
@@ -5842,14 +5861,16 @@ mod tests {
         // A writer with no evidence persists NULL/ NULL.
         insert_recipient_event(
             &pool,
-            &tenant,
-            &format!("msg-{suffix}-unknown"),
-            "dom-1",
-            None,
-            "sent",
-            "user@unknown.example",
-            None,
-            None,
+            RecipientEvent {
+                tenant_id: &tenant,
+                message_id: &format!("msg-{suffix}-unknown"),
+                domain_id: "dom-1",
+                campaign_id: None,
+                event_type: "sent",
+                recipient: "user@unknown.example",
+                recipient_provider: None,
+                provider_source: None,
+            },
         )
         .await
         .expect("unknown-provider insert");
@@ -8562,7 +8583,7 @@ mod tests {
             matches!(result, Err(ProcessorError::SourceBindingUnverified(_))),
             "a mismatched actual IP must be a hard failure: {result:?}"
         );
-        let error = result.as_ref().err().expect("error");
+        let error = result.as_ref().expect_err("error");
         assert_eq!(classify_send_failure(error), SendFailureClass::Hard);
         assert!(warmup_reservation_must_be_released(&route, &result));
 

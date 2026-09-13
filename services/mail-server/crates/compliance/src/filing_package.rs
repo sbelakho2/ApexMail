@@ -435,7 +435,6 @@ pub fn tsd_payment_type_gap() -> NamedGap {
     )
 }
 
-
 // ---------------------------------------------------------------------------
 // Canonical serialisation and digest
 // ---------------------------------------------------------------------------
@@ -864,7 +863,10 @@ fn valid_period(period: &str) -> bool {
 }
 
 fn is_country_code(value: &str) -> bool {
-    value.len() == 2 && value.chars().all(|character| character.is_ascii_alphabetic())
+    value.len() == 2
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
 }
 
 fn is_finite_non_negative(value: f64) -> bool {
@@ -1059,12 +1061,7 @@ pub fn build_kmd_package_with_vat_number(
     }
 
     Ok(FilingPackage::assemble(
-        form,
-        period,
-        entity,
-        payload,
-        report,
-        gaps,
+        form, period, entity, payload, report, gaps,
     ))
 }
 
@@ -1080,7 +1077,10 @@ pub fn build_kmd_inf_package(annex: &KmdInfAnnex) -> Result<FilingPackage, Packa
     let mut check = FormCheck::new(form);
 
     check.required_opt_text("entity.legal_name", annex.entity.legal_name.as_deref());
-    check.required_opt_text("entity.registry_code", annex.entity.registry_code.as_deref());
+    check.required_opt_text(
+        "entity.registry_code",
+        annex.entity.registry_code.as_deref(),
+    );
     if valid_period(&annex.period) {
         check.note("period", true, true, None);
     } else {
@@ -1163,7 +1163,9 @@ pub fn build_kmd_inf_package(annex: &KmdInfAnnex) -> Result<FilingPackage, Packa
 /// member is absent (never omitting a person, never zero-filling a rate).
 /// A valid package still carries [`TSD_PAYMENT_TYPE_GAP`] and is not
 /// submittable.
-pub fn build_tsd_package(declaration: &SocialTaxDeclaration) -> Result<FilingPackage, PackageError> {
+pub fn build_tsd_package(
+    declaration: &SocialTaxDeclaration,
+) -> Result<FilingPackage, PackageError> {
     let form = FilingForm::Tsd;
     let period = crate::vat_oss::period_key(declaration.tax_year, declaration.tax_month)
         .unwrap_or_else(|_| format!("{}-{:02}", declaration.tax_year, declaration.tax_month));
@@ -1218,12 +1220,8 @@ pub fn build_tsd_package(declaration: &SocialTaxDeclaration) -> Result<FilingPac
         check.present(&format!("{prefix}.gross_salary_cents"));
         check.present(&format!("{prefix}.income_tax_withheld_cents"));
         check.present(&format!("{prefix}.social_tax_cents"));
-        check.present(&format!(
-            "{prefix}.unemployment_insurance_employee_cents"
-        ));
-        check.present(&format!(
-            "{prefix}.unemployment_insurance_employer_cents"
-        ));
+        check.present(&format!("{prefix}.unemployment_insurance_employee_cents"));
+        check.present(&format!("{prefix}.unemployment_insurance_employer_cents"));
         check.present(&format!("{prefix}.funded_pension_cents"));
         match employee.funded_pension_rate {
             Some(rate) => {
@@ -1331,9 +1329,7 @@ pub fn build_tsd_package(declaration: &SocialTaxDeclaration) -> Result<FilingPac
 /// ACQUISITIONS are declared on KMD (`VatInputBreakdown::intra_eu_acquisitions`
 /// of the KMD package), not on this listing, so a complete return here is
 /// submittable.
-pub fn build_vd_package(
-    declaration: &VdReturnDeclaration,
-) -> Result<FilingPackage, PackageError> {
+pub fn build_vd_package(declaration: &VdReturnDeclaration) -> Result<FilingPackage, PackageError> {
     let form = FilingForm::Vd;
     let mut check = FormCheck::new(form);
 
@@ -1342,10 +1338,16 @@ pub fn build_vd_package(
     } else {
         check.invalid(
             "period",
-            format!("period {:?} is not a valid YYYY-MM period", declaration.period),
+            format!(
+                "period {:?} is not a valid YYYY-MM period",
+                declaration.period
+            ),
         );
     }
-    check.required_opt_text("seller_vat_number", declaration.seller_vat_number.as_deref());
+    check.required_opt_text(
+        "seller_vat_number",
+        declaration.seller_vat_number.as_deref(),
+    );
 
     check.required_present(
         "entries",
@@ -1479,7 +1481,10 @@ pub fn build_oss_package(
     } else {
         check.invalid(
             "period",
-            format!("period {:?} is not a valid YYYY-MM period", declaration.period),
+            format!(
+                "period {:?} is not a valid YYYY-MM period",
+                declaration.period
+            ),
         );
     }
 
@@ -1495,12 +1500,7 @@ pub fn build_oss_package(
         );
     }
     if is_country_code(&declaration.registration.registration_country) {
-        check.note(
-            "registration.registration_country",
-            true,
-            true,
-            None,
-        );
+        check.note("registration.registration_country", true, true, None);
     } else {
         check.invalid(
             "registration.registration_country",

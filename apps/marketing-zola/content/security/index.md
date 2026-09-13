@@ -119,7 +119,7 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 - Penetration test summary: planned for publication after the first external application penetration test is completed and high/critical findings are remediated. Not currently available.
 - Security-questionnaire requests are assessed case by case using current review material; no standardized SIG, CAIQ, or HECVAT pack is a product entitlement.
-- Audit logs are available on Growth, Business, and Enterprise Cloud, with retention determined by the subscribed plan.
+- ApexMail records API, configuration and admin actions in an operator audit trail; event retention follows the subscribed plan.
 - Customer audit facilitation subject to Enterprise contract review.
 
 ## Operational Security

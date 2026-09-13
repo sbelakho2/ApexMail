@@ -318,8 +318,14 @@ pub fn resolve_jurisdiction(country: Option<&str>, confidence: f32) -> String {
     if code.len() != 2 || !code.chars().all(|c| c.is_ascii_alphabetic()) {
         return UNKNOWN_POLICY_KEY.to_string();
     }
-    // `!(confidence >= MIN)` rather than `<` so NaN also fails closed.
-    if !(confidence >= MIN_COUNTRY_CONFIDENCE) {
+    // Fail closed unless the confidence is ordered at or above the minimum:
+    // the manual `!(confidence >= MIN)` form was deliberately chosen because
+    // `<` alone would let NaN through. `partial_cmp` makes that explicit —
+    // `None` (NaN) and `Less` are both "not confident enough".
+    if matches!(
+        confidence.partial_cmp(&MIN_COUNTRY_CONFIDENCE),
+        Some(std::cmp::Ordering::Less) | None
+    ) {
         return UNKNOWN_POLICY_KEY.to_string();
     }
     if EU_EEA_COUNTRIES.contains(&code.as_str()) {

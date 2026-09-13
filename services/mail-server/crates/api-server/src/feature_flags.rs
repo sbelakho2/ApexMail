@@ -294,7 +294,15 @@ mod tests {
 
     /// Adversarial 7: a non-boolean override is IGNORED (the chosen failure
     /// behaviour) and is logged at warn.
-    #[tokio::test]
+    ///
+    /// `current_thread`: the capture subscriber is installed as the
+    /// THREAD-LOCAL default, and `enabled()` awaits database calls — on a
+    /// multi-thread runtime a task can resume on another worker after an
+    /// await, and the warn emitted there would never reach this subscriber
+    /// (observed as a load-dependent flake under a full-workspace run).
+    /// Pinning the runtime keeps every await on the test thread, so the
+    /// capture is deterministic.
+    #[tokio::test(flavor = "current_thread")]
     async fn non_boolean_override_is_ignored_and_logged() {
         let Some(pool) = crate::test_db::canonical_pool("feature_flag_bad_override").await else {
             return;

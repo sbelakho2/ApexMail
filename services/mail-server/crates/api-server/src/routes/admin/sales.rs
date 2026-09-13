@@ -969,7 +969,9 @@ async fn apply_lead_update(
             builder.push(", lead_notes = ").push_bind(notes.clone());
         }
         if let Some(ref tags) = body.tags {
-            builder.push(", lead_tags = ").push_bind(serde_json::json!(tags));
+            builder
+                .push(", lead_tags = ")
+                .push_bind(serde_json::json!(tags));
         }
         if let Some(deal_value) = body.deal_value {
             builder.push(", lead_deal_value = ").push_bind(deal_value);
@@ -977,7 +979,9 @@ async fn apply_lead_update(
         builder
             .push(" WHERE tenant_id = ")
             .push_bind(tenant_id.to_string());
-        builder.push(" AND legacy_lead_id = ANY(").push_bind(ids.clone());
+        builder
+            .push(" AND legacy_lead_id = ANY(")
+            .push_bind(ids.clone());
         builder.push(")");
         builder.build().execute(&mut *tx).await?;
     }

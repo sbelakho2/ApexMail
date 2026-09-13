@@ -117,7 +117,10 @@ const ASIC_SIGNATURES_XML: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 const ASIC_FINANCIALS: &[u8] = b"account,amount\nrevenue,1000.00\n";
 
 fn strip_whitespace(value: &str) -> String {
-    value.chars().filter(|character| !character.is_whitespace()).collect()
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
 fn fixture_response() -> Vec<u8> {
@@ -216,7 +219,10 @@ fn reference_for<'a>(
 fn asic_members(document: &[u8], signatures_xml: &str) -> Vec<ContainerMember> {
     vec![
         ContainerMember::new("mimetype", ASIC_E_MIMETYPE.as_bytes().to_vec()),
-        ContainerMember::new("META-INF/signatures.xml", signatures_xml.as_bytes().to_vec()),
+        ContainerMember::new(
+            "META-INF/signatures.xml",
+            signatures_xml.as_bytes().to_vec(),
+        ),
         ContainerMember::new("document.txt", document.to_vec()),
         ContainerMember::new("financials.csv", ASIC_FINANCIALS.to_vec()),
     ]
@@ -317,7 +323,10 @@ fn der_reader_refuses_trailing_garbage() {
     let mut reader = Reader::new(&input);
     let tlv = reader.read(&mut budget).expect("NULL");
     assert_eq!(tlv.tag, der::TAG_NULL);
-    assert_eq!(reader.finish(), Err(DerError::TrailingGarbage { remaining: 2 }));
+    assert_eq!(
+        reader.finish(),
+        Err(DerError::TrailingGarbage { remaining: 2 })
+    );
 }
 
 #[test]
@@ -371,10 +380,7 @@ fn der_budget_refuses_element_flood() {
             }
         }
     }
-    assert!(matches!(
-        error,
-        Some(DerError::ElementLimitExceeded { .. })
-    ));
+    assert!(matches!(error, Some(DerError::ElementLimitExceeded { .. })));
 }
 
 #[test]
@@ -447,7 +453,10 @@ fn open_ssl_fixture_passes_every_check_independently() {
     );
     assert!(!evidence.has_failures());
     assert_eq!(evidence.request_nonce, FIXTURE_NONCE);
-    assert_eq!(evidence.tsa_url.as_deref(), Some("https://tsa.example.test/"));
+    assert_eq!(
+        evidence.tsa_url.as_deref(),
+        Some("https://tsa.example.test/")
+    );
     assert_eq!(evidence.policy_oid, FIXTURE_POLICY);
     assert_eq!(evidence.serial_number_hex, FIXTURE_SERIAL_HEX);
     assert_eq!(evidence.imprint_algorithm, "sha256");
@@ -478,10 +487,17 @@ fn open_ssl_fixture_passes_every_check_independently() {
         "signer_id_matches_certificate",
         "token_signature_valid",
     ] {
-        assert_eq!(timestamp_outcome(&evidence, id), &CheckOutcome::Pass, "{id}");
+        assert_eq!(
+            timestamp_outcome(&evidence, id),
+            &CheckOutcome::Pass,
+            "{id}"
+        );
     }
     assert_eq!(evidence.checks.len(), 13);
-    assert!(evidence.proven_properties.iter().any(|line| line.contains("nonce")));
+    assert!(evidence
+        .proven_properties
+        .iter()
+        .any(|line| line.contains("nonce")));
     assert!(evidence
         .not_proven_properties
         .iter()
@@ -509,7 +525,10 @@ fn wrong_document_fails_only_the_imprint_check() {
         timestamp_outcome(&evidence, "signed_attrs_message_digest_matches_econtent"),
         &CheckOutcome::Pass
     );
-    assert_eq!(evidence.document_digest_hex, hex::encode(Sha256::digest(other)));
+    assert_eq!(
+        evidence.document_digest_hex,
+        hex::encode(Sha256::digest(other))
+    );
 }
 
 #[test]
@@ -552,7 +571,10 @@ fn gen_time_outside_tolerance_fails_with_the_observed_time() {
         }
         other => panic!("expected Fail, got {other:?}"),
     }
-    assert_eq!(timestamp_outcome(&evidence, "gen_time_parses"), &CheckOutcome::Pass);
+    assert_eq!(
+        timestamp_outcome(&evidence, "gen_time_parses"),
+        &CheckOutcome::Pass
+    );
 
     // Far past must fail just as loudly.
     let far_past = fixture_now() - chrono::Duration::days(30);
@@ -641,12 +663,19 @@ fn corrupted_signer_certificate_fails_only_the_certificate_checks() {
         "digest_algorithm_accepted",
         "signed_attrs_message_digest_matches_econtent",
     ] {
-        assert_eq!(timestamp_outcome(&evidence, id), &CheckOutcome::Pass, "{id}");
+        assert_eq!(
+            timestamp_outcome(&evidence, id),
+            &CheckOutcome::Pass,
+            "{id}"
+        );
     }
     // Signature checks cannot run without a public key, and say so.
     assert!(timestamp_outcome(&evidence, "token_signature_valid").is_not_performed());
-    assert!(timestamp_outcome(&evidence, "ess_signing_certificate_hash_matches_certificate")
-        .is_not_performed());
+    assert!(timestamp_outcome(
+        &evidence,
+        "ess_signing_certificate_hash_matches_certificate"
+    )
+    .is_not_performed());
 }
 
 #[test]
@@ -683,7 +712,11 @@ fn corrupted_signature_fails_only_the_signature_check() {
         "signed_attrs_message_digest_matches_econtent",
         "ess_signing_certificate_hash_matches_certificate",
     ] {
-        assert_eq!(timestamp_outcome(&evidence, id), &CheckOutcome::Pass, "{id}");
+        assert_eq!(
+            timestamp_outcome(&evidence, id),
+            &CheckOutcome::Pass,
+            "{id}"
+        );
     }
 }
 
@@ -762,7 +795,9 @@ fn request_building_round_trips_for_sha256_and_sha512() {
         assert_eq!(parsed.nonce, Some(nonce));
         assert!(parsed.cert_req);
         // certReq=true must be an explicit BOOLEAN TRUE in DER terms.
-        assert!(der_bytes.windows(3).any(|window| window == [0x01, 0x01, 0xFF]));
+        assert!(der_bytes
+            .windows(3)
+            .any(|window| window == [0x01, 0x01, 0xFF]));
     }
 
     // A request without certReq omits the boolean (DEFAULT FALSE).
@@ -771,7 +806,11 @@ fn request_building_round_trips_for_sha256_and_sha512() {
     assert!(!parsed.cert_req);
 
     // Hostile request bytes must be refused, not panic.
-    for blob in [vec![], vec![0x30, 0x01, 0x05], vec![0x30, 0x03, 0x02, 0x01, 0xFF]] {
+    for blob in [
+        vec![],
+        vec![0x30, 0x01, 0x05],
+        vec![0x30, 0x03, 0x02, 0x01, 0xFF],
+    ] {
         assert!(parse_request(&blob).is_err(), "{blob:?}");
     }
 }
@@ -785,7 +824,11 @@ fn no_configured_tsa_means_no_timestamp() {
         .build()
         .expect("runtime");
     let error = runtime
-        .block_on(timestamp_document(None, FIXTURE_DOCUMENT, HashAlgorithm::Sha256))
+        .block_on(timestamp_document(
+            None,
+            FIXTURE_DOCUMENT,
+            HashAlgorithm::Sha256,
+        ))
         .expect_err("must fail closed");
     assert!(matches!(error, TimeStampError::NotConfigured));
     // No URL, no client, no network call: the error is produced before any
@@ -798,7 +841,11 @@ fn no_configured_tsa_means_no_timestamp() {
         .expect("config")
         .with_timeout_secs(1);
     let error = runtime
-        .block_on(timestamp_document(Some(&config), FIXTURE_DOCUMENT, HashAlgorithm::Sha256))
+        .block_on(timestamp_document(
+            Some(&config),
+            FIXTURE_DOCUMENT,
+            HashAlgorithm::Sha256,
+        ))
         .expect_err("must fail");
     assert!(
         matches!(error, TimeStampError::Transport(_)),
@@ -808,16 +855,21 @@ fn no_configured_tsa_means_no_timestamp() {
 
 #[test]
 fn invalid_tsa_urls_are_rejected_at_configuration_time() {
-    for url in ["", "   ", "not a url", "ftp://tsa.example/", "http://", "https://"] {
+    for url in [
+        "",
+        "   ",
+        "not a url",
+        "ftp://tsa.example/",
+        "http://",
+        "https://",
+    ] {
         assert!(
             compliance::signing::timestamp::TsaConfig::new(url).is_err(),
             "accepted {url:?}"
         );
     }
-    let config = compliance::signing::timestamp::TsaConfig::new(
-        "https://tsa.example.test/rfc3161",
-    )
-    .expect("valid");
+    let config = compliance::signing::timestamp::TsaConfig::new("https://tsa.example.test/rfc3161")
+        .expect("valid");
     assert!(config.describe().contains("tsa.example.test"));
     assert!(!config.describe().contains("Bearer"));
 }
@@ -825,20 +877,21 @@ fn invalid_tsa_urls_are_rejected_at_configuration_time() {
 // ── Transport round trip against a loopback TSA ────────────────────────────
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
+    buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
 }
 
 fn content_length(headers: &str) -> Option<usize> {
-    headers
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if name.eq_ignore_ascii_case("content-length") {
-                value.trim().parse::<usize>().ok()
-            } else {
-                None
-            }
-        })
+    headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// A one-shot HTTP/1.1 server that answers one TSA request and reports the
@@ -901,7 +954,9 @@ async fn transport_rejects_a_response_for_a_foreign_nonce() {
     let evidence = match error {
         TimeStampError::VerificationFailed { failures, evidence } => {
             assert!(
-                failures.iter().any(|check| check.check == "nonce_matches_request"),
+                failures
+                    .iter()
+                    .any(|check| check.check == "nonce_matches_request"),
                 "{failures:?}"
             );
             evidence
@@ -1020,7 +1075,11 @@ fn valid_asic_e_container_passes_every_check() {
         "signature_file_present",
         "all_container_files_signed",
     ] {
-        assert_eq!(container_outcome(&evidence, id), &CheckOutcome::Pass, "{id}");
+        assert_eq!(
+            container_outcome(&evidence, id),
+            &CheckOutcome::Pass,
+            "{id}"
+        );
     }
 
     let signature = &evidence.signatures[0];
@@ -1095,7 +1154,10 @@ fn corrupted_mimetype_fails_the_media_type_check() {
     members[0] = ContainerMember::new("mimetype", b"application/zip".to_vec());
     let evidence = verify_asic_e(&members);
     assert!(!evidence.all_passed());
-    assert_fail_contains(container_outcome(&evidence, "mimetype_exact"), "application/zip");
+    assert_fail_contains(
+        container_outcome(&evidence, "mimetype_exact"),
+        "application/zip",
+    );
     // Nothing else is perturbed.
     assert_eq!(
         container_outcome(&evidence, "all_container_files_signed"),
@@ -1214,19 +1276,31 @@ fn evidence_records_are_serialisable_and_carry_the_audit_lists() {
     assert_eq!(json["policy_oid"], json!(FIXTURE_POLICY));
     assert_eq!(json["signer_certificate"]["serial_hex"], json!("5a504558"));
     assert!(json["proven_properties"].as_array().expect("proven").len() >= 5);
-    assert!(json["not_proven_properties"].as_array().expect("not proven").len() >= 4);
+    assert!(
+        json["not_proven_properties"]
+            .as_array()
+            .expect("not proven")
+            .len()
+            >= 4
+    );
     let decoded: TimeStampEvidence = serde_json::from_value(json).expect("round trip");
     assert_eq!(decoded, timestamp_evidence);
 
     let container_evidence = verify_asic_e(&asic_members(FIXTURE_DOCUMENT, ASIC_SIGNATURES_XML));
     let json = serde_json::to_value(&container_evidence).expect("serialise");
     assert_eq!(json["members"][0]["path"], json!("mimetype"));
-    assert_eq!(json["signatures"][0]["references"][0]["uri"], json!("document.txt"));
+    assert_eq!(
+        json["signatures"][0]["references"][0]["uri"],
+        json!("document.txt")
+    );
     assert!(json["not_proven_properties"]
         .as_array()
         .expect("not proven")
         .iter()
-        .any(|line| line.as_str().unwrap_or_default().contains("canonicalization")));
+        .any(|line| line
+            .as_str()
+            .unwrap_or_default()
+            .contains("canonicalization")));
     let decoded: AsicEvidence = serde_json::from_value(json).expect("round trip");
     assert_eq!(decoded, container_evidence);
 }
@@ -1243,16 +1317,25 @@ fn check_verdict_helpers_behave() {
     assert!(skipped.outcome.is_not_performed());
     // A skipped optional check does not block the baseline gate; a skipped
     // required check would.
-    assert!(compliance::signing::all_passed(&[pass.clone(), skipped.clone()]));
-    assert!(compliance::signing::all_passed(&[pass.clone()]));
-    assert!(!compliance::signing::all_passed(&[CheckVerdict::not_performed(
-        "required-skip",
-        true,
-        "unsupported"
-    )]));
-    assert!(compliance::signing::has_failures(&[pass.clone(), fail.clone()]));
-    assert!(!compliance::signing::strictly_passed(&[pass.clone(), skipped.clone()]));
-    assert!(compliance::signing::strictly_passed(&[pass.clone()]));
+    assert!(compliance::signing::all_passed(&[
+        pass.clone(),
+        skipped.clone()
+    ]));
+    assert!(compliance::signing::all_passed(std::slice::from_ref(&pass)));
+    assert!(!compliance::signing::all_passed(&[
+        CheckVerdict::not_performed("required-skip", true, "unsupported")
+    ]));
+    assert!(compliance::signing::has_failures(&[
+        pass.clone(),
+        fail.clone()
+    ]));
+    assert!(!compliance::signing::strictly_passed(&[
+        pass.clone(),
+        skipped.clone()
+    ]));
+    assert!(compliance::signing::strictly_passed(std::slice::from_ref(
+        &pass
+    )));
     let with_note = CheckVerdict::pass("n", true).with_note("context");
     assert_eq!(with_note.note.as_deref(), Some("context"));
     assert_eq!(

@@ -48,7 +48,7 @@
 //! retained.
 
 use accounting_core::bank_ingest::{
-    ingest_bank_statement, BankStatementImport, IngestError, ImportOutcome,
+    ingest_bank_statement, BankStatementImport, ImportOutcome, IngestError,
 };
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -117,12 +117,7 @@ async fn import_bank_statement(
         Err(IngestError::Rejected { errors }) => Err(ApiError::Validation(
             errors
                 .iter()
-                .map(|error| {
-                    format!(
-                        "row {} ({}): {}",
-                        error.row, error.column, error.message
-                    )
-                })
+                .map(|error| format!("row {} ({}): {}", error.row, error.column, error.message))
                 .collect(),
         )),
         Err(IngestError::Conflict { errors }) => {

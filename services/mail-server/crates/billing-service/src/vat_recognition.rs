@@ -197,7 +197,7 @@ pub fn plan_recognition_entry(
             recognition_event_type(scheme, supply_date, paid_date),
         ),
         VatAccountingScheme::CashSpecial => {
-            let paid_before_fallback = paid_date.map_or(false, |paid| paid < fallback);
+            let paid_before_fallback = paid_date.is_some_and(|paid| paid < fallback);
             if paid_before_fallback {
                 (
                     input.paid_at.expect("paid_date implies paid_at is present"),
@@ -242,20 +242,38 @@ pub fn plan_recognition_entry(
 }
 
 /// Load the dated accounting bases and resolve the scheme for `tenant_id` on
+/// A `vat_accounting_bases` row (named row: the 6-tuple tripped clippy's
+/// type-complexity gate).
+#[derive(Debug, sqlx::FromRow)]
+struct VatAccountingBasisRow {
+    tenant_id: Option<String>,
+    scheme: String,
+    effective_from: NaiveDate,
+    effective_to: Option<NaiveDate>,
+    authorised_at: Option<NaiveDate>,
+    authorisation_reference: Option<String>,
+}
+
+/// The invoice columns the recognition materializer reads (named row).
+#[derive(Debug, sqlx::FromRow)]
+struct InvoiceRecognitionSourceRow {
+    tenant_id: String,
+    currency: String,
+    subtotal: i64,
+    vat_rate: f64,
+    vat_total: i64,
+    issued_at: DateTime<Utc>,
+    paid_at: Option<DateTime<Utc>>,
+    billing_country: Option<String>,
+}
+
 /// `at`. Missing table (pre-213 deployment) falls back to `general`.
 async fn resolve_scheme(
     executor: impl sqlx::PgExecutor<'_>,
     tenant_id: &str,
     at: NaiveDate,
 ) -> Result<VatAccountingScheme, String> {
-    let rows: Vec<(
-        Option<String>,
-        String,
-        NaiveDate,
-        Option<NaiveDate>,
-        Option<NaiveDate>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let rows: Vec<VatAccountingBasisRow> = sqlx::query_as(
         r#"
             SELECT tenant_id, scheme, effective_from, effective_to,
                    authorised_at, authorisation_reference
@@ -270,18 +288,16 @@ async fn resolve_scheme(
 
     let bases: Vec<VatAccountingBasis> = rows
         .into_iter()
-        .filter_map(
-            |(tenant_id, scheme, effective_from, effective_to, authorised_at, reference)| {
-                Some(VatAccountingBasis {
-                    tenant_id,
-                    scheme: VatAccountingScheme::from_db(&scheme)?,
-                    effective_from,
-                    effective_to,
-                    authorised_at,
-                    authorisation_reference: reference,
-                })
-            },
-        )
+        .filter_map(|row| {
+            Some(VatAccountingBasis {
+                tenant_id: row.tenant_id,
+                scheme: VatAccountingScheme::from_db(&row.scheme)?,
+                effective_from: row.effective_from,
+                effective_to: row.effective_to,
+                authorised_at: row.authorised_at,
+                authorisation_reference: row.authorisation_reference,
+            })
+        })
         .collect();
 
     Ok(resolve_accounting_scheme(&bases, tenant_id, at))
@@ -359,16 +375,7 @@ pub async fn materialize_invoice_recognition_by_id(
     invoice_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<Option<RecognitionEntry>, String> {
-    let row: Option<(
-        String,
-        String,
-        i64,
-        f64,
-        i64,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-        Option<String>,
-    )> = sqlx::query_as(
+    let row: Option<InvoiceRecognitionSourceRow> = sqlx::query_as(
         r#"
             SELECT tenant_id, currency, COALESCE(subtotal, amount, 0)::bigint,
                    COALESCE(vat_rate, 0)::double precision, COALESCE(vat_total, 0)::bigint,
@@ -382,8 +389,16 @@ pub async fn materialize_invoice_recognition_by_id(
     .await
     .map_err(|error| format!("failed to load invoice {invoice_id} for recognition: {error}"))?;
 
-    let Some((tenant_id, currency, subtotal, vat_rate, vat_total, issued_at, paid_at, country)) =
-        row
+    let Some(InvoiceRecognitionSourceRow {
+        tenant_id,
+        currency,
+        subtotal,
+        vat_rate,
+        vat_total,
+        issued_at,
+        paid_at,
+        billing_country: country,
+    }) = row
     else {
         return Ok(None);
     };

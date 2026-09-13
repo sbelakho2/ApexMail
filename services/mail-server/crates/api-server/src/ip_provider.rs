@@ -407,19 +407,22 @@ fn assert_transition(from: DedicatedIpState, to: DedicatedIpState) -> Result<(),
     transition(from, to)
         .map(|_| ())
         .map_err(|e| IpProviderError::InvalidStateTransition {
-            from: e.from_state().to_string(),
-            to: e.to_state().to_string(),
+            from: e.origin_state().to_string(),
+            to: e.target_state().to_string(),
         })
 }
 
 impl StateTransitionError {
-    fn from_state(&self) -> &'static str {
+    /// The state the transition started from. Named `origin_state`, not
+    /// `from_state`: a `from_*` method conventionally takes no `self`.
+    fn origin_state(&self) -> &'static str {
         match self {
             StateTransitionError::Illegal { from, .. } => from,
         }
     }
 
-    fn to_state(&self) -> &'static str {
+    /// The state the transition was going to.
+    fn target_state(&self) -> &'static str {
         match self {
             StateTransitionError::Illegal { to, .. } => to,
         }

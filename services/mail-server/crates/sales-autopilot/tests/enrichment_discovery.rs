@@ -821,7 +821,7 @@ async fn live_discovery_hostile_input_is_sanitized() {
     .await
     .expect("bad url query");
     assert!(
-        stored_url.map_or(true, |value| value != "not a url"),
+        stored_url.is_none_or(|value| value != "not a url"),
         "non-URL source_url must not be stored verbatim"
     );
 

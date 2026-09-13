@@ -1131,14 +1131,13 @@ mod tests {
 
         // The lead is visible through the derived view with the FIRST call's
         // id — the id an API client holds must keep resolving.
-        let view_row: (String, String) = sqlx::query_as(
-            "SELECT id, status FROM sales_leads WHERE tenant_id = $1 AND id = $2",
-        )
-        .bind(&tenant)
-        .bind(&first.id)
-        .fetch_one(&pool)
-        .await
-        .expect("the created lead must be readable through the view");
+        let view_row: (String, String) =
+            sqlx::query_as("SELECT id, status FROM sales_leads WHERE tenant_id = $1 AND id = $2")
+                .bind(&tenant)
+                .bind(&first.id)
+                .fetch_one(&pool)
+                .await
+                .expect("the created lead must be readable through the view");
         assert_eq!(view_row.0, first.id);
         assert_eq!(view_row.1, "new");
 
@@ -1834,7 +1833,10 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("sales_leads relation");
-        assert_eq!(relkind, "v", "sales_leads must be a VIEW after migration 223");
+        assert_eq!(
+            relkind, "v",
+            "sales_leads must be a VIEW after migration 223"
+        );
 
         let columns: Vec<String> = sqlx::query_scalar(
             "SELECT column_name FROM information_schema.columns \
@@ -1941,14 +1943,13 @@ mod tests {
         .execute(&pool)
         .await
         .expect("notes update");
-        let (score, notes): (i32, Option<String>) = sqlx::query_as(
-            "SELECT score, notes FROM sales_leads WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(&lead.id)
-        .bind(&tenant)
-        .fetch_one(&pool)
-        .await
-        .expect("view after update");
+        let (score, notes): (i32, Option<String>) =
+            sqlx::query_as("SELECT score, notes FROM sales_leads WHERE id = $1 AND tenant_id = $2")
+                .bind(&lead.id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("view after update");
         assert_eq!(score, 77);
         assert_eq!(notes.as_deref(), Some("called"));
 
@@ -1960,13 +1961,12 @@ mod tests {
                 .await
                 .expect("view count after delete");
         assert_eq!(remaining, 0, "a deleted lead must be gone from the view");
-        let contacts: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)::bigint FROM sales_contacts WHERE tenant_id = $1",
-        )
-        .bind(&tenant)
-        .fetch_one(&pool)
-        .await
-        .expect("contact count");
+        let contacts: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_contacts WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("contact count");
         assert_eq!(
             contacts, 1,
             "deleting the lead unmaps the contact; the canonical person survives"

@@ -282,6 +282,31 @@ pub async fn register_source_document(
     }
 }
 
+/// The identity/state facts of the entry being reversed (named row: a
+/// 5-tuple of mostly-unrelated types tripped clippy's type-complexity gate).
+#[derive(Debug, sqlx::FromRow)]
+struct ReversalOriginalRow {
+    legal_entity_id: Uuid,
+    entry_type: String,
+    source_hash: String,
+    posted_at: Option<DateTime<Utc>>,
+    entry_no: i64,
+}
+
+/// One line of the entry being reversed, mirrored into the reversal.
+#[derive(Debug, sqlx::FromRow)]
+struct ReversalLineRow {
+    account_id: Uuid,
+    debit_cents: i64,
+    credit_cents: i64,
+    currency: String,
+    net_cents: Option<i64>,
+    vat_cents: Option<i64>,
+    vat_rate_bp: Option<i32>,
+    vat_code: Option<String>,
+    description: String,
+}
+
 /// Parameters for [`reverse_entry`].
 #[derive(Debug, Clone)]
 pub struct ReversalRequest {
@@ -310,7 +335,7 @@ pub async fn reverse_entry_in(
     conn: &mut PgConnection,
     req: &ReversalRequest,
 ) -> Result<PostOutcome> {
-    let original: Option<(Uuid, String, String, Option<DateTime<Utc>>, i64)> = sqlx::query_as(
+    let original: Option<ReversalOriginalRow> = sqlx::query_as(
         "SELECT legal_entity_id, entry_type::text, source_hash, posted_at, entry_no \
          FROM journal_entries WHERE id = $1",
     )
@@ -318,7 +343,13 @@ pub async fn reverse_entry_in(
     .fetch_optional(&mut *conn)
     .await?;
 
-    let Some((legal_entity_id, _original_type, original_hash, posted_at, entry_no)) = original
+    let Some(ReversalOriginalRow {
+        legal_entity_id,
+        entry_type: _original_type,
+        source_hash: original_hash,
+        posted_at,
+        entry_no,
+    }) = original
     else {
         return Err(AccountingError::Invalid(format!(
             "journal entry {} not found",
@@ -333,17 +364,7 @@ pub async fn reverse_entry_in(
         )));
     }
 
-    let original_lines: Vec<(
-        Uuid,
-        i64,
-        i64,
-        String,
-        Option<i64>,
-        Option<i64>,
-        Option<i32>,
-        Option<String>,
-        String,
-    )> = sqlx::query_as(
+    let original_lines: Vec<ReversalLineRow> = sqlx::query_as(
         "SELECT account_id, debit_cents, credit_cents, currency, net_cents, \
                     vat_cents, vat_rate_bp, vat_code, description \
              FROM journal_lines WHERE entry_id = $1 ORDER BY line_no",
@@ -358,7 +379,7 @@ pub async fn reverse_entry_in(
 
     let currency = original_lines
         .first()
-        .map(|line| line.3.clone())
+        .map(|line| line.currency.clone())
         .unwrap_or_else(|| "EUR".to_string());
 
     let fiscal_period_id =
@@ -385,8 +406,19 @@ pub async fn reverse_entry_in(
 
     let lines: Vec<JournalLine> = original_lines
         .into_iter()
-        .map(
-            |(account_id, debit, credit, currency, net, vat, rate, code, description)| {
+        .map(|line| {
+            let ReversalLineRow {
+                account_id,
+                debit_cents: debit,
+                credit_cents: credit,
+                currency,
+                net_cents: net,
+                vat_cents: vat,
+                vat_rate_bp: rate,
+                vat_code: code,
+                description,
+            } = line;
+            {
                 let mut line = if credit > 0 {
                     JournalLine::debit(account_id, credit, &currency)
                 } else {
@@ -398,8 +430,8 @@ pub async fn reverse_entry_in(
                 line.vat_code = code;
                 line.description = description;
                 line
-            },
-        )
+            }
+        })
         .collect();
 
     let memo = if req.memo.trim().is_empty() {

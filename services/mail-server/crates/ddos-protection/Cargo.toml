@@ -48,6 +48,12 @@ thiserror = "2.0"
 once_cell = "1.20"
 
 [dev-dependencies]
+# The crate's #[cfg(test)] modules pause the clock with
+# `tokio::time::advance`, which needs `test-util`. It compiled in a
+# whole-workspace build only because another crate happened to enable the
+# feature (accidental feature unification); `cargo check -p ddos-protection
+# --all-targets` failed. Declared here so the crate's own tests build alone.
+tokio = { version = "1.44", features = ["test-util"] }
 criterion = "0.8"
 rand = "0.9"
 sha2 = "0.10"

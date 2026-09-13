@@ -1376,7 +1376,7 @@ impl SubmissionServer {
         )
         .bind(message_uuid)
         .bind(mail_from)
-        .bind(&rcpt_to)
+        .bind(rcpt_to)
         .bind(&payload.subject)
         .bind(&payload.headers)
         .bind(&payload.text_body)

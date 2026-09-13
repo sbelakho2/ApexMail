@@ -110,19 +110,41 @@ validate_pipeline_config() {
     [ -f "$CI_ROOT/units/apexmail-pipeline.service" ] || { ci_err "systemd unit missing"; _vp_err=1; }
     [ -f "$CI_ROOT/units/apexmail-pipeline.timer" ] || { ci_err "systemd timer missing"; _vp_err=1; }
 
-    # Replacement map must account for every workflow file.
+    # GitHub Actions is NOT this repository's CI. The invariant is checked,
+    # not assumed: a workflow file reappearing in `.github/workflows/`, or the
+    # retired archive coming back, fails the run. (The historical
+    # workflow→stage replacement map stays in ci/README.md §2 for the record.)
     if [ -d "$REPO_ROOT/.github/workflows" ]; then
         for _wf in "$REPO_ROOT"/.github/workflows/*.yml "$REPO_ROOT"/.github/workflows/*.yaml; do
             [ -f "$_wf" ] || continue
-            _wfb=$(basename "$_wf")
-            if ! grep -q "$_wfb" "$CI_ROOT/README.md" 2>/dev/null; then
-                ci_err "workflow '$_wfb' has no row in ci/README.md replacement map"
-                _vp_err=1
-            fi
+            ci_err "GitHub Actions workflow present: ${_wf#"$REPO_ROOT"/} — CI runs in ci/ (host pipeline) and .woodpecker.yml (executor); add a ci/ stage instead"
+            _vp_err=1
         done
     fi
+    if [ -d "$REPO_ROOT/.github/workflows-archive" ]; then
+        ci_err ".github/workflows-archive/ is back — the retired GitHub workflows were removed; CI is ci/ + .woodpecker.yml"
+        _vp_err=1
+    fi
+
+    # The executor pipeline must exist, must run the ci/ stages (never a
+    # second implementation of the gates) and must be documented.
+    _wp=$REPO_ROOT/.woodpecker.yml
+    if [ ! -f "$_wp" ]; then
+        ci_err "missing .woodpecker.yml (the CI executor pipeline)"
+        _vp_err=1
+    else
+        grep -q 'ci/woodpecker/stage.sh' "$_wp" \
+            || { ci_err ".woodpecker.yml does not invoke ci/woodpecker/stage.sh — gates must not be reimplemented in YAML"; _vp_err=1; }
+        grep -q '^services:' "$_wp" \
+            || { ci_err ".woodpecker.yml declares no services: — the DB-gated tests would self-skip"; _vp_err=1; }
+    fi
+    [ -f "$CI_ROOT/woodpecker/stage.sh" ] \
+        || { ci_err "missing ci/woodpecker/stage.sh (the executor's stage wrapper)"; _vp_err=1; }
+    grep -qi 'woodpecker' "$CI_ROOT/README.md" 2>/dev/null \
+        || { ci_err "ci/README.md does not document the Woodpecker executor"; _vp_err=1; }
+
     [ "$_vp_err" -eq 0 ] || return "$CI_EXIT_FAIL"
-    ci_info "PASS: pipeline config sane; README map covers all workflows"
+    ci_info "PASS: pipeline config sane; no GitHub Actions CI; Woodpecker executor wired to the ci/ stages"
     return "$CI_EXIT_OK"
 }
 
@@ -347,7 +369,12 @@ prohibited_claims() {
 }
 
 zola_gates() {
-    if ! command -v zola >/dev/null 2>&1; then
+    # The PINNED zola (apps/marketing-zola/Dockerfile), not whatever is on
+    # PATH: zola 0.23 removed `{% import %}`, so a newer host zola fails every
+    # template with "Unknown tag".
+    _zg_zola=''
+    _zg_zola=$(ci_zola 2>/dev/null) || _zg_zola=''
+    if [ -z "$_zg_zola" ]; then
         if [ "${CI_ZOLA_REQUIRED:-0}" = 1 ]; then
             ci_die "zola missing and CI_ZOLA_REQUIRED=1 — install zola (ci/install.sh)"
         fi
@@ -358,11 +385,11 @@ zola_gates() {
         ci_info "dry-run: zola build + marketing gates"
         return "$CI_EXIT_OK"
     fi
-    ci_info "building marketing site (zola)"
+    ci_info "building marketing site ($("$_zg_zola" --version 2>/dev/null || echo zola))"
     # rm -rf public first: zola only cleans orphan outputs on 0.22+; on
     # older host zolas deleted pages linger in public/ and fail the
     # forbidden-pattern gate with stale content.
-    (cd apps/marketing-zola && rm -rf public && zola build) >>"$CI_STAGE_LOG" 2>&1 \
+    (cd apps/marketing-zola && rm -rf public && "$_zg_zola" build) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "zola build failed"; return "$CI_EXIT_FAIL"; }
     [ -f apps/marketing-zola/public/index.html ] || { ci_err "zola build produced no index.html"; return "$CI_EXIT_FAIL"; }
 

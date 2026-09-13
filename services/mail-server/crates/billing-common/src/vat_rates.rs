@@ -455,11 +455,11 @@ impl VatValidationEvidence {
                 .outage_state
                 .as_deref()
                 .map(str::trim)
-                .map_or(true, str::is_empty)
+                .is_none_or(str::is_empty)
             && vat_numbers_match(vat_number, &self.vat_number)
             && countries_match(country, &self.country)
             && at >= self.valid_from
-            && self.valid_until.map_or(true, |until| at <= until)
+            && self.valid_until.is_none_or(|until| at <= until)
     }
 }
 
@@ -514,9 +514,7 @@ pub fn reverse_charge_authorised(
     if !is_valid_vat_number(vat_number, Some(&upper)) {
         return false;
     }
-    evidence.map_or(false, |evidence| {
-        evidence.authorises_reverse_charge(&upper, vat_number, at)
-    })
+    evidence.is_some_and(|evidence| evidence.authorises_reverse_charge(&upper, vat_number, at))
 }
 
 /// Calculate the VAT rate and amount for a given subtotal, customer country,
@@ -555,9 +553,7 @@ pub fn calculate_vat_with_evidence(
     }
 
     if EU_COUNTRIES.contains(&country) {
-        if vat_number.map_or(false, |vat| {
-            reverse_charge_authorised(&country, vat, evidence, at)
-        }) {
+        if vat_number.is_some_and(|vat| reverse_charge_authorised(&country, vat, evidence, at)) {
             // EU B2B — reverse charge (0 %) against authoritative evidence.
             return (0.0, 0);
         }
@@ -646,9 +642,7 @@ pub fn calculate_vat_strict_with_evidence(
     }
 
     if EU_COUNTRIES.contains(&upper) {
-        if vat_number.map_or(false, |vat| {
-            reverse_charge_authorised(&upper, vat, evidence, at)
-        }) {
+        if vat_number.is_some_and(|vat| reverse_charge_authorised(&upper, vat, evidence, at)) {
             return Ok((0.0, 0));
         }
         let rate = EU_VAT_RATES.get(&upper).copied().map_or_else(

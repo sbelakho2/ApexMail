@@ -247,8 +247,10 @@ this repository — see §9).
 
 The canonical deployment is the **self-hosted pipeline** (`ci/pipeline.sh`)
 running **on the deploy host** — there is no GitHub Actions runner, no
-registry, and no SSH hop (the GHCR/GitHub-Actions flow is decommissioned and
-archived under `.github/workflows-archive/`; see `ci/README.md`).
+registry, and no SSH hop (the GHCR flow is decommissioned; the GitHub
+workflows were removed from the tree on 2026-09-13 — see `ci/README.md`).
+Push/PR checks run the same stages through the free self-hosted Woodpecker
+executor ([`.woodpecker.yml`](.woodpecker.yml)), which never deploys.
 
 ```
 push to main

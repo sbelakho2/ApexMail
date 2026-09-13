@@ -1,0 +1,80 @@
+# =============================================================================
+# .woodpecker.yml — Woodpecker CI (https://woodpecker-ci.org)
+# =============================================================================
+# Woodpecker is free, self-hosted and open source (Apache-2.0): it runs on your
+# own agent (a container on the deploy host, a spare box, a workstation) and
+# needs no GitHub Actions minutes, no hosted runners and no paid plan. Point a
+# Woodpecker server at this repository, start one agent, and every push runs
+# the pipeline below.
+#
+# This file is a THIN ADAPTER, not a second implementation of the gates. Each
+# step calls `ci/woodpecker/stage.sh <stage>`, which runs the same
+# `ci/stages/<stage>.sh` the host pipeline (ci/pipeline.sh) runs — so the
+# executor and the deploy host cannot drift, and a gate added to `ci/` is
+# picked up here with no YAML change.
+#
+# Scope: validate → test → security. The host-only stages (fetch/migrate/
+# deploy/verify/notify) are deliberately NOT here: they act on the deploy host
+# and require its docker/compose and secrets. CI never deploys.
+#
+# Databases: postgres + redis are provided as Woodpecker `services`, and the
+# stages run in `service` mode (CI_TEST_DB=service / CI_TEST_REDIS=service), so
+# the DB-gated test suites RUN instead of self-skipping. The canonical
+# migration chain is applied to the provided database by the stage itself.
+# =============================================================================
+
+when:
+  - event: [push, pull_request, manual]
+
+# Full history: the secret scan inspects every commit (clone depth 0).
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 0
+
+services:
+  - name: postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: apexmail_ci
+      POSTGRES_DB: apexmail_ci
+  - name: redis
+    image: redis:7-alpine
+
+steps:
+  # --- static validation gates (env-file/compose sanity, repo gates, migration lint) ---
+  - name: validate
+    image: rust:1.98-bookworm
+    commands:
+      - ./ci/woodpecker/stage.sh validate
+
+  # --- build, lint and test everything (fmt, clippy -D warnings, machete,
+  #     deny, cargo test --workspace against the postgres service, coverage
+  #     ratchet, PHP/SDK/satellite lanes when their toolchains are present) ---
+  - name: test
+    image: rust:1.98-bookworm
+    environment:
+      CI_TEST_DB: service
+      CI_TEST_REDIS: service
+      TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+      # The DML-only-role release test provisions a role, so it needs a
+      # CREATEROLE connection; the postgres service user IS the superuser.
+      TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+      TEST_REDIS_URL: redis://redis:6379
+    commands:
+      - ./ci/woodpecker/stage.sh test
+
+  # --- security + supply chain (gitleaks, cargo audit/vet, semgrep,
+  #     fresh-database migration validation, trivy) ---
+  - name: security
+    image: rust:1.98-bookworm
+    environment:
+      CI_TEST_DB: service
+      CI_TEST_REDIS: service
+      TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+      TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
+      TEST_REDIS_URL: redis://redis:6379
+    commands:
+      - ./ci/woodpecker/stage.sh security

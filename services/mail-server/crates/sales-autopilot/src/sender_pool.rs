@@ -855,18 +855,28 @@ mod tests {
     // SOFT-SKIP only when no test database is configured.
     // -----------------------------------------------------------------------
 
+    /// Variable fields of a `sales_sender_identities` fixture. `health_score`
+    /// is only written when `health_state` is `Some`.
+    struct SenderSeed<'a> {
+        pool_name: &'a str,
+        from_email: &'a str,
+        status: &'a str,
+        daily_limit: Option<i32>,
+        health_state: Option<&'a str>,
+        health_score: f64,
+    }
+
     /// Insert one sender identity (plus an optional healthy health row) and
     /// return its id.
-    async fn seed_sender(
-        pool: &PgPool,
-        tenant: &str,
-        pool_name: &str,
-        from_email: &str,
-        status: &str,
-        daily_limit: Option<i32>,
-        health_state: Option<&str>,
-        health_score: f64,
-    ) -> Uuid {
+    async fn seed_sender(pool: &PgPool, tenant: &str, seed: SenderSeed<'_>) -> Uuid {
+        let SenderSeed {
+            pool_name,
+            from_email,
+            status,
+            daily_limit,
+            health_state,
+            health_score,
+        } = seed;
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO sales_sender_identities \
@@ -944,12 +954,14 @@ mod tests {
         let spent = seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "spent@fixture.example",
-            "active",
-            Some(5),
-            Some("healthy"),
-            0.99,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "spent@fixture.example",
+                status: "active",
+                daily_limit: Some(5),
+                health_state: Some("healthy"),
+                health_score: 0.99,
+            },
         )
         .await;
         sqlx::query(
@@ -966,12 +978,14 @@ mod tests {
         let unlimited = seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "unlimited@fixture.example",
-            "active",
-            None,
-            Some("healthy"),
-            0.99,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "unlimited@fixture.example",
+                status: "active",
+                daily_limit: None,
+                health_state: Some("healthy"),
+                health_score: 0.99,
+            },
         )
         .await;
         sqlx::query(
@@ -1016,12 +1030,14 @@ mod tests {
         seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "quarantined@fixture.example",
-            "active",
-            Some(100),
-            Some("quarantined"),
-            0.1,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "quarantined@fixture.example",
+                status: "active",
+                daily_limit: Some(100),
+                health_state: Some("quarantined"),
+                health_score: 0.1,
+            },
         )
         .await;
 
@@ -1034,12 +1050,14 @@ mod tests {
         seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "paused@fixture.example",
-            "paused",
-            Some(100),
-            Some("paused"),
-            0.1,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "paused@fixture.example",
+                status: "paused",
+                daily_limit: Some(100),
+                health_state: Some("paused"),
+                health_score: 0.1,
+            },
         )
         .await;
         let err = reserve_sales_sender(&pool, &tenant, SenderPool::SalesOutbound)
@@ -1064,23 +1082,27 @@ mod tests {
         let first = seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "race-a@fixture.example",
-            "active",
-            Some(5),
-            Some("healthy"),
-            0.99,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "race-a@fixture.example",
+                status: "active",
+                daily_limit: Some(5),
+                health_state: Some("healthy"),
+                health_score: 0.99,
+            },
         )
         .await;
         let second = seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "race-b@fixture.example",
-            "active",
-            Some(5),
-            Some("healthy"),
-            0.99,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "race-b@fixture.example",
+                status: "active",
+                daily_limit: Some(5),
+                health_state: Some("healthy"),
+                health_score: 0.99,
+            },
         )
         .await;
 
@@ -1146,12 +1168,14 @@ mod tests {
         let only = seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "release@fixture.example",
-            "active",
-            Some(1),
-            Some("healthy"),
-            0.99,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "release@fixture.example",
+                status: "active",
+                daily_limit: Some(1),
+                health_state: Some("healthy"),
+                health_score: 0.99,
+            },
         )
         .await;
 
@@ -1212,12 +1236,14 @@ mod tests {
         let sender = seed_sender(
             &pool,
             &tenant,
-            "sales_outbound",
-            "rollback@fixture.example",
-            "active",
-            Some(5),
-            Some("healthy"),
-            0.99,
+            SenderSeed {
+                pool_name: "sales_outbound",
+                from_email: "rollback@fixture.example",
+                status: "active",
+                daily_limit: Some(5),
+                health_state: Some("healthy"),
+                health_score: 0.99,
+            },
         )
         .await;
 

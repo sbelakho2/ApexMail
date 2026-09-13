@@ -175,7 +175,7 @@ pub async fn set_mode(
     // Reject an unknown mode rather than silently falling back to Disabled:
     // an operator who typed the wrong thing must be told, not obeyed.
     let mode = AutonomyMode::parse(&body.mode);
-    if mode == AutonomyMode::Disabled && body.mode.trim().to_ascii_lowercase() != "disabled" {
+    if mode == AutonomyMode::Disabled && !body.mode.trim().eq_ignore_ascii_case("disabled") {
         return Err(SalesError::InvalidInput(format!(
             "unknown autonomy mode '{}'; valid: disabled, shadow, assisted, approval_required, autonomous_guarded",
             body.mode
@@ -941,6 +941,18 @@ fn status_for(error: &SalesError) -> StatusCode {
 mod tests {
     use super::*;
 
+    /// `sales_actions` row read back after an approval release.
+    #[derive(sqlx::FromRow)]
+    struct ReleasedActionRow {
+        state: String,
+        attempt: i32,
+        last_error: Option<String>,
+        due_at: chrono::DateTime<chrono::Utc>,
+        lease_owner: Option<String>,
+        lease_token: Option<Uuid>,
+        lease_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
     #[test]
     fn invalid_uuid_is_rejected_with_the_field_named() {
         let err = parse_uuid("not-a-uuid", "decision id").unwrap_err();
@@ -1298,15 +1310,7 @@ mod tests {
             result.revalidation.reasons
         );
 
-        let (state, attempt, last_error, due_at, owner, token, expires): (
-            String,
-            i32,
-            Option<String>,
-            chrono::DateTime<chrono::Utc>,
-            Option<String>,
-            Option<Uuid>,
-            Option<chrono::DateTime<chrono::Utc>>,
-        ) = sqlx::query_as(
+        let row: ReleasedActionRow = sqlx::query_as(
             "SELECT state, attempt, last_error, due_at, lease_owner, lease_token, lease_expires_at \
              FROM sales_actions WHERE id = $1",
         )
@@ -1314,13 +1318,16 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(state, "queued");
-        assert_eq!(attempt, 0, "a released action gets a fresh attempt budget");
-        assert_eq!(last_error, None);
-        assert!(due_at <= chrono::Utc::now());
-        assert_eq!(owner, None);
-        assert_eq!(token, None);
-        assert_eq!(expires, None);
+        assert_eq!(row.state, "queued");
+        assert_eq!(
+            row.attempt, 0,
+            "a released action gets a fresh attempt budget"
+        );
+        assert_eq!(row.last_error, None);
+        assert!(row.due_at <= chrono::Utc::now());
+        assert_eq!(row.lease_owner, None);
+        assert_eq!(row.lease_token, None);
+        assert_eq!(row.lease_expires_at, None);
 
         let (review_status, reviewed_by, reviewed_at, review_note): (
             Option<String>,

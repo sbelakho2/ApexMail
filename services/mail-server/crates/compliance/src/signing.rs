@@ -223,7 +223,9 @@ impl CheckVerdict {
 /// True when every required check passed. Optional checks that failed or were
 /// not performed do not block; inspect them via the returned evidence.
 pub fn all_passed(checks: &[CheckVerdict]) -> bool {
-    checks.iter().all(|check| !check.required || check.outcome.is_pass())
+    checks
+        .iter()
+        .all(|check| !check.required || check.outcome.is_pass())
 }
 
 /// True when every check (required or not) is a `Pass` — the strongest claim
@@ -803,9 +805,7 @@ pub mod der {
 
         let mut rest = &text[14..];
         let mut nanos: u32 = 0;
-        let fraction = rest
-            .strip_prefix('.')
-            .or_else(|| rest.strip_prefix(','));
+        let fraction = rest.strip_prefix('.').or_else(|| rest.strip_prefix(','));
         if let Some(fraction) = fraction {
             let digit_count = fraction
                 .bytes()
@@ -879,7 +879,10 @@ pub mod der {
                 actual: tlv.tag,
             });
         }
-        let (unused, data) = tlv.content.split_first().ok_or(DerError::InvalidBitString)?;
+        let (unused, data) = tlv
+            .content
+            .split_first()
+            .ok_or(DerError::InvalidBitString)?;
         if *unused > 7 || (*unused > 0 && data.is_empty()) {
             return Err(DerError::InvalidBitString);
         }
@@ -1029,7 +1032,7 @@ pub mod der {
 pub mod timestamp {
     use super::der::{self, Budget, DerError, Reader, Tlv};
     use super::{
-        all_passed, describe_failures, CheckVerdict, CertificateSummary, EVIDENCE_SCHEMA_VERSION,
+        all_passed, describe_failures, CertificateSummary, CheckVerdict, EVIDENCE_SCHEMA_VERSION,
     };
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Serialize};
@@ -1378,7 +1381,9 @@ pub mod timestamp {
             status: u16,
         },
         /// The response content type was not `application/timestamp-reply`.
-        #[error("TSA response has content type {content_type:?}, expected application/timestamp-reply")]
+        #[error(
+            "TSA response has content type {content_type:?}, expected application/timestamp-reply"
+        )]
         WrongContentType {
             /// Observed content type, if any.
             content_type: Option<String>,
@@ -1809,7 +1814,10 @@ pub mod timestamp {
             )?
             .to_vec();
             imprint_reader.finish()?;
-            let serial = reader.read_tagged(budget, der::TAG_INTEGER)?.content.to_vec();
+            let serial = reader
+                .read_tagged(budget, der::TAG_INTEGER)?
+                .content
+                .to_vec();
             let gen_time_tlv = reader.read_tagged(budget, der::TAG_GENERALIZED_TIME)?;
             let gen_time_raw = std::str::from_utf8(gen_time_tlv.content)
                 .map_err(|_| DerError::InvalidUtf8)?
@@ -1907,9 +1915,9 @@ pub mod timestamp {
                         .to_vec();
                     Some(SignerId::IssuerAndSerial { issuer, serial })
                 }
-                der::TAG_CTX_0 => {
-                    Some(SignerId::SubjectKeyIdentifier(signer_id_tlv.content.to_vec()))
-                }
+                der::TAG_CTX_0 => Some(SignerId::SubjectKeyIdentifier(
+                    signer_id_tlv.content.to_vec(),
+                )),
                 _ => None,
             };
             let digest_algorithm_tlv = reader.read_tagged(budget, der::TAG_SEQUENCE)?;
@@ -1924,10 +1932,9 @@ pub mod timestamp {
                 None => (None, None),
             };
             let signature_algorithm_tlv = reader.read_tagged(budget, der::TAG_SEQUENCE)?;
-            let signature = der::decode_octet_string(
-                &reader.read_tagged(budget, der::TAG_OCTET_STRING)?,
-            )?
-            .to_vec();
+            let signature =
+                der::decode_octet_string(&reader.read_tagged(budget, der::TAG_OCTET_STRING)?)?
+                    .to_vec();
             Ok(ParsedSignerInfo {
                 digest_algorithm: digest_oid,
                 signed_attributes,
@@ -2221,7 +2228,13 @@ pub mod timestamp {
                 true,
                 "no SignerInfo".to_string(),
             ));
-            return Ok(build_evidence(request, tst, certificate_der, certificate, checks));
+            return Ok(build_evidence(
+                request,
+                tst,
+                certificate_der,
+                certificate,
+                checks,
+            ));
         };
 
         // 7. Signed attributes: contentType must be id-ct-TSTInfo.
@@ -2408,13 +2421,9 @@ pub mod timestamp {
         match certificate.as_ref() {
             Some(cert) => match verify_token_signature(signer, cert, &token.econtent) {
                 Ok(()) => checks.push(CheckVerdict::pass("token_signature_valid", true)),
-                Err(SignatureFailure::Unsupported(reason)) => {
-                    checks.push(CheckVerdict::not_performed(
-                        "token_signature_valid",
-                        true,
-                        reason,
-                    ))
-                }
+                Err(SignatureFailure::Unsupported(reason)) => checks.push(
+                    CheckVerdict::not_performed("token_signature_valid", true, reason),
+                ),
                 Err(SignatureFailure::Invalid(reason)) => {
                     checks.push(CheckVerdict::fail("token_signature_valid", true, reason))
                 }
@@ -2427,7 +2436,13 @@ pub mod timestamp {
             )),
         }
 
-        Ok(build_evidence(request, tst, certificate_der, certificate, checks))
+        Ok(build_evidence(
+            request,
+            tst,
+            certificate_der,
+            certificate,
+            checks,
+        ))
     }
 
     fn issuer_name_matches(
@@ -2498,8 +2513,8 @@ pub mod timestamp {
             Some(set) => set.clone(),
             None => econtent.to_vec(),
         };
-        let (remaining, algorithm) =
-            AlgorithmIdentifier::from_der(&signer.signature_algorithm_raw).map_err(|error| {
+        let (remaining, algorithm) = AlgorithmIdentifier::from_der(&signer.signature_algorithm_raw)
+            .map_err(|error| {
                 SignatureFailure::Unsupported(format!(
                     "signature AlgorithmIdentifier did not parse: {error}"
                 ))
@@ -2514,38 +2529,36 @@ pub mod timestamp {
         // digestAlgorithm. Map that pair onto the combined PKCS#1 OID the
         // verification backend understands. RSASSA-PSS is a distinct scheme
         // and is reported as unsupported rather than guessed at.
-        let mapped_der: Option<Vec<u8>> =
-            if algorithm.algorithm.to_string() == OID_RSA_ENCRYPTION {
-                match rsa_pkcs1_oid_for_digest(&signer.digest_algorithm) {
-                    Some(oid) => Some(der::algorithm_identifier(oid).map_err(|error| {
-                        SignatureFailure::Unsupported(format!(
-                            "could not encode the RSA signature algorithm: {error}"
-                        ))
-                    })?),
-                    None => {
-                        return Err(SignatureFailure::Unsupported(format!(
+        let mapped_der: Option<Vec<u8>> = if algorithm.algorithm.to_string() == OID_RSA_ENCRYPTION {
+            match rsa_pkcs1_oid_for_digest(&signer.digest_algorithm) {
+                Some(oid) => Some(der::algorithm_identifier(oid).map_err(|error| {
+                    SignatureFailure::Unsupported(format!(
+                        "could not encode the RSA signature algorithm: {error}"
+                    ))
+                })?),
+                None => {
+                    return Err(SignatureFailure::Unsupported(format!(
                             "signatureAlgorithm is rsaEncryption but digestAlgorithm {} has no supported PKCS#1 v1.5 mapping",
                             signer.digest_algorithm
                         )));
-                    }
                 }
-            } else if algorithm.algorithm.to_string() == OID_RSASSA_PSS {
-                return Err(SignatureFailure::Unsupported(
+            }
+        } else if algorithm.algorithm.to_string() == OID_RSASSA_PSS {
+            return Err(SignatureFailure::Unsupported(
                     "signatureAlgorithm is RSASSA-PSS (1.2.840.113549.1.1.10); the available verification backend supports PKCS#1 v1.5, ECDSA and Ed25519 only"
                         .to_string(),
                 ));
-            } else {
-                None
-            };
+        } else {
+            None
+        };
         let mapped_algorithm = match &mapped_der {
             Some(bytes) => {
-                let (remaining, mapped) = AlgorithmIdentifier::from_der(bytes).map_err(
-                    |error| {
+                let (remaining, mapped) =
+                    AlgorithmIdentifier::from_der(bytes).map_err(|error| {
                         SignatureFailure::Unsupported(format!(
                             "could not parse the mapped RSA signature algorithm: {error}"
                         ))
-                    },
-                )?;
+                    })?;
                 if !remaining.is_empty() {
                     return Err(SignatureFailure::Unsupported(
                         "mapped RSA signature algorithm has trailing bytes".to_string(),
@@ -2583,9 +2596,9 @@ pub mod timestamp {
         certificate: Option<x509_parser::prelude::X509Certificate<'_>>,
         checks: Vec<CheckVerdict>,
     ) -> TimeStampEvidence {
-        let signer_certificate = certificate
-            .as_ref()
-            .and_then(|certificate| certificate_der.map(|der| summarise_certificate(certificate, der)));
+        let signer_certificate = certificate.as_ref().and_then(|certificate| {
+            certificate_der.map(|der| summarise_certificate(certificate, der))
+        });
         let document_digest = digest_for_oid(&tst.imprint_algorithm, request.document)
             .unwrap_or_else(|| request.algorithm.digest(request.document));
         TimeStampEvidence {
@@ -2749,7 +2762,9 @@ pub mod timestamp {
                         .split(';')
                         .next()
                         .map(|media_type| {
-                            media_type.trim().eq_ignore_ascii_case(HTTP_CONTENT_TYPE_REPLY)
+                            media_type
+                                .trim()
+                                .eq_ignore_ascii_case(HTTP_CONTENT_TYPE_REPLY)
                         })
                         .unwrap_or(false)
                 })
@@ -2807,7 +2822,7 @@ pub mod timestamp {
 pub mod container {
     use super::der;
     use super::{
-        all_passed, has_failures, strictly_passed, CheckVerdict, CertificateSummary,
+        all_passed, has_failures, strictly_passed, CertificateSummary, CheckVerdict,
         EVIDENCE_SCHEMA_VERSION,
     };
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -3168,8 +3183,7 @@ pub mod container {
                 container_checks.push(CheckVerdict::fail(
                     format!("signature_present[{}]", file.path),
                     true,
-                    "file contains no ds:Signature element in the XML DSig namespace"
-                        .to_string(),
+                    "file contains no ds:Signature element in the XML DSig namespace".to_string(),
                 ));
                 continue;
             }
@@ -3344,7 +3358,9 @@ pub mod container {
             }
             let (actual_digest, ok) = match (&digest_algorithm_name, expected_digest.as_ref()) {
                 (None, _) => {
-                    detail.push_str("digest algorithm is not supported (only SHA-256/384/512 are accepted); ");
+                    detail.push_str(
+                        "digest algorithm is not supported (only SHA-256/384/512 are accepted); ",
+                    );
                     (None, false)
                 }
                 (Some(_), Err(error)) => {
@@ -3406,7 +3422,10 @@ pub mod container {
                 is_same_document,
                 digest_algorithm,
                 digest_algorithm_name,
-                expected_digest_hex: expected_digest.as_ref().map(hex::encode).unwrap_or_default(),
+                expected_digest_hex: expected_digest
+                    .as_ref()
+                    .map(hex::encode)
+                    .unwrap_or_default(),
                 actual_digest_hex: actual_digest.map(hex::encode),
                 ok,
                 required,
@@ -3629,7 +3648,9 @@ pub mod container {
         } else {
             der::algorithm_identifier_without_parameters(oid)
         }
-        .map_err(|error| SignatureFailure::Invalid(format!("could not encode algorithm: {error}")))?;
+        .map_err(|error| {
+            SignatureFailure::Invalid(format!("could not encode algorithm: {error}"))
+        })?;
         let (remaining, algorithm) = AlgorithmIdentifier::from_der(&algorithm_der)
             .map_err(|error| SignatureFailure::Invalid(format!("algorithm identifier: {error}")))?;
         if !remaining.is_empty() {
@@ -3932,7 +3953,9 @@ pub mod container {
         }
     }
 
-    fn element_attributes(element: &quick_xml::events::BytesStart<'_>) -> Result<Vec<(String, String)>, String> {
+    fn element_attributes(
+        element: &quick_xml::events::BytesStart<'_>,
+    ) -> Result<Vec<(String, String)>, String> {
         let mut attributes = Vec::new();
         for attribute in element.attributes() {
             let attribute =

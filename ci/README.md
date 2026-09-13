@@ -3,8 +3,23 @@
 Fully independent, GitHub-free CI/CD for ApexMail, per the owner's directive:
 *“GitHub CI should not be relied on… extremely solid and reliable pipeline,
 replaces all or almost all of GitHub Actions’s functionalities, fully
-independent.”* Everything here is POSIX sh + the tools already on the host
-(docker, cargo, jq). No YAML, no runners, no registry, no GitHub API.
+independent.”* The pipeline itself is POSIX sh + the tools already on the host
+(docker, cargo, jq): no registry, no GitHub API, no GitHub runners.
+
+**CI executors: there is no GitHub Actions anywhere.** Two runners execute
+these same stages:
+
+| Runner | Where | What it runs | Cost |
+|---|---|---|---|
+| `ci/pipeline.sh` | the deploy host (systemd timer + local webhook) | every stage incl. images/migrate/deploy/verify | free (own host) |
+| Woodpecker CI — [`.woodpecker.yml`](../.woodpecker.yml) | any agent you point at it (a container on the deploy host, a spare box, a workstation) | `validate` → `test` → `security` on every push/PR; **never deploys** | free (self-hosted, Apache-2.0) |
+
+`.woodpecker.yml` is a THIN ADAPTER: each step calls
+`ci/woodpecker/stage.sh <stage>`, which runs the same `ci/stages/<stage>.sh`
+the host pipeline runs. A gate added or changed in `ci/` reaches both runners
+with no YAML change — there is exactly one implementation of the gates.
+GitHub Actions workflows were removed from the tree (2026-09-13); the
+`validate` stage fails the run if one reappears.
 
 ---
 
@@ -76,14 +91,17 @@ pipeline.conf` (host) → environment variables (always win).
 
 ---
 
-## 2. Workflow replacement map — every file in `.github/workflows/`
+## 2. Workflow replacement map (historical record)
 
-The GitHub workflows are ARCHIVED (2026-08-22): `.github/workflows/` is
-intentionally empty and every file lives in `.github/workflows-archive/`
-with its own README. The validate stage enforces that this table stays
-complete: if a workflow file ever (re)appears in `.github/workflows/`
-without a row here, validation fails — restoring Actions by accident is a
-build break, by design.
+GitHub Actions was retired on 2026-08-22 (the account's Actions billing
+failed; the owner's directive is that CI must not depend on GitHub) and the
+archived files were REMOVED from the tree on 2026-09-13. `.github/workflows/`
+no longer exists; the `validate` stage now enforces the inverse invariant — a
+workflow file that reappears there, or the archive directory coming back,
+fails the run. Add or extend a `ci/` stage instead.
+
+This table is kept as the record of what each retired workflow's checks became,
+so the coverage of the old CI can still be audited.
 
 | Workflow | Verdict | Replaced by / why |
 |---|---|---|
@@ -253,7 +271,7 @@ The substitutes, in enforcement order:
 | Branch protection rules | gone | same — plus the fetch stage's pushed-HEAD guarantee |
 | Dependabot + auto-merge | gone | manual `cargo update` → `check-pr.sh` full → push |
 | GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags + a SHA256SUMS digest manifest per run; the deploy stage refuses to bring up images whose digests do not match the manifest the images stage recorded (tamper/regression guard, SLSA-lite); Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
-| Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (REQUIRED)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` fail-closed on the deploy host (`ci_have_tool`; warn-skip on dev machines) since 2026-09-10 — was advisory with a silent skip. Every finding is fixed or triaged with a targeted inline `# nosemgrep: <rule-id>` justification (2026-09-10 sweep: 103 findings → 0, all triaged in-tree; `.github/workflows-archive` is excluded as never-executed config). gitleaks + cargo-audit + cargo-deny + Trivy (images AND fs) run alongside. |
+| Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (REQUIRED)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` fail-closed on the deploy host (`ci_have_tool`; warn-skip on dev machines) since 2026-09-10 — was advisory with a silent skip. Every finding is fixed or triaged with a targeted inline `# nosemgrep: <rule-id>` justification (2026-09-10 sweep: 103 findings → 0, all triaged in-tree; the retired GitHub workflows that used to trip `run-shell-injection` were removed from the tree on 2026-09-13). gitleaks + cargo-audit + cargo-deny + Trivy (images AND fs) run alongside. |
 | SARIF uploads to GitHub Security | gone | same reports as JSON/text in `ci/runs/<ts>/` |
 | GitHub runner isolation | inverted model | the pipeline runs on the deploy host as root bounded to repo code fetched over the deploy key; hardening in the unit (`PrivateTmp`, journald logging, socket-activation rate caps) |
 
@@ -573,12 +591,72 @@ These are **product defects found by this pipeline**, not pipeline bugs:
 
 ## 10. Owner actions to finish the cutover
 
-1. Archive the workflows: `git mv .github/workflows .github/workflows-archive`
-   (optional: delete `auto-merge.yml`, `mobile-qa.yml`,
-   `performance-budget.yml`, `mutation-testing.yml`, `load-gate.yml`,
-   `broken-link-check.yml` outright — they have no pipeline counterpart by
-   design).
+1. ~~Archive the workflows~~ **DONE 2026-08-22**, and the archive was removed
+   from the tree on 2026-09-13 — GitHub Actions is not part of CI at all.
 2. Add `ci` to `SYNC_DIRS` in the `Makefile` (one word) so `make deploy*`
    keeps the host's `ci/` current.
 3. Install the pre-push hook (§4) on every dev machine.
 4. Turn off branch protection / required checks in GitHub once confident.
+5. Point a Woodpecker server at the repository and start one agent (§11) to
+   get push/PR pipelines back without GitHub-hosted runners.
+
+## 11. Woodpecker CI executor (free, self-hosted)
+
+Why: the host pipeline is the deploy gate, but it is a *poll* loop on one
+machine — a push does not run the gates until the timer fires, and PRs get no
+checks at all. Woodpecker gives push/PR pipelines on infrastructure you own,
+with no GitHub Actions minutes and no paid plan (Apache-2.0, one server + one
+agent).
+
+### What runs
+
+`.woodpecker.yml` runs three steps on every push, pull request and manual
+trigger, each a thin call into this directory's stages:
+
+| Step | Stage | Covers |
+|---|---|---|
+| validate | `ci/stages/validate.sh` | compose/env sanity, pipeline-config invariants, repo gates (kiwi isolation, panic paths, outbound-delivery contract, migration lint, …) |
+| test | `ci/stages/test.sh` | `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` against the postgres service, machete + deny, coverage ratchet, PHP/SDK/satellite/static-lint lanes |
+| security | `ci/stages/security.sh` | gitleaks (full history), cargo audit, cargo vet, semgrep SAST, fresh-database migration validation, Trivy |
+
+The DB-gated suites really run: the pipeline declares `postgres` + `redis`
+under `services:` and the stages run in **service mode**
+(`CI_TEST_DB=service`, `CI_TEST_REDIS=service`), which uses the provided
+`TEST_DATABASE_URL` / `TEST_REDIS_URL` verbatim, applies the canonical
+migration chain to that database, and fails closed if the URL is missing. The
+default `ephemeral` mode (start your own containers) and the GitHub-parity
+`none` mode (self-skip) are unchanged — see `ci/pipeline.conf`.
+
+### Setup (once)
+
+```sh
+# 1. Server + agent (any host with docker; the deploy host is the natural one)
+docker run -d --name woodpecker-server -p 8000:8000 -p 9000:9000 \
+  -v /opt/woodpecker:/var/lib/woodpecker \
+  -e WOODPECKER_OPEN=true \
+  -e WOODPECKER_HOST=https://ci.example.com \
+  -e WOODPECKER_AGENT_SECRET="$(openssl rand -hex 32)" \
+  woodpeckerci/woodpecker-server:latest
+
+docker run -d --name woodpecker-agent --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e WOODPECKER_SERVER=ci.example.com:9000 \
+  -e WOODPECKER_AGENT_SECRET=<same secret> \
+  -e WOODPECKER_MAX_WORKFLOWS=2 \
+  woodpeckerci/woodpecker-agent:latest
+
+# 2. In the UI: enable the repository, then add the webhook the UI shows you.
+# 3. Lint the pipeline locally before pushing a change to it:
+woodpecker-cli lint .woodpecker.yml
+```
+
+No secrets are required: the pipeline uses the postgres/redis service
+containers with credentials declared in the YAML.
+
+### Deliberately absent
+
+`fetch`, `images`, `migrate`, `deploy`, `verify` and `notify` are NOT in the
+Woodpecker pipeline. They act on the deploy host (its compose project, its
+nginx, its secrets, its docker images) and the owner's directive is that CI
+never deploys. Woodpecker answers "is this commit good?"; the host pipeline
+answers "is production on that commit?".

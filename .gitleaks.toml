@@ -176,6 +176,16 @@ regexes = [
     "Password1!abc",
     # Truncated example JWTs in API docs.
     "eyJhbGciOiJIUzI1NiIs[.][.][.]",
+    #
+    # 2026-09-13 triage: generic-api-key captures "X509Certificate" out of a
+    # TEST ASSERTION MESSAGE in the ASiC/XAdES verifier's test module
+    # (crates/compliance/src/signing.rs: "KeyInfo contains no
+    # ds:X509Certificate"). The capture is the XML-DSig ELEMENT NAME, not a
+    # credential — the rule sees "ds:<value>" and reads the tag as a secret.
+    # Allowlisted by the captured VALUE only: no credential is literally the
+    # string "X509Certificate", while a real secret carrying it as a prefix
+    # still fires on its own entropy.
+    "X509Certificate",
 ]
 
 # README.md path note (2026-09-05): the "^README[.]md$" path allowlist in the

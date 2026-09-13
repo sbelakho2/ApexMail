@@ -2853,7 +2853,6 @@ const CP_LEADS_CANONICAL_CTE: &str = r#"
     )
 "#;
 
-
 async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     // Item M: the search widens to (action ILIKE OR user_id ILIKE OR
     // resource_type ILIKE), with an optional recency window in days —
@@ -3355,12 +3354,12 @@ async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     data
 }
 
-/// /alerts/rules is NOT implemented: there is no alert-rule table or CRUD
-/// service, and presenting an empty "rules" surface implied one existed. The
-/// route now returns an explicit 501 (see `cp_alert_rules_not_implemented`
-/// in app.rs) instead of fabricated page data. This loader was removed with
-/// the route's data arm so a future real store must wire itself in
-/// deliberately.
+// /alerts/rules is NOT implemented: there is no alert-rule table or CRUD
+// service, and presenting an empty "rules" surface implied one existed. The
+// route now returns an explicit 501 (see `cp_alert_rules_not_implemented`
+// in app.rs) instead of fabricated page data. This loader was removed with
+// the route's data arm so a future real store must wire itself in
+// deliberately.
 
 async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();

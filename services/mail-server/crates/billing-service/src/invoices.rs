@@ -10,6 +10,20 @@ use uuid::Uuid;
 
 use crate::types::{Invoice, InvoiceLineItem, InvoiceStatus};
 
+/// `vat_validation_evidence` row the evidence lookup decodes (named row: the
+/// 8-tuple tripped clippy's type-complexity gate).
+#[derive(Debug, sqlx::FromRow)]
+struct VatEvidenceRow {
+    id: Uuid,
+    vat_number: String,
+    country: String,
+    source: String,
+    valid: bool,
+    valid_from: Option<chrono::NaiveDate>,
+    valid_until: Option<chrono::NaiveDate>,
+    outage_state: Option<String>,
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 // ---------------------------------------------------------------------------
@@ -95,19 +109,7 @@ pub async fn load_vat_evidence_in<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let row: Result<
-        Option<(
-            Uuid,
-            String,
-            String,
-            String,
-            bool,
-            Option<chrono::NaiveDate>,
-            Option<chrono::NaiveDate>,
-            Option<String>,
-        )>,
-        sqlx::Error,
-    > = sqlx::query_as(
+    let row: Result<Option<VatEvidenceRow>, sqlx::Error> = sqlx::query_as(
         r#"
         SELECT id, vat_number, country, source, valid, valid_from, valid_until, outage_state
         FROM vat_validation_evidence
@@ -123,7 +125,7 @@ where
     .await;
 
     match row {
-        Ok(Some((
+        Ok(Some(VatEvidenceRow {
             id,
             vat_number,
             country,
@@ -132,7 +134,7 @@ where
             valid_from,
             valid_until,
             outage_state,
-        ))) => VatValidationEvidence::from_authority_row(
+        })) => VatValidationEvidence::from_authority_row(
             Some(id),
             vat_number,
             country,
@@ -166,9 +168,8 @@ pub fn calculate_vat_for_invoice(
 ) -> (f64, i64, Option<Uuid>) {
     let (rate, amount) =
         vat_rates::calculate_vat_with_evidence(subtotal, country, vat_number, evidence, at);
-    let authorised = vat_number.map_or(false, |vat| {
-        vat_rates::reverse_charge_authorised(country, vat, evidence, at)
-    });
+    let authorised = vat_number
+        .is_some_and(|vat| vat_rates::reverse_charge_authorised(country, vat, evidence, at));
     let evidence_id = if authorised {
         evidence.and_then(|evidence| evidence.id)
     } else {
@@ -1167,6 +1168,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use billing_common::vat_rates;
 
     #[test]

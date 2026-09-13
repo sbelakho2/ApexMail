@@ -296,14 +296,23 @@ impl LedgerRow {
 /// their semantics cannot drift).
 fn classify_existing(
     send_unit: &str,
-    state: &str,
-    attempt: i32,
-    next_attempt_at: DateTime<Utc>,
-    lease_until: Option<DateTime<Utc>>,
-    acceptance_record: Option<serde_json::Value>,
-    last_error: Option<String>,
+    row: &ClaimStateRow,
     now: DateTime<Utc>,
 ) -> Result<ClaimOutcome, LedgerError> {
+    let ClaimStateRow {
+        state,
+        attempt,
+        next_attempt_at,
+        lease_until,
+        acceptance_record,
+        last_error,
+    } = row;
+    let state = state.as_str();
+    let attempt = *attempt;
+    let next_attempt_at = *next_attempt_at;
+    let lease_until = *lease_until;
+    let acceptance_record = acceptance_record.clone();
+    let last_error = last_error.clone();
     let attempt = u32::try_from(attempt).map_err(|_| LedgerError::Corrupt {
         send_unit: send_unit.to_string(),
         message: format!("negative attempt {attempt}"),
@@ -432,16 +441,7 @@ impl RelayLedger for PgLedger {
             send_unit: new.send_unit.clone(),
             message: "row vanished between insert conflict and classification".to_string(),
         })?;
-        classify_existing(
-            &new.send_unit,
-            &state.state,
-            state.attempt,
-            state.next_attempt_at,
-            state.lease_until,
-            state.acceptance_record,
-            state.last_error,
-            now,
-        )
+        classify_existing(&new.send_unit, &state, now)
     }
 
     async fn claim_due(
@@ -661,19 +661,18 @@ pub mod test_support {
             let lease_until = lease_deadline(now, lease)?;
             self.with_entries(|entries| {
                 if let Some(existing) = entries.get(&new.send_unit) {
-                    return classify_existing(
-                        &existing.send_unit,
-                        &existing.state,
-                        existing.attempt as i32,
-                        existing.next_attempt_at,
-                        existing.lease_until,
-                        existing
+                    let row = ClaimStateRow {
+                        state: existing.state.clone(),
+                        attempt: existing.attempt as i32,
+                        next_attempt_at: existing.next_attempt_at,
+                        lease_until: existing.lease_until,
+                        acceptance_record: existing
                             .acceptance
                             .as_ref()
                             .and_then(|record| serde_json::to_value(record).ok()),
-                        existing.last_error.clone(),
-                        now,
-                    );
+                        last_error: existing.last_error.clone(),
+                    };
+                    return classify_existing(&existing.send_unit, &row, now);
                 }
                 let submission = QueuedSubmission {
                     send_unit: new.send_unit.clone(),

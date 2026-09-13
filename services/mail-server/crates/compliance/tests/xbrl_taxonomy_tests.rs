@@ -10,10 +10,11 @@
 
 use std::path::PathBuf;
 
+use chrono::NaiveDate;
 use compliance::annual_report::{
     build_annual_report_xbrl, derive_statements, AnnualReportXbrl, AnnualReportXbrlConfig,
-    BalanceSheet, CompanyIdentity, IncomeStatement, LedgerBalanceLine, ReportSlot,
-    TaxonomyBinding, XBRL_EXTENSION_NAMESPACE, XBRL_EXTENSION_SCHEMA_NAME,
+    BalanceSheet, CompanyIdentity, IncomeStatement, LedgerBalanceLine, ReportSlot, TaxonomyBinding,
+    XBRL_EXTENSION_NAMESPACE, XBRL_EXTENSION_SCHEMA_NAME,
 };
 use compliance::xbrl_taxonomy::{
     load_taxonomy, load_taxonomy_with, parse_instance, validate_instance, Context, ContextPeriod,
@@ -24,7 +25,6 @@ use compliance::xbrl_taxonomy::{
     FAIL_MISSING_ENTITY_SCHEME, FAIL_MISSING_UNIT, FAIL_MISSING_UNIT_MEASURE,
     FAIL_NON_NUMERIC_VALUE, FAIL_PERIOD_TYPE_MISMATCH, FAIL_UNEXPECTED_UNIT, FAIL_UNKNOWN_CONTEXT,
 };
-use chrono::NaiveDate;
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -178,10 +178,15 @@ fn taxonomy_fixture_loads_elements_arcs_and_labels() {
     );
 
     // Element declarations, including a custom type derived from xbrli.
-    let assets = taxonomy.resolve_qname("ee:Assets").expect("prefix resolves");
+    let assets = taxonomy
+        .resolve_qname("ee:Assets")
+        .expect("prefix resolves");
     let concept = taxonomy.concept(&assets).expect("Assets is declared");
     assert_eq!(concept.period_type, Some(PeriodType::Instant));
-    assert_eq!(concept.balance, Some(compliance::xbrl_taxonomy::Balance::Debit));
+    assert_eq!(
+        concept.balance,
+        Some(compliance::xbrl_taxonomy::Balance::Debit)
+    );
     assert!(!concept.is_abstract);
     assert!(concept.is_item());
     assert_eq!(
@@ -205,7 +210,8 @@ fn taxonomy_fixture_loads_elements_arcs_and_labels() {
     assert!(taxonomy
         .presentation_arcs
         .iter()
-        .any(|arc| arc.parent == assets && arc.child == taxonomy.resolve_qname("ee:Liabilities").unwrap()));
+        .any(|arc| arc.parent == assets
+            && arc.child == taxonomy.resolve_qname("ee:Liabilities").unwrap()));
     assert!(taxonomy
         .presentation_children(&net_profit)
         .iter()
@@ -273,13 +279,20 @@ fn emitted_instance_reparses_and_every_fact_validates() {
 
     // Official statement facts use taxonomy concepts, extension account facts
     // stay in the extension namespace.
-    assert!(output.instance_xml.contains("<ee:Assets"), "{}", output.instance_xml);
+    assert!(
+        output.instance_xml.contains("<ee:Assets"),
+        "{}",
+        output.instance_xml
+    );
     assert!(output.instance_xml.contains("<ee:CompanyName"));
     assert!(!output.instance_xml.contains("<apex:Assets"));
     assert!(output
         .instance_xml
         .contains(&format!("href=\"{XBRL_EXTENSION_SCHEMA_NAME}\"")));
-    assert!(output.instance_xml.contains("entry.xsd"), "taxonomy entry point referenced");
+    assert!(
+        output.instance_xml.contains("entry.xsd"),
+        "taxonomy entry point referenced"
+    );
 
     // Every emitted fact resolves through the taxonomy or the extension
     // schema — nothing is invented.
@@ -468,7 +481,11 @@ fn undeclared_binding_concept_is_refused_and_nothing_is_emitted() {
         output.readiness.validation_failures
     );
     // No invented official-namespace fact reaches the instance.
-    assert!(!output.instance_xml.contains("<ee:"), "{}", output.instance_xml);
+    assert!(
+        !output.instance_xml.contains("<ee:"),
+        "{}",
+        output.instance_xml
+    );
     assert!(!output.instance_xml.contains("<ee:NotDeclaredAnywhere"));
     let parsed = parse_instance(&output.instance_xml).unwrap();
     assert!(parsed
@@ -500,8 +517,9 @@ fn abstract_and_missing_binding_slots_are_refused() {
         .readiness
         .validation_failures
         .iter()
-        .any(|failure| failure.code == FAIL_BINDING_INVALID
-            && failure.message.contains("abstract")));
+        .any(
+            |failure| failure.code == FAIL_BINDING_INVALID && failure.message.contains("abstract")
+        ));
 
     // A validator-level fact on an abstract concept is refused too.
     let mut document = output.document.clone();
@@ -518,10 +536,7 @@ fn abstract_and_missing_binding_slots_are_refused() {
 
     // A binding that omits a required slot is incomplete, not silently
     // defaulted.
-    let incomplete = TaxonomyBinding::from_json_str(
-        r#"{"assets": "ee:Assets"}"#,
-    )
-    .unwrap();
+    let incomplete = TaxonomyBinding::from_json_str(r#"{"assets": "ee:Assets"}"#).unwrap();
     let output = emit(Some(&AnnualReportXbrlConfig {
         taxonomy: load_fixture(),
         binding: Some(incomplete),
@@ -562,9 +577,21 @@ fn calculation_mismatch_is_reported_with_concepts_and_amounts() {
         .iter()
         .find(|failure| failure.code == FAIL_CALCULATION_MISMATCH)
         .unwrap_or_else(|| panic!("expected calculation_mismatch, got {failures:#?}"));
-    assert!(mismatch.message.contains("ee:NetProfit"), "{}", mismatch.message);
-    assert!(mismatch.message.contains("ee:Revenue"), "{}", mismatch.message);
-    assert!(mismatch.message.contains("ee:Expenses"), "{}", mismatch.message);
+    assert!(
+        mismatch.message.contains("ee:NetProfit"),
+        "{}",
+        mismatch.message
+    );
+    assert!(
+        mismatch.message.contains("ee:Revenue"),
+        "{}",
+        mismatch.message
+    );
+    assert!(
+        mismatch.message.contains("ee:Expenses"),
+        "{}",
+        mismatch.message
+    );
     assert!(mismatch.message.contains("600.00"), "{}", mismatch.message);
     assert!(mismatch.message.contains("500.00"), "{}", mismatch.message);
     assert_eq!(
@@ -602,7 +629,9 @@ fn monetary_unit_and_decimals_rules_are_enforced() {
         .unwrap()
         .unit_ref = None;
     let failures = validate_instance(&config.taxonomy, &output.extension, &document);
-    assert!(failures.iter().any(|failure| failure.code == FAIL_MISSING_UNIT));
+    assert!(failures
+        .iter()
+        .any(|failure| failure.code == FAIL_MISSING_UNIT));
 
     // Monetary fact without decimals.
     let mut document = output.document.clone();
@@ -693,10 +722,10 @@ fn no_taxonomy_is_not_submission_ready_and_names_what_is_missing() {
         output.readiness.missing[0]
     );
     assert!(output.readiness.validation_failures.is_empty());
-    assert!(output
-        .instance_xml
-        .contains("not submission-ready: the Estonian annual-report taxonomy entry point is not \
-                   configured"));
+    assert!(output.instance_xml.contains(
+        "not submission-ready: the Estonian annual-report taxonomy entry point is not \
+                   configured"
+    ));
 }
 
 #[test]
@@ -731,7 +760,9 @@ fn missing_import_is_a_typed_error_not_a_panic() {
     .expect_err("a missing import must be refused");
     match error {
         TaxonomyError::MissingImport {
-            reference, location, ..
+            reference,
+            location,
+            ..
         } => {
             assert!(reference.contains("missing.xsd"), "{reference}");
             assert!(location.contains("missing.xsd"), "{location}");
@@ -785,7 +816,10 @@ fn import_cycles_are_typed_errors_not_panics() {
         &TaxonomyLimits::default(),
     )
     .expect_err("self-import must be refused");
-    assert!(matches!(error, TaxonomyError::ImportCycle { .. }), "{error:?}");
+    assert!(
+        matches!(error, TaxonomyError::ImportCycle { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -808,7 +842,10 @@ fn hostile_taxonomy_bounds_refuse_quickly() {
         },
     )
     .expect_err("the document bound must be enforced");
-    assert!(matches!(error, TaxonomyError::TooManyDocuments { limit: 3 }), "{error:?}");
+    assert!(
+        matches!(error, TaxonomyError::TooManyDocuments { limit: 3 }),
+        "{error:?}"
+    );
 
     // Depth bound: the same chain with max_depth = 1.
     let error = load_taxonomy_with(
@@ -851,7 +888,10 @@ fn hostile_taxonomy_bounds_refuse_quickly() {
 #[test]
 fn instance_parsing_errors_are_typed() {
     let error = parse_instance("<not-xbrl/>").expect_err("non-XBRL root");
-    assert!(matches!(error, compliance::xbrl_taxonomy::InstanceError::NotAnInstance { .. }));
+    assert!(matches!(
+        error,
+        compliance::xbrl_taxonomy::InstanceError::NotAnInstance { .. }
+    ));
 
     let error = parse_instance("<xbrli:xbrl").expect_err("unclosed");
     assert!(matches!(

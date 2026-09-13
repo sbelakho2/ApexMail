@@ -1002,6 +1002,51 @@ pub struct MessageStrategist {
     knowledge: SalesKnowledgeBase,
 }
 
+/// `sales_accounts` columns loaded for the strategy context.
+#[derive(sqlx::FromRow)]
+struct AccountContextRow {
+    company: String,
+    domain: String,
+    country: Option<String>,
+    industry: Option<String>,
+    employees: Option<i32>,
+    technologies: Vec<String>,
+    esp_hypotheses: serde_json::Value,
+}
+
+/// `sales_contacts` columns loaded for the strategy context.
+#[derive(sqlx::FromRow)]
+struct ContactContextRow {
+    full_name: String,
+    job_title: Option<String>,
+    persona: Option<String>,
+    country: Option<String>,
+    timezone: Option<String>,
+    language: Option<String>,
+}
+
+/// One `sales_signals` row considered during composition.
+#[derive(sqlx::FromRow)]
+struct SignalContextRow {
+    signal_type: String,
+    strength: f64,
+    observed_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
+    evidence_id: Option<Uuid>,
+    payload: serde_json::Value,
+}
+
+/// One `sales_evidence` row considered during composition.
+#[derive(sqlx::FromRow)]
+struct EvidenceContextRow {
+    id: Uuid,
+    proposition: String,
+    confidence: f64,
+    source_kind: String,
+    observed_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
 impl MessageStrategist {
     pub fn new(db: PgPool, knowledge: SalesKnowledgeBase) -> Self {
         Self { db, knowledge }
@@ -1016,15 +1061,7 @@ impl MessageStrategist {
         &self,
         request: &StrategyRequest,
     ) -> Result<StrategyInput, StrategistError> {
-        let account_row: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<i32>,
-            Vec<String>,
-            serde_json::Value,
-        )> = sqlx::query_as(
+        let account_row: Option<AccountContextRow> = sqlx::query_as(
             "SELECT company, domain, country, industry, employees, technologies, esp_hypotheses \
              FROM sales_accounts WHERE id = $1 AND tenant_id = $2",
         )
@@ -1033,19 +1070,18 @@ impl MessageStrategist {
         .fetch_optional(&self.db)
         .await
         .map_err(|e| StrategistError::Database(e.to_string()))?;
-        let (company, domain, country, industry, employees, technologies, esp_hypotheses) =
-            account_row.ok_or_else(|| {
-                StrategistError::NotFound(format!("account {}", request.account_id))
-            })?;
+        let AccountContextRow {
+            company,
+            domain,
+            country,
+            industry,
+            employees,
+            technologies,
+            esp_hypotheses,
+        } = account_row
+            .ok_or_else(|| StrategistError::NotFound(format!("account {}", request.account_id)))?;
 
-        let contact_row: Option<(
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = sqlx::query_as(
+        let contact_row: Option<ContactContextRow> = sqlx::query_as(
             "SELECT full_name, job_title, persona, country, timezone, language \
              FROM sales_contacts WHERE id = $1 AND tenant_id = $2",
         )
@@ -1054,19 +1090,17 @@ impl MessageStrategist {
         .fetch_optional(&self.db)
         .await
         .map_err(|e| StrategistError::Database(e.to_string()))?;
-        let (full_name, job_title, persona, contact_country, timezone, contact_language) =
-            contact_row.ok_or_else(|| {
-                StrategistError::NotFound(format!("contact {}", request.contact_id))
-            })?;
+        let ContactContextRow {
+            full_name,
+            job_title,
+            persona,
+            country: contact_country,
+            timezone,
+            language: contact_language,
+        } = contact_row
+            .ok_or_else(|| StrategistError::NotFound(format!("contact {}", request.contact_id)))?;
 
-        let signal_rows: Vec<(
-            String,
-            f64,
-            DateTime<Utc>,
-            Option<DateTime<Utc>>,
-            Option<Uuid>,
-            serde_json::Value,
-        )> = sqlx::query_as(
+        let signal_rows: Vec<SignalContextRow> = sqlx::query_as(
             "SELECT signal_type, strength, observed_at, expires_at, evidence_id, payload \
              FROM sales_signals WHERE tenant_id = $1 AND account_id = $2 \
              ORDER BY strength DESC LIMIT $3",
@@ -1078,14 +1112,7 @@ impl MessageStrategist {
         .await
         .map_err(|e| StrategistError::Database(e.to_string()))?;
 
-        let evidence_rows: Vec<(
-            Uuid,
-            String,
-            f64,
-            String,
-            DateTime<Utc>,
-            Option<DateTime<Utc>>,
-        )> = sqlx::query_as(
+        let evidence_rows: Vec<EvidenceContextRow> = sqlx::query_as(
             "SELECT id, proposition, confidence, source_kind, observed_at, expires_at \
              FROM sales_evidence WHERE tenant_id = $1 \
                AND (account_id = $2 OR contact_id = $3) \
@@ -1174,33 +1201,25 @@ impl MessageStrategist {
             },
             signals: signal_rows
                 .into_iter()
-                .map(
-                    |(signal_type, strength, observed_at, expires_at, evidence_id, payload)| {
-                        SignalContext {
-                            signal_type,
-                            strength: strength as f32,
-                            observed_at,
-                            expires_at,
-                            evidence_id,
-                            payload,
-                        }
-                    },
-                )
+                .map(|row| SignalContext {
+                    signal_type: row.signal_type,
+                    strength: row.strength as f32,
+                    observed_at: row.observed_at,
+                    expires_at: row.expires_at,
+                    evidence_id: row.evidence_id,
+                    payload: row.payload,
+                })
                 .collect(),
             evidence: evidence_rows
                 .into_iter()
-                .map(
-                    |(id, proposition, confidence, source_kind, observed_at, expires_at)| {
-                        EvidenceContext {
-                            id,
-                            proposition,
-                            confidence: confidence as f32,
-                            source_kind,
-                            observed_at,
-                            expires_at,
-                        }
-                    },
-                )
+                .map(|row| EvidenceContext {
+                    id: row.id,
+                    proposition: row.proposition,
+                    confidence: row.confidence as f32,
+                    source_kind: row.source_kind,
+                    observed_at: row.observed_at,
+                    expires_at: row.expires_at,
+                })
                 .collect(),
             previous_touches: touches,
             reply_history: replies,

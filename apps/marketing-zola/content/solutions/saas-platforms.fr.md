@@ -1,12 +1,12 @@
 +++
 title = "Solution email pour plateformes SaaS"
-description = "Infrastructure email multi-tenant pour le SaaS B2B et B2C. Sous-comptes, isolation de domaine, RBAC, SSO et livraison en marque blanche."
+description = "Infrastructure email multi-tenant pour le SaaS B2B et B2C. Isolation des tenants, isolation de domaine, RBAC, SSO et livraison en marque blanche."
 template = "prose.html"
 +++
 
 ## Plateformes SaaS
 
-Offrez à vos clients une infrastructure email fiable et isolée, sans construire ni maintenir votre propre couche email. Le modèle de sous-comptes d'ApexMail donne à chacun de vos tenants des domaines, clés API, listes de suppression et flux d'événements indépendants.
+Offrez à vos clients une infrastructure email fiable et isolée, sans construire ni maintenir votre propre couche email. ApexMail donne à chacun de vos tenants ses propres domaines, clés API, points de terminaison webhook avec un secret HMAC par tenant, listes de suppression, IP dédiées et flux d'événements.
 
 ## Audience
 
@@ -25,57 +25,46 @@ Les plateformes qui envoient des emails pour leurs clients héritent du risque d
 
 ## La solution ApexMail
 
-- **Sous-comptes** — Chaque tenant dispose d'un sous-compte indépendant avec ses propres clés API, domaines, webhooks, listes de suppression, IP dédiées et flux d'événements.
-- **Isolation de domaine** — Vérification et authentification de domaine par sous-compte (SPF, DKIM, DMARC) pour éviter la contamination croisée des réputations.
+- **Isolation des tenants** — Chaque tenant dispose de ses propres domaines, clés API, points de terminaison webhook avec un secret HMAC par tenant, listes de suppression, IP dédiées et flux d'événements.
+- **Isolation de domaine** — Vérification et authentification de domaine par tenant (SPF, DKIM, DMARC) pour éviter la contamination croisée des réputations.
 - **RBAC personnalisé** — Administrateur au niveau plateforme, administrateur au niveau tenant et rôles en lecture seule. Provisioning SCIM sur Enterprise.
 - **SSO** — SAML 2.0 pour les opérateurs de plateforme et les administrateurs de tenants.
-- **Quotas d'usage** — Limites strictes et souples par sous-compte pour le volume, le débit et la concurrence.
+- **Quotas d'usage** — Limites strictes et souples par tenant pour le volume, le débit et la concurrence.
 - **Marque blanche** — Retirez la marque ApexMail des tableaux de bord, des pieds d'email et des modèles de notification.
 
 ## Implémentation technique
 
-1. Créez un compte maître pour votre plateforme.
-2. Provisionnez des sous-comptes via l'API ou le tableau de bord pour chaque tenant client.
+1. Créez un compte pour votre plateforme.
+2. Provisionnez un tenant distinct pour chaque client.
 3. Chaque tenant vérifie son ou ses domaines d'envoi indépendamment.
 4. Attribuez des IP dédiées aux tenants nécessitant une isolation de réputation.
 5. Configurez des points de terminaison webhook par tenant pour les événements de livraison.
 6. Surveillez la santé de livraison de l'ensemble de la plateforme via l'analytique agrégée.
 
-## Points de terminaison API pertinents
-
-| Point de terminaison | Description |
-|---|---|
-| `POST /v1/subaccounts` | Créer un sous-compte |
-| `GET /v1/subaccounts` | Lister les sous-comptes |
-| `GET /v1/subaccounts/:id` | Récupérer les détails d'un sous-compte |
-| `PATCH /v1/subaccounts/:id` | Mettre à jour les paramètres d'un sous-compte |
-| `DELETE /v1/subaccounts/:id` | Désactiver un sous-compte |
-| `POST /v1/subaccounts/:id/api-keys` | Créer une clé API de sous-compte |
-
 ## Forfait requis
 
-Les sous-comptes sont disponibles sur Scale (jusqu'à 10) et Enterprise (jusqu'à 100). Tout arrangement de déploiement non standard requiert une revue d'architecture et de contrat distincte.
+Tout arrangement de déploiement non standard requiert une revue d'architecture et de contrat distincte.
 
 ## Considérations de sécurité
 
 - Par défaut, les opérateurs de plateforme ne peuvent pas lire le contenu des emails des tenants. L'accès au contenu requiert une autorisation explicite du tenant.
-- Les clés API de sous-compte sont limitées à leur sous-compte uniquement. L'accès entre tenants est bloqué au niveau de la couche d'autorisation.
-- Les points de terminaison webhook sont configurés par sous-compte. Les signatures HMAC reposent sur un secret propre à chaque sous-compte.
-- Les journaux d'audit enregistrent toutes les créations, suppressions de sous-comptes et modifications de permissions.
+- Les clés API sont limitées à leur tenant uniquement. L'accès entre tenants est bloqué au niveau de la couche d'autorisation.
+- Les points de terminaison webhook sont configurés par tenant. Les signatures HMAC reposent sur un secret propre à chaque tenant.
+- Les journaux d'audit enregistrent toutes les créations, suppressions de tenants et modifications de permissions.
 
 ## Considérations de conformité
 
-- Chaque sous-compte conserve des listes de suppression, une authentification de domaine et une rétention d'événements indépendantes.
-- La couverture DPA des sous-comptes requiert la DPA de la plateforme avec ApexMail. L'engagement contractuel dévolu aux tenants relève de la responsabilité de la plateforme.
+- Chaque tenant conserve des listes de suppression, une authentification de domaine et une rétention d'événements indépendantes.
+- La couverture DPA des tenants requiert la DPA de la plateforme avec ApexMail. L'engagement contractuel dévolu aux tenants relève de la responsabilité de la plateforme.
 - Les exigences de localisation des données s'appliquent au niveau de la plateforme et doivent être confirmées pour le déploiement actif et l'accord applicable.
 - Les opérateurs de plateforme sont responsables de la conformité d'utilisation acceptable de leurs tenants.
 
 ## Limites connues
 
-- L'isolement des sous-comptes est logique sur les forfaits Cloud mutualisé. Un déploiement contractualisé séparément peut définir des exigences d'isolation supplémentaires, mais cela ne constitue pas un droit d'un forfait public.
-- L'analytique inter-sous-comptes impose à la plateforme d'agréger les données d'événements des sous-comptes de son côté.
+- L'isolement des tenants est logique sur les forfaits Cloud mutualisé. Un déploiement contractualisé séparément peut définir des exigences d'isolation supplémentaires, mais cela ne constitue pas un droit d'un forfait public.
+- L'analytique inter-tenants impose à la plateforme d'agréger les données d'événements des tenants de son côté.
 - La marque blanche est disponible sur le forfait Enterprise.
 
 ## Prochaine étape recommandée
 
-[Contactez l'équipe commerciale](/fr/contact/sales/) pour une revue d'architecture de sous-comptes et une tarification volume pour un déploiement multi-tenant.
+[Contactez l'équipe commerciale](/fr/contact/sales/) pour une revue d'architecture multi-tenant et une tarification volume pour votre déploiement.

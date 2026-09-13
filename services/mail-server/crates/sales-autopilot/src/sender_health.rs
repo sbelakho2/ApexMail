@@ -174,6 +174,28 @@ fn clamp01(value: f64) -> f64 {
     value.clamp(0.0, 1.0)
 }
 
+/// The counters of one rolling health window (`sales_sender_health`), i.e. the
+/// pure input of [`compute_health`], [`breaker_state`] and [`rates_json`].
+#[derive(Debug, Clone, Copy, Default, sqlx::FromRow)]
+pub struct HealthWindow {
+    pub volume: i64,
+    pub hard_bounces: i64,
+    pub soft_bounces: i64,
+    pub complaints: i64,
+    pub unsubscribes: i64,
+    pub deferrals: i64,
+    pub auth_failures: i64,
+}
+
+/// `sales_sender_health` row: the counters plus the warmup day, which is
+/// tracked alongside them but is not a counter.
+#[derive(Debug, Clone, Copy, Default, sqlx::FromRow)]
+struct HealthWindowRow {
+    #[sqlx(flatten)]
+    window: HealthWindow,
+    warmup_day: Option<i32>,
+}
+
 fn rate(count: i64, volume: i64) -> f64 {
     if volume > 0 {
         count as f64 / volume as f64
@@ -198,16 +220,16 @@ fn warmup_maturity(warmup_day: Option<i32>) -> f64 {
 ///
 /// Returns `(health_score, state, reasons)`. Rate terms are ignored below
 /// `HealthThresholds::default().min_volume_for_rates`.
-pub fn compute_health(
-    volume: i64,
-    hard_bounces: i64,
-    soft_bounces: i64,
-    complaints: i64,
-    unsubscribes: i64,
-    deferrals: i64,
-    auth_failures: i64,
-    warmup_day: Option<i32>,
-) -> (f64, String, Vec<String>) {
+pub fn compute_health(window: HealthWindow, warmup_day: Option<i32>) -> (f64, String, Vec<String>) {
+    let HealthWindow {
+        volume,
+        hard_bounces,
+        soft_bounces,
+        complaints,
+        unsubscribes,
+        deferrals,
+        auth_failures,
+    } = window;
     let thresholds = HealthThresholds::default();
     let rates_meaningful = volume >= thresholds.min_volume_for_rates.max(0);
 
@@ -281,15 +303,7 @@ pub fn compute_health(
 
     let score = clamp01(maturity * (1.0 - clamp01(penalty)));
 
-    let (state, breaker_reasons) = breaker_state(
-        volume,
-        hard_bounces,
-        complaints,
-        deferrals,
-        auth_failures,
-        warmup_day,
-        &thresholds,
-    );
+    let (state, breaker_reasons) = breaker_state(window, warmup_day, &thresholds);
     reasons.extend(breaker_reasons);
 
     (score, state, reasons)
@@ -300,14 +314,18 @@ pub fn compute_health(
 /// warming/healthy. Rate breakers are skipped entirely below
 /// `thresholds.min_volume_for_rates`; auth failures never are.
 pub fn breaker_state(
-    volume: i64,
-    hard_bounces: i64,
-    complaints: i64,
-    deferrals: i64,
-    auth_failures: i64,
+    window: HealthWindow,
     warmup_day: Option<i32>,
     thresholds: &HealthThresholds,
 ) -> (String, Vec<String>) {
+    let HealthWindow {
+        volume,
+        hard_bounces,
+        complaints,
+        deferrals,
+        auth_failures,
+        ..
+    } = window;
     let mut reasons = Vec::new();
     let rates_meaningful = volume >= thresholds.min_volume_for_rates.max(0);
 
@@ -379,23 +397,15 @@ fn identity_status_for(state: &str) -> &'static str {
     }
 }
 
-fn rates_json(
-    volume: i64,
-    hard_bounces: i64,
-    soft_bounces: i64,
-    complaints: i64,
-    unsubscribes: i64,
-    deferrals: i64,
-    auth_failures: i64,
-) -> serde_json::Value {
+fn rates_json(window: &HealthWindow) -> serde_json::Value {
     serde_json::json!({
-        "volume": volume,
-        "hardBounceRate": rate(hard_bounces, volume),
-        "softBounceRate": rate(soft_bounces, volume),
-        "complaintRate": rate(complaints, volume),
-        "deferralRate": rate(deferrals, volume),
-        "unsubscribeRate": rate(unsubscribes, volume),
-        "authFailures": auth_failures,
+        "volume": window.volume,
+        "hardBounceRate": rate(window.hard_bounces, window.volume),
+        "softBounceRate": rate(window.soft_bounces, window.volume),
+        "complaintRate": rate(window.complaints, window.volume),
+        "deferralRate": rate(window.deferrals, window.volume),
+        "unsubscribeRate": rate(window.unsubscribes, window.volume),
+        "authFailures": window.auth_failures,
     })
 }
 
@@ -435,7 +445,7 @@ pub async fn assess_and_persist_tx(
     sender_identity_id: Uuid,
     thresholds: &HealthThresholds,
 ) -> Result<HealthAssessment, SalesError> {
-    let window: Option<(i64, i64, i64, i64, i64, i64, i64, Option<i32>)> = sqlx::query_as(
+    let row: Option<HealthWindowRow> = sqlx::query_as(
         "SELECT volume, hard_bounces, soft_bounces, complaints, unsubscribes, \
                 deferrals, auth_failures, warmup_day \
          FROM sales_sender_health \
@@ -446,39 +456,12 @@ pub async fn assess_and_persist_tx(
     .fetch_optional(&mut **tx)
     .await
     .map_err(|e| SalesError::Database(e.to_string()))?;
+    let HealthWindowRow { window, warmup_day } = row.unwrap_or_default();
 
-    let (
-        volume,
-        hard_bounces,
-        soft_bounces,
-        complaints,
-        unsubscribes,
-        deferrals,
-        auth_failures,
-        warmup_day,
-    ) = window.unwrap_or((0, 0, 0, 0, 0, 0, 0, None));
-
-    let (health_score, _default_state, mut reasons) = compute_health(
-        volume,
-        hard_bounces,
-        soft_bounces,
-        complaints,
-        unsubscribes,
-        deferrals,
-        auth_failures,
-        warmup_day,
-    );
+    let (health_score, _default_state, mut reasons) = compute_health(window, warmup_day);
     // Re-run the breaker mapping with the caller-supplied thresholds so the
     // persisted state reflects configured policy, not just the defaults.
-    let (state, breaker_reasons) = breaker_state(
-        volume,
-        hard_bounces,
-        complaints,
-        deferrals,
-        auth_failures,
-        warmup_day,
-        thresholds,
-    );
+    let (state, breaker_reasons) = breaker_state(window, warmup_day, thresholds);
     reasons.extend(breaker_reasons);
 
     sqlx::query(
@@ -528,15 +511,7 @@ pub async fn assess_and_persist_tx(
         health_score,
         state,
         reasons,
-        rates: rates_json(
-            volume,
-            hard_bounces,
-            soft_bounces,
-            complaints,
-            unsubscribes,
-            deferrals,
-            auth_failures,
-        ),
+        rates: rates_json(&window),
     })
 }
 
@@ -764,7 +739,14 @@ mod tests {
     fn tiny_volume_never_trips_a_rate_breaker() {
         // 1 complaint out of 2 sends is 50% — 166x the quarantine threshold —
         // yet the tiny-volume safeguard must keep the sender sendable.
-        let (score, state, reasons) = compute_health(2, 0, 0, 1, 0, 0, 0, None);
+        let (score, state, reasons) = compute_health(
+            HealthWindow {
+                volume: 2,
+                complaints: 1,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "healthy");
         assert!(score > 0.9, "score {score} should be clean on tiny volume");
         assert!(reasons.iter().any(|r| r.contains("tiny-volume")));
@@ -772,13 +754,27 @@ mod tests {
 
     #[test]
     fn tiny_volume_with_warmup_stays_warming() {
-        let (_, state, _) = compute_health(2, 0, 0, 1, 0, 0, 0, Some(3));
+        let (_, state, _) = compute_health(
+            HealthWindow {
+                volume: 2,
+                complaints: 1,
+                ..Default::default()
+            },
+            Some(3),
+        );
         assert_eq!(state, "warming");
     }
 
     #[test]
     fn high_complaint_rate_quarantines_once_volume_is_meaningful() {
-        let (score, state, reasons) = compute_health(1000, 0, 0, 4, 0, 0, 0, None);
+        let (score, state, reasons) = compute_health(
+            HealthWindow {
+                volume: 1000,
+                complaints: 4,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "quarantined");
         assert!(reasons.iter().any(|r| r.contains("complaint rate")));
         assert!(
@@ -790,13 +786,27 @@ mod tests {
     #[test]
     fn complaint_rate_at_threshold_does_not_trip() {
         // 3/1000 == the 0.003 threshold exactly; "over threshold" is strict.
-        let (_, state, _) = compute_health(1000, 0, 0, 3, 0, 0, 0, None);
+        let (_, state, _) = compute_health(
+            HealthWindow {
+                volume: 1000,
+                complaints: 3,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "healthy");
     }
 
     #[test]
     fn high_hard_bounce_rate_pauses() {
-        let (score, state, reasons) = compute_health(1000, 60, 0, 0, 0, 0, 0, None);
+        let (score, state, reasons) = compute_health(
+            HealthWindow {
+                volume: 1000,
+                hard_bounces: 60,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "paused");
         assert!(reasons.iter().any(|r| r.contains("hard-bounce")));
         assert!(score < 0.75);
@@ -804,21 +814,45 @@ mod tests {
 
     #[test]
     fn high_deferral_rate_throttles() {
-        let (_, state, reasons) = compute_health(1000, 0, 0, 0, 0, 150, 0, None);
+        let (_, state, reasons) = compute_health(
+            HealthWindow {
+                volume: 1000,
+                deferrals: 150,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "throttled");
         assert!(reasons.iter().any(|r| r.contains("deferral")));
     }
 
     #[test]
     fn any_auth_failure_pauses_regardless_of_volume() {
-        let (_, state, reasons) = compute_health(1, 0, 0, 0, 0, 0, 1, Some(2));
+        let (_, state, reasons) = compute_health(
+            HealthWindow {
+                volume: 1,
+                auth_failures: 1,
+                ..Default::default()
+            },
+            Some(2),
+        );
         assert_eq!(state, "paused");
         assert!(reasons.iter().any(|r| r.contains("auth failures")));
     }
 
     #[test]
     fn clean_sender_is_healthy() {
-        let (score, state, _) = compute_health(500, 2, 3, 0, 1, 5, 0, None);
+        let (score, state, _) = compute_health(
+            HealthWindow {
+                volume: 500,
+                hard_bounces: 2,
+                soft_bounces: 3,
+                unsubscribes: 1,
+                deferrals: 5,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "healthy");
         assert!(score > 0.9, "clean sender scored only {score}");
     }
@@ -827,7 +861,14 @@ mod tests {
     fn a_single_complaint_weighs_heaviest_but_stays_below_quarantine() {
         // One complaint in a meaningful sample is a large score penalty yet
         // still below the strict quarantine threshold.
-        let (score, state, _) = compute_health(500, 0, 0, 1, 0, 0, 0, None);
+        let (score, state, _) = compute_health(
+            HealthWindow {
+                volume: 500,
+                complaints: 1,
+                ..Default::default()
+            },
+            None,
+        );
         assert_eq!(state, "healthy");
         assert!(
             score < 0.7,
@@ -837,7 +878,13 @@ mod tests {
 
     #[test]
     fn immature_warmup_day_reports_warming() {
-        let (score, state, reasons) = compute_health(500, 0, 0, 0, 0, 0, 0, Some(0));
+        let (score, state, reasons) = compute_health(
+            HealthWindow {
+                volume: 500,
+                ..Default::default()
+            },
+            Some(0),
+        );
         assert_eq!(state, "warming");
         assert!(reasons.iter().any(|r| r.contains("warming up")));
         assert!(score < 1.0, "day-0 sender should not score a perfect 1.0");
@@ -850,7 +897,18 @@ mod tests {
             (1000, 1000, 1000, 1000, 1000, 1000, 10),
             (50, 50, 50, 50, 50, 50, 100),
         ] {
-            let (score, _, _) = compute_health(volume, hb, sb, c, u, d, a, Some(0));
+            let (score, _, _) = compute_health(
+                HealthWindow {
+                    volume,
+                    hard_bounces: hb,
+                    soft_bounces: sb,
+                    complaints: c,
+                    unsubscribes: u,
+                    deferrals: d,
+                    auth_failures: a,
+                },
+                Some(0),
+            );
             assert!((0.0..=1.0).contains(&score), "score {score} out of range");
         }
     }
@@ -860,33 +918,127 @@ mod tests {
         let t = default_thresholds();
         // complaint beats everything (including an auth failure)
         assert_eq!(
-            breaker_state(1000, 100, 10, 10, 1, None, &t).0,
+            breaker_state(
+                HealthWindow {
+                    volume: 1000,
+                    hard_bounces: 100,
+                    complaints: 10,
+                    deferrals: 10,
+                    auth_failures: 1,
+                    ..Default::default()
+                },
+                None,
+                &t
+            )
+            .0,
             "quarantined"
         );
         // auth failure beats a deferral throttle
-        assert_eq!(breaker_state(1000, 0, 0, 150, 1, None, &t).0, "paused");
+        assert_eq!(
+            breaker_state(
+                HealthWindow {
+                    volume: 1000,
+                    deferrals: 150,
+                    auth_failures: 1,
+                    ..Default::default()
+                },
+                None,
+                &t
+            )
+            .0,
+            "paused"
+        );
         // hard bounce pause
-        assert_eq!(breaker_state(1000, 60, 0, 0, 0, None, &t).0, "paused");
+        assert_eq!(
+            breaker_state(
+                HealthWindow {
+                    volume: 1000,
+                    hard_bounces: 60,
+                    ..Default::default()
+                },
+                None,
+                &t
+            )
+            .0,
+            "paused"
+        );
         // deferral throttle
-        assert_eq!(breaker_state(1000, 0, 0, 150, 0, None, &t).0, "throttled");
+        assert_eq!(
+            breaker_state(
+                HealthWindow {
+                    volume: 1000,
+                    deferrals: 150,
+                    ..Default::default()
+                },
+                None,
+                &t
+            )
+            .0,
+            "throttled"
+        );
         // warmup only when nothing worse tripped
-        assert_eq!(breaker_state(10, 0, 0, 0, 0, Some(1), &t).0, "warming");
+        assert_eq!(
+            breaker_state(
+                HealthWindow {
+                    volume: 10,
+                    ..Default::default()
+                },
+                Some(1),
+                &t
+            )
+            .0,
+            "warming"
+        );
         // clean
-        assert_eq!(breaker_state(1000, 1, 1, 0, 0, Some(90), &t).0, "healthy");
+        assert_eq!(
+            breaker_state(
+                HealthWindow {
+                    volume: 1000,
+                    hard_bounces: 1,
+                    complaints: 1,
+                    ..Default::default()
+                },
+                Some(90),
+                &t
+            )
+            .0,
+            "healthy"
+        );
     }
 
     #[test]
     fn breaker_skips_rates_below_min_volume() {
         let t = default_thresholds();
         // Would quarantine at volume >= 50; at 10 it must not.
-        assert_eq!(breaker_state(10, 0, 5, 0, 0, None, &t).0, "healthy");
+        assert_eq!(
+            breaker_state(
+                HealthWindow {
+                    volume: 10,
+                    complaints: 5,
+                    ..Default::default()
+                },
+                None,
+                &t
+            )
+            .0,
+            "healthy"
+        );
         // A custom higher floor keeps even a large-looking sample safe.
         let strict = HealthThresholds {
             min_volume_for_rates: 10_000,
             ..t
         };
         assert_eq!(
-            breaker_state(9999, 0, 500, 0, 0, None, &strict).0,
+            breaker_state(
+                HealthWindow {
+                    volume: 9999,
+                    complaints: 500,
+                    ..Default::default()
+                },
+                None,
+                &strict
+            )
+            .0,
             "healthy"
         );
     }
@@ -928,7 +1080,15 @@ mod tests {
 
     #[test]
     fn rates_json_reports_expected_keys() {
-        let rates = rates_json(100, 5, 2, 1, 3, 10, 0);
+        let rates = rates_json(&HealthWindow {
+            volume: 100,
+            hard_bounces: 5,
+            soft_bounces: 2,
+            complaints: 1,
+            unsubscribes: 3,
+            deferrals: 10,
+            auth_failures: 0,
+        });
         assert_eq!(rates["volume"], 100);
         assert!((rates["hardBounceRate"].as_f64().unwrap_or_default() - 0.05).abs() < 1e-12);
         assert!((rates["complaintRate"].as_f64().unwrap_or_default() - 0.01).abs() < 1e-12);

@@ -45,7 +45,6 @@ comparison_sections = [
   ]},
   { title = "ENTERPRISE CONTROLS", rows = [
     { feature = "SAML SSO", apex = 'Business and Enterprise plans', comp = 'Via AWS IAM Identity Center — requires AWS Organization setup and IAM configuration<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
-    { feature = "Subaccounts / isolation", apex = 'Scale (10) and Enterprise (100) — managed, hierarchical', comp = 'Via AWS Organizations with separate account per environment — self-managed<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
     { feature = "Managed support", apex = 'Plan-specific support terms', comp = 'AWS Support plans (Developer, Business, Enterprise) — separate purchase from SES usage<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
     { feature = "HIPAA availability", apex = 'Not currently offered', comp = 'Yes — AWS BAA available; SES is an eligible HIPAA service<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }
   ]},

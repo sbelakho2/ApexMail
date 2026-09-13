@@ -244,9 +244,12 @@ gate, brings the stack up with `docker-compose.prod.yml`, and verifies
 per-service health, HTTP probes, and the SMTP banner. A red stage stops the
 line before `docker compose up -d`. There is **no registry** — images are
 tagged with `ghcr.io/...` names for compatibility but never pushed or pulled.
-GitHub Actions is decommissioned (`.github/workflows` is empty; the archived
-workflows and the replacement map live in `.github/workflows-archive/` and
-`ci/README.md`).
+GitHub Actions is gone from this repository (the workflows were removed on
+2026-09-13; the historical replacement map lives in `ci/README.md` §2, and the
+validate stage fails the run if a workflow file ever reappears). CI runs on
+two executors that share the same gates: `ci/pipeline.sh` on the deploy host,
+and the free self-hosted **Woodpecker** pipeline (`.woodpecker.yml`) for
+push/PR checks on any agent you own.
 
 The `Makefile` + `deploy/scripts/deploy.sh` path is a **manual/emergency
 fallback only** (it builds the same images locally on the host and never

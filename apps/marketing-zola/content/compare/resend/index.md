@@ -37,7 +37,7 @@ comparison_sections = [
     { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">DSR workflows</span>', comp = '<span class="text-surface-600">Standard controls</span>', winner = "apexmail" },
     { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">Not evaluated in this comparison</span>', winner = "none" },
     { feature = "Consent Management", apex = '<span class="text-brand-600 font-semibold">Built-in</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
-    { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Growth plan & above</span>', comp = '<span class="text-surface-600">Activity logs only</span>', winner = "apexmail" },
+    { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Operator + API audit trail</span>', comp = '<span class="text-surface-600">Activity logs only</span>', winner = "apexmail" },
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "tie" }
   ]}
 ]

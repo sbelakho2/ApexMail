@@ -198,7 +198,13 @@ pub(crate) enum CpAuthOutcome {
     /// MFA-backed and time-bounded — does not apply.
     MachineCredential,
     /// A verified human operator CP session.
-    Verified(CpSessionVerification),
+    ///
+    /// Boxed: the verification material (user, refreshed token, refreshed
+    /// claims) dwarfs the unit variant, and this enum is returned on the
+    /// request path — clippy's `large_enum_variant` gate is the same
+    /// observation. The box is an allocation the request path already pays
+    /// for, not a semantic change.
+    Verified(Box<CpSessionVerification>),
 }
 
 /// The verified session material the middleware inserts into the request
@@ -484,11 +490,11 @@ pub(crate) async fn verify_cp_session(
     )
     .await;
 
-    Ok(CpAuthOutcome::Verified(CpSessionVerification {
+    Ok(CpAuthOutcome::Verified(Box::new(CpSessionVerification {
         user: cp_user,
         refreshed_token: new_token,
         refreshed_claims: updated_claims,
-    }))
+    })))
 }
 
 /// Build the `Set-Cookie` value that replays a refreshed CP session.
