@@ -154,4 +154,72 @@ mod tests {
         let config = client_config();
         assert!(std::sync::Arc::strong_count(&config) >= 1);
     }
+
+    #[test]
+    fn policies_render_and_the_port_table_is_total() {
+        assert_eq!(TlsPolicy::Opportunistic.to_string(), "opportunistic");
+        assert_eq!(TlsPolicy::StartTlsRequired.to_string(), "starttls-required");
+        assert_eq!(
+            TlsPolicy::ImplicitTlsRequired.to_string(),
+            "implicit-tls-required"
+        );
+        for port in [1u16, 24, 25, 26, 465, 587, 2525, 65535] {
+            let policy = TlsPolicy::for_port(port);
+            let expected = match port {
+                465 => TlsPolicy::ImplicitTlsRequired,
+                587 | 2525 => TlsPolicy::StartTlsRequired,
+                _ => TlsPolicy::Opportunistic,
+            };
+            assert_eq!(policy, expected, "port {port}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tls_errors_name_the_server() {
+        let error = TlsError::StartTlsNotAdvertised {
+            policy: TlsPolicy::StartTlsRequired,
+        };
+        assert!(error.to_string().contains("starttls-required"));
+        let invalid = TlsError::InvalidServerName {
+            server_name: "bad name".to_string(),
+        };
+        assert!(invalid.to_string().contains("bad name"));
+    }
+
+    #[tokio::test]
+    async fn invalid_server_names_are_refused_before_the_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let error = connect_tls(stream, "not a valid dns name")
+            .await
+            .expect_err("a malformed TLS name is refused locally");
+        assert!(matches!(error, TlsError::InvalidServerName { .. }));
+        let _ = accept.await;
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_closes_mid_handshake_is_a_handshake_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let accept = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let error = connect_tls(stream, "mx.example.com")
+            .await
+            .expect_err("a peer that closes mid-handshake fails");
+        assert!(matches!(error, TlsError::Handshake { .. }), "got {error:?}");
+        assert!(error.to_string().contains("mx.example.com"));
+        let _ = accept.await;
+    }
 }

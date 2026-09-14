@@ -801,4 +801,36 @@ mod tests {
         assert_eq!(json["rates"].as_array().unwrap().len(), 2);
         assert_eq!(json["excluded_other_currency"][0]["currency"], "USD");
     }
+
+    #[test]
+    fn map_kmd_row_carries_every_filing_field_verbatim() {
+        let generated = Utc::now();
+        let response = map_kmd_row(
+            "kmd-id".into(),
+            2026,
+            5,
+            "filed".into(),
+            serde_json::json!({"totalVatCents": 7650}),
+            7,
+            35_000,
+            7_650,
+            generated,
+            Some(generated),
+            Some("EMTA-REF-1".into()),
+            None,
+            generated,
+            generated,
+        );
+        assert_eq!(response.id, "kmd-id");
+        assert_eq!((response.tax_year, response.tax_month), (2026, 5));
+        assert_eq!(response.status, "filed");
+        assert_eq!(response.invoice_count, 7);
+        assert_eq!(response.total_taxable_cents, 35_000);
+        assert_eq!(response.total_vat_cents, 7_650);
+        assert_eq!(response.generated_at, generated);
+        assert_eq!(response.filed_at, Some(generated));
+        assert_eq!(response.filing_reference.as_deref(), Some("EMTA-REF-1"));
+        assert!(response.filing_error.is_none());
+        assert_eq!(response.breakdown["totalVatCents"], 7_650);
+    }
 }

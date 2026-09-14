@@ -247,3 +247,71 @@ mod tests {
         assert!(!bp.is_shedding());
     }
 }
+
+#[cfg(test)]
+mod overload_tests {
+    use super::*;
+
+    /// A saturated controller rejects the next acquire instead of queueing
+    /// unboundedly, and counts the shed job. `start_paused` makes the 500 ms
+    /// internal acquire timeout fire deterministically without real waiting.
+    #[tokio::test(start_paused = true)]
+    async fn saturated_acquire_is_shed_and_counted() {
+        let bp = Backpressure::new(BackpressureConfig {
+            max_concurrency: 1,
+            max_backlog: 1_000,
+            cooldown: Duration::from_secs(5),
+        });
+        let permit = bp.acquire().await.expect("first permit");
+        assert_eq!(bp.in_flight(), 1);
+        assert_eq!(bp.available(), 0);
+        assert_eq!(bp.max_concurrency(), 1);
+        assert_eq!(bp.utilization(), 1.0);
+
+        let rejected = bp.acquire().await;
+        assert!(
+            rejected.is_none(),
+            "an overloaded worker must shed instead of blocking forever"
+        );
+        assert_eq!(bp.total_rejected(), 1);
+        drop(permit);
+        assert_eq!(bp.utilization(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn backlog_over_threshold_sheds_until_the_cooldown_elapses() {
+        let bp = Backpressure::new(BackpressureConfig {
+            max_concurrency: 4,
+            max_backlog: 10,
+            // The cooldown is wall-clock (SystemTime), so this test uses real
+            // time — kept well under the suite's sleep budget.
+            cooldown: Duration::from_millis(20),
+        });
+        assert_eq!(bp.backlog(), 0);
+        bp.observe_backlog(10);
+        assert!(!bp.is_shedding(), "at the threshold is not yet over it");
+        bp.observe_backlog(11);
+        assert_eq!(bp.backlog(), 11);
+        assert!(bp.is_shedding(), "over the threshold sheds load");
+        let shed = bp.acquire().await;
+        assert!(shed.is_none());
+        assert_eq!(bp.total_rejected(), 1);
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!bp.is_shedding(), "the cooldown expires");
+        let permit = bp.acquire().await;
+        assert!(permit.is_some(), "traffic resumes after the cooldown");
+        assert_eq!(bp.total_rejected(), 1);
+    }
+
+    #[test]
+    fn zero_capacity_never_divides_by_zero() {
+        let bp = Backpressure::new(BackpressureConfig {
+            max_concurrency: 0,
+            max_backlog: 1,
+            cooldown: Duration::from_millis(1),
+        });
+        assert_eq!(bp.utilization(), 0.0);
+        assert_eq!(bp.in_flight(), 0);
+    }
+}

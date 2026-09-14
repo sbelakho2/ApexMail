@@ -78,10 +78,31 @@ impl ScriptedReply {
 pub struct FakeSmtpConfig {
     pub advertise_starttls: bool,
     pub greeting: ReplySpec,
+    /// Raw bytes written INSTEAD of `greeting.line()`. Lets a test script a
+    /// hostile greeting: unparseable text, an oversized line, a multiline
+    /// reply whose lines carry mismatched codes, or a reply packed with a
+    /// second buffered reply.
+    pub raw_greeting: Option<Vec<u8>>,
+    /// Reply to the `EHLO` command (multiline capabilities are only emitted
+    /// when this is the default 250 reply).
+    pub ehlo: ScriptedReply,
+    /// Reply to the `HELO` fallback (RFC 5321 §4.1.1.1). Default accepted;
+    /// script a refusal to make the session unusable.
+    pub helo: ScriptedReply,
     pub mail_from: ScriptedReply,
     pub default_rcpt: ScriptedReply,
     pub rcpt: Arc<Mutex<HashMap<String, ScriptedReply>>>,
+    /// Reply to the `DATA` command itself (must be 354 to accept a payload).
+    pub data_command: ScriptedReply,
     pub end_of_data: ScriptedReply,
+    /// Close the connection immediately after writing the greeting.
+    pub close_after_greeting: bool,
+    /// Accept the connection, write the greeting, then never answer again.
+    pub hang_after_greeting: bool,
+    /// Close the connection (no reply) when a command starts with this prefix.
+    pub drop_after_command: Option<String>,
+    /// Close the connection after reading the DATA payload, before replying.
+    pub drop_before_data_reply: bool,
 }
 
 impl Default for FakeSmtpConfig {
@@ -89,10 +110,18 @@ impl Default for FakeSmtpConfig {
         Self {
             advertise_starttls: false,
             greeting: ReplySpec::new(220, "fake ESMTP ready"),
+            raw_greeting: None,
+            ehlo: ScriptedReply::always(ReplySpec::new(250, "fake greets you")),
+            helo: ScriptedReply::always(ReplySpec::new(250, "fake")),
             mail_from: ScriptedReply::always(ReplySpec::ok()),
             default_rcpt: ScriptedReply::always(ReplySpec::ok()),
             rcpt: Arc::new(Mutex::new(HashMap::new())),
+            data_command: ScriptedReply::always(ReplySpec::new(354, "go ahead")),
             end_of_data: ScriptedReply::always(ReplySpec::new(250, "2.0.0 queued")),
+            close_after_greeting: false,
+            hang_after_greeting: false,
+            drop_after_command: None,
+            drop_before_data_reply: false,
         }
     }
 }
@@ -212,7 +241,20 @@ async fn handle_connection(
 ) -> std::io::Result<()> {
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    writer.write_all(config.greeting.line().as_bytes()).await?;
+    match &config.raw_greeting {
+        Some(raw) => writer.write_all(raw).await?,
+        None => writer.write_all(config.greeting.line().as_bytes()).await?,
+    }
+    if config.close_after_greeting {
+        return Ok(());
+    }
+    if config.hang_after_greeting {
+        // Accept the connection and stay silent: the client must hit its
+        // command timeout. Bounded so the task cannot outlive the test
+        // runtime's shutdown.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        return Ok(());
+    }
 
     let mut mail_from: Option<String> = None;
     let mut recipients: Vec<String> = Vec::new();
@@ -231,16 +273,30 @@ async fn handle_connection(
             .commands
             .push(command.clone());
 
-        if upper.starts_with("EHLO") {
-            let mut response = String::from("250-fake greets you\r\n");
-            if config.advertise_starttls {
-                response.push_str("250-STARTTLS\r\n");
+        if let Some(prefix) = &config.drop_after_command {
+            if upper.starts_with(prefix.as_str()) {
+                break;
             }
-            response.push_str("250-SIZE 10485760\r\n");
-            response.push_str("250 8BITMIME\r\n");
-            writer.write_all(response.as_bytes()).await?;
+        }
+
+        if upper.starts_with("EHLO") {
+            let reply = config.ehlo.next();
+            if reply.code == 250 && reply.text == "fake greets you" {
+                // The default reply: advertise the full capability set.
+                let mut response = String::from("250-fake greets you\r\n");
+                if config.advertise_starttls {
+                    response.push_str("250-STARTTLS\r\n");
+                }
+                response.push_str("250-SIZE 10485760\r\n");
+                response.push_str("250 8BITMIME\r\n");
+                writer.write_all(response.as_bytes()).await?;
+            } else {
+                writer.write_all(reply.line().as_bytes()).await?;
+            }
         } else if upper.starts_with("HELO") {
-            writer.write_all(b"250 fake\r\n").await?;
+            writer
+                .write_all(config.helo.next().line().as_bytes())
+                .await?;
         } else if upper.starts_with("STARTTLS") {
             writer.write_all(b"454 4.7.0 TLS not available\r\n").await?;
         } else if upper.starts_with("MAIL FROM:") {
@@ -260,12 +316,22 @@ async fn handle_connection(
                     .unwrap_or_else(|| config.default_rcpt.clone())
             }
             .next();
+            if reply.code == 0 {
+                // A scripted code 0 means "drop the connection without a
+                // reply" — models a peer that dies mid-RCPT.
+                break;
+            }
             if (200..300).contains(&reply.code) {
                 recipients.push(recipient);
             }
             writer.write_all(reply.line().as_bytes()).await?;
         } else if upper == "DATA" {
-            writer.write_all(b"354 go ahead\r\n").await?;
+            let data_reply = config.data_command.next();
+            writer.write_all(data_reply.line().as_bytes()).await?;
+            if !(300..400).contains(&data_reply.code) {
+                // Refused DATA: no payload follows.
+                continue;
+            }
             let mut data: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 4096];
             loop {
@@ -279,7 +345,6 @@ async fn handle_connection(
                     break;
                 }
             }
-            let final_reply = config.end_of_data.next();
             state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -289,6 +354,11 @@ async fn handle_connection(
                     recipients: std::mem::take(&mut recipients),
                     data,
                 });
+            if config.drop_before_data_reply {
+                // The payload arrived; the verdict never does.
+                break;
+            }
+            let final_reply = config.end_of_data.next();
             writer.write_all(final_reply.line().as_bytes()).await?;
         } else if upper == "QUIT" {
             writer.write_all(b"221 bye\r\n").await?;
@@ -322,4 +392,68 @@ fn extract_address(command: &str) -> String {
 
 fn find_terminator(data: &[u8]) -> Option<usize> {
     data.windows(5).position(|window| window == b"\r\n.\r\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::BufReader;
+
+    #[tokio::test]
+    async fn scripted_server_speaks_the_full_command_set() {
+        let server = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let stream = tokio::net::TcpStream::connect(server.addr())
+            .await
+            .expect("connect");
+        let (read_half, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("greeting");
+        assert!(line.starts_with("220 "), "greeting: {line:?}");
+
+        for (command, expected) in [
+            ("HELO client.test\r\n", "250"),
+            ("RSET\r\n", "250"),
+            ("NOOP\r\n", "250"),
+            ("WAT\r\n", "500"),
+            ("QUIT\r\n", "221"),
+        ] {
+            writer.write_all(command.as_bytes()).await.expect("write");
+            line.clear();
+            reader.read_line(&mut line).await.expect("reply");
+            assert!(
+                line.starts_with(expected),
+                "command {command:?} expected {expected}, got {line:?}"
+            );
+        }
+        assert!(
+            server.commands().iter().any(|command| command == "WAT"),
+            "every command is recorded"
+        );
+        assert_eq!(server.connections(), 1);
+        assert!(server.messages().is_empty());
+    }
+
+    #[test]
+    fn address_extraction_handles_unbracketed_and_malformed_commands() {
+        assert_eq!(extract_address("MAIL FROM:<a@b.c> SIZE=100"), "a@b.c");
+        assert_eq!(extract_address("RCPT TO:plain@x.y"), "plain@x.y");
+        assert_eq!(extract_address("MAIL FROM:<a@b.c"), "<a@b.c");
+        assert_eq!(extract_address("NO-COLON"), "");
+        assert_eq!(extract_address("MAIL FROM:"), "");
+        assert_eq!(extract_address("RCPT TO: <a@b.c> "), "a@b.c");
+    }
+
+    #[test]
+    fn terminator_detection_requires_the_full_sequence() {
+        assert_eq!(find_terminator(b"x\r\n.\r\n"), Some(1));
+        assert_eq!(find_terminator(b"line\r\n.\r\nrest"), Some(4));
+        assert_eq!(find_terminator(b"no terminator\r\n"), None);
+        assert_eq!(find_terminator(b""), None);
+        assert_eq!(
+            find_terminator(b".\r\n.\r\n"),
+            Some(1),
+            "the terminator starts after the stuffed dot"
+        );
+    }
 }

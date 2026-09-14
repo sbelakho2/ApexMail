@@ -3234,6 +3234,12 @@ impl EmailProcessor {
     /// dl.attempted_at, dl.success, dl.smtp_response) and billing's
     /// usage ingest (success rows by attempted_at day, tenant via the
     /// queue). Best-effort by design — never fails the send.
+    ///
+    /// `created_at` is NOT NULL and `(email_id, created_at)` is a composite
+    /// FK onto `email_queue(id, created_at)`, so the value must be COPIED
+    /// from the queue row (a literal `NOW()` would both violate NOT NULL
+    /// when omitted and break the FK when it differs from the queue row).
+    /// The SELECT form also keeps a legacy/non-UUID job id from erroring.
     async fn record_delivery_attempt(
         &self,
         job: &EmailJob,
@@ -3244,8 +3250,10 @@ impl EmailProcessor {
         if let Err(e) = sqlx::query(
             r#"
             INSERT INTO email_delivery_log
-                (email_id, attempt_number, smtp_response, success, error_message, attempted_at, status)
-            VALUES ($1::uuid, $2, $3, $4, $5, NOW(), $6)
+                (email_id, attempt_number, smtp_response, success, error_message, attempted_at, status, created_at)
+            SELECT q.id, $2, $3, $4, $5, NOW(), $6, q.created_at
+            FROM email_queue q
+            WHERE q.id = $1::uuid
             "#,
         )
         .bind(&job.id)
@@ -9604,5 +9612,1108 @@ mod acceptance_ledger_db_tests {
             AcceptanceClaim::AlreadyAccepted
         );
         pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod end_to_end_db_tests {
+    //! End-to-end dispatch: `fetch_jobs` → `process_job` → the outcome
+    //! handlers, against the canonical provisioned schema with an injected
+    //! transport double. `TEST_DATABASE_URL` gates the suite exactly like the
+    //! rest of the crate: unset soft-skips, configured-but-broken FAILS.
+
+    use super::*;
+    use sqlx::PgPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn e2e_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn e2e_redis() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    /// The scripted transport disposition.
+    #[derive(Clone)]
+    enum SendMode {
+        Success,
+        HardBounce,
+        SoftBounce,
+        UnknownError,
+    }
+
+    struct ScriptedTransport {
+        mode: SendMode,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedTransport {
+        fn new(mode: SendMode) -> Arc<Self> {
+            Arc::new(Self {
+                mode,
+                calls: AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for ScriptedTransport {
+        fn transport_name(&self) -> &str {
+            "scripted"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            false
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                SendMode::Success => Ok(DeliveryReceipt {
+                    transport: match route {
+                        DeliveryRoute::SesShared => TransportType::Ses,
+                        DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
+                    },
+                    transport_message_id: Some("provider-message-1".into()),
+                    actual_source_ip: route.dedicated_source_ip(),
+                    recipient_provider: Some("Google Workspace".into()),
+                    provider_source: Some("mx_resolved".into()),
+                }),
+                SendMode::HardBounce => Err(ProcessorError::Smtp {
+                    code: 550,
+                    enhanced: Some("5.1.1".into()),
+                    message: "user unknown".into(),
+                }),
+                SendMode::SoftBounce => Err(ProcessorError::Smtp {
+                    code: 450,
+                    enhanced: Some("4.2.1".into()),
+                    message: "mailbox busy".into(),
+                }),
+                SendMode::UnknownError => Err(ProcessorError::Transport("connection reset".into())),
+            }
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    struct E2eFixture {
+        tenant_id: String,
+        domain_id: uuid::Uuid,
+        queue_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+        sender: String,
+        recipient: String,
+    }
+
+    /// Seed tenant + verified sending domain + one queued, single-recipient
+    /// marketing row (no dedicated IPs: the route resolves to the shared SES
+    /// pool).
+    async fn seed(pool: &PgPool, label: &str) -> E2eFixture {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant_id = format!("e2e-{suffix}");
+        sqlx::query("INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')")
+            .bind(&tenant_id)
+            .bind(format!("E2E {label} {suffix}"))
+            .bind(format!("e2e-{suffix}"))
+            .execute(pool)
+            .await
+            .expect("insert tenant");
+
+        let domain_id = uuid::Uuid::new_v4();
+        let domain_name = format!("e2e-{suffix}.example");
+        sqlx::query(
+            "INSERT INTO domains \
+                 (id, tenant_id, name, status, verified, dkim_enabled, ses_verified, \
+                  dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'sel', 'pub', 'dkim:v1:test')",
+        )
+        .bind(domain_id)
+        .bind(&tenant_id)
+        .bind(&domain_name)
+        .execute(pool)
+        .await
+        .expect("insert domain");
+
+        let queue_id = uuid::Uuid::new_v4();
+        let message_id = uuid::Uuid::new_v4();
+        let sender = format!("sender@{domain_name}");
+        let recipient = "user@example.com".to_string();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category) \
+             VALUES ($1, $2, ARRAY[$3], $4, 'pending', $5, $6, $7, $3, 'body', \
+                     '{}'::jsonb, 0, 'marketing')",
+        )
+        .bind(queue_id)
+        .bind(&sender)
+        .bind(&recipient)
+        .bind(format!("E2E {label}"))
+        .bind(&tenant_id)
+        .bind(message_id)
+        .bind(domain_id)
+        .execute(pool)
+        .await
+        .expect("insert email_queue row");
+
+        E2eFixture {
+            tenant_id,
+            domain_id,
+            queue_id,
+            message_id,
+            sender,
+            recipient,
+        }
+    }
+
+    /// Processor with the SES double wired for the shared route; rate
+    /// admission disabled (covered by its own focused tests) so the e2e
+    /// assertions stay deterministic.
+    async fn build_processor(pool: &PgPool, transport: Arc<ScriptedTransport>) -> EmailProcessor {
+        build_processor_with(pool, transport, false).await
+    }
+
+    async fn build_processor_with(
+        pool: &PgPool,
+        transport: Arc<ScriptedTransport>,
+        restricted_retries: bool,
+    ) -> EmailProcessor {
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "e2e".to_string(),
+                max_retries: if restricted_retries { 0 } else { 3 },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        let hybrid = HybridTransport::new(Some(transport as Arc<dyn EmailTransport>), None);
+        EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor")
+    }
+
+    async fn queue_row(
+        pool: &PgPool,
+        queue_id: uuid::Uuid,
+    ) -> (String, Option<DateTime<Utc>>, Option<String>) {
+        sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<String>)>(
+            "SELECT status, sent_at, smtp_message_id FROM email_queue WHERE id = $1",
+        )
+        .bind(queue_id)
+        .fetch_one(pool)
+        .await
+        .expect("queue row")
+    }
+
+    async fn acceptance_state(pool: &PgPool, send_unit: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT state FROM sales_delivery_acceptances WHERE send_unit = $1")
+            .bind(send_unit)
+            .fetch_optional(pool)
+            .await
+            .expect("acceptance state")
+    }
+
+    // ── success path ───────────────────────────────────────────────────────
+
+    /// The full success path: claim, route, exactly-once reserve, submit,
+    /// record, row transition, events, delivery log, reputation.
+    #[tokio::test]
+    async fn successful_dispatch_transitions_every_durable_surface_once() {
+        let Some(pool) = e2e_pool("e2e_success").await else {
+            return;
+        };
+        let fixture = seed(&pool, "success").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        assert_eq!(jobs.len(), 1);
+        let job = jobs.into_iter().next().expect("one job");
+        assert_eq!(job.to, fixture.recipient);
+        assert_eq!(job.from, fixture.sender);
+        assert_eq!(job.tenant_id, fixture.tenant_id);
+        assert_eq!(job.domain_id, fixture.domain_id.to_string());
+        assert_eq!(job.message_id, fixture.message_id.to_string());
+        assert!(
+            lease_token_of(&job).is_some(),
+            "the claim mints a lease token"
+        );
+
+        processor.process_job(job.clone()).await.expect("dispatch");
+        assert_eq!(transport.calls(), 1);
+
+        let (status, sent_at, smtp_message_id) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        assert!(sent_at.is_some(), "sent_at is stamped with the row");
+        assert_eq!(smtp_message_id.as_deref(), Some("provider-message-1"));
+
+        assert_eq!(
+            acceptance_state(&pool, &send_unit_of(&job))
+                .await
+                .as_deref(),
+            Some("accepted"),
+            "the exactly-once ledger records the acceptance"
+        );
+
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM events WHERE tenant_id = $1 AND recipient = $2 \
+             AND event_type = 'sent'",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.recipient)
+        .fetch_one(&pool)
+        .await
+        .expect("events");
+        assert_eq!(events, 1, "exactly one 'sent' event");
+
+        let provider: Option<String> = sqlx::query_scalar(
+            "SELECT recipient_provider FROM events WHERE tenant_id = $1 AND event_type = 'sent' \
+             LIMIT 1",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("provider");
+        assert_eq!(
+            provider.as_deref(),
+            Some("google_workspace"),
+            "the delivery-time provider is normalized and persisted"
+        );
+
+        let log_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM email_delivery_log WHERE email_id = $1 AND success",
+        )
+        .bind(fixture.queue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("delivery log");
+        assert_eq!(log_rows, 1);
+
+        // The row is terminal: a second claim finds nothing.
+        let again = processor.fetch_jobs(10).await.expect("second claim");
+        assert!(again.is_empty(), "a sent row is never re-claimed");
+        pool.close().await;
+    }
+
+    /// A replayed logical send (the ledger already records acceptance) is
+    /// NEVER submitted again: the row is completed as possibly-sent and the
+    /// double stays untouched.
+    #[tokio::test]
+    async fn replayed_send_is_completed_without_a_second_submission() {
+        let Some(pool) = e2e_pool("e2e_replay").await else {
+            return;
+        };
+        let fixture = seed(&pool, "replay").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+
+        // A previous worker already recorded the external acceptance.
+        sqlx::query(
+            "INSERT INTO sales_delivery_acceptances \
+                 (send_unit, tenant_id, queue_id, state, transport, accepted_at) \
+             VALUES ($1, $2, $3, 'accepted', 'ses', NOW())",
+        )
+        .bind(send_unit_of(&job))
+        .bind(&fixture.tenant_id)
+        .bind(fixture.queue_id)
+        .execute(&pool)
+        .await
+        .expect("seed acceptance");
+
+        processor.process_job(job.clone()).await.expect("dispatch");
+        assert_eq!(
+            transport.calls(),
+            0,
+            "an already-accepted send must never be submitted again"
+        );
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        let possibly: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT metadata->'possibly_sent' FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("possibly_sent");
+        assert!(
+            possibly
+                .as_ref()
+                .and_then(|v| v.as_array())
+                .is_some_and(|list| list.iter().any(|v| v.as_str() == Some(&fixture.recipient))),
+            "the recipient is recorded as possibly-sent: {possibly:?}"
+        );
+        pool.close().await;
+    }
+
+    // ── failure taxonomy ───────────────────────────────────────────────────
+
+    /// 5xx with an address-proving enhanced code: bounced row, recipient
+    /// suppressed, bounce event recorded, replay of the send impossible.
+    #[tokio::test]
+    async fn hard_bounce_suppresses_only_the_proven_invalid_recipient() {
+        let Some(pool) = e2e_pool("e2e_hard_bounce").await else {
+            return;
+        };
+        let fixture = seed(&pool, "hard").await;
+        let transport = ScriptedTransport::new(SendMode::HardBounce);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+
+        let error = processor
+            .process_job(job.clone())
+            .await
+            .expect_err("a 550 is returned to the caller");
+        assert!(matches!(error, ProcessorError::Smtp { code: 550, .. }));
+        let (status, sent_at, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "bounced");
+        assert!(sent_at.is_none(), "a bounce never stamps sent_at");
+
+        let suppressed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM suppressions WHERE tenant_id = $1 AND email = $2 \
+             AND reason = 'hard_bounce'",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.recipient)
+        .fetch_one(&pool)
+        .await
+        .expect("suppressions");
+        assert_eq!(suppressed, 1, "only the bounced address is suppressed");
+
+        let bounced: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM events WHERE tenant_id = $1 AND event_type = 'bounced'",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("bounce event");
+        assert_eq!(bounced, 1);
+
+        assert_eq!(
+            acceptance_state(&pool, &send_unit_of(&job))
+                .await
+                .as_deref(),
+            Some("failed"),
+            "the refusal frees the unit for retry, never leaves it reserved"
+        );
+        pool.close().await;
+    }
+
+    /// A policy 5xx WITHOUT address proof (5.7.x spam verdict) dead-letters
+    /// the message but must NOT suppress the mailbox.
+    #[tokio::test]
+    async fn policy_refusal_never_suppresses_the_recipient() {
+        let Some(pool) = e2e_pool("e2e_policy_refusal").await else {
+            return;
+        };
+        let fixture = seed(&pool, "policy").await;
+        struct PolicyTransport;
+        #[async_trait::async_trait]
+        impl EmailTransport for PolicyTransport {
+            fn transport_name(&self) -> &str {
+                "policy"
+            }
+            fn supports_source_binding(&self) -> bool {
+                false
+            }
+            async fn verify(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+            async fn send(
+                &self,
+                _email: &PreparedEmail,
+                _route: &DeliveryRoute,
+            ) -> ProcessorResult<DeliveryReceipt> {
+                Err(ProcessorError::Smtp {
+                    code: 550,
+                    enhanced: Some("5.7.1".into()),
+                    message: "rejected as spam".into(),
+                })
+            }
+            async fn close(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+        }
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "e2e".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        let processor = EmailProcessor::with_transport(
+            pool.clone(),
+            e2e_redis(),
+            config,
+            HybridTransport::new(
+                Some(Arc::new(PolicyTransport) as Arc<dyn EmailTransport>),
+                None,
+            ),
+        )
+        .await
+        .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect_err("5xx returned to the caller");
+
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "bounced", "the message is permanently failed");
+        let suppressed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM suppressions WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("suppressions");
+        assert_eq!(
+            suppressed, 0,
+            "a policy refusal says nothing about the mailbox — no suppression"
+        );
+        pool.close().await;
+    }
+
+    /// 4xx: the row is requeued with backoff and the attempt counter advances.
+    #[tokio::test]
+    async fn soft_bounce_requeues_with_backoff_and_advances_the_attempt() {
+        let Some(pool) = e2e_pool("e2e_soft_bounce").await else {
+            return;
+        };
+        let fixture = seed(&pool, "soft").await;
+        let transport = ScriptedTransport::new(SendMode::SoftBounce);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+
+        processor
+            .process_job(job)
+            .await
+            .expect_err("a 450 defers the message");
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending", "a 4xx returns the row to pending");
+        let (attempt, scheduled_at, error_message): (i32, Option<DateTime<Utc>>, Option<String>) =
+            sqlx::query_as(
+                "SELECT attempt, scheduled_at, error_message FROM email_queue WHERE id = $1",
+            )
+            .bind(fixture.queue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("queue row");
+        assert_eq!(attempt, 1);
+        assert!(
+            scheduled_at.expect("scheduled") > Utc::now(),
+            "the retry is scheduled in the future"
+        );
+        assert!(
+            error_message.unwrap_or_default().contains("450"),
+            "the SMTP failure text is persisted"
+        );
+        pool.close().await;
+    }
+
+    /// An unclassifiable transport error at the attempt ceiling dead-letters
+    /// the recipient into `email_dlq` and terminalizes the row.
+    #[tokio::test]
+    async fn unknown_error_at_the_ceiling_moves_the_row_to_the_dlq() {
+        let Some(pool) = e2e_pool("e2e_dlq").await else {
+            return;
+        };
+        let fixture = seed(&pool, "dlq").await;
+        let transport = ScriptedTransport::new(SendMode::UnknownError);
+        let processor = build_processor_with(&pool, transport.clone(), true).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+
+        processor
+            .process_job(job.clone())
+            .await
+            .expect_err("the transport error is returned");
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "failed");
+        let dlq: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1 AND error_message LIKE '%connection reset%'",
+        )
+        .bind(fixture.queue_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("dlq");
+        assert_eq!(dlq, 1, "the exhausted recipient is dead-lettered");
+        pool.close().await;
+    }
+
+    // ── dispatch gates ─────────────────────────────────────────────────────
+
+    /// A globally suppressed recipient is never handed to the transport and
+    /// the row terminalizes as suppressed.
+    #[tokio::test]
+    async fn suppressed_recipient_is_never_submitted() {
+        let Some(pool) = e2e_pool("e2e_suppressed").await else {
+            return;
+        };
+        let fixture = seed(&pool, "suppressed").await;
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason) VALUES ($1, $2, $3, 'unsubscribe')",
+        )
+        .bind(format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]))
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.recipient)
+        .execute(&pool)
+        .await
+        .expect("seed suppression");
+
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect("suppression is success");
+
+        assert_eq!(
+            transport.calls(),
+            0,
+            "no submission for a suppressed address"
+        );
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "suppressed");
+        pool.close().await;
+    }
+
+    /// A suspended tenant defers the job with the real reason, before any
+    /// transport (or ledger) effect.
+    #[tokio::test]
+    async fn suspended_tenant_defers_before_any_effect() {
+        let Some(pool) = e2e_pool("e2e_tenant").await else {
+            return;
+        };
+        let fixture = seed(&pool, "tenant").await;
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+            .bind(&fixture.tenant_id)
+            .execute(&pool)
+            .await
+            .expect("suspend tenant");
+
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor.process_job(job.clone()).await.expect("deferral");
+
+        assert_eq!(transport.calls(), 0);
+        let (status, scheduled_at, reason): (String, Option<DateTime<Utc>>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, scheduled_at, metadata->>'requeue_reason' \
+                 FROM email_queue WHERE id = $1",
+            )
+            .bind(fixture.queue_id)
+            .fetch_one(&pool)
+            .await
+            .expect("queue row");
+        assert_eq!(status, "pending");
+        assert!(
+            scheduled_at.expect("requeue scheduled") > Utc::now(),
+            "the deferral is scheduled, not immediate"
+        );
+        assert_eq!(reason.as_deref(), Some("tenant_suspended"));
+        assert!(
+            acceptance_state(&pool, &send_unit_of(&job)).await.is_none(),
+            "no acceptance row may exist for a deferred job"
+        );
+        pool.close().await;
+    }
+
+    /// A queue row without an authorized domain is permanently rejected: the
+    /// row dead-letters into `email_dlq` instead of ever sending unsigned.
+    #[tokio::test]
+    async fn row_without_an_authorized_domain_is_permanently_rejected() {
+        let Some(pool) = e2e_pool("e2e_no_domain").await else {
+            return;
+        };
+        let fixture = seed(&pool, "no-domain").await;
+        sqlx::query("UPDATE email_queue SET domain_id = NULL WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("clear domain");
+
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        let error = processor
+            .process_job(job)
+            .await
+            .expect_err("no domain is a permanent job error");
+        assert!(matches!(error, ProcessorError::Job(_)), "error: {error}");
+
+        assert_eq!(transport.calls(), 0);
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "failed");
+        let dlq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1")
+                .bind(fixture.queue_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("dlq");
+        assert_eq!(dlq, 1);
+        pool.close().await;
+    }
+
+    /// A queue row whose `from` no longer matches its authorized domain is a
+    /// permanent job error (never an unsigned/other-tenant send) and
+    /// dead-letters.
+    #[tokio::test]
+    async fn sender_domain_mismatch_is_a_permanent_job_error() {
+        let Some(pool) = e2e_pool("e2e_sender_mismatch").await else {
+            return;
+        };
+        let fixture = seed(&pool, "mismatch").await;
+        sqlx::query("UPDATE email_queue SET from_address = 'attacker@other.example' WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("spoof sender");
+
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        let error = processor
+            .process_job(job)
+            .await
+            .expect_err("a mismatched sender domain must not be sent");
+        assert!(matches!(error, ProcessorError::Job(_)), "error: {error}");
+        assert_eq!(transport.calls(), 0, "nothing may reach the transport");
+        let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
+        assert_eq!(status, "failed");
+        let dlq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1")
+                .bind(fixture.queue_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("dlq");
+        assert_eq!(dlq, 1);
+        pool.close().await;
+    }
+
+    /// The error-rate circuit breaker latches once the 20-outcome window is
+    /// at least half failures, and a healthy window clears it again.
+    #[tokio::test]
+    async fn error_rate_breaker_latches_and_recovers() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool");
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport).await;
+
+        for _ in 0..(ERROR_WINDOW_SIZE - 1) {
+            processor.record_outcome(SendOutcome::TransportError);
+        }
+        assert_eq!(
+            processor.error_cooldown_until.load(Ordering::SeqCst),
+            0,
+            "below the window there is no latch"
+        );
+        processor.record_outcome(SendOutcome::TransportError);
+        let latched = processor.error_cooldown_until.load(Ordering::SeqCst);
+        assert!(
+            latched > Utc::now().timestamp_millis(),
+            "the breaker latched"
+        );
+
+        // A window of successes does not unlatch it (the cooldown owns the
+        // recovery), but it must not extend it either.
+        for _ in 0..ERROR_WINDOW_SIZE {
+            processor.record_outcome(SendOutcome::Success);
+        }
+        assert_eq!(
+            processor.error_cooldown_until.load(Ordering::SeqCst),
+            latched,
+            "successes neither unlatch nor extend the cooldown"
+        );
+    }
+
+    // ── pure helpers ───────────────────────────────────────────────────────
+
+    #[test]
+    fn overlay_status_counts_zero_fills_and_appends_unknowns() {
+        let snapshot = overlay_status_counts(vec![
+            ("sent".to_string(), 3),
+            ("future_status".to_string(), 7),
+        ]);
+        assert_eq!(snapshot.len(), EMAIL_QUEUE_STATUSES.len() + 1);
+        for status in EMAIL_QUEUE_STATUSES {
+            let count = snapshot
+                .iter()
+                .find(|(name, _)| name == status)
+                .map(|(_, count)| *count)
+                .expect("every canonical status is present");
+            assert_eq!(count, if status == "sent" { 3 } else { 0 });
+        }
+        assert_eq!(
+            snapshot.last(),
+            Some(&("future_status".to_string(), 7)),
+            "unknown statuses are appended, never dropped"
+        );
+    }
+
+    #[test]
+    fn split_mime_headers_prefers_structured_forms_and_parses_legacy() {
+        use serde_json::json;
+        let structured = json!({
+            "to_mailboxes": [{"email": "a@x.com", "name": "A"}, {"email": "b@y.com"}],
+            "cc_mailboxes": [{"email": "c@z.com"}],
+            "reply_to_mailbox": {"email": "r@x.com", "name": "R"},
+            "custom": {"X-One": "1", "X-Bad": 5}
+        });
+        let split = split_mime_headers(Some(&structured));
+        assert_eq!(split.mime_to.len(), 2);
+        assert_eq!(split.mime_to[0].email, "a@x.com");
+        assert_eq!(split.mime_to[0].name.as_deref(), Some("A"));
+        assert_eq!(split.mime_cc.len(), 1);
+        assert_eq!(
+            split.reply_to.as_ref().map(|m| m.email.as_str()),
+            Some("r@x.com")
+        );
+        assert_eq!(
+            split.custom,
+            vec![("X-One".to_string(), "1".to_string())],
+            "non-string custom values are dropped"
+        );
+
+        let legacy = json!({
+            "to": "a@x.com, B <b@y.com>",
+            "cc": "c@z.com",
+            "reply_to": "r@x.com"
+        });
+        let split = split_mime_headers(Some(&legacy));
+        assert_eq!(split.mime_to.len(), 2);
+        assert_eq!(split.mime_to[1].name.as_deref(), Some("B"));
+        assert_eq!(split.mime_cc.len(), 1);
+        assert_eq!(
+            split.reply_to.as_ref().map(|m| m.email.as_str()),
+            Some("r@x.com")
+        );
+
+        let flat = json!({"X-Custom": "yes"});
+        assert!(split_mime_headers(Some(&flat)).mime_to.is_empty());
+        assert_eq!(split_mime_headers(None).custom.len(), 0);
+        assert!(split_mime_headers(Some(&json!("not-an-object")))
+            .mime_to
+            .is_empty());
+    }
+
+    #[test]
+    fn logical_message_id_uses_the_sender_domain_and_refuses_degenerate_ids() {
+        let mut job = bare_job();
+        job.from = "sender@example.com".into();
+        job.message_id = "msg-1".into();
+        assert_eq!(
+            logical_message_id(&job).as_deref(),
+            Some("<msg-1@example.com>")
+        );
+        job.message_id = "<msg-2>".into();
+        assert_eq!(
+            logical_message_id(&job).as_deref(),
+            Some("<msg-2@example.com>")
+        );
+        job.message_id = "".into();
+        assert!(logical_message_id(&job).is_none());
+        job.message_id = "a b".into();
+        assert!(logical_message_id(&job).is_none());
+        job.message_id = "a@b".into();
+        assert!(
+            logical_message_id(&job).is_none(),
+            "an embedded @ is refused"
+        );
+        job.message_id = "msg".into();
+        job.from = "no-at-sign".into();
+        assert!(logical_message_id(&job).is_none());
+    }
+
+    #[test]
+    fn dkim_config_refuses_incomplete_domain_material() {
+        let mut domain = Domain {
+            id: "d1".into(),
+            tenant_id: "t1".into(),
+            domain: "example.com".into(),
+            dkim_selector: None,
+            dkim_public_key: None,
+            dkim_private_key: None,
+            warmup_enabled: false,
+            warmup_day: 0,
+            ses_verified: true,
+            dedicated_ips: Vec::new(),
+            return_path: None,
+        };
+        assert!(
+            matches!(
+                smtp_dkim_config_for_domain(&domain),
+                Err(ProcessorError::Dkim(_))
+            ),
+            "a missing selector is refused"
+        );
+        domain.dkim_selector = Some("sel".into());
+        assert!(matches!(
+            smtp_dkim_config_for_domain(&domain),
+            Err(ProcessorError::Dkim(_))
+        ));
+        domain.dkim_private_key = Some("dkim:v1:not-a-key".into());
+        assert!(matches!(
+            smtp_dkim_config_for_domain(&domain),
+            Err(ProcessorError::Dkim(_))
+        ));
+        domain.dkim_public_key = Some("pub".into());
+        assert!(
+            matches!(
+                smtp_dkim_config_for_domain(&domain),
+                Err(ProcessorError::Dkim(_))
+            ),
+            "undecryptable key material is a Dkim error, never a panic"
+        );
+    }
+
+    #[test]
+    fn route_and_transport_labels_are_total() {
+        assert_eq!(
+            route_transport_type(&DeliveryRoute::SesShared),
+            TransportType::Ses
+        );
+        assert_eq!(
+            route_transport_type(&DeliveryRoute::Dedicated {
+                dedicated_ip_id: "d".into(),
+                source_ip: "203.0.113.9".parse().expect("ip"),
+            }),
+            TransportType::Smtp
+        );
+        assert_eq!(transport_provider_label(&TransportType::Ses), "ses");
+        assert_eq!(transport_provider_label(&TransportType::Smtp), "smtp");
+    }
+
+    #[test]
+    fn recipient_provider_normalization_rejects_garbage() {
+        assert_eq!(
+            normalize_recipient_provider("Google Workspace"),
+            Some("google_workspace".into())
+        );
+        assert_eq!(normalize_recipient_provider("--__.."), None);
+        assert_eq!(normalize_recipient_provider(""), None);
+        assert_eq!(normalize_recipient_provider(&"a".repeat(65)), None);
+        assert_eq!(
+            normalized_provider_columns(Some("Google"), Some("mx_resolved")),
+            (Some("google".into()), Some("mx_resolved"))
+        );
+        assert_eq!(
+            normalized_provider_columns(Some("Google"), Some("made_up")),
+            (None, None),
+            "a provider without a valid provenance source is dropped"
+        );
+        assert_eq!(
+            normalized_provider_columns(None, Some("mx_resolved")),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn dedicated_ip_decoding_drops_corrupt_entries() {
+        use serde_json::json;
+        let raw = json!([
+            {"id": "d1", "ip_address": "203.0.113.9", "warming": true,
+             "warmup_started_at": "2026-01-01T00:00:00Z"},
+            {"id": "d2", "ip_address": "203.0.113.10"}
+        ]);
+        let decoded = parse_dedicated_ips(Some(&raw));
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].id, "d1");
+        assert!(decoded[0].warming);
+        assert!(decoded[0].warmup_started_at.is_some());
+        assert!(!decoded[1].warming, "warming defaults to false");
+        assert!(decoded[1].warmup_started_at.is_none());
+        let converted: DedicatedIp = DedicatedIpRow {
+            id: "d3".into(),
+            ip_address: "203.0.113.11".into(),
+            warming: true,
+            warmup_started_at: None,
+        }
+        .into();
+        assert_eq!(converted.id, "d3");
+
+        assert!(parse_dedicated_ips(None).is_empty());
+        assert!(parse_dedicated_ips(Some(&json!({"not": "an array"}))).is_empty());
+        assert!(
+            parse_dedicated_ips(Some(&json!([{"id": "d1"}]))).is_empty(),
+            "entries missing ip_address are dropped rather than invented"
+        );
+    }
+
+    #[test]
+    fn expand_rows_stops_at_the_cap_and_warns() {
+        fn row(to_addresses: Vec<&str>) -> QueuedEmailRow {
+            QueuedEmailRow {
+                id: "00000000-0000-0000-0000-000000000001".into(),
+                message_id: "00000000-0000-0000-0000-000000000002".into(),
+                tenant_id: "t".into(),
+                domain_id: "d".into(),
+                from: "s@example.com".into(),
+                to: to_addresses.first().copied().unwrap_or("").to_string(),
+                to_addresses: Some(to_addresses.iter().map(|s| s.to_string()).collect()),
+                subject: "s".into(),
+                html: None,
+                text: None,
+                headers: None,
+                attachments: None,
+                campaign_id: None,
+                message_category: "marketing".into(),
+                tags: None,
+                metadata: None,
+                sales_step_execution_id: None,
+                scheduled_at: None,
+                attempt: 0,
+                created_at: Utc::now(),
+            }
+        }
+        let jobs = expand_rows_within_cap(vec![row(vec!["a@x.com", "b@x.com", "c@x.com"])], 2);
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].to, "a@x.com");
+        assert_eq!(jobs[1].to, "b@x.com");
+        assert!(
+            expand_rows_within_cap(vec![row(vec![])], 2).is_empty(),
+            "an explicit empty recipient array yields no jobs"
+        );
+        let legacy = QueuedEmailRow {
+            to_addresses: None,
+            ..row(vec!["legacy@x.com"])
+        };
+        let jobs = expand_rows_within_cap(vec![legacy], 10);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].to, "legacy@x.com");
+    }
+
+    #[test]
+    fn send_failure_classification_covers_structured_and_legacy_signals() {
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Smtp {
+                code: 450,
+                enhanced: None,
+                message: "try later".into(),
+            }),
+            SendFailureClass::Soft
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Smtp {
+                code: 550,
+                enhanced: None,
+                message: "no".into(),
+            }),
+            SendFailureClass::Hard
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Smtp {
+                code: 250,
+                enhanced: None,
+                message: "odd".into(),
+            }),
+            SendFailureClass::Unknown,
+            "a non-failure code carries no disposition"
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Transport("Soft bounce hint".into())),
+            SendFailureClass::Soft
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Transport("Hard bounce hint".into())),
+            SendFailureClass::Hard
+        );
+        assert_eq!(
+            classify_send_failure(&ProcessorError::Transport("socket closed".into())),
+            SendFailureClass::Unknown
+        );
+
+        assert!(
+            is_recipient_invalid(&ProcessorError::Smtp {
+                code: 550,
+                enhanced: Some("5.1.1".into()),
+                message: "rejected".into(),
+            }),
+            "5.1.x proves the address"
+        );
+        assert!(
+            !is_recipient_invalid(&ProcessorError::Smtp {
+                code: 550,
+                enhanced: Some("5.7.1".into()),
+                message: "spam".into(),
+            }),
+            "a policy verdict is not address-proving"
+        );
+        assert!(is_recipient_invalid(&ProcessorError::Smtp {
+            code: 550,
+            enhanced: None,
+            message: "No Such User".into(),
+        }));
+    }
+
+    #[test]
+    fn fenced_out_only_matches_zero_rows() {
+        assert!(fenced_out(0));
+        assert!(!fenced_out(1));
+        assert!(!fenced_out(7));
+    }
+
+    fn bare_job() -> EmailJob {
+        EmailJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "t".into(),
+            domain_id: "00000000-0000-0000-0000-000000000003".into(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            subject: "s".into(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
     }
 }

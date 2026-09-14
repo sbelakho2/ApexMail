@@ -1582,4 +1582,329 @@ mod tests {
             "decommissioning"
         );
     }
+
+    // ── Adversarial wire-contract sweep ─────────────────────────────────
+    //
+    // Every enum that crosses a wire boundary has three encodings that must
+    // agree forever: `Display`, serde's `snake_case` value, and `FromStr`.
+    // A drift between any two silently corrupts stored statuses (e.g. a
+    // serde rename nobody mirrored into FromStr would make a previously
+    // written row unreadable). These tests pin all three encodings per
+    // variant and pin that unknown inputs are *rejected*, never defaulted.
+
+    /// Assert `value` renders as `wire`, serializes to exactly `wire`, and
+    /// parses back from `wire`; then assert unknown variants (`""`, the
+    /// uppercased wire value, and a NUL-bearing hostile string) are refused.
+    fn assert_wire_contract<T>(value: T, wire: &str, parse: fn(&str) -> Result<T, String>)
+    where
+        T: std::fmt::Display + serde::Serialize + PartialEq + std::fmt::Debug,
+    {
+        assert_eq!(value.to_string(), wire, "Display drift for {value:?}");
+        assert_eq!(
+            serde_json::to_value(&value).unwrap(),
+            serde_json::json!(wire),
+            "serde wire drift for {value:?}"
+        );
+        assert_eq!(
+            parse(wire).unwrap(),
+            value,
+            "FromStr round-trip drift for {wire}"
+        );
+        for hostile in ["", "\u{0}", "DROP TABLE", &wire.to_uppercase()] {
+            assert!(
+                parse(hostile).is_err(),
+                "hostile input {hostile:?} must not parse as {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn compliance_framework_wire_contract() {
+        assert_wire_contract(ComplianceFramework::Hipaa, "hipaa", |s| s.parse());
+        assert_wire_contract(ComplianceFramework::Soc2, "soc2", |s| s.parse());
+        assert_wire_contract(ComplianceFramework::Gdpr, "gdpr", |s| s.parse());
+        assert_wire_contract(ComplianceFramework::Ccpa, "ccpa", |s| s.parse());
+        assert_wire_contract(ComplianceFramework::Iso27001, "iso27001", |s| s.parse());
+        // Serde deserialization must not accept unknown framework strings.
+        assert!(
+            serde_json::from_value::<ComplianceFramework>(serde_json::json!("unknown")).is_err()
+        );
+    }
+
+    #[test]
+    fn compliance_status_wire_contract() {
+        for (status, wire) in [
+            (ComplianceStatus::Pending, "pending"),
+            (ComplianceStatus::Active, "active"),
+            (ComplianceStatus::Review, "review"),
+            (ComplianceStatus::Suspended, "suspended"),
+            (ComplianceStatus::Expired, "expired"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+        assert!(serde_json::from_value::<ComplianceStatus>(serde_json::json!("bogus")).is_err());
+    }
+
+    #[test]
+    fn data_request_type_and_status_wire_contract() {
+        assert_eq!(DataRequestType::Access.to_string(), "access");
+        assert_eq!(DataRequestType::Export.to_string(), "export");
+        assert_eq!(DataRequestType::Deletion.to_string(), "deletion");
+        assert_eq!(
+            serde_json::to_value(DataRequestType::Export).unwrap(),
+            serde_json::json!("export")
+        );
+        for (status, wire) in [
+            (DataRequestStatus::Pending, "pending"),
+            (DataRequestStatus::Approved, "approved"),
+            (DataRequestStatus::Processing, "processing"),
+            (DataRequestStatus::Completed, "completed"),
+            (DataRequestStatus::Rejected, "rejected"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn stream_destination_wire_contract_all_variants() {
+        assert_wire_contract(StreamDestinationType::S3, "s3", |s| s.parse());
+        assert_wire_contract(StreamDestinationType::Gcs, "gcs", |s| s.parse());
+        assert_wire_contract(StreamDestinationType::AzureBlob, "azure_blob", |s| {
+            s.parse()
+        });
+        assert_wire_contract(StreamDestinationType::Webhook, "webhook", |s| s.parse());
+        assert_wire_contract(StreamDestinationType::Splunk, "splunk", |s| s.parse());
+        assert_wire_contract(StreamDestinationType::Datadog, "datadog", |s| s.parse());
+        assert_wire_contract(StreamDestinationType::SumoLogic, "sumo_logic", |s| {
+            s.parse()
+        });
+        assert_wire_contract(StreamDestinationType::Elasticsearch, "elasticsearch", |s| {
+            s.parse()
+        });
+    }
+
+    #[test]
+    fn stream_status_wire_contract_all_variants() {
+        for (status, wire) in [
+            (StreamStatus::Active, "active"),
+            (StreamStatus::Paused, "paused"),
+            (StreamStatus::Error, "error"),
+            (StreamStatus::Disabled, "disabled"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn deployment_type_wire_contract_all_variants() {
+        assert_wire_contract(DeploymentType::Dedicated, "dedicated", |s| s.parse());
+        assert_wire_contract(DeploymentType::PrivateCloud, "private_cloud", |s| s.parse());
+        assert_wire_contract(DeploymentType::Hybrid, "hybrid", |s| s.parse());
+        assert_wire_contract(DeploymentType::OnPremise, "on_premise", |s| s.parse());
+    }
+
+    #[test]
+    fn deployment_and_ip_status_wire_contracts() {
+        for (status, wire) in [
+            (DeploymentStatus::Pending, "pending"),
+            (DeploymentStatus::Provisioning, "provisioning"),
+            (DeploymentStatus::Active, "active"),
+            (DeploymentStatus::Maintenance, "maintenance"),
+            (DeploymentStatus::Decommissioning, "decommissioning"),
+            (DeploymentStatus::Failed, "failed"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+        for (status, wire) in [
+            (IPStatus::Pending, "pending"),
+            (IPStatus::Warming, "warming"),
+            (IPStatus::Active, "active"),
+            (IPStatus::Suspended, "suspended"),
+            (IPStatus::Decommissioned, "decommissioned"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn sub_account_and_ticket_status_wire_contracts() {
+        for (status, wire) in [
+            (SubAccountStatus::Active, "active"),
+            (SubAccountStatus::Suspended, "suspended"),
+            (SubAccountStatus::Pending, "pending"),
+            (SubAccountStatus::Deactivated, "deactivated"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+        for (status, wire) in [
+            (TicketStatus::New, "new"),
+            (TicketStatus::Open, "open"),
+            (TicketStatus::Pending, "pending"),
+            (TicketStatus::OnHold, "on_hold"),
+            (TicketStatus::WaitingCustomer, "waiting_customer"),
+            (TicketStatus::Escalated, "escalated"),
+            (TicketStatus::Resolved, "resolved"),
+            (TicketStatus::Closed, "closed"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn ticket_priority_wire_contract_and_alias_rejection() {
+        for (priority, wire) in [
+            (TicketPriority::Critical, "critical"),
+            (TicketPriority::High, "high"),
+            (TicketPriority::Medium, "medium"),
+            (TicketPriority::Low, "low"),
+        ] {
+            assert_eq!(priority.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(&priority).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(wire.parse::<TicketPriority>().unwrap(), priority);
+        }
+        // Human shorthand aliases parse, but serde (the persisted wire form)
+        // does not accept them.
+        assert_eq!(
+            "p1".parse::<TicketPriority>().unwrap(),
+            TicketPriority::Critical
+        );
+        assert_eq!("p4".parse::<TicketPriority>().unwrap(), TicketPriority::Low);
+        assert!(serde_json::from_value::<TicketPriority>(serde_json::json!("p1")).is_err());
+        for hostile in ["", "P1", "urgent", "sev1"] {
+            assert!(hostile.parse::<TicketPriority>().is_err());
+        }
+    }
+
+    #[test]
+    fn ticket_category_wire_contract_all_variants() {
+        assert_wire_contract(TicketCategory::Delivery, "delivery", |s| s.parse());
+        assert_wire_contract(TicketCategory::Authentication, "authentication", |s| {
+            s.parse()
+        });
+        assert_wire_contract(TicketCategory::Billing, "billing", |s| s.parse());
+        assert_wire_contract(TicketCategory::Api, "api", |s| s.parse());
+        assert_wire_contract(TicketCategory::Integration, "integration", |s| s.parse());
+        assert_wire_contract(TicketCategory::Security, "security", |s| s.parse());
+        assert_wire_contract(TicketCategory::FeatureRequest, "feature_request", |s| {
+            s.parse()
+        });
+        assert_wire_contract(TicketCategory::Other, "other", |s| s.parse());
+    }
+
+    #[test]
+    fn sla_deadlines_unknown_priority_falls_back_to_medium_never_zero() {
+        // An unknown priority must inherit the medium SLA rather than a zero
+        // deadline (which would instantly breach every ticket).
+        assert_eq!(sla_deadlines("bogus"), sla_deadlines("medium"));
+        assert_eq!(sla_deadlines(""), (240, 1440));
+        assert_eq!(sla_deadlines("CRITICAL"), (240, 1440));
+    }
+
+    #[test]
+    fn template_and_domain_wire_contracts() {
+        assert_wire_contract(TemplateApprovalStatus::Draft, "draft", |s| s.parse());
+        assert_wire_contract(TemplateApprovalStatus::Pending, "pending", |s| s.parse());
+        assert_wire_contract(TemplateApprovalStatus::Approved, "approved", |s| s.parse());
+        assert_wire_contract(TemplateApprovalStatus::Rejected, "rejected", |s| s.parse());
+        assert_wire_contract(
+            TemplateApprovalStatus::ChangesRequested,
+            "changes_requested",
+            |s| s.parse(),
+        );
+        assert_wire_contract(DomainType::Tracking, "tracking", |s| s.parse());
+        assert_wire_contract(DomainType::ReturnPath, "return_path", |s| s.parse());
+        assert_wire_contract(DomainType::CustomFrom, "custom_from", |s| s.parse());
+        assert_wire_contract(DomainType::LandingPage, "landing_page", |s| s.parse());
+    }
+
+    #[test]
+    fn qbr_and_goal_status_wire_contracts() {
+        assert_wire_contract(QBRStatus::Scheduled, "scheduled", |s| s.parse());
+        assert_wire_contract(QBRStatus::DataGathering, "data_gathering", |s| s.parse());
+        assert_wire_contract(QBRStatus::Generating, "generating", |s| s.parse());
+        assert_wire_contract(QBRStatus::Review, "review", |s| s.parse());
+        assert_wire_contract(QBRStatus::Delivered, "delivered", |s| s.parse());
+        assert_wire_contract(QBRStatus::FeedbackReceived, "feedback_received", |s| {
+            s.parse()
+        });
+        for (status, wire) in [
+            (GoalStatus::NotStarted, "not_started"),
+            (GoalStatus::InProgress, "in_progress"),
+            (GoalStatus::AtRisk, "at_risk"),
+            (GoalStatus::Completed, "completed"),
+            (GoalStatus::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn domain_verification_and_contract_status_wire_contracts() {
+        for (status, wire) in [
+            (DomainVerificationStatus::Pending, "pending"),
+            (DomainVerificationStatus::Verified, "verified"),
+            (DomainVerificationStatus::Failed, "failed"),
+            (DomainVerificationStatus::Expired, "expired"),
+        ] {
+            assert_eq!(status.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+        for (status, wire) in [
+            (ContractStatus::Draft, "draft"),
+            (ContractStatus::PendingSignature, "pending_signature"),
+            (ContractStatus::Active, "active"),
+            (ContractStatus::Expired, "expired"),
+            (ContractStatus::Terminated, "terminated"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+        for (freq, wire) in [
+            (ContractFeeFrequency::OneTime, "one_time"),
+            (ContractFeeFrequency::Monthly, "monthly"),
+            (ContractFeeFrequency::Yearly, "yearly"),
+        ] {
+            assert_eq!(serde_json::to_value(freq).unwrap(), serde_json::json!(wire));
+        }
+    }
 }

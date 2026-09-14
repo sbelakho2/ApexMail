@@ -589,3 +589,197 @@ pub struct ProcessedReply {
     pub action_taken: Option<String>,
     pub processed_at: DateTime<Utc>,
 }
+
+#[cfg(test)]
+mod vocabulary_tests {
+    //! The string vocabulary is a DB contract (CHECK constraints on
+    //! `sales_reply_classifications`): every variant must round-trip, and
+    //! every policy predicate must be table-driven.
+
+    use super::*;
+
+    #[test]
+    fn reply_classification_round_trips_every_variant() {
+        for (name, variant) in [
+            ("out_of_office", ReplyClassification::OutOfOffice),
+            ("not_interested", ReplyClassification::NotInterested),
+            ("interested", ReplyClassification::Interested),
+            ("tell_me_more", ReplyClassification::TellMeMore),
+            ("wrong_person", ReplyClassification::WrongPerson),
+            ("referral", ReplyClassification::Referral),
+            ("unsubscribe", ReplyClassification::Unsubscribe),
+            ("bounce", ReplyClassification::Bounce),
+            ("positive_intent", ReplyClassification::PositiveIntent),
+            ("meeting_request", ReplyClassification::MeetingRequest),
+            ("question", ReplyClassification::Question),
+            ("complaint", ReplyClassification::Complaint),
+            ("spam", ReplyClassification::Spam),
+            ("unknown", ReplyClassification::Unknown),
+        ] {
+            assert_eq!(variant.as_str(), name);
+            assert_eq!(variant.to_string(), name);
+            assert_eq!(name.parse::<ReplyClassification>(), Ok(variant));
+        }
+        assert_eq!(
+            "OOO".parse::<ReplyClassification>(),
+            Ok(ReplyClassification::OutOfOffice)
+        );
+        assert_eq!(
+            "NOT_INTERESTED".parse::<ReplyClassification>(),
+            Ok(ReplyClassification::NotInterested)
+        );
+        assert_eq!(
+            "wat".parse::<ReplyClassification>(),
+            Ok(ReplyClassification::Unknown),
+            "unknown strings degrade to the explicit variant"
+        );
+    }
+
+    #[test]
+    fn reply_disposition_round_trips_and_policies_are_complete() {
+        assert_eq!(ReplyDisposition::ALL.len(), 11);
+        for disposition in ReplyDisposition::ALL {
+            let name = disposition.as_str();
+            assert_eq!(
+                name.parse::<ReplyDisposition>(),
+                Ok(disposition),
+                "disposition {name}"
+            );
+            assert_eq!(disposition.to_string(), name);
+        }
+        assert_eq!(
+            "out_of_office".parse::<ReplyDisposition>(),
+            Ok(ReplyDisposition::OutOfOffice),
+            "the long alias is accepted"
+        );
+        assert_eq!(
+            " OOO ".parse::<ReplyDisposition>(),
+            Ok(ReplyDisposition::OutOfOffice),
+            "parsing trims and lowercases"
+        );
+        let error = "no-such-disposition"
+            .parse::<ReplyDisposition>()
+            .expect_err("garbage is refused loudly");
+        assert!(error.contains("no-such-disposition"), "error: {error}");
+
+        // Sequence-stop policy: only an OOO autoreply and a soft bounce do
+        // not stop the scheduled follow-up.
+        for disposition in ReplyDisposition::ALL {
+            let expected = !matches!(
+                disposition,
+                ReplyDisposition::OutOfOffice | ReplyDisposition::BounceSoft
+            );
+            assert_eq!(
+                disposition.stops_normal_sequence(),
+                expected,
+                "stops_normal_sequence({})",
+                disposition.as_str()
+            );
+        }
+        for disposition in ReplyDisposition::ALL {
+            let expected = matches!(
+                disposition,
+                ReplyDisposition::Unsubscribe
+                    | ReplyDisposition::Complaint
+                    | ReplyDisposition::BounceHard
+                    | ReplyDisposition::NotInterested
+            );
+            assert_eq!(
+                disposition.is_permanent_suppression(),
+                expected,
+                "is_permanent_suppression({})",
+                disposition.as_str()
+            );
+        }
+        for disposition in ReplyDisposition::ALL {
+            let expected = matches!(
+                disposition,
+                ReplyDisposition::Unsubscribe
+                    | ReplyDisposition::Complaint
+                    | ReplyDisposition::BounceHard
+            );
+            assert_eq!(
+                disposition.requires_unsubscribe_upsert(),
+                expected,
+                "requires_unsubscribe_upsert({})",
+                disposition.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_projection_covers_every_disposition() {
+        for disposition in ReplyDisposition::ALL {
+            let legacy = ReplyClassification::from(disposition);
+            assert!(!legacy.as_str().is_empty());
+        }
+        assert_eq!(
+            ReplyClassification::from(ReplyDisposition::Positive),
+            ReplyClassification::PositiveIntent
+        );
+        assert_eq!(
+            ReplyClassification::from(ReplyDisposition::BounceHard),
+            ReplyClassification::Bounce
+        );
+        assert_eq!(
+            ReplyClassification::from(ReplyDisposition::BounceSoft),
+            ReplyClassification::Bounce
+        );
+        assert_eq!(
+            ReplyClassification::from(ReplyDisposition::Referral),
+            ReplyClassification::Referral
+        );
+    }
+
+    #[test]
+    fn classifier_kind_strings_are_canonical() {
+        assert_eq!(ClassifierKind::Deterministic.as_str(), "deterministic");
+        assert_eq!(ClassifierKind::Ai.as_str(), "ai");
+        assert_eq!(ClassifierKind::Operator.as_str(), "operator");
+    }
+
+    #[test]
+    fn operator_correction_note_names_both_sides() {
+        let note = ReplyDisposition::Unknown.corrects(ReplyDisposition::Complaint);
+        assert!(note.contains("unknown"), "note: {note}");
+        assert!(note.contains("complaint"), "note: {note}");
+    }
+
+    #[test]
+    fn reply_input_header_lookup_is_case_insensitive_and_lossy_safe() {
+        use serde_json::json;
+        let input = ReplyInput::from_bytes(b"Re: \xff", b"body")
+            .with_header("Content-Type", "text/plain")
+            .with_headers_json(Some(&json!({
+                "Auto-Submitted": "auto-replied",
+                "X-Number": 7,
+                "X-Null": null,
+                "X-Object": {"a": 1}
+            })));
+        assert_eq!(input.header("content-type"), Some("text/plain"));
+        assert_eq!(input.header("AUTO-SUBMITTED"), Some("auto-replied"));
+        assert_eq!(
+            input.header("x-number"),
+            None,
+            "non-string values are ignored"
+        );
+        assert_eq!(input.header("x-null"), None);
+        assert_eq!(input.header("x-object"), None);
+        assert_eq!(input.header("missing"), None);
+        assert_eq!(input.subject, "Re: \u{fffd}", "invalid UTF-8 is replaced");
+
+        let empty = ReplyInput::new("s", "b").with_headers_json(None);
+        assert!(empty.header("anything").is_none());
+        let scalar = ReplyInput::new("s", "b").with_headers_json(Some(&json!("not-an-object")));
+        assert!(scalar.header("anything").is_none());
+    }
+
+    #[test]
+    fn suggested_action_default_is_conservative() {
+        let action = SuggestedAction::default();
+        assert_eq!(action.action, ActionType::Ignore);
+        assert!(!action.auto_execute, "the default never acts on its own");
+        assert_eq!(action.priority, Urgency::Low);
+        assert!(action.parameters.is_object());
+    }
+}

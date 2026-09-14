@@ -24,3 +24,12 @@ clap.workspace = true
 chrono.workspace = true
 base64.workspace = true
 futures.workspace = true
+
+[dev-dependencies]
+# In-memory transport adapter (TokioIo) so the real gRPC client can run
+# over a tokio::io::duplex stream in tests — no TCP sockets anywhere.
+# Already in the workspace graph via tonic; not a new crate.
+hyper-util = { version = "0.1", default-features = false }
+# Paused-clock control (`tokio::time::advance`) for the IDLE-deadline and
+# read-timeout tests — same crate, dev-only feature.
+tokio = { workspace = true, features = ["test-util"] }

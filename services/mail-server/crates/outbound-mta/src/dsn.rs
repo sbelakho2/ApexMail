@@ -377,6 +377,87 @@ mod tests {
     }
 
     #[test]
+    fn actions_and_reporting_identity_render() {
+        assert_eq!(DsnAction::Failed.as_str(), "failed");
+        assert_eq!(DsnAction::Delayed.as_str(), "delayed");
+        assert_eq!(DsnAction::Delivered.as_str(), "delivered");
+        let generator = DsnGenerator::new("relay.example");
+        assert_eq!(generator.reporting_mta(), "relay.example");
+
+        let mut delivered = inputs();
+        delivered.action = DsnAction::Delivered;
+        let dsn = generator
+            .generate(&delivered, Some("sender@apexmail.ee"), b"")
+            .expect("DSN");
+        let text = String::from_utf8(dsn.message).expect("utf8");
+        assert!(text.contains("Action: delivered"));
+    }
+
+    #[test]
+    fn missing_recipient_is_refused() {
+        let generator = DsnGenerator::new("relay.example");
+        let mut blank = inputs();
+        blank.final_recipient = "   ".to_string();
+        let error = generator
+            .generate(&blank, Some("sender@apexmail.ee"), b"")
+            .expect_err("a DSN without a recipient is meaningless");
+        assert!(matches!(error, DsnError::MissingRecipient));
+    }
+
+    #[test]
+    fn optional_dsn_fields_are_omitted_when_unknown() {
+        let generator = DsnGenerator::new("relay.example");
+        let mut sparse = inputs();
+        sparse.original_envelope_id = None;
+        sparse.remote_mta = None;
+        let dsn = generator
+            .generate(&sparse, Some("sender@apexmail.ee"), b"")
+            .expect("DSN");
+        let text = String::from_utf8(dsn.message).expect("utf8");
+        assert!(!text.contains("Original-Envelope-Id:"));
+        assert!(!text.contains("Remote-MTA:"));
+        assert!(text.contains("Final-Recipient: rfc822; user@example.com"));
+    }
+
+    #[test]
+    fn header_extraction_handles_hostile_and_degenerate_messages() {
+        // No trailing newline: the final line still counts as a header.
+        let headers = extract_original_headers(b"From: a@b.c\r\nSubject: no-newline", 1024);
+        assert!(headers.contains("Subject: no-newline"));
+        assert!(
+            headers.ends_with("\r\n"),
+            "extraction normalizes line endings"
+        );
+        // LF-only line endings are normalized.
+        assert_eq!(
+            extract_original_headers(b"From: a@b.c\nSubject: s\n", 1024),
+            "From: a@b.c\r\nSubject: s\r\n"
+        );
+        // A body-only message yields nothing.
+        assert!(extract_original_headers(b"\r\nbody only", 1024).is_empty());
+        assert!(extract_original_headers(b"", 1024).is_empty());
+        // An oversized single header does not blow the budget.
+        let huge = format!("X-Huge: {}\r\n", "x".repeat(2000));
+        let capped = extract_original_headers(huge.as_bytes(), 64);
+        assert!(capped.len() <= 64, "budget is respected: {}", capped.len());
+        // Invalid UTF-8 is replaced, never panicking.
+        let headers = extract_original_headers(b"From: \xff\xfe\r\n\r\n", 1024);
+        assert!(headers.starts_with("From: "));
+    }
+
+    #[test]
+    fn address_sanity_check_rejects_degenerate_senders() {
+        assert!(is_usable_address("a@b.c"));
+        assert!(!is_usable_address("no-at-sign"));
+        assert!(!is_usable_address("@b.c"));
+        assert!(!is_usable_address("a@"));
+        assert!(!is_usable_address("a@nodot"));
+        assert!(!is_usable_address("a b@c.d"));
+        assert!(!is_usable_address("a@b.c\n"));
+        assert!(!is_usable_address("a@b.c\u{0}"));
+    }
+
+    #[test]
     fn permanent_dsn_inputs_use_enhanced_status() {
         let reply = SmtpReply::parse("550 5.1.1 user unknown").expect("reply");
         let built = reply

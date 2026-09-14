@@ -1419,11 +1419,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
-    fn utc(seconds: i64) -> DateTime<Utc> {
+    pub(super) fn utc(seconds: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_800_000_000 + seconds, 0).unwrap()
     }
 
-    fn test_config() -> SweepConfig {
+    pub(super) fn test_config() -> SweepConfig {
         SweepConfig {
             batch: 32,
             lease_secs: 120,
@@ -1432,14 +1432,14 @@ mod tests {
         }
     }
 
-    fn test_policy() -> RetryPolicy {
+    pub(super) fn test_policy() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 4,
             backoff_secs: vec![30, 120, 600, 3600],
         }
     }
 
-    fn message(mail_from: &str) -> StoredInboundMessage {
+    pub(super) fn message(mail_from: &str) -> StoredInboundMessage {
         StoredInboundMessage {
             mail_from: mail_from.to_string(),
             disposition: "accept".to_string(),
@@ -1448,28 +1448,28 @@ mod tests {
     }
 
     #[derive(Debug, Clone)]
-    struct MemRecipient {
-        message_id: String,
-        recipient: String,
-        mailbox_id: Option<String>,
-        status: String,
-        attempt: i32,
-        next_attempt_at: DateTime<Utc>,
-        delivered_at: Option<DateTime<Utc>>,
-        dsn_generated_at: Option<DateTime<Utc>>,
-        last_error: Option<String>,
+    pub(super) struct MemRecipient {
+        pub(super) message_id: String,
+        pub(super) recipient: String,
+        pub(super) mailbox_id: Option<String>,
+        pub(super) status: String,
+        pub(super) attempt: i32,
+        pub(super) next_attempt_at: DateTime<Utc>,
+        pub(super) delivered_at: Option<DateTime<Utc>>,
+        pub(super) dsn_generated_at: Option<DateTime<Utc>>,
+        pub(super) last_error: Option<String>,
     }
 
     /// In-memory `InboundDeliveryStore` mirroring the SQL semantics of
     /// migration 210 (claim predicate, lease, DSN claim guard).
-    struct MemStore {
-        jobs: Mutex<Vec<MemRecipient>>,
-        messages: Mutex<std::collections::HashMap<String, StoredInboundMessage>>,
-        attempts: Mutex<Vec<AttemptRecord>>,
+    pub(super) struct MemStore {
+        pub(super) jobs: Mutex<Vec<MemRecipient>>,
+        pub(super) messages: Mutex<std::collections::HashMap<String, StoredInboundMessage>>,
+        pub(super) attempts: Mutex<Vec<AttemptRecord>>,
     }
 
     impl MemStore {
-        fn new(jobs: Vec<MemRecipient>) -> Self {
+        pub(super) fn new(jobs: Vec<MemRecipient>) -> Self {
             Self {
                 jobs: Mutex::new(jobs),
                 messages: Mutex::new(std::collections::HashMap::new()),
@@ -1477,7 +1477,7 @@ mod tests {
             }
         }
 
-        fn with_message(self, message_id: &str, message: StoredInboundMessage) -> Self {
+        pub(super) fn with_message(self, message_id: &str, message: StoredInboundMessage) -> Self {
             self.messages
                 .lock()
                 .unwrap()
@@ -1485,7 +1485,7 @@ mod tests {
             self
         }
 
-        fn job(&self, message_id: &str, recipient: &str) -> MemRecipient {
+        pub(super) fn job(&self, message_id: &str, recipient: &str) -> MemRecipient {
             self.jobs
                 .lock()
                 .unwrap()
@@ -1495,11 +1495,11 @@ mod tests {
                 .expect("job exists")
         }
 
-        fn attempts(&self) -> Vec<AttemptRecord> {
+        pub(super) fn attempts(&self) -> Vec<AttemptRecord> {
             self.attempts.lock().unwrap().clone()
         }
 
-        fn update<F: FnOnce(&mut MemRecipient)>(&self, job: &RecipientJob, apply: F) {
+        pub(super) fn update<F: FnOnce(&mut MemRecipient)>(&self, job: &RecipientJob, apply: F) {
             let mut jobs = self.jobs.lock().unwrap();
             let row = jobs
                 .iter_mut()
@@ -1653,14 +1653,14 @@ mod tests {
         }
     }
 
-    struct ScriptedDeliverer {
-        outcomes: Mutex<VecDeque<DeliveryOutcome>>,
-        fallback: DeliveryOutcome,
-        calls: AtomicUsize,
+    pub(super) struct ScriptedDeliverer {
+        pub(super) outcomes: Mutex<VecDeque<DeliveryOutcome>>,
+        pub(super) fallback: DeliveryOutcome,
+        pub(super) calls: AtomicUsize,
     }
 
     impl ScriptedDeliverer {
-        fn new(outcomes: Vec<DeliveryOutcome>) -> Self {
+        pub(super) fn new(outcomes: Vec<DeliveryOutcome>) -> Self {
             Self {
                 outcomes: Mutex::new(outcomes.into()),
                 fallback: DeliveryOutcome::Delivered,
@@ -1669,7 +1669,7 @@ mod tests {
         }
 
         /// Every call returns `outcome` once the script is exhausted.
-        fn always(outcome: DeliveryOutcome) -> Self {
+        pub(super) fn always(outcome: DeliveryOutcome) -> Self {
             Self {
                 outcomes: Mutex::new(VecDeque::new()),
                 fallback: outcome,
@@ -1694,20 +1694,20 @@ mod tests {
         }
     }
 
-    struct RecordingDsn {
-        sent: Mutex<Vec<DeliveryStatusNotification>>,
-        fail_next: AtomicBool,
+    pub(super) struct RecordingDsn {
+        pub(super) sent: Mutex<Vec<DeliveryStatusNotification>>,
+        pub(super) fail_next: AtomicBool,
     }
 
     impl RecordingDsn {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 sent: Mutex::new(Vec::new()),
                 fail_next: AtomicBool::new(false),
             }
         }
 
-        fn sent_count(&self) -> usize {
+        pub(super) fn sent_count(&self) -> usize {
             self.sent.lock().unwrap().len()
         }
     }
@@ -1723,7 +1723,7 @@ mod tests {
         }
     }
 
-    fn job_row(message_id: &str, recipient: &str) -> MemRecipient {
+    pub(super) fn job_row(message_id: &str, recipient: &str) -> MemRecipient {
         MemRecipient {
             message_id: message_id.to_string(),
             recipient: recipient.to_string(),
@@ -2154,5 +2154,323 @@ mod tests {
             backoff_secs: vec![],
         };
         assert_eq!(empty.delay_secs(1), 300);
+    }
+}
+
+#[cfg(test)]
+mod adversarial_delivery_tests {
+    //! Additional adversarial cases for the delivery worker: missing
+    //! messages, DSN-retry-only jobs, dispatch failures, single-DSN guards,
+    //! and the status/header helpers.
+
+    use super::tests::*;
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn missing_message_row_defers_and_records_an_attempt() {
+        // No message inserted for the job: the sweep must defer it, never
+        // deliver, never generate a DSN.
+        let store = MemStore::new(vec![job_row("inb_missing", "user@managed.test")]);
+        let deliverer = ScriptedDeliverer::always(DeliveryOutcome::Delivered);
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &deliverer,
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.claimed, 1);
+        assert_eq!(stats.deferred, 1);
+        assert_eq!(stats.delivered, 0);
+        assert_eq!(dsn.sent_count(), 0, "no DSN for a missing message");
+        let job = store.job("inb_missing", "user@managed.test");
+        assert_eq!(job.status, STATUS_DEFERRED);
+        assert_eq!(job.attempt, 1);
+        assert_eq!(
+            job.last_error.as_deref(),
+            Some("inbound_messages row is missing")
+        );
+        let attempts = store.attempts();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].outcome, "transient");
+        assert_eq!(deliverer.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dsn_retry_job_skips_mailbox_delivery_and_dispatches() {
+        // prior_status = failed: mailbox delivery is over, only the DSN is
+        // outstanding. The deliverer must not be invoked again.
+        let mut row = job_row("inb_dsn", "user@managed.test");
+        row.status = STATUS_FAILED.to_string();
+        row.attempt = 2;
+        row.last_error = Some("550 no such mailbox".to_string());
+        row.mailbox_id = None;
+        let store = MemStore::new(vec![row]).with_message("inb_dsn", message("sender@remote.test"));
+        let deliverer = ScriptedDeliverer::always(DeliveryOutcome::Transient {
+            error: "should not run".to_string(),
+        });
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &deliverer,
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.dsn_sent, 1, "the pending DSN is dispatched");
+        assert_eq!(deliverer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.job("inb_dsn", "user@managed.test").status,
+            STATUS_DSN_SENT
+        );
+        let sent = dsn.sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].diagnostic, "550 no such mailbox");
+        assert_eq!(sent[0].original_sender, "sender@remote.test");
+        assert_eq!(sent[0].original_recipient, "user@managed.test");
+        assert_eq!(sent[0].status, "5.4.7");
+    }
+
+    #[tokio::test]
+    async fn dsn_sent_rows_are_never_claimed_again() {
+        let mut row = job_row("inb_sent", "user@managed.test");
+        row.status = STATUS_DSN_SENT.to_string();
+        row.dsn_generated_at = Some(utc(0));
+        let store = MemStore::new(vec![row]).with_message("inb_sent", message("s@remote.test"));
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Delivered),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.claimed, 0, "a finalized row is not claimable");
+        assert_eq!(dsn.sent_count(), 0, "no duplicate DSN");
+
+        // Crash window (documented at-least-once): a row claimed for a DSN
+        // (dsn_generated_at stamped) whose dispatch never completed is
+        // re-dispatched on the next sweep — a duplicate DSN is preferable to
+        // a lost one — and is finalized exactly once, after which it can
+        // never be claimed again.
+        let mut row = job_row("inb_crash", "user@managed.test");
+        row.status = STATUS_FAILED.to_string();
+        row.dsn_generated_at = Some(utc(0));
+        let store = MemStore::new(vec![row]).with_message("inb_crash", message("s@remote.test"));
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Delivered),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.claimed, 1, "the interrupted row is reclaimed");
+        assert_eq!(dsn.sent_count(), 1, "the interrupted DSN is retried");
+        assert_eq!(
+            store.job("inb_crash", "user@managed.test").status,
+            STATUS_DSN_SENT
+        );
+
+        // Once finalized, even a later sweep finds nothing to claim.
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Delivered),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(1_000),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.claimed, 0);
+        assert_eq!(dsn.sent_count(), 1, "no further DSN after finalization");
+    }
+
+    #[tokio::test]
+    async fn dsn_dispatch_failure_releases_the_claim_for_retry() {
+        let mut row = job_row("inb_retry_dsn", "user@managed.test");
+        row.status = STATUS_FAILED.to_string();
+        row.mailbox_id = None;
+        let store =
+            MemStore::new(vec![row]).with_message("inb_retry_dsn", message("s@remote.test"));
+        let dsn = RecordingDsn::new();
+        dsn.fail_next.store(true, Ordering::SeqCst);
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Delivered),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.dsn_deferred, 1);
+        assert_eq!(stats.dsn_sent, 0);
+        let job = store.job("inb_retry_dsn", "user@managed.test");
+        assert_eq!(
+            job.status, STATUS_FAILED,
+            "the claim is released back to the retryable state"
+        );
+        assert_eq!(
+            job.next_attempt_at,
+            utc(0) + chrono::Duration::seconds(test_config().dsn_retry_secs),
+            "retry is scheduled at the configured backoff"
+        );
+        assert!(
+            job.dsn_generated_at.is_none(),
+            "the guard is cleared for retry"
+        );
+        assert!(
+            job.last_error
+                .unwrap_or_default()
+                .contains("DSN dispatch failed"),
+            "the release records why"
+        );
+        let attempt = store.attempts().pop().expect("dsn attempt recorded");
+        assert_eq!(attempt.stage, "dsn");
+        assert_eq!(attempt.outcome, "transient");
+    }
+
+    #[tokio::test]
+    async fn null_return_path_permanent_failure_is_undeliverable_and_terminal() {
+        // mail_from "" (bounce): RFC 5321 §4.5.5 forbids a DSN; the row is
+        // terminal and a later sweep must not resurrect it.
+        let store = MemStore::new(vec![job_row("inb_null", "user@managed.test")])
+            .with_message("inb_null", message(""));
+        let dsn = RecordingDsn::new();
+        let stats = run_sweep(
+            &store,
+            &ScriptedDeliverer::always(DeliveryOutcome::Permanent {
+                error: "550 5.1.1 no such user".to_string(),
+                dsn_status: "5.1.1",
+            }),
+            &dsn,
+            &test_policy(),
+            &test_config(),
+            utc(0),
+        )
+        .await
+        .expect("sweep succeeds");
+        assert_eq!(stats.undeliverable, 1);
+        assert_eq!(dsn.sent_count(), 0);
+        let job = store.job("inb_null", "user@managed.test");
+        assert_eq!(job.status, STATUS_UNDELIVERABLE);
+        let attempts = store.attempts();
+        assert_eq!(attempts[0].outcome, "permanent");
+        assert_eq!(attempts[0].stage, "delivery");
+    }
+
+    #[test]
+    fn outcome_from_status_maps_every_code() {
+        use tonic::Code;
+        // (code, expected permanent DSN status)
+        for (code, expected) in [
+            (Code::NotFound, Some("5.1.1")),
+            (Code::InvalidArgument, Some("5.3.0")),
+            (Code::PermissionDenied, Some("5.3.0")),
+            (Code::FailedPrecondition, Some("5.3.0")),
+            (Code::ResourceExhausted, Some("5.2.2")),
+            (Code::Unimplemented, None),
+            (Code::Unavailable, None),
+            (Code::DeadlineExceeded, None),
+            (Code::Internal, None),
+            (Code::Unknown, None),
+            (Code::Aborted, None),
+        ] {
+            let outcome = outcome_from_status(&tonic::Status::new(code, "detail"));
+            match (outcome, expected) {
+                (DeliveryOutcome::Permanent { dsn_status, .. }, Some(want)) => {
+                    assert_eq!(dsn_status, want, "{code:?}");
+                }
+                (DeliveryOutcome::Permanent { .. }, None) => {
+                    panic!("{code:?} must be transient so the delivery is retried")
+                }
+                (DeliveryOutcome::Transient { .. }, None) => {}
+                (DeliveryOutcome::Transient { .. }, Some(want)) => {
+                    panic!("{code:?} must be a permanent {want}")
+                }
+                (DeliveryOutcome::Delivered, _) => panic!("{code:?} cannot be Delivered"),
+            }
+        }
+    }
+
+    #[test]
+    fn find_header_end_handles_crlf_and_lf_only() {
+        assert_eq!(find_header_end(b"a: b\r\n\r\nbody"), Some(8));
+        assert_eq!(find_header_end(b"a: b\n\nbody"), Some(6));
+        // No blank line at all.
+        assert_eq!(find_header_end(b"a: b\r\nc: d"), None);
+        // The first separator wins.
+        assert_eq!(find_header_end(b"\r\n\r\n\r\n\r\n"), Some(4));
+    }
+
+    #[test]
+    fn truncate_error_is_char_safe_and_bounded() {
+        let short = "boom";
+        assert_eq!(truncate_error(short), "boom");
+        let long = "é".repeat(LAST_ERROR_MAX_CHARS);
+        let truncated = truncate_error(&long);
+        assert!(
+            truncated.len() <= LAST_ERROR_MAX_CHARS * 2 + 3,
+            "byte bound"
+        );
+        assert!(truncated.is_char_boundary(truncated.len()), "char safe");
+        let exact = "x".repeat(LAST_ERROR_MAX_CHARS);
+        assert_eq!(truncate_error(&exact).len(), LAST_ERROR_MAX_CHARS);
+        let over = "x".repeat(LAST_ERROR_MAX_CHARS + 10);
+        assert!(truncate_error(&over).len() <= LAST_ERROR_MAX_CHARS + 3);
+    }
+
+    #[test]
+    fn retry_policy_backoff_is_clamped_and_defaulted() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            backoff_secs: Vec::new(),
+        };
+        assert_eq!(policy.delay_secs(1), 300, "empty table falls back to 300s");
+        let policy = RetryPolicy {
+            max_attempts: 10,
+            backoff_secs: vec![30, 120],
+        };
+        assert_eq!(policy.delay_secs(1), 30);
+        assert_eq!(policy.delay_secs(2), 120);
+        assert_eq!(policy.delay_secs(99), 120, "beyond the table is clamped");
+        let default_policy = RetryPolicy::default();
+        assert!(default_policy.max_attempts > 0);
+        assert_eq!(default_policy.delay_secs(1), 30);
+    }
+
+    #[tokio::test]
+    async fn rpc_with_deadline_times_out_but_returns_fast_values() {
+        let fast = rpc_with_deadline(async { 7 }, Duration::from_secs(60)).await;
+        assert_eq!(fast, Some(7));
+        let slow = rpc_with_deadline(
+            async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                9
+            },
+            Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(
+            slow, None,
+            "a stalled mailstore RPC yields None, not a hang"
+        );
     }
 }

@@ -825,3 +825,151 @@ mod tests {
         assert_eq!(result, html);
     }
 }
+
+#[cfg(test)]
+mod adversarial_rewrite_tests {
+    //! DOM-guided rewriting against hostile markup: script/style bodies
+    //! containing decoy `</body>` tags, and every attribute spelling the
+    //! single-scan rewriter must (or must not) touch.
+
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    const TEST_SECRET: &str = "test-secret-key-32-bytes-minimum!!";
+
+    fn job() -> EmailJob {
+        EmailJob {
+            id: "job_rw".to_string(),
+            message_id: "msg_rw".to_string(),
+            tenant_id: "ten_rw".to_string(),
+            domain_id: "dom_rw".to_string(),
+            from: "sender@example.com".to_string(),
+            to: "recipient@example.com".to_string(),
+            subject: "Test".to_string(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".to_string(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 1,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn config() -> TrackingConfig {
+        TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".to_string(),
+            open_pixel_path: "/o".to_string(),
+            click_redirect_path: "/c".to_string(),
+            unsubscribe_path: "/u".to_string(),
+            secret_key: None,
+        }
+    }
+
+    fn with_secret<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, TEST_SECRET);
+        body()
+    }
+
+    /// A decoy `</body>` inside a `<script>` string must not receive the
+    /// pixel; the REAL closing body tag does.
+    #[test]
+    fn decoy_body_tags_inside_script_and_style_are_skipped() {
+        with_secret(|| {
+            let html = "<html><body><script>var x = '</body>';</script>\
+                        <style>/* </body> */</style><p>hi</p></body></html>";
+            let tracked = add_tracking_pixel(html, &job(), &config());
+            let real_close = tracked.rfind("</body>").expect("real body close");
+            let pixel = tracked
+                .find("track.example.com/o/")
+                .expect("pixel inserted");
+            assert!(
+                pixel < real_close,
+                "the pixel must land before the real </body>, not inside script/style"
+            );
+            // Both decoys survive untouched inside their elements.
+            assert!(tracked.contains("<script>var x = '</body>';</script>"));
+            assert!(tracked.contains("<style>/* </body> */</style>"));
+        });
+    }
+
+    /// Every legal attribute spelling is rewritten under a single scan.
+    #[test]
+    fn every_href_quoting_style_is_rewritten() {
+        with_secret(|| {
+            let html = "<html><body>\
+                <a href=\"https://example.com/a\">a</a>\
+                <a href='https://example.com/b'>b</a>\
+                <a href=https://example.com/c>c</a>\
+                <a HREF=\"https://example.com/d\">d</a>\
+                <a href= \"https://example.com/f\">f</a>\
+                <a href=\"https://example.com/e?x=1&amp;y=2\">e</a>\
+                </body></html>";
+            let tracked = rewrite_links(html, &job(), &config());
+            assert_eq!(
+                tracked.matches("https://track.example.com/c/").count(),
+                6,
+                "all six spellings must be tracked: {tracked}"
+            );
+            for original in ["a", "b", "c", "d", "e", "f"] {
+                assert!(
+                    !tracked.contains(&format!("https://example.com/{original}")),
+                    "href {original} was not rewritten: {tracked}"
+                );
+            }
+            assert!(
+                !tracked.contains("&amp;"),
+                "the raw attribute is replaced wholesale (no stale entity): {tracked}"
+            );
+        });
+    }
+
+    /// Unterminated quotes and non-trackable schemes are left byte-exact.
+    #[test]
+    fn hostile_and_excluded_hrefs_are_left_untouched() {
+        with_secret(|| {
+            let unterminated = "<a href=\"https://example.com/x>broken</a>";
+            assert_eq!(
+                rewrite_links(unterminated, &job(), &config()),
+                unterminated,
+                "an unterminated quote must not be rewritten"
+            );
+
+            let html = "<html><body>\
+                <a href=\"mailto:a@b.c\">m</a>\
+                <a href=\"tel:+123\">t</a>\
+                <a href=\"#anchor\">a</a>\
+                <a href=\"{{unsubscribe_url}}\">u</a>\
+                <a href=\"https://x.example/unsubscribe?u=1\">s</a>\
+                </body></html>";
+            assert_eq!(
+                rewrite_links(html, &job(), &config()),
+                html,
+                "excluded schemes and unsubscribe targets stay direct"
+            );
+        });
+    }
+
+    /// Without the shared secret nothing is rewritten — no unsigned token is
+    /// ever emitted into customer HTML.
+    #[test]
+    fn missing_secret_leaves_every_href_direct() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+        let html = "<a href=\"https://example.com/a\">a</a>";
+        assert_eq!(rewrite_links(html, &job(), &config()), html);
+        let html_with_pixel = "<html><body><p>hi</p></body></html>";
+        assert_eq!(
+            add_tracking_pixel(html_with_pixel, &job(), &config()),
+            html_with_pixel,
+            "no pixel without the secret"
+        );
+    }
+}

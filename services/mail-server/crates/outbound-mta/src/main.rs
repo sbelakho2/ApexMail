@@ -42,6 +42,7 @@ use outbound_mta::ledger::{PgLedger, RelayLedger};
 use outbound_mta::mx::DnsMxResolver;
 use outbound_mta::{Relay, RelayConfig};
 
+#[derive(Debug)]
 struct DaemonConfig {
     database_url: String,
     health_addr: SocketAddr,
@@ -251,4 +252,259 @@ async fn main() -> Result<()> {
     let _ = server.await;
     info!("outbound MTA relay stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! The daemon's configuration parser and health contract are pure enough
+    //! to pin without a live broker: a misconfigured environment must refuse
+    //! to start, and a ledger outage must surface as 503, never as "ok".
+
+    use super::*;
+    use async_trait::async_trait;
+    use outbound_mta::ledger::{ClaimOutcome, LedgerError, QueuedSubmission};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with exactly `vars` set (all other daemon variables are
+    /// removed first), restoring nothing afterwards — the lock keeps other
+    /// tests from observing the mutation.
+    fn with_env<T>(vars: &[(&str, &str)], body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for name in [
+            "DATABASE_URL",
+            "OUTBOUND_MTA_HEALTH_ADDR",
+            "OUTBOUND_MTA_HELO_DOMAIN",
+            "OUTBOUND_MTA_REPORTING_MTA",
+            "OUTBOUND_MTA_POLL_SECS",
+            "OUTBOUND_MTA_BATCH_SIZE",
+            "OUTBOUND_MTA_MAX_ATTEMPTS",
+        ] {
+            std::env::remove_var(name);
+        }
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
+        body()
+    }
+
+    #[derive(Default)]
+    struct StubLedger {
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl RelayLedger for StubLedger {
+        async fn claim_submission(
+            &self,
+            _new: outbound_mta::ledger::NewSubmission,
+            _now: DateTime<Utc>,
+            _lease: Duration,
+        ) -> Result<ClaimOutcome, LedgerError> {
+            Err(LedgerError::Corrupt {
+                send_unit: "stub".to_string(),
+                message: "not used".to_string(),
+            })
+        }
+
+        async fn claim_due(
+            &self,
+            _now: DateTime<Utc>,
+            _lease: Duration,
+            _limit: i64,
+        ) -> Result<Vec<QueuedSubmission>, LedgerError> {
+            Ok(Vec::new())
+        }
+
+        async fn record_retry(
+            &self,
+            _send_unit: &str,
+            _attempt: u32,
+            _next_attempt_at: DateTime<Utc>,
+            _error: &str,
+        ) -> Result<(), LedgerError> {
+            Ok(())
+        }
+
+        async fn record_accepted(
+            &self,
+            _send_unit: &str,
+            _record: &outbound_mta::AcceptanceRecord,
+        ) -> Result<(), LedgerError> {
+            Ok(())
+        }
+
+        async fn record_permanent(
+            &self,
+            _send_unit: &str,
+            _attempt: u32,
+            _error: &str,
+        ) -> Result<(), LedgerError> {
+            Ok(())
+        }
+
+        async fn enqueue_dsn(
+            &self,
+            _new: outbound_mta::ledger::NewSubmission,
+            _now: DateTime<Utc>,
+        ) -> Result<bool, LedgerError> {
+            Ok(false)
+        }
+
+        async fn get(&self, _send_unit: &str) -> Result<Option<QueuedSubmission>, LedgerError> {
+            Ok(None)
+        }
+
+        async fn reclaim_expired(&self, _now: DateTime<Utc>) -> Result<u64, LedgerError> {
+            Ok(0)
+        }
+
+        async fn stats(&self) -> Result<outbound_mta::ledger::LedgerStats, LedgerError> {
+            if self.fail {
+                return Err(LedgerError::Database("ledger is down".to_string()));
+            }
+            Ok(outbound_mta::ledger::LedgerStats {
+                pending: 3,
+                delivering: 1,
+                accepted: 5,
+                failed: 2,
+            })
+        }
+    }
+
+    fn state(ledger: Arc<dyn RelayLedger>) -> AppState {
+        AppState {
+            started_at: Utc::now(),
+            ledger,
+            counters: Arc::new(Counters::default()),
+        }
+    }
+
+    #[test]
+    fn env_parse_defaults_overrides_and_rejects_garbage() {
+        with_env(&[], || {
+            let batch: i64 = env_parse("OUTBOUND_MTA_BATCH_SIZE", "100").expect("default");
+            assert_eq!(batch, 100);
+        });
+        with_env(&[("OUTBOUND_MTA_BATCH_SIZE", " 7 ")], || {
+            let batch: i64 = env_parse("OUTBOUND_MTA_BATCH_SIZE", "100").expect("override");
+            assert_eq!(batch, 7, "surrounding whitespace is tolerated");
+        });
+        with_env(&[("OUTBOUND_MTA_BATCH_SIZE", "not-a-number")], || {
+            let error = env_parse::<i64>("OUTBOUND_MTA_BATCH_SIZE", "100")
+                .expect_err("garbage must refuse startup");
+            let text = error.to_string();
+            assert!(text.contains("OUTBOUND_MTA_BATCH_SIZE"), "error: {text}");
+        });
+    }
+
+    #[test]
+    fn daemon_config_refuses_incomplete_or_impossible_environments() {
+        with_env(&[], || {
+            let error = DaemonConfig::from_env().expect_err("DATABASE_URL is required");
+            assert!(error.to_string().contains("DATABASE_URL"));
+        });
+        with_env(&[("DATABASE_URL", "   ")], || {
+            let error = DaemonConfig::from_env().expect_err("blank DATABASE_URL is refused");
+            assert!(error.to_string().contains("must not be empty"));
+        });
+        let valid = &[("DATABASE_URL", "postgres://localhost/db")];
+        with_env(valid, || {
+            let config = DaemonConfig::from_env().expect("defaults");
+            assert_eq!(config.health_addr.to_string(), "127.0.0.1:8093");
+            assert_eq!(config.poll_interval, Duration::from_secs(5));
+            assert_eq!(config.batch_size, 100);
+            assert_eq!(config.relay.retry.max_attempts, 12);
+            assert_eq!(config.relay.helo_domain, "relay.apexmail.ee");
+            assert_eq!(
+                config.relay.reporting_mta, config.relay.helo_domain,
+                "Reporting-MTA defaults to the HELO domain"
+            );
+        });
+        with_env(
+            &[
+                ("DATABASE_URL", "postgres://localhost/db"),
+                ("OUTBOUND_MTA_HEALTH_ADDR", "0.0.0.0:9999"),
+                ("OUTBOUND_MTA_HELO_DOMAIN", "relay.test"),
+                ("OUTBOUND_MTA_POLL_SECS", "1"),
+                ("OUTBOUND_MTA_BATCH_SIZE", "1"),
+                ("OUTBOUND_MTA_MAX_ATTEMPTS", "3"),
+            ],
+            || {
+                let config = DaemonConfig::from_env().expect("overrides");
+                assert_eq!(config.health_addr.to_string(), "0.0.0.0:9999");
+                assert_eq!(config.relay.reporting_mta, "relay.test");
+                assert_eq!(config.relay.retry.max_attempts, 3);
+            },
+        );
+        for (name, value) in [
+            ("OUTBOUND_MTA_POLL_SECS", "0"),
+            ("OUTBOUND_MTA_BATCH_SIZE", "0"),
+            ("OUTBOUND_MTA_MAX_ATTEMPTS", "0"),
+            ("OUTBOUND_MTA_HEALTH_ADDR", "not-an-address"),
+        ] {
+            with_env(
+                &[("DATABASE_URL", "postgres://localhost/db"), (name, value)],
+                || {
+                    let error = DaemonConfig::from_env()
+                        .err()
+                        .unwrap_or_else(|| panic!("{name}={value} must refuse"));
+                    assert!(
+                        error.to_string().contains(name),
+                        "the failure must name the variable: {error}"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn counters_snapshot_exposes_every_field() {
+        let counters = Counters::default();
+        counters.sweeps.fetch_add(2, Ordering::Relaxed);
+        counters.accepted.fetch_add(3, Ordering::Relaxed);
+        let snapshot = counters.snapshot();
+        assert_eq!(snapshot["sweeps"], 2);
+        assert_eq!(snapshot["accepted"], 3);
+        assert_eq!(snapshot["claimed"], 0);
+        assert_eq!(snapshot["retry_scheduled"], 0);
+        assert_eq!(snapshot["permanently_failed"], 0);
+        assert_eq!(snapshot["errors"], 0);
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_queue_stats_and_fails_closed_on_a_ledger_outage() {
+        let healthy = state(Arc::new(StubLedger::default()));
+        let response = healthz(State(healthy)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["queue"]["accepted"], 5);
+        assert_eq!(json["queue"]["pending"], 3);
+
+        let degraded = state(Arc::new(StubLedger { fail: true }));
+        let response = healthz(State(degraded)).await.into_response();
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a ledger outage must never be reported as healthy"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["status"], "degraded");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ledger is down"),
+            "json: {json}"
+        );
+    }
 }

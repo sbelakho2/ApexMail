@@ -544,11 +544,10 @@ fn bye(msg: &str) -> String {
 }
 
 fn flags_response(flags: &[String]) -> String {
-    let f = flags
-        .iter()
-        .map(|fl| format!("\\{}", fl))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // The stored flag names already carry their leading backslash (`\Seen`),
+    // exactly as `permanent_flags_response` assumes — prepending another one
+    // emitted `* FLAGS (\\Seen ...)`, which is not a valid IMAP flag.
+    let f = flags.join(" ");
     format!("* FLAGS ({})\r\n", f)
 }
 
@@ -2185,6 +2184,10 @@ fn resolve_macro_item(item: &FetchItem) -> Vec<FetchItem> {
         FetchItem::All => vec![
             FetchItem::Flags,
             FetchItem::InternalDate,
+            // RFC 3501 §6.4.5: ALL = (FLAGS INTERNALDATE RFC822.SIZE ENVELOPE).
+            // Omitting RFC822.SIZE made an ALL FETCH return every macro
+            // attribute except the size.
+            FetchItem::Rfc822Size,
             FetchItem::Envelope,
         ],
         // F5: RFC 3501 §6.4.5 — the FULL macro is ALL + BODY (the structure).
@@ -2193,6 +2196,7 @@ fn resolve_macro_item(item: &FetchItem) -> Vec<FetchItem> {
         FetchItem::Full => vec![
             FetchItem::Flags,
             FetchItem::InternalDate,
+            FetchItem::Rfc822Size,
             FetchItem::Envelope,
             FetchItem::BodyStructure { extended: true },
         ],
@@ -4827,6 +4831,10 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
     let mut responses = String::new();
     if mailbox_selected(session) && !session.mailbox.is_empty() {
         let old_uid_map = session.uid_map.clone();
+        // What the client was last told: the refresh below may raise the
+        // session's internal uid_next from the listing (last UID + 1), which
+        // must not mask the store's own UIDNEXT update from the response.
+        let uid_next_before = session.uid_next;
         let mut client = session.client.clone();
         if let Ok(status) =
             get_mailbox_status(&mut client, &session.account_id, &session.mailbox).await
@@ -4892,10 +4900,15 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
                 responses.push_str(&format!("* {} RECENT\r\n", recent_now));
                 session.recent = recent_now;
             }
-            if mb.uidnext.max(1) != session.uid_next {
+            // UIDNEXT is reported whenever the STORE's value differs from
+            // what the client was last told — not from the session's
+            // internally advanced uid_next. The refresh above raises
+            // uid_next to last+1 on an arrival, which previously suppressed
+            // the very UIDNEXT update the arrival justified.
+            if mb.uidnext.max(1) != uid_next_before {
                 responses.push_str(&uid_next_response(mb.uidnext.max(1)));
-                session.uid_next = mb.uidnext.max(1);
             }
+            session.uid_next = session.uid_next.max(mb.uidnext.max(1));
         }
     }
     responses.push_str(&tagged_ok(tag, "NOOP completed"));
@@ -5572,6 +5585,14 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
         };
         if let Some(tag) = idle_tag {
             run_idle(&session, &mut reader, &mut writer, &tag).await?;
+            // run_idle ends the session on client disconnect, read error or
+            // the 29-minute deadline (state = Logout). Without this check
+            // the loop would re-enter run_idle on a dead reader (spinning
+            // forever after an IDLE disconnect) or wait for the 5-minute
+            // command timeout after a LOGOUT sent while idling.
+            if session.lock().await.state == SessionState::Logout {
+                break;
+            }
             continue;
         }
 
@@ -6978,8 +6999,21 @@ mod tests {
             vec![
                 FetchItem::Flags,
                 FetchItem::InternalDate,
+                // RFC 3501 §6.4.5: FULL = ALL + BODY, and ALL includes
+                // RFC822.SIZE.
+                FetchItem::Rfc822Size,
                 FetchItem::Envelope,
                 FetchItem::BodyStructure { extended: true },
+            ]
+        );
+        // The ALL macro on its own carries RFC822.SIZE too.
+        assert_eq!(
+            resolve_macro_item(&FetchItem::All),
+            vec![
+                FetchItem::Flags,
+                FetchItem::InternalDate,
+                FetchItem::Rfc822Size,
+                FetchItem::Envelope,
             ]
         );
         // FULL needs the raw message to derive the structure, but it must
@@ -7799,3 +7833,6 @@ mod tests {
         assert!(view_capped_notice(100, 99).is_none());
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests;

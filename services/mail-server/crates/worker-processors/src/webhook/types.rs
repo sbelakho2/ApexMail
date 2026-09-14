@@ -304,4 +304,34 @@ mod truncate_tests {
         let out = truncate_payload(&payload, 1024);
         assert_eq!(out, payload);
     }
+
+    #[test]
+    fn truncate_payload_recurses_into_arrays_of_objects() {
+        let payload = json!({
+            "items": [{ "html": "x".repeat(3000) }, { "keep": "small" }],
+            "count": 2
+        });
+        let out = truncate_payload(&payload, 1024);
+        let first = out["items"][0]["html"].as_str().expect("string");
+        assert!(
+            first.contains("[truncated"),
+            "array members recurse: {first}"
+        );
+        assert!(first.chars().count() < 3000);
+        assert_eq!(out["items"][1]["keep"], "small");
+        assert_eq!(out["count"], 2);
+    }
+
+    #[test]
+    fn truncate_payload_with_a_tiny_budget_never_panics() {
+        // Non-large fields cannot be shortened, so the aggressive second pass
+        // returns the payload unchanged rather than looping or panicking.
+        let payload = json!({ "subject": "hello" });
+        let out = truncate_payload(&payload, 4);
+        assert_eq!(out, payload);
+        // Primitive payloads are returned as-is.
+        assert_eq!(truncate_payload(&json!(42), 1), json!(42));
+        assert_eq!(truncate_payload(&json!(null), 1), json!(null));
+        assert_eq!(truncate_payload(&json!([1, 2]), 1), json!([1, 2]));
+    }
 }

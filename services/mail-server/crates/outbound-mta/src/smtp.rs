@@ -157,7 +157,18 @@ impl SmtpClient {
             connect_bound(remote, requested_source_ip, timeouts.connect).await?;
         let stream = match policy {
             TlsPolicy::ImplicitTlsRequired => {
-                Stream::Tls(Box::new(connect_tls(tcp, peer_name).await?))
+                // A peer that accepts TCP and then never completes the TLS
+                // handshake must not wedge the delivery loop forever: the
+                // handshake is bounded by the same budget as the connection.
+                match tokio::time::timeout(timeouts.connect, connect_tls(tcp, peer_name)).await {
+                    Err(_) => {
+                        return Err(SmtpError::Timeout {
+                            stage: SmtpStage::Greeting,
+                        })
+                    }
+                    Ok(Err(error)) => return Err(SmtpError::Tls(error)),
+                    Ok(Ok(tls)) => Stream::Tls(Box::new(tls)),
+                }
             }
             TlsPolicy::Opportunistic | TlsPolicy::StartTlsRequired => Stream::Plain(tcp),
         };
@@ -539,5 +550,95 @@ mod tests {
     fn angle_brackets_are_trimmed() {
         assert_eq!(trim_angle_brackets("<a@b.c>"), "a@b.c");
         assert_eq!(trim_angle_brackets(" a@b.c "), "a@b.c");
+        assert_eq!(trim_angle_brackets("<<a@b.c>>"), "a@b.c");
+        assert_eq!(trim_angle_brackets(""), "");
+    }
+
+    #[test]
+    fn payload_normalization_handles_empty_and_mixed_line_endings() {
+        assert_eq!(build_data_payload(b""), b"\r\n.\r\n".to_vec());
+        assert_eq!(build_data_payload(b"x"), b"x\r\n.\r\n".to_vec());
+        // Lone CR and lone LF both normalize; CRLF is not doubled.
+        assert_eq!(
+            build_data_payload(b"a\r\r\nb\nc\r\nd"),
+            b"a\r\n\r\nb\r\nc\r\nd\r\n.\r\n".to_vec()
+        );
+        // A dot after a bare CR is a line start and must be stuffed.
+        assert_eq!(build_data_payload(b"a\r.b"), b"a\r\n..b\r\n.\r\n".to_vec());
+        // Non-UTF8 bytes pass through untouched.
+        assert_eq!(
+            build_data_payload(b"\xff\x00"),
+            b"\xff\x00\r\n.\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn capabilities_ignore_unknown_and_degenerate_advertisements() {
+        let reply = SmtpReply::parse_multiline(&[
+            "250-fake greets you".to_string(),
+            "250-STARTTLS".to_string(),
+            "250-SIZE".to_string(),
+            "250-PIPELINING".to_string(),
+            "250 ok".to_string(),
+        ])
+        .expect("reply");
+        let capabilities = parse_capabilities(&reply);
+        assert!(capabilities.starttls);
+        assert_eq!(
+            capabilities.size,
+            Some(0),
+            "a bare SIZE means 'no fixed limit' rather than unknown"
+        );
+        assert!(!capabilities.eight_bit_mime);
+
+        let junk = SmtpReply::parse_multiline(&[
+            "250-fake".to_string(),
+            "250-SIZE not-a-number".to_string(),
+            "250-starttls".to_string(),
+        ])
+        .expect("reply");
+        let capabilities = parse_capabilities(&junk);
+        assert_eq!(capabilities.size, None, "junk SIZE is ignored");
+        assert!(capabilities.starttls, "the comparison is case-insensitive");
+
+        let default = EhloCapabilities::default();
+        assert!(!default.starttls);
+        assert_eq!(default.size, None);
+        assert!(!default.eight_bit_mime);
+    }
+
+    #[test]
+    fn smtp_errors_expose_replies_only_when_they_carry_one() {
+        let reply = SmtpReply::parse("550 5.1.1 no").expect("reply");
+        let with_reply = SmtpError::Reply {
+            stage: SmtpStage::RcptTo,
+            reply: reply.clone(),
+        };
+        let (stage, exposed) = with_reply.reply().expect("a reply is exposed");
+        assert_eq!(stage, SmtpStage::RcptTo);
+        assert_eq!(exposed, &reply);
+
+        let without = SmtpError::Protocol("garbage".to_string());
+        assert!(without.reply().is_none());
+        let timeout = SmtpError::Timeout {
+            stage: SmtpStage::EndOfData,
+        };
+        assert!(timeout.reply().is_none());
+        let io = SmtpError::Io {
+            stage: SmtpStage::Data,
+            message: "broken pipe".to_string(),
+        };
+        assert!(io.reply().is_none());
+        assert!(io.to_string().contains("DATA"));
+        assert!(timeout.to_string().contains("end-of-DATA"));
+        assert!(SmtpError::StreamTaken.to_string().contains("consumed"));
+    }
+
+    #[test]
+    fn timeouts_have_sane_defaults() {
+        let timeouts = SmtpTimeouts::default();
+        assert!(timeouts.connect < timeouts.data);
+        assert!(timeouts.command <= timeouts.data);
+        assert_eq!(timeouts.connect, Duration::from_secs(30));
     }
 }

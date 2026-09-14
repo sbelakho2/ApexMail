@@ -2715,3 +2715,112 @@ mod ses_disposition_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod reply_parsing_tests {
+    //! F-21: reply-code parsing out of mail-send's Display strings, plus the
+    //! O-16.1 credential redaction applied to the free-text tail.
+
+    use super::*;
+
+    #[test]
+    fn parse_smtp_reply_handles_both_display_shapes() {
+        let (code, enhanced, tail) =
+            parse_smtp_reply("550 5.1.1 mailbox unavailable").expect("raw shape");
+        assert_eq!(code, 550);
+        assert_eq!(enhanced.as_deref(), Some("5.1.1"));
+        assert_eq!(tail, "mailbox unavailable");
+
+        let (code, enhanced, tail) = parse_smtp_reply("450 try later").expect("no enhanced code");
+        assert_eq!(code, 450);
+        assert!(enhanced.is_none());
+        assert_eq!(tail, "try later");
+
+        let display =
+            "Unexpected reply: Code: 554, Enhanced code: 5.7.1, Message: rejected for policy";
+        let (code, enhanced, tail) = parse_smtp_reply(display).expect("display shape");
+        assert_eq!(code, 554);
+        assert_eq!(enhanced.as_deref(), Some("5.7.1"));
+        assert_eq!(tail, "rejected for policy");
+
+        // A display without a `Message:` section keeps the raw string as the
+        // diagnostic tail rather than dropping the evidence.
+        let (code, _, tail) = parse_smtp_reply("Code: 421, Enhanced code: 4.7.0").expect("display");
+        assert_eq!(code, 421);
+        assert!(tail.contains("421"), "tail: {tail}");
+
+        for raw in [
+            "",
+            "connection refused",
+            "250 OK",
+            "399 weird",
+            "Code: 99x",
+            "Code: 250, Message: ok",
+        ] {
+            assert!(
+                parse_smtp_reply(raw).is_none(),
+                "raw {raw:?} must not yield a failure reply"
+            );
+        }
+    }
+
+    #[test]
+    fn split_enhanced_code_only_accepts_x_n_n() {
+        assert_eq!(
+            split_enhanced_code("5.1.1 rest"),
+            (Some("5.1.1".to_string()), "rest")
+        );
+        assert_eq!(
+            split_enhanced_code("4.0.0"),
+            (Some("4.0.0".to_string()), "")
+        );
+        assert_eq!(
+            split_enhanced_code("mailbox unavailable"),
+            (None, "mailbox unavailable")
+        );
+        assert_eq!(split_enhanced_code("5.1 rest"), (None, "5.1 rest"));
+        assert_eq!(split_enhanced_code("5.1.1.1 rest"), (None, "5.1.1.1 rest"));
+        assert_eq!(split_enhanced_code("x.y.z rest"), (None, "x.y.z rest"));
+        assert_eq!(split_enhanced_code("1234.1.1"), (None, "1234.1.1"));
+        assert_eq!(split_enhanced_code("5..1 rest"), (None, "5..1 rest"));
+    }
+
+    #[test]
+    fn auth_related_text_is_detected_and_redacted() {
+        assert!(looks_auth_related("535 Authentication failed"));
+        assert!(looks_auth_related("AUTH LOGIN unsupported"));
+        assert!(looks_auth_related("Login failed"));
+        assert!(!looks_auth_related("mailbox unavailable"));
+
+        // A long auth error is truncated before the credential tail and
+        // marked redacted.
+        let secret = "username=admin secret=supersecret";
+        let auth_err = format!("535 Authentication failed for relay account {secret}");
+        let redacted = redact_error_text(&auth_err, true);
+        assert!(
+            redacted.ends_with("[credential details redacted]"),
+            "redacted: {redacted}"
+        );
+        assert!(
+            !redacted.contains("supersecret"),
+            "credentials past the cut must not survive: {redacted}"
+        );
+
+        // Only the FIRST line is kept for auth errors.
+        let multiline = redact_error_text("535 auth failed\nsecond line secret", true);
+        assert!(!multiline.contains("second line"));
+
+        // Non-auth text keeps ordinary words but drops a long base64-looking
+        // token (an embedded AUTH string).
+        let long_b64 = "A".repeat(60);
+        let text = format!("550 rejected {long_b64} because policy");
+        let cleaned = redact_error_text(&text, false);
+        assert!(!cleaned.contains(&long_b64), "cleaned: {cleaned}");
+        assert!(cleaned.contains("rejected"));
+        assert!(cleaned.contains("policy"));
+        assert_eq!(
+            redact_error_text("550 plain failure", false),
+            "550 plain failure"
+        );
+    }
+}

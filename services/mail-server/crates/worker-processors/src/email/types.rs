@@ -87,7 +87,11 @@ impl Mailbox {
             }
             return None;
         }
-        if trimmed.contains('@') && !trimmed.is_empty() {
+        // A "bare" address that still carries an angle bracket never went
+        // through the display-name parse (e.g. `Name <a@b.c` with an unclosed
+        // bracket, or a stray `>`): it is malformed, and accepting it would
+        // push a broken mailbox into the MIME headers.
+        if !trimmed.contains(['<', '>']) && trimmed.contains('@') && !trimmed.is_empty() {
             return Some(Self {
                 name: None,
                 email: trimmed.to_string(),
@@ -457,5 +461,32 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].name.as_deref(), Some("Doe, Jane"));
         assert_eq!(list[1].email, "bob@example.com");
+    }
+
+    #[test]
+    fn mailbox_parse_refuses_unusable_angle_forms() {
+        assert!(Mailbox::parse("Name <>").is_none());
+        assert!(Mailbox::parse("Name <no-at-sign>").is_none());
+        assert!(Mailbox::parse("Name <a@b.c").is_none(), "unclosed angle");
+        assert!(Mailbox::parse("<>").is_none());
+        assert!(Mailbox::parse("").is_none());
+        // A stray bracket on a bare address is malformed too.
+        assert!(Mailbox::parse("user@example.com>").is_none());
+        assert!(Mailbox::parse("<user@example.com").is_none());
+    }
+
+    #[test]
+    fn mailbox_list_skips_droppable_segments_and_handles_escapes() {
+        let list = Mailbox::parse_list("not-an-address, a@b.c, , also-bad");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].email, "a@b.c");
+        assert!(Mailbox::parse_list("").is_empty());
+        assert!(Mailbox::parse_list("  ,  , ").is_empty());
+
+        // An escaped quote inside a quoted display name must not close it,
+        // so the comma inside the name does not split the list.
+        let escaped = Mailbox::parse_list(r#""Doe \"JJ\", Jane" <jane@example.com>"#);
+        assert_eq!(escaped.len(), 1, "list: {escaped:?}");
+        assert_eq!(escaped[0].email, "jane@example.com");
     }
 }

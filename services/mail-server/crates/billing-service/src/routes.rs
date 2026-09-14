@@ -3236,4 +3236,176 @@ mod tests {
             .expect_err("500-cent credit exceeds the 100-cent deployed cap");
         assert!(error.contains("credit exceeds maximum allowed"));
     }
+
+    // ── Adversarial: legacy support-level mapping and JSON truthiness ────
+
+    #[test]
+    fn legacy_support_level_maps_every_variant_and_unknown_falls_back() {
+        for (level, wire) in [
+            (SupportLevel::Community, "community"),
+            (SupportLevel::Email, "email"),
+            (SupportLevel::Priority, "priority"),
+            (SupportLevel::Phone, "phone"),
+            (SupportLevel::Dedicated, "dedicated"),
+        ] {
+            assert_eq!(legacy_support_level(level), wire);
+            assert_eq!(parse_legacy_support_level(wire), level, "round trip");
+        }
+        // A hostile/unknown level must degrade to Community, never panic or
+        // silently upgrade the entitlement.
+        for hostile in ["", "ENTERPRISE", "dedicated ", "phone\n", "admin"] {
+            assert_eq!(parse_legacy_support_level(hostile), SupportLevel::Community);
+        }
+    }
+
+    #[test]
+    fn truthy_json_covers_every_json_kind() {
+        assert!(truthy_json(&serde_json::json!(true)));
+        assert!(!truthy_json(&serde_json::json!(false)));
+        assert!(truthy_json(&serde_json::json!(1)));
+        assert!(!truthy_json(&serde_json::json!(0)));
+        assert!(!truthy_json(&serde_json::json!(0.0)));
+        assert!(truthy_json(&serde_json::json!(0.5)));
+        assert!(truthy_json(&serde_json::json!("yes")));
+        assert!(!truthy_json(&serde_json::json!("")));
+        assert!(!truthy_json(&serde_json::Value::Null));
+        assert!(truthy_json(&serde_json::json!([1])));
+        assert!(!truthy_json(&serde_json::json!([])));
+        assert!(truthy_json(&serde_json::json!({"a": 1})));
+        assert!(!truthy_json(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn feature_has_access_distinguishes_absent_from_false() {
+        use crate::types::PlanFeatures;
+        let features = LegacyPlanFeaturesPayload::from(PlanFeatures::default());
+        // Present-but-false must be `Some(false)`, absent must be `None`:
+        // collapsing the two would silently grant entitlements. The legacy
+        // surface speaks camelCase (the serde wire form), so a snake_case
+        // lookup is an unknown feature, not an alias.
+        let present = feature_has_access(&features, "apiAccess");
+        assert_eq!(present, Some(true), "known feature reports its value");
+        assert_eq!(feature_has_access(&features, "no_such_feature"), None);
+        assert_eq!(
+            feature_has_access(&features, "api_access"),
+            None,
+            "snake_case is not a wire alias for the legacy camelCase surface"
+        );
+        let json = serde_json::to_value(&features).expect("features serialize");
+        let api_access = json["apiAccess"].as_bool().expect("bool field");
+        assert_eq!(present, Some(api_access));
+    }
+
+    // ── Adversarial: ApiError → HTTP mapping is exact per variant ────────
+
+    async fn assert_api_error(err: ApiError, status: StatusCode, code: &str, message: &str) {
+        let (actual_status, json) = response_json(err.into_response()).await;
+        assert_eq!(actual_status, status, "{json}");
+        assert_eq!(json["error"]["code"], code, "{json}");
+        assert_eq!(json["error"]["message"], message, "{json}");
+    }
+
+    #[tokio::test]
+    async fn api_error_mappings_are_exact_for_every_domain_variant() {
+        assert_api_error(
+            ApiError::Usage(usage::UsageError::Db(sqlx::Error::RowNotFound)),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "billing resource not found",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Usage(usage::UsageError::InvalidQuantity(0)),
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "quantity must be a positive integer, got 0",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Usage(usage::UsageError::OperationConflict {
+                event_id: uuid::Uuid::nil(),
+                detail: "reused".into(),
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "internal server error",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Invoice(invoices::InvoiceError::Db(sqlx::Error::RowNotFound)),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "invoice not found",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Invoice(invoices::InvoiceError::NoBillingAddress),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "billing address not found for tenant",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Invoice(invoices::InvoiceError::PdfGeneration("s3 down".into())),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "pdf generation unavailable",
+        )
+        .await;
+        // The internal S3 detail must never leak to the client.
+        let (_, json) = response_json(
+            ApiError::Invoice(invoices::InvoiceError::PdfGeneration(
+                "bucket=secret key=leak".into(),
+            ))
+            .into_response(),
+        )
+        .await;
+        assert!(!json.to_string().contains("secret"));
+
+        assert_api_error(
+            ApiError::Subscription(SubscriptionError::NotFound),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "active subscription not found",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Subscription(SubscriptionError::UsageExceedsPlan {
+                plan_name: "scale".into(),
+                reasons: vec!["emails over quota".into(), "api calls over quota".into()],
+            }),
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "cannot change to scale: emails over quota; api calls over quota",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Subscription(SubscriptionError::PlanNotFound("gold".into())),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "plan not found: gold",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Subscription(SubscriptionError::Db(sqlx::Error::RowNotFound)),
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "active subscription not found",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Subscription(SubscriptionError::InvalidStatus("bogus".into())),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "internal server error",
+        )
+        .await;
+        assert_api_error(
+            ApiError::Subscription(SubscriptionError::PaymentConfirmationRequired),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "internal server error",
+        )
+        .await;
+    }
 }

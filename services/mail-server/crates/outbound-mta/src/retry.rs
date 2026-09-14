@@ -329,5 +329,169 @@ mod tests {
         let summary = failure.summary();
         assert!(summary.contains("mx.example"));
         assert!(summary.contains("RCPT TO"));
+
+        // Without an MX the stage still names where the attempt died.
+        let no_mx = DeliveryFailure::Transient {
+            mx: None,
+            stage: AttemptStage::Resolve,
+            message: "dns timeout".into(),
+        };
+        assert!(no_mx.summary().contains("MX resolution"));
+        assert_eq!(no_mx.mx(), None);
+    }
+
+    #[test]
+    fn every_failure_variant_has_a_disposition_mx_and_summary() {
+        let reply = reply(550, "5.1.1 nope");
+        let cases: Vec<(DeliveryFailure, FailureDisposition, Option<&str>)> = vec![
+            (
+                DeliveryFailure::Transient {
+                    mx: Some("mx.example".into()),
+                    stage: AttemptStage::Connect,
+                    message: "refused".into(),
+                },
+                FailureDisposition::Retry,
+                Some("mx.example"),
+            ),
+            (
+                DeliveryFailure::SourceIpUnverified {
+                    requested: "203.0.113.9".parse().expect("ip"),
+                    message: "cannot bind".into(),
+                },
+                FailureDisposition::Retry,
+                None,
+            ),
+            (
+                DeliveryFailure::TlsRequiredUnavailable {
+                    mx: "mx.example".into(),
+                    message: "no STARTTLS".into(),
+                },
+                FailureDisposition::Retry,
+                Some("mx.example"),
+            ),
+            (
+                DeliveryFailure::RecipientRejected {
+                    mx: "mx.example".into(),
+                    recipient: "u@example.com".into(),
+                    reply: reply.clone(),
+                },
+                FailureDisposition::PermanentRecipient("u@example.com".into()),
+                Some("mx.example"),
+            ),
+            (
+                DeliveryFailure::MessageRejected {
+                    mx: "mx.example".into(),
+                    reply: reply.clone(),
+                },
+                FailureDisposition::PermanentMessage,
+                Some("mx.example"),
+            ),
+            (
+                DeliveryFailure::DomainUndeliverable {
+                    domain: "example.com".into(),
+                    message: "no MX".into(),
+                },
+                FailureDisposition::PermanentMessage,
+                None,
+            ),
+            (
+                DeliveryFailure::AllMxRefused {
+                    message: "all refused".into(),
+                },
+                FailureDisposition::PermanentMessage,
+                None,
+            ),
+            (
+                DeliveryFailure::RetryCeilingExhausted {
+                    attempt: 12,
+                    message: "too many".into(),
+                },
+                FailureDisposition::PermanentMessage,
+                None,
+            ),
+        ];
+        for (failure, disposition, mx) in cases {
+            assert_eq!(failure.disposition(), disposition, "for {failure:?}");
+            assert_eq!(failure.mx(), mx, "for {failure:?}");
+            let summary = failure.summary();
+            assert!(!summary.is_empty(), "no summary for {failure:?}");
+            assert!(
+                !summary.contains('\n') && !summary.contains('\r'),
+                "a summary is a single line: {summary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_rendering_is_total() {
+        let pairs = [
+            (AttemptStage::Resolve, "MX resolution"),
+            (AttemptStage::Connect, "connect"),
+            (AttemptStage::Greeting, "greeting"),
+            (AttemptStage::Ehlo, "EHLO"),
+            (AttemptStage::StartTls, "STARTTLS"),
+            (AttemptStage::MailFrom, "MAIL FROM"),
+            (AttemptStage::RcptTo, "RCPT TO"),
+            (AttemptStage::EndOfData, "end-of-DATA"),
+        ];
+        for (stage, expected) in pairs {
+            assert_eq!(stage.as_str(), expected);
+            assert_eq!(stage.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn backoff_edges_are_bounded_and_never_panic() {
+        let zero_base = RetryPolicy {
+            max_attempts: 3,
+            base_delay_secs: 0,
+            max_delay_secs: 100,
+            multiplier: 2,
+        };
+        assert_eq!(zero_base.backoff(5), Duration::from_secs(0));
+
+        let one_multiplier = RetryPolicy {
+            max_attempts: 3,
+            base_delay_secs: 10,
+            max_delay_secs: 100,
+            multiplier: 1,
+        };
+        assert_eq!(one_multiplier.backoff(5), Duration::from_secs(10));
+        assert_eq!(one_multiplier.backoff(0), Duration::from_secs(0));
+
+        // multiplier 0 is clamped to 1 (no collapse to zero).
+        let zero_multiplier = RetryPolicy {
+            max_attempts: 3,
+            base_delay_secs: 7,
+            max_delay_secs: 100,
+            multiplier: 0,
+        };
+        assert_eq!(zero_multiplier.backoff(9), Duration::from_secs(7));
+
+        // Absurd attempt counts saturate instead of overflowing.
+        assert_eq!(
+            RetryPolicy::default().backoff(u32::MAX),
+            Duration::from_secs(14_400)
+        );
+    }
+
+    #[test]
+    fn next_attempt_at_refuses_unrepresentable_schedules() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            base_delay_secs: u64::MAX,
+            max_delay_secs: u64::MAX,
+            multiplier: 1,
+        };
+        assert!(
+            policy.next_attempt_at(1, Utc::now()).is_none(),
+            "an unrepresentable backoff must refuse the retry, not panic"
+        );
+        // Ceiling beats representation: no attempt is ever scheduled past it.
+        let ceiling = RetryPolicy {
+            max_attempts: 1,
+            ..RetryPolicy::default()
+        };
+        assert!(ceiling.next_attempt_at(1, Utc::now()).is_none());
     }
 }

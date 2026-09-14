@@ -142,3 +142,112 @@ impl std::fmt::Display for EventType {
         f.write_str(self.as_str())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_type_round_trips_every_variant_and_rejects_garbage() {
+        let variants = [
+            ("sent", EventType::Sent),
+            ("delivered", EventType::Delivered),
+            ("opened", EventType::Opened),
+            ("clicked", EventType::Clicked),
+            ("bounced", EventType::Bounced),
+            ("unsubscribed", EventType::Unsubscribed),
+            ("complained", EventType::Complained),
+            ("failed", EventType::Failed),
+        ];
+        for (name, expected) in variants {
+            assert_eq!(name.parse::<EventType>(), Ok(expected), "parse {name}");
+            assert_eq!(expected.as_str(), name);
+            assert_eq!(expected.to_string(), name);
+        }
+        assert!(
+            "SENT".parse::<EventType>().is_err(),
+            "the wire grammar is lower-case only"
+        );
+        let error = "bogus".parse::<EventType>().expect_err("refused");
+        assert!(error.contains("bogus"), "error: {error}");
+    }
+
+    #[test]
+    fn aggregation_increments_every_wire_event_type_once() {
+        let start = Utc::now();
+        let end = start + chrono::Duration::hours(1);
+        let mut stats = AggregatedStats::new(
+            "tenant-1".to_string(),
+            Some("dom-1".to_string()),
+            Some("camp-1".to_string()),
+            start,
+            end,
+        );
+        assert_eq!(stats.tenant_id, "tenant-1");
+        assert_eq!(stats.domain_id.as_deref(), Some("dom-1"));
+        assert_eq!(stats.campaign_id.as_deref(), Some("camp-1"));
+        assert_eq!(stats.period_start, start);
+        assert_eq!(stats.period_end, end);
+
+        for event in [
+            "sent",
+            "delivered",
+            "opened",
+            "clicked",
+            "bounced",
+            "unsubscribed",
+            "complained",
+            "failed",
+        ] {
+            stats.increment(event);
+        }
+        assert_eq!(stats.sent, 1);
+        assert_eq!(stats.delivered, 1);
+        assert_eq!(stats.opened, 1);
+        assert_eq!(stats.clicked, 1);
+        assert_eq!(stats.bounced, 1);
+        assert_eq!(stats.unsubscribed, 1);
+        assert_eq!(stats.complained, 1);
+        assert_eq!(stats.failed, 1);
+
+        // Unknown event types are ignored (forward compatibility), while a
+        // case-mismatched one is not silently folded in.
+        stats.increment("not-a-real-event");
+        stats.increment("Sent");
+        assert_eq!(stats.sent, 1);
+        assert_eq!(stats.failed, 1);
+    }
+
+    #[test]
+    fn merge_from_adds_every_counter() {
+        let mut base = AggregatedStats::default();
+        let delta = AggregatedStats {
+            sent: 1,
+            delivered: 2,
+            opened: 3,
+            clicked: 4,
+            bounced: 5,
+            unsubscribed: 6,
+            complained: 7,
+            failed: 8,
+            ..Default::default()
+        };
+        base.merge_from(delta);
+        assert_eq!(
+            (
+                base.sent,
+                base.delivered,
+                base.opened,
+                base.clicked,
+                base.bounced,
+                base.unsubscribed,
+                base.complained,
+                base.failed
+            ),
+            (1, 2, 3, 4, 5, 6, 7, 8)
+        );
+        // Merging again keeps the counters additive (restored buffers).
+        base.merge_from(base.clone());
+        assert_eq!(base.failed, 16);
+    }
+}

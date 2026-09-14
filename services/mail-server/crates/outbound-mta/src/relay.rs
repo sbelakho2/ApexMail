@@ -57,7 +57,7 @@ use crate::ledger::{
 };
 use crate::mx::{MxResolver, MxTarget};
 use crate::response::{classify, ReplyDisposition, SmtpReply, SmtpStage};
-use crate::retry::{AttemptStage, DeliveryFailure, RetryPolicy};
+use crate::retry::{AttemptStage, DeliveryFailure, FailureDisposition, RetryPolicy};
 use crate::smtp::{SmtpClient, SmtpError, SmtpTimeouts};
 use crate::source_ip::SourceIpError;
 use crate::tls::TlsPolicy;
@@ -169,10 +169,10 @@ impl RecipientResult {
         }
     }
 
-    fn from_failure(recipient: &str, failure: &DeliveryFailure) -> Self {
+    fn from_failure(recipient: &str, outcome: RecipientOutcome, failure: &DeliveryFailure) -> Self {
         Self {
             recipient: recipient.to_string(),
-            outcome: RecipientOutcome::Rejected,
+            outcome,
             reply_code: None,
             enhanced_status: None,
             diagnostic: Some(failure.summary()),
@@ -443,6 +443,11 @@ impl Relay {
         let mut deferred_results: Vec<RecipientResult> = Vec::new();
         let mut transient_failures: Vec<DeliveryFailure> = Vec::new();
         let mut permanent_failures: Vec<DeliveryFailure> = Vec::new();
+        // Recipients a domain-level failure left without a per-recipient
+        // verdict, keyed by recipient domain. Needed so a mixed outcome (one
+        // domain accepted, another refused the session) cannot drop
+        // recipients from the acceptance record.
+        let mut unresolved: HashMap<String, DeliveryFailure> = HashMap::new();
         let mut remote_mx: Option<String> = None;
         let mut tls_used = false;
         let mut actual_source_ip: Option<IpAddr> = None;
@@ -456,17 +461,23 @@ impl Relay {
                         message: error.to_string(),
                     };
                     for recipient in recipients {
-                        rejected_results.push(RecipientResult::from_failure(recipient, &failure));
+                        rejected_results.push(RecipientResult::from_failure(
+                            recipient,
+                            RecipientOutcome::Rejected,
+                            &failure,
+                        ));
                     }
                     permanent_failures.push(failure);
                     continue;
                 }
                 Err(error) => {
-                    transient_failures.push(DeliveryFailure::Transient {
+                    let failure = DeliveryFailure::Transient {
                         mx: None,
                         stage: AttemptStage::Resolve,
                         message: error.to_string(),
-                    });
+                    };
+                    unresolved.insert(domain.clone(), failure.clone());
+                    transient_failures.push(failure);
                     continue;
                 }
             };
@@ -525,12 +536,47 @@ impl Relay {
             }
             if !settled {
                 if let Some(failure) = last_transient {
+                    unresolved.insert(domain.clone(), failure.clone());
                     transient_failures.push(failure);
                 }
             }
         }
 
         if !accepted_results.is_empty() {
+            // Recipients an unsettled domain left without a per-recipient
+            // verdict must not vanish from the acceptance record: the unit is
+            // pinned accepted below, so they will never be retried, and a
+            // silent drop would leave no trace and no DSN. A retryable cause
+            // becomes Deferred (never retried — a retry would duplicate the
+            // accepted copy); a permanent one becomes Rejected and is DSN'd
+            // with the rest.
+            let accounted: std::collections::HashSet<String> = accepted_results
+                .iter()
+                .chain(rejected_results.iter())
+                .chain(deferred_results.iter())
+                .map(|result| result.recipient.clone())
+                .collect();
+            for (domain, recipients) in &groups {
+                let Some(failure) = unresolved.get(domain) else {
+                    continue;
+                };
+                let outcome = if matches!(failure.disposition(), FailureDisposition::Retry) {
+                    RecipientOutcome::Deferred
+                } else {
+                    RecipientOutcome::Rejected
+                };
+                for recipient in recipients {
+                    if accounted.contains(recipient) {
+                        continue;
+                    }
+                    let result = RecipientResult::from_failure(recipient, outcome, failure);
+                    if outcome == RecipientOutcome::Rejected {
+                        rejected_results.push(result);
+                    } else {
+                        deferred_results.push(result);
+                    }
+                }
+            }
             // Post-DATA 250 recorded: pin the unit accepted. Deferred
             // recipients are deliberately NOT retried — a retry would
             // duplicate the accepted copy.
@@ -570,13 +616,27 @@ impl Relay {
             return Ok(record);
         }
 
-        if transient_failures.is_empty() {
-            // Every failure is permanent: reject the whole send unit, DSN the
-            // rejected recipients, and never retry.
+        let retryable = transient_failures
+            .iter()
+            .any(|failure| matches!(failure.disposition(), FailureDisposition::Retry));
+        if !retryable {
+            // No failure is retryable: reject the whole send unit, DSN the
+            // rejected recipients, and never retry. This covers both the
+            // all-permanent case and a session-level refusal that the
+            // taxonomy classifies permanent (5xx greeting/EHLO/STARTTLS —
+            // `AllMxRefused`); retrying those to the ceiling would misreport
+            // them as a 4.4.7 delivery-expired timeout.
+            let mut all_permanent: Vec<DeliveryFailure> = permanent_failures.clone();
+            all_permanent.extend(
+                transient_failures
+                    .iter()
+                    .filter(|failure| !matches!(failure.disposition(), FailureDisposition::Retry))
+                    .cloned(),
+            );
             let dsn_send_units = self
-                .enqueue_permanent_dsns(&row, &rejected_results, &permanent_failures, arrival)
+                .enqueue_permanent_dsns(&row, &rejected_results, &all_permanent, arrival)
                 .await;
-            let reason = summarize_failures(&permanent_failures, &rejected_results);
+            let reason = summarize_failures(&all_permanent, &rejected_results);
             self.ledger
                 .record_permanent(&row.send_unit, attempt, &reason)
                 .await?;
@@ -923,11 +983,30 @@ impl Relay {
                     },
                 }
             }
-            other => DeliveryFailure::Transient {
-                mx: Some(mx.to_string()),
-                stage: AttemptStage::Connect,
-                message: other.to_string(),
-            },
+            other => {
+                // A permanent greeting refusal (5xx before ANY command) is
+                // the peer closing the door: this MX cannot carry the
+                // message. Retrying it to the ceiling would report a
+                // permanent refusal as a delivery timeout — classify it as
+                // the session-level refusal it is (try the next MX, then
+                // permanent).
+                if let Some((stage, reply)) = other.reply() {
+                    if reply.is_permanent() {
+                        return DeliveryFailure::AllMxRefused {
+                            message: format!(
+                                "{mx} refused during {}: {}",
+                                stage.as_str(),
+                                reply.diagnostic()
+                            ),
+                        };
+                    }
+                }
+                DeliveryFailure::Transient {
+                    mx: Some(mx.to_string()),
+                    stage: AttemptStage::Connect,
+                    message: other.to_string(),
+                }
+            }
         }
     }
 
@@ -1827,5 +1906,1320 @@ mod tests {
         assert_eq!(report.accepted, 1);
         assert_eq!(harness.server.messages().len(), 2);
         assert_eq!(harness.server.messages()[1].mail_from, "");
+    }
+
+    // ── hostile submission inputs ──────────────────────────────────────────
+
+    /// Every malformed recipient/sender shape is REFUSED before a single
+    /// connection exists: no whitespace, control byte, missing `@`, empty
+    /// local part, bad label or NUL may reach the wire.
+    #[tokio::test]
+    async fn hostile_addresses_are_refused_before_any_connection() {
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        let hostile_recipients = [
+            String::new(),
+            "   ".to_string(),
+            "user example.com".to_string(),
+            "user@".to_string(),
+            "@example.com".to_string(),
+            "user@exa mple.com".to_string(),
+            "user@-bad.example".to_string(),
+            "user@bad..example".to_string(),
+            "no-at-sign".to_string(),
+            "user@example.com\u{0}".to_string(),
+            "user@example.com\r\nRCPT TO:<evil@example.com>".to_string(),
+            "user@example.com>".to_string(),
+            "user@exam_ple.com".to_string(),
+            format!("user@{}", "a".repeat(64)),
+            format!("user@{}", "a".repeat(254)),
+        ];
+        for recipient in &hostile_recipients {
+            let mut hostile = request();
+            hostile.recipients = vec![recipient.to_string()];
+            let error = harness
+                .relay
+                .submit(hostile)
+                .await
+                .expect_err("hostile recipient must be refused");
+            assert!(
+                matches!(error, RelayError::InvalidRequest(_)),
+                "recipient {recipient:?} produced {error:?}"
+            );
+        }
+
+        // NOTE: an unquoted multi-`@` local part is deliberately out of
+        // scope here — validate_address follows rsplit_once, so a quoted
+        // local part containing '@' keeps working.
+        for sender in ["no-at", "user@", "a b@example.com", "user@-bad.example"] {
+            let mut hostile = request();
+            hostile.envelope_from = Some(sender.to_string());
+            let error = harness
+                .relay
+                .submit(hostile)
+                .await
+                .expect_err("hostile sender must be refused");
+            assert!(
+                matches!(error, RelayError::InvalidRequest(_)),
+                "sender {sender:?} produced {error:?}"
+            );
+        }
+        assert_eq!(
+            harness.server.connections(),
+            0,
+            "validation must run before any connection is attempted"
+        );
+    }
+
+    #[tokio::test]
+    async fn submission_limits_are_enforced_with_the_real_reason() {
+        let mut config = relay_config();
+        config.max_recipients = 2;
+        config.max_message_bytes = 1024;
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+
+        let mut blank_unit = request();
+        blank_unit.send_unit = "   ".to_string();
+        assert!(matches!(
+            harness.relay.submit(blank_unit).await,
+            Err(RelayError::InvalidRequest(_))
+        ));
+
+        let mut long_unit = request();
+        long_unit.send_unit = "u".repeat(513);
+        assert!(matches!(
+            harness.relay.submit(long_unit).await,
+            Err(RelayError::InvalidRequest(_))
+        ));
+
+        let mut no_recipients = request();
+        no_recipients.recipients.clear();
+        assert!(matches!(
+            harness.relay.submit(no_recipients).await,
+            Err(RelayError::InvalidRequest(_))
+        ));
+
+        let mut too_many = request();
+        too_many.recipients = vec![
+            "a@example.com".to_string(),
+            "b@example.com".to_string(),
+            "c@example.com".to_string(),
+        ];
+        let error = harness.relay.submit(too_many).await.expect_err("refused");
+        assert!(error.to_string().contains("exceed the configured maximum"));
+
+        let mut empty_message = request();
+        empty_message.message.clear();
+        assert!(matches!(
+            harness.relay.submit(empty_message).await,
+            Err(RelayError::InvalidRequest(_))
+        ));
+
+        let mut oversized = request();
+        oversized.message = vec![b'x'; 2048];
+        let error = harness.relay.submit(oversized).await.expect_err("refused");
+        assert!(error.to_string().contains("exceeds the configured maximum"));
+
+        // A message made ONLY of reserved internal headers strips to nothing:
+        // forwarding an empty DATA payload would be a protocol lie.
+        let mut only_reserved = request();
+        only_reserved.message = b"X-ApexMail-Route: v1 dedicated ip-row-1 203.0.113.9\r\n".to_vec();
+        let error = harness
+            .relay
+            .submit(only_reserved)
+            .await
+            .expect_err("header-only message is empty after stripping");
+        assert!(error.to_string().contains("empty after removing"));
+        assert_eq!(harness.server.connections(), 0);
+    }
+
+    // ── duplicate-submission state machine ─────────────────────────────────
+
+    #[tokio::test]
+    async fn duplicate_submit_while_a_lease_is_live_reports_in_flight() {
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        let new = NewSubmission {
+            send_unit: "email_queue:unit-1:user@example.com".to_string(),
+            tenant_id: Some("tenant-1".to_string()),
+            queue_id: None,
+            envelope_from: Some("sender@apexmail.ee".to_string()),
+            recipients: vec!["user@example.com".to_string()],
+            message: b"From: x\r\n\r\nbody".to_vec(),
+            requested_source_ip: None,
+            max_attempts: 12,
+        };
+        // Another worker holds a live lease (claimed but not finished).
+        let claimed = harness
+            .ledger
+            .claim_submission(new, Utc::now(), Duration::from_secs(60))
+            .await
+            .expect("claim");
+        assert!(matches!(claimed, ClaimOutcome::Claimed(_)));
+
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a live lease must refuse a duplicate submission");
+        match error {
+            RelayError::InFlight {
+                send_unit, attempt, ..
+            } => {
+                assert_eq!(send_unit, "email_queue:unit-1:user@example.com");
+                assert_eq!(attempt, 1);
+            }
+            other => panic!("expected InFlight, got {other:?}"),
+        }
+        assert_eq!(harness.server.connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn duplicate_submit_while_a_retry_is_queued_reports_already_queued() {
+        let mut server_config = FakeSmtpConfig::default();
+        server_config.rcpt_replies("user@example.com", vec![ReplySpec::new(450, "4.2.1 busy")]);
+        let harness = harness(relay_config(), server_config).await;
+
+        harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("first attempt defers");
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a queued retry must not be submitted again");
+        match error {
+            RelayError::AlreadyQueued {
+                send_unit,
+                attempt,
+                next_attempt_at,
+            } => {
+                assert_eq!(send_unit, "email_queue:unit-1:user@example.com");
+                assert_eq!(attempt, 1);
+                assert!(next_attempt_at > Utc::now());
+            }
+            other => panic!("expected AlreadyQueued, got {other:?}"),
+        }
+        assert_eq!(
+            harness.server.connections(),
+            1,
+            "the duplicate must not open a second connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_submit_after_a_permanent_failure_returns_the_real_error_text() {
+        let mut server_config = FakeSmtpConfig::default();
+        server_config.rcpt_replies(
+            "user@example.com",
+            vec![ReplySpec::new(550, "5.1.1 mailbox unavailable")],
+        );
+        let harness = harness(relay_config(), server_config).await;
+
+        harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("first attempt is permanently rejected");
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a terminal failure is never silently retried");
+        match error {
+            RelayError::Permanent {
+                send_unit,
+                attempt,
+                reason,
+                dsn_send_units,
+            } => {
+                assert_eq!(attempt, 1);
+                assert!(
+                    reason.contains("5.1.1 mailbox unavailable"),
+                    "the stored error text must survive: {reason}"
+                );
+                assert!(
+                    dsn_send_units.is_empty(),
+                    "the DSN key belongs to the original attempt, not the replay"
+                );
+                assert_eq!(send_unit, "email_queue:unit-1:user@example.com");
+            }
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        assert_eq!(
+            harness.server.connections(),
+            1,
+            "a terminal failure is never delivered twice"
+        );
+    }
+
+    // ── crashed attempts, leases, queued-row processing ────────────────────
+
+    #[tokio::test]
+    async fn expired_lease_is_reclaimed_and_delivered_exactly_once() {
+        let mut config = relay_config();
+        config.lease = Duration::from_millis(1);
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+
+        // A worker claimed the unit, then crashed before any delivery.
+        let claimed = harness
+            .ledger
+            .claim_submission(
+                NewSubmission {
+                    send_unit: "email_queue:unit-1:user@example.com".to_string(),
+                    tenant_id: Some("tenant-1".to_string()),
+                    queue_id: None,
+                    envelope_from: Some("sender@apexmail.ee".to_string()),
+                    recipients: vec!["user@example.com".to_string()],
+                    message: b"From: x\r\n\r\nbody".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 12,
+                },
+                Utc::now(),
+                Duration::from_millis(1),
+            )
+            .await
+            .expect("claim");
+        assert!(matches!(claimed, ClaimOutcome::Claimed(_)));
+        assert!(harness.server.messages().is_empty(), "no partial work");
+
+        let reclaimed = harness
+            .relay
+            .reclaim_expired(Utc::now() + chrono::Duration::seconds(1))
+            .await
+            .expect("reclaim");
+        assert_eq!(reclaimed, 1, "the crashed lease is reclaimed");
+
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::seconds(2), 10)
+            .await
+            .expect("due sweep");
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.accepted, 1);
+        assert_eq!(
+            harness.server.messages().len(),
+            1,
+            "the reclaimed unit is delivered exactly once"
+        );
+
+        // A duplicate submit after the accepted retry returns the stored
+        // record and delivers nothing more.
+        let record = harness.relay.submit(request()).await.expect("stored");
+        assert_eq!(record.state, "accepted");
+        assert_eq!(harness.server.messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn crashed_delivering_row_is_claimed_by_the_due_sweep() {
+        let mut config = relay_config();
+        config.lease = Duration::from_millis(1);
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+        harness
+            .ledger
+            .claim_submission(
+                NewSubmission {
+                    send_unit: "email_queue:unit-1:user@example.com".to_string(),
+                    tenant_id: None,
+                    queue_id: None,
+                    envelope_from: Some("sender@apexmail.ee".to_string()),
+                    recipients: vec!["user@example.com".to_string()],
+                    message: b"From: x\r\n\r\nbody".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 12,
+                },
+                Utc::now(),
+                Duration::from_millis(1),
+            )
+            .await
+            .expect("claim");
+
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::seconds(1), 10)
+            .await
+            .expect("due sweep claims the expired lease directly");
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.accepted, 1);
+        let row = ledger_row(&harness, "email_queue:unit-1:user@example.com").await;
+        assert_eq!(row.attempt, 2, "the reclaimed attempt is counted");
+        assert_eq!(harness.server.messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn process_due_isolates_an_unroutable_row_as_an_error() {
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        harness
+            .ledger
+            .enqueue_dsn(
+                NewSubmission {
+                    send_unit: "broken:unit".to_string(),
+                    tenant_id: None,
+                    queue_id: None,
+                    envelope_from: Some("sender@apexmail.ee".to_string()),
+                    recipients: vec!["not-an-address".to_string()],
+                    message: b"From: x\r\n\r\nbody".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 12,
+                },
+                Utc::now(),
+            )
+            .await
+            .expect("enqueue");
+
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::seconds(1), 10)
+            .await
+            .expect("due sweep");
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.errors, 1, "an unroutable row is counted as an error");
+        assert_eq!(report.accepted, 0);
+        let row = harness
+            .relay
+            .get("broken:unit")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            row.state, "delivering",
+            "the error must not fake a terminal transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_empty_message_permanently_fails_with_the_real_reason() {
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        harness
+            .ledger
+            .enqueue_dsn(
+                NewSubmission {
+                    send_unit: "empty:unit".to_string(),
+                    tenant_id: None,
+                    queue_id: None,
+                    envelope_from: Some("sender@apexmail.ee".to_string()),
+                    recipients: vec!["user@example.com".to_string()],
+                    message: Vec::new(),
+                    requested_source_ip: None,
+                    max_attempts: 12,
+                },
+                Utc::now(),
+            )
+            .await
+            .expect("enqueue");
+
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::seconds(1), 10)
+            .await
+            .expect("due sweep");
+        assert_eq!(report.permanently_failed, 1);
+        let row = harness
+            .relay
+            .get("empty:unit")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(row.state, "failed");
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("queued message is empty"),
+            "the real reason is parked on the row"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_queued_message_dead_letters_with_a_5_3_4_dsn() {
+        let mut config = relay_config();
+        config.max_message_bytes = 8;
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+        harness
+            .ledger
+            .enqueue_dsn(
+                NewSubmission {
+                    send_unit: "huge:unit".to_string(),
+                    tenant_id: None,
+                    queue_id: None,
+                    envelope_from: Some("sender@apexmail.ee".to_string()),
+                    recipients: vec!["user@example.com".to_string()],
+                    message: b"Subject: oversized\r\n\r\n".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 12,
+                },
+                Utc::now(),
+            )
+            .await
+            .expect("enqueue");
+
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::seconds(1), 10)
+            .await
+            .expect("due sweep");
+        assert_eq!(report.permanently_failed, 1);
+        assert_eq!(
+            harness.server.connections(),
+            0,
+            "an oversized message is refused before any connection"
+        );
+        let row = harness
+            .relay
+            .get("huge:unit")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(row.state, "failed");
+        assert!(
+            row.last_error.as_deref().unwrap_or("").contains("exceeds"),
+            "reason: {:?}",
+            row.last_error
+        );
+
+        // The DSN is queued durably for the original sender with 5.3.4; it is
+        // read straight off the ledger because the DSN (~1 KiB) also exceeds
+        // the deliberately tiny test cap.
+        let dsn_row = harness
+            .relay
+            .get("huge:unit:dsn:user@example.com")
+            .await
+            .expect("get dsn")
+            .expect("the DSN row exists");
+        assert_eq!(dsn_row.state, "pending");
+        assert_eq!(dsn_row.envelope_from, None, "DSNs use MAIL FROM:<>");
+        assert_eq!(dsn_row.recipients, vec!["sender@apexmail.ee".to_string()]);
+        let dsn = String::from_utf8_lossy(&dsn_row.message);
+        assert!(dsn.contains("Status: 5.3.4"), "DSN: {dsn}");
+        assert!(dsn.contains("message too large for relay policy"));
+    }
+
+    // ── MX/TLS/session failure taxonomy ───────────────────────────────────
+
+    #[tokio::test]
+    async fn greeting_5xx_is_permanent_for_the_whole_message() {
+        let server_config = FakeSmtpConfig {
+            greeting: ReplySpec::new(554, "5.3.0 no service for this sender"),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a 5xx greeting is a permanent refusal");
+        match &error {
+            RelayError::Permanent {
+                reason,
+                dsn_send_units,
+                ..
+            } => {
+                assert!(reason.contains("5.3.0"), "reason: {reason}");
+                assert_eq!(dsn_send_units.len(), 1);
+            }
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        let row = ledger_row(&harness, "email_queue:unit-1:user@example.com").await;
+        assert_eq!(row.state, "failed", "never scheduled for retry");
+
+        // The DSN is queued durably with the 5.4.0 session-refusal status (it
+        // cannot be delivered to the same refusing peer, so read the ledger).
+        let dsn_row = harness
+            .relay
+            .get("email_queue:unit-1:user@example.com:dsn:user@example.com")
+            .await
+            .expect("get dsn")
+            .expect("the DSN row exists");
+        assert_eq!(dsn_row.state, "pending");
+        let dsn = String::from_utf8_lossy(&dsn_row.message);
+        assert!(dsn.contains("Status: 5.4.0"), "DSN: {dsn}");
+    }
+
+    #[tokio::test]
+    async fn ehlo_5xx_tries_the_next_mx_then_succeeds() {
+        let dead = FakeSmtpServer::start(FakeSmtpConfig {
+            ehlo: ScriptedReply::always(ReplySpec::new(554, "5.5.1 EHLO refused")),
+            helo: ScriptedReply::always(ReplySpec::new(554, "5.5.1 HELO refused")),
+            ..FakeSmtpConfig::default()
+        })
+        .await;
+        let live = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let ledger = Arc::new(MemoryLedger::new());
+        let resolver = Arc::new(StaticMxResolver::new().with_targets(
+            "example.com",
+            vec![
+                MxTarget {
+                    preference: 10,
+                    exchange: "mx1.example.com".to_string(),
+                    addresses: vec![dead.addr()],
+                },
+                MxTarget {
+                    preference: 20,
+                    exchange: "mx2.example.com".to_string(),
+                    addresses: vec![live.addr()],
+                },
+            ],
+        ));
+        let relay = Relay::new(ledger, resolver, relay_config());
+
+        let record = relay
+            .submit(request())
+            .await
+            .expect("the second MX accepts");
+        assert_eq!(record.remote_mx.as_deref(), Some("mx2.example.com"));
+        assert_eq!(live.messages().len(), 1);
+        assert_eq!(dead.messages().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn ehlo_5xx_on_every_mx_is_permanent_not_a_retry_loop() {
+        let server_config = FakeSmtpConfig {
+            ehlo: ScriptedReply::always(ReplySpec::new(554, "5.5.1 EHLO refused")),
+            helo: ScriptedReply::always(ReplySpec::new(554, "5.5.1 HELO refused")),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("every MX refusing EHLO is permanent");
+        match &error {
+            RelayError::Permanent {
+                reason,
+                dsn_send_units,
+                ..
+            } => {
+                assert!(reason.contains("5.5.1"), "reason: {reason}");
+                assert!(reason.contains("all MX hosts refused"), "reason: {reason}");
+                assert_eq!(dsn_send_units.len(), 1);
+            }
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        let row = ledger_row(&harness, "email_queue:unit-1:user@example.com").await;
+        assert_eq!(row.state, "failed");
+        assert_eq!(
+            harness.server.connections(),
+            1,
+            "a 5xx session refusal is not retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn ehlo_4xx_is_transient_with_the_reply_text() {
+        let server_config = FakeSmtpConfig {
+            ehlo: ScriptedReply::always(ReplySpec::new(421, "4.7.0 try later")),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("4xx EHLO is transient");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("4.7.0"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn starttls_advertised_but_refused_is_transient_before_mail_from() {
+        // Advertised STARTTLS, but the handshake command itself is refused:
+        // the opportunistic policy must NOT downgrade to cleartext.
+        let mut config = relay_config();
+        config.tls_policy_override = Some(TlsPolicy::Opportunistic);
+        let server_config = FakeSmtpConfig {
+            advertise_starttls: true,
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(config, server_config).await;
+
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a failed STARTTLS must abort the attempt");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("STARTTLS"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+        let commands = harness.server.commands();
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.starts_with("MAIL FROM")),
+            "no message may be sent after a failed STARTTLS: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn starttls_required_and_refused_after_advertisement_is_transient() {
+        let mut config = relay_config();
+        config.tls_policy_override = Some(TlsPolicy::StartTlsRequired);
+        let server_config = FakeSmtpConfig {
+            advertise_starttls: true,
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(config, server_config).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("mandatory STARTTLS that fails is a refusal");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("TLS is required"), "reason: {reason}");
+                assert!(reason.contains("STARTTLS"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn implicit_tls_policy_never_sends_cleartext() {
+        let mut config = relay_config();
+        config.tls_policy_override = Some(TlsPolicy::ImplicitTlsRequired);
+        // The handshake is bounded: a peer that accepts TCP and then stalls
+        // forever must not wedge the delivery loop.
+        config.timeouts = SmtpTimeouts {
+            connect: Duration::from_millis(100),
+            command: Duration::from_millis(100),
+            data: Duration::from_millis(100),
+        };
+        let harness = harness(config, FakeSmtpConfig::default()).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a cleartext peer cannot complete implicit TLS");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(
+                    reason.contains("TLS") || reason.contains("timed out"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+        let commands = harness.server.commands();
+        assert!(
+            !commands
+                .iter()
+                .any(|command| command.starts_with("EHLO") || command.starts_with("MAIL FROM")),
+            "nothing but the TLS handshake may reach a cleartext peer: {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mail_from_5xx_permanently_rejects_the_message_with_a_dsn() {
+        let server_config = FakeSmtpConfig {
+            mail_from: ScriptedReply::always(ReplySpec::new(550, "5.7.1 sender rejected")),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("5xx at MAIL FROM is permanent for the message");
+        match &error {
+            RelayError::Permanent {
+                reason,
+                dsn_send_units,
+                ..
+            } => {
+                assert!(reason.contains("5.7.1"), "reason: {reason}");
+                assert_eq!(dsn_send_units.len(), 1);
+            }
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        assert!(
+            harness.server.messages().is_empty(),
+            "MAIL FROM refusal means no DATA"
+        );
+    }
+
+    #[tokio::test]
+    async fn mail_from_4xx_is_transient() {
+        let server_config = FakeSmtpConfig {
+            mail_from: ScriptedReply::always(ReplySpec::new(451, "4.3.0 try later")),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("4xx at MAIL FROM defers");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("4.3.0"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn data_command_refusal_permanently_rejects_the_message() {
+        let server_config = FakeSmtpConfig {
+            data_command: ScriptedReply::always(ReplySpec::new(554, "5.7.0 no DATA today")),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a 5xx DATA refusal is permanent");
+        match &error {
+            RelayError::Permanent { reason, .. } => {
+                assert!(reason.contains("5.7.0"), "reason: {reason}");
+            }
+            other => panic!("expected Permanent, got {other:?}"),
+        }
+        assert!(
+            harness.server.messages().is_empty(),
+            "the payload was never transmitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_session_connection_drops_are_transient() {
+        // Drop on RCPT.
+        let rcpt_drop = harness(
+            relay_config(),
+            FakeSmtpConfig {
+                drop_after_command: Some("RCPT TO".to_string()),
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = rcpt_drop
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a dropped RCPT connection is transient");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("RCPT TO"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+
+        // Drop after the DATA payload, before the verdict.
+        let data_drop = harness(
+            relay_config(),
+            FakeSmtpConfig {
+                drop_before_data_reply: true,
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = data_drop
+            .relay
+            .submit(request())
+            .await
+            .expect_err("losing the post-DATA verdict is transient");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("end-of-DATA"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+        assert!(
+            !data_drop.server.messages().is_empty(),
+            "the message WAS transmitted before the connection dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn recipient_verdicts_mix_accepted_and_deferred_without_retrying() {
+        let mut server_config = FakeSmtpConfig::default();
+        server_config.rcpt_replies("b@example.com", vec![ReplySpec::new(450, "4.2.1 busy")]);
+        let harness = harness(relay_config(), server_config).await;
+        let mut request = request();
+        request.recipients = vec!["a@example.com".to_string(), "b@example.com".to_string()];
+
+        let record = harness.relay.submit(request).await.expect("accepted for a");
+        assert_eq!(record.recipients.len(), 2);
+        assert!(record
+            .recipients
+            .iter()
+            .any(|r| r.recipient == "b@example.com" && r.outcome == RecipientOutcome::Deferred));
+        assert!(
+            record.dsn_send_units.is_empty(),
+            "a deferred recipient is not DSN'd"
+        );
+        assert_eq!(
+            harness.server.messages().len(),
+            1,
+            "the deferred recipient is not retried once the unit is pinned accepted"
+        );
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::days(1), 10)
+            .await
+            .expect("second sweep");
+        assert_eq!(report.claimed, 0, "nothing is retried");
+    }
+
+    #[tokio::test]
+    async fn unexpected_rcpt_code_defers_the_recipient() {
+        let server_config = FakeSmtpConfig {
+            default_rcpt: ScriptedReply::always(ReplySpec::new(199, "garbage verdict")),
+            ..FakeSmtpConfig::default()
+        };
+        let harness = harness(relay_config(), server_config).await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("no recipient accepted");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("no recipient accepted"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+        assert!(
+            harness.server.messages().is_empty(),
+            "no DATA after no recipient accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_domain_outcome_never_drops_a_recipient() {
+        // Domain A accepts; domain B's only MX refuses EHLO permanently.
+        let refused = FakeSmtpServer::start(FakeSmtpConfig {
+            ehlo: ScriptedReply::always(ReplySpec::new(554, "5.5.1 refused")),
+            helo: ScriptedReply::always(ReplySpec::new(554, "5.5.1 refused")),
+            ..FakeSmtpConfig::default()
+        })
+        .await;
+        let accepting = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let ledger = Arc::new(MemoryLedger::new());
+        let resolver = Arc::new(
+            StaticMxResolver::new()
+                .with_target("a.example", vec![accepting.addr()])
+                .with_target("b.example", vec![refused.addr()]),
+        );
+        let relay = Relay::new(ledger, resolver, relay_config());
+        let mut first_request = request();
+        first_request.recipients = vec!["u1@a.example".to_string(), "u2@b.example".to_string()];
+
+        let record = relay.submit(first_request).await.expect("a accepts");
+        assert_eq!(
+            record.recipients.len(),
+            2,
+            "the refused domain's recipient must not vanish: {:?}",
+            record.recipients
+        );
+        let refused_result = record
+            .recipients
+            .iter()
+            .find(|r| r.recipient == "u2@b.example")
+            .expect("u2 is recorded");
+        assert_eq!(refused_result.outcome, RecipientOutcome::Rejected);
+        assert_eq!(
+            record.dsn_send_units.len(),
+            1,
+            "the permanently refused recipient is DSN'd"
+        );
+        assert!(!record.warmup_capacity_consumed());
+
+        // A transient domain-level failure instead becomes Deferred (never a
+        // retry — the unit is already accepted for A).
+        let accepting2 = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let ledger2 = Arc::new(MemoryLedger::new());
+        let resolver2 = Arc::new(
+            StaticMxResolver::new()
+                .with_target("a.example", vec![accepting2.addr()])
+                .with_error(
+                    "c.example",
+                    MxError::Transient {
+                        domain: "c.example".to_string(),
+                        message: "resolver timeout".to_string(),
+                    },
+                ),
+        );
+        let relay2 = Relay::new(ledger2, resolver2, relay_config());
+        let mut request2 = request();
+        request2.recipients = vec!["u1@a.example".to_string(), "u3@c.example".to_string()];
+        let record2 = relay2.submit(request2).await.expect("a accepts");
+        let deferred = record2
+            .recipients
+            .iter()
+            .find(|r| r.recipient == "u3@c.example")
+            .expect("u3 is recorded");
+        assert_eq!(deferred.outcome, RecipientOutcome::Deferred);
+        assert!(record2.dsn_send_units.is_empty());
+        assert_eq!(accepting2.messages().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hostile_replies_are_rejected_as_protocol_errors() {
+        // Unparseable greeting.
+        let garbage = harness(
+            relay_config(),
+            FakeSmtpConfig {
+                raw_greeting: Some(b"garbage with no code\r\n".to_vec()),
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = garbage
+            .relay
+            .submit(request())
+            .await
+            .expect_err("unparseable greeting is transient");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("unparseable"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+
+        // Multiline greeting whose lines carry DIFFERENT codes: a first-line
+        // reader would call this 250; the protocol says it is unparseable.
+        let mismatch = harness(
+            relay_config(),
+            FakeSmtpConfig {
+                raw_greeting: Some(b"250-fake\r\n550 actually no\r\n".to_vec()),
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = mismatch
+            .relay
+            .submit(request())
+            .await
+            .expect_err("mismatched multiline codes are unparseable");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("unparseable"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+
+        // Oversized reply line: loop protection must fire.
+        let mut oversized = b"220 ".to_vec();
+        oversized.extend(std::iter::repeat_n(b'A', 1024 * 1024 + 16));
+        oversized.extend_from_slice(b"\r\n");
+        let huge = harness(
+            relay_config(),
+            FakeSmtpConfig {
+                raw_greeting: Some(oversized),
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = huge
+            .relay
+            .submit(request())
+            .await
+            .expect_err("oversized reply is refused");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("maximum buffer size"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_peer_hits_the_command_timeout() {
+        let mut config = relay_config();
+        config.timeouts = SmtpTimeouts {
+            connect: Duration::from_millis(500),
+            command: Duration::from_millis(50),
+            data: Duration::from_millis(50),
+        };
+        let harness = harness(
+            config,
+            FakeSmtpConfig {
+                hang_after_greeting: true,
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a silent peer must time out");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("timed out"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_connection_is_transient() {
+        let harness = harness(
+            relay_config(),
+            FakeSmtpConfig {
+                close_after_greeting: true,
+                ..FakeSmtpConfig::default()
+            },
+        )
+        .await;
+        let error = harness
+            .relay
+            .submit(request())
+            .await
+            .expect_err("a closed connection is transient");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(
+                    reason.contains("closed by peer")
+                        || reason.contains("timed out")
+                        || reason.contains("I/O error"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn source_ip_family_mismatch_is_a_retryable_refusal() {
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        let mut request = request();
+        request.requested_source_ip = Some("::1".parse().expect("ip"));
+        let error = harness
+            .relay
+            .submit(request)
+            .await
+            .expect_err("an IPv6 bind cannot reach an IPv4 MX");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(
+                    reason.contains("source IP") && reason.contains("refused before DATA"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+        assert_eq!(harness.server.connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_queued_broken_sender_never_generates_a_dsn() {
+        let mut server_config = FakeSmtpConfig::default();
+        server_config.rcpt_replies("user@example.com", vec![ReplySpec::new(550, "5.1.1 nope")]);
+        let harness = harness(relay_config(), server_config).await;
+        harness
+            .ledger
+            .enqueue_dsn(
+                NewSubmission {
+                    send_unit: "broken-sender:unit".to_string(),
+                    tenant_id: None,
+                    queue_id: None,
+                    envelope_from: Some("not-an-address".to_string()),
+                    recipients: vec!["user@example.com".to_string()],
+                    message: b"From: x\r\n\r\nbody".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 12,
+                },
+                Utc::now(),
+            )
+            .await
+            .expect("enqueue");
+        let report = harness
+            .relay
+            .process_due(Utc::now() + chrono::Duration::seconds(1), 10)
+            .await
+            .expect("due sweep");
+        assert_eq!(report.permanently_failed, 1);
+        let stats = harness.relay.stats().await.expect("stats");
+        assert_eq!(stats.failed, 1);
+        assert_eq!(
+            stats.pending, 0,
+            "an unusable return path must not queue a DSN that cannot be sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_accessors_expose_the_ledger_state() {
+        let harness = harness(relay_config(), FakeSmtpConfig::default()).await;
+        assert!(
+            harness.relay.get("missing").await.expect("get").is_none(),
+            "unknown units read as None"
+        );
+        harness.relay.submit(request()).await.expect("accepted");
+        let row = harness
+            .relay
+            .get("email_queue:unit-1:user@example.com")
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(row.state, "accepted");
+        assert_eq!(row.envelope_from.as_deref(), Some("sender@apexmail.ee"));
+        let stats = harness.relay.stats().await.expect("stats");
+        assert_eq!(stats.accepted, 1);
+        assert_eq!(
+            harness
+                .relay
+                .reclaim_expired(Utc::now())
+                .await
+                .expect("reclaim"),
+            0,
+            "a terminal row is never reclaimed"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_resolution_failure_names_the_stage() {
+        let server = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
+        let ledger = Arc::new(MemoryLedger::new());
+        let resolver = Arc::new(
+            StaticMxResolver::new()
+                .with_error(
+                    "example.com",
+                    MxError::Transient {
+                        domain: "example.com".to_string(),
+                        message: "resolver timeout".to_string(),
+                    },
+                )
+                .with_target("apexmail.ee", vec![server.addr()]),
+        );
+        let relay = Relay::new(ledger, resolver, relay_config());
+        let error = relay
+            .submit(request())
+            .await
+            .expect_err("transient DNS defers");
+        match &error {
+            RelayError::RetryScheduled { reason, .. } => {
+                assert!(reason.contains("MX resolution"), "reason: {reason}");
+                assert!(reason.contains("resolver timeout"), "reason: {reason}");
+            }
+            other => panic!("expected RetryScheduled, got {other:?}"),
+        }
+        assert_eq!(server.connections(), 0);
+    }
+
+    // ── pure policy helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_key_neutralizes_hostile_dsn_keys() {
+        assert_eq!(sanitize_key("user@example.com"), "user@example.com");
+        assert_eq!(sanitize_key("a b/c\r\nd"), "a_b_c__d");
+        assert_eq!(sanitize_key("é"), "_");
+        assert_eq!(sanitize_key(&"x".repeat(300)).len(), 200);
+    }
+
+    #[test]
+    fn normalize_diagnostic_prefixes_and_defaults() {
+        assert_eq!(
+            normalize_diagnostic(Some("smtp; 550 nope")),
+            "smtp; 550 nope"
+        );
+        assert_eq!(normalize_diagnostic(Some("550 nope")), "smtp; 550 nope");
+        assert_eq!(
+            normalize_diagnostic(None),
+            "smtp; 550 permanent delivery failure"
+        );
+    }
+
+    #[test]
+    fn failure_dsn_status_covers_the_taxonomy() {
+        let reply = SmtpReply::parse("550 5.1.1 no such user").expect("reply");
+        assert_eq!(
+            failure_dsn_status(&DeliveryFailure::RecipientRejected {
+                mx: "mx.example".into(),
+                recipient: "u@example.com".into(),
+                reply: reply.clone(),
+            }),
+            "5.1.1"
+        );
+        assert_eq!(
+            failure_dsn_status(&DeliveryFailure::MessageRejected {
+                mx: "mx.example".into(),
+                reply,
+            }),
+            "5.1.1"
+        );
+        assert_eq!(
+            failure_dsn_status(&DeliveryFailure::DomainUndeliverable {
+                domain: "example.com".into(),
+                message: "no MX".into(),
+            }),
+            "5.1.1"
+        );
+        assert_eq!(
+            failure_dsn_status(&DeliveryFailure::AllMxRefused {
+                message: "refused".into(),
+            }),
+            "5.4.0"
+        );
+        assert_eq!(
+            failure_dsn_status(&DeliveryFailure::RetryCeilingExhausted {
+                attempt: 12,
+                message: "too many".into(),
+            }),
+            "4.4.7"
+        );
+        assert_eq!(
+            failure_dsn_status(&DeliveryFailure::Transient {
+                mx: None,
+                stage: AttemptStage::Connect,
+                message: "io".into(),
+            }),
+            "5.0.0"
+        );
+    }
+
+    #[test]
+    fn source_ip_of_error_reports_every_requested_address() {
+        let ip: IpAddr = "203.0.113.9".parse().expect("ip");
+        let cases = [
+            SourceIpError::SocketAllocation {
+                requested: ip,
+                message: "no socket".into(),
+            },
+            SourceIpError::Bind {
+                requested: ip,
+                message: "cannot bind".into(),
+            },
+            SourceIpError::Unverified {
+                requested: ip,
+                actual: "203.0.113.10".parse().expect("ip"),
+            },
+            SourceIpError::LocalAddressUnavailable {
+                requested: ip,
+                message: "gone".into(),
+            },
+            SourceIpError::FamilyMismatch {
+                requested: ip,
+                remote: "127.0.0.1:25".parse().expect("addr"),
+            },
+        ];
+        for case in cases {
+            assert_eq!(source_ip_of_error(&case), Some(ip), "case: {case}");
+        }
+    }
+
+    #[test]
+    fn summarize_failures_falls_back_to_recipient_diagnostics() {
+        assert_eq!(summarize_failures(&[], &[]), "delivery failed");
+        let result = RecipientResult {
+            recipient: "u@example.com".into(),
+            outcome: RecipientOutcome::Rejected,
+            reply_code: Some(550),
+            enhanced_status: Some("5.1.1".into()),
+            diagnostic: Some("550 5.1.1 nope".into()),
+            mx: Some("mx.example".into()),
+            tls_used: false,
+        };
+        let summary = summarize_failures(&[], &[result]);
+        assert!(summary.contains("u@example.com"), "summary: {summary}");
+        assert!(summary.contains("5.1.1"), "summary: {summary}");
     }
 }

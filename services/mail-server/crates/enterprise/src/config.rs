@@ -735,4 +735,137 @@ mod tests {
         assert!(cfg.log_stream.compression);
         assert_eq!(cfg.log_stream.max_retries, 3);
     }
+
+    // ── Adversarial: validate() must fail closed per rule ────────────────
+
+    fn base_config() -> Config {
+        Config::from_env().expect("Config::from_env with test defaults")
+    }
+
+    #[test]
+    fn secret_string_exposes_but_never_prints() {
+        let secret = SecretString::new("super-secret-token".into());
+        assert_eq!(secret.expose_secret(), "super-secret-token");
+        assert_eq!(format!("{secret:?}"), "[REDACTED]");
+        assert!(!format!("{secret:?}").contains("super-secret"));
+        // Clone still exposes the same value (zeroize happens on drop only).
+        assert_eq!(secret.clone().expose_secret(), "super-secret-token");
+    }
+
+    #[test]
+    fn config_validate_rejects_each_single_violation() {
+        // Baseline must be valid so each mutation isolates one rule.
+        let base = base_config();
+        assert!(base.validate().is_ok(), "test baseline must validate");
+
+        let mut cfg = base.clone();
+        cfg.port = 0;
+        assert!(cfg.validate().unwrap_err().contains("PORT"));
+        let mut cfg = base.clone();
+        cfg.host = "   ".into();
+        assert!(cfg.validate().unwrap_err().contains("HOST"));
+        let mut cfg = base.clone();
+        cfg.db.port = 0;
+        assert!(cfg.validate().unwrap_err().contains("DB_PORT"));
+        let mut cfg = base.clone();
+        cfg.db.max_connections = 0;
+        assert!(cfg.validate().unwrap_err().contains("DB_MAX_CONNECTIONS"));
+        let mut cfg = base.clone();
+        cfg.cors_origins = vec![];
+        assert!(cfg.validate().unwrap_err().contains("CORS_ORIGINS"));
+        let mut cfg = base.clone();
+        cfg.node_env = "production".into();
+        cfg.db.password = "  ".into();
+        assert!(cfg.validate().unwrap_err().contains("DB_PASSWORD"));
+        let mut cfg = base.clone();
+        cfg.node_env = "production".into();
+        cfg.db.password = "set".into();
+        cfg.jwt_public_key_pem = String::new();
+        assert!(cfg.validate().unwrap_err().contains("JWT_PUBLIC_KEY_PEM"));
+        let mut cfg = base.clone();
+        cfg.node_env = "production".into();
+        cfg.db.password = "set".into();
+        cfg.jwt_public_key_pem = "pem".into();
+        cfg.log_stream.encryption_key = String::new();
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .contains("LOG_STREAM_ENCRYPTION_KEY"),
+            "log-stream key must be required in production"
+        );
+        let mut cfg = base.clone();
+        cfg.sso.saml.enabled = true;
+        cfg.sso.saml.private_key = SecretString::new(String::new());
+        assert!(cfg.validate().unwrap_err().contains("SAML_PRIVATE_KEY"));
+        let mut cfg = base.clone();
+        cfg.sso.saml.enabled = true;
+        cfg.sso.saml.private_key = SecretString::new("key".into());
+        cfg.sso.saml.certificate = String::new();
+        assert!(cfg.validate().unwrap_err().contains("SAML_CERTIFICATE"));
+        let mut cfg = base.clone();
+        cfg.sso.oidc.enabled = true;
+        cfg.sso.oidc.client_secret = String::new();
+        assert!(cfg.validate().unwrap_err().contains("OIDC_CLIENT_SECRET"));
+        let mut cfg = base.clone();
+        cfg.sso.oidc.enabled = true;
+        cfg.sso.oidc.client_secret = "secret".into();
+        cfg.sso.oidc.client_id = String::new();
+        assert!(cfg.validate().unwrap_err().contains("OIDC_CLIENT_ID"));
+        let mut cfg = base.clone();
+        cfg.sso.oidc.enabled = true;
+        cfg.sso.oidc.client_secret = "secret".into();
+        cfg.sso.oidc.client_id = "client".into();
+        cfg.sso.oidc.issuer = String::new();
+        assert!(cfg.validate().unwrap_err().contains("OIDC_ISSUER"));
+    }
+
+    #[test]
+    fn enterprise_plan_wire_contract_all_variants() {
+        for (plan, wire) in [
+            (EnterprisePlan::Starter, "starter"),
+            (EnterprisePlan::Business, "business"),
+            (EnterprisePlan::Scale, "scale"),
+            (EnterprisePlan::Enterprise, "enterprise"),
+            (EnterprisePlan::Private, "private"),
+            (EnterprisePlan::Custom, "custom"),
+        ] {
+            assert_eq!(plan.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(&plan).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+    }
+
+    #[test]
+    fn sso_provider_and_volume_mode_wire_contracts() {
+        for (provider, wire) in [
+            (SSOProviderType::Saml, "saml"),
+            (SSOProviderType::Oidc, "oidc"),
+            (SSOProviderType::Okta, "okta"),
+            (SSOProviderType::AzureAd, "azure_ad"),
+            (SSOProviderType::Google, "google"),
+        ] {
+            assert_eq!(provider.to_string(), wire);
+            assert_eq!(
+                serde_json::to_value(&provider).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(wire.parse::<SSOProviderType>().unwrap(), provider);
+        }
+        for hostile in ["", "SAML", "ldap"] {
+            assert!(hostile.parse::<SSOProviderType>().is_err());
+        }
+        for (mode, wire) in [
+            (VolumeAllocationMode::Fixed, "fixed"),
+            (VolumeAllocationMode::Shared, "shared"),
+            (VolumeAllocationMode::Burst, "burst"),
+        ] {
+            assert_eq!(mode.to_string(), wire);
+            assert_eq!(wire.parse::<VolumeAllocationMode>().unwrap(), mode);
+        }
+        for hostile in ["", "shared_mode", "SHARED"] {
+            assert!(hostile.parse::<VolumeAllocationMode>().is_err());
+        }
+    }
 }

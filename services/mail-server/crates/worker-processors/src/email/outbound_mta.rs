@@ -630,6 +630,171 @@ mod tests {
         );
     }
 
+    // ── submission construction, error mapping and verification ──────────
+
+    /// The VERP binding (when present) supplies the ledger's tenant and the
+    /// queue id; a malformed queue id degrades to None instead of failing
+    /// the send.
+    #[tokio::test]
+    async fn build_request_carries_the_verp_identity_when_well_formed() {
+        let (transport, _ledger, _server) = real_relay_transport().await;
+        let queue_id = uuid::Uuid::new_v4();
+        let mut email = email();
+        email.verp = Some(super::super::types::VerpBinding {
+            queue_id: queue_id.to_string(),
+            tenant_id: "tenant-9".into(),
+        });
+        let request = transport
+            .build_request(&email, &dedicated_route())
+            .expect("request");
+        assert_eq!(request.tenant_id.as_deref(), Some("tenant-9"));
+        assert_eq!(request.queue_id, Some(queue_id));
+        assert_eq!(request.recipients, vec!["user@example.com".to_string()]);
+        assert!(request.envelope_from.is_some());
+
+        // A non-UUID queue id must not poison the submission: it degrades to
+        // None (no queue attribution) while the send proceeds.
+        email.verp = Some(super::super::types::VerpBinding {
+            queue_id: "not-a-uuid".into(),
+            tenant_id: "tenant-9".into(),
+        });
+        let request = transport
+            .build_request(&email, &dedicated_route())
+            .expect("request");
+        assert_eq!(request.queue_id, None);
+        assert_eq!(
+            request.tenant_id.as_deref(),
+            Some("tenant-9"),
+            "tenant survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_request_refuses_a_missing_send_unit() {
+        let (transport, _ledger, _server) = real_relay_transport().await;
+        let mut email = email();
+        email.send_unit = "   ".into();
+        let error = transport
+            .build_request(&email, &dedicated_route())
+            .expect_err("no stable identity, no idempotent submission");
+        assert!(matches!(error, ProcessorError::Config(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn relay_errors_map_onto_the_processor_taxonomy() {
+        let permanent = map_relay_error(RelayError::Permanent {
+            send_unit: "u".into(),
+            attempt: 1,
+            reason: "5.1.1 user unknown".into(),
+            dsn_send_units: vec![],
+        });
+        match permanent {
+            ProcessorError::Smtp { code, message, .. } => {
+                assert_eq!(code, 554, "a terminal relay failure is a 5xx refusal");
+                assert!(message.contains("5.1.1 user unknown"));
+            }
+            other => panic!("expected Smtp, got {other:?}"),
+        }
+        let transient = map_relay_error(RelayError::Delivery("connection reset".into()));
+        assert!(matches!(transient, ProcessorError::Transport(_)));
+    }
+
+    /// A record that is not `accepted` — or is keyed on another unit — never
+    /// verifies, and a shared route has no binding to verify.
+    #[tokio::test]
+    async fn acceptance_verification_covers_every_rejection_shape() {
+        let route = dedicated_route();
+        let unit = "email_queue:job-1:user@example.com";
+        let error = verify_acceptance_record(
+            &route,
+            unit,
+            &record("failed", Some("127.0.0.1"), Some("127.0.0.1")),
+        )
+        .expect_err("a failed record must not verify");
+        assert!(
+            error.to_string().contains("state 'failed'"),
+            "error: {error}"
+        );
+
+        let mismatched = record("accepted", Some("127.0.0.1"), Some("127.0.0.1"));
+        let error = verify_acceptance_record(&route, "email_queue:other", &mismatched)
+            .expect_err("another unit's acceptance must not verify");
+        assert!(error.to_string().contains("identity mismatch"));
+
+        // The shared route never checks a binding: any accepted record is
+        // its success shape.
+        verify_acceptance_record(
+            &DeliveryRoute::SesShared,
+            unit,
+            &record("accepted", None, None),
+        )
+        .expect("shared acceptance verifies without a binding");
+    }
+
+    /// A DKIM-configured dedicated send is signed BEFORE submission (the
+    /// relay delivers the bytes verbatim).
+    #[tokio::test]
+    async fn dkim_signing_happens_before_submission() {
+        let pair = apexmail_lib::dkim::generate_dkim_keypair().expect("keypair");
+        let (transport, _ledger, _server) = real_relay_transport().await;
+        let mut email = email();
+        email.dkim = Some(super::super::types::DkimConfig {
+            selector: "sel".into(),
+            domain: "example.com".into(),
+            private_key: pair.private_key_pem,
+        });
+        let request = transport
+            .build_request(&email, &dedicated_route())
+            .expect("signed request");
+        let message = String::from_utf8_lossy(&request.message);
+        assert!(
+            message.starts_with("DKIM-Signature:"),
+            "the signature header must lead the signed message"
+        );
+        assert!(
+            message.contains("sender@apexmail.ee"),
+            "the original MIME bytes are preserved under the signature"
+        );
+    }
+
+    /// A broken submission seam maps onto Transport errors; readiness
+    /// failures are reported, never swallowed.
+    #[tokio::test]
+    async fn a_failing_submitter_surfaces_as_transport_errors() {
+        struct FailingRelay;
+        #[async_trait]
+        impl RelaySubmitter for FailingRelay {
+            async fn submit(
+                &self,
+                _request: SubmitRequest,
+            ) -> Result<AcceptanceRecord, RelayError> {
+                Err(RelayError::Delivery("relay down".into()))
+            }
+            async fn ready(&self) -> Result<(), String> {
+                Err("ledger unreachable".into())
+            }
+        }
+        let transport = OutboundMtaTransport::new(Arc::new(FailingRelay));
+        let error = transport
+            .send(&email(), &dedicated_route())
+            .await
+            .expect_err("a failed submission is a transport error");
+        assert!(
+            matches!(error, ProcessorError::Transport(_)),
+            "got {error:?}"
+        );
+
+        let error = transport
+            .verify()
+            .await
+            .expect_err("an unready ledger must fail verification");
+        assert!(
+            error.to_string().contains("ledger unreachable"),
+            "error: {error}"
+        );
+        transport.close().await.expect("close is a no-op");
+    }
+
     /// Regression guard for the pre-DATA refusal: a dedicated route whose
     /// configured transport cannot bind still defers BEFORE submit. The
     /// legacy SMTP transport is the production example (its client cannot

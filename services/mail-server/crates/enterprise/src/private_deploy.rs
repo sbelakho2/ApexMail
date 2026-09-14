@@ -150,6 +150,40 @@ impl PrivateDeployService {
         region: Option<&str>,
         config: Option<serde_json::Value>,
     ) -> Result<ApiResult<PrivateDeployment>, String> {
+        // Validation before persistence: hostile names (Postgres cannot store
+        // NUL bytes at all), over-length values, and unknown deployment types
+        // must surface as 400s (VALIDATION), never as a database
+        // CHECK/encoding failure that leaks internals as a 500.
+        let tenant_id = tenant_id.trim();
+        if tenant_id.is_empty() || tenant_id.chars().count() > 26 || tenant_id.contains('\u{0}') {
+            return Ok(ApiResult::err(
+                "tenant_id must be 1..=26 characters without NUL",
+                "VALIDATION",
+            ));
+        }
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 255 || name.contains('\u{0}') {
+            return Ok(ApiResult::err(
+                "name must be 1..=255 characters without NUL",
+                "VALIDATION",
+            ));
+        }
+        if deployment_type.parse::<DeploymentType>().is_err() {
+            return Ok(ApiResult::err(
+                "deployment_type must be one of: dedicated, private_cloud, hybrid, on_premise",
+                "VALIDATION",
+            ));
+        }
+        if let Some(region) = region {
+            let region = region.trim();
+            if region.is_empty() || region.chars().count() > 64 || region.contains('\u{0}') {
+                return Ok(ApiResult::err(
+                    "region must be 1..=64 characters without NUL",
+                    "VALIDATION",
+                ));
+            }
+        }
+        let tenant_id = tenant_id.to_string();
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, PrivateDeploymentDbRow>(
             "INSERT INTO ent_private_deployments (id, tenant_id, name, deployment_type, status, region, config, created_at, updated_at)
@@ -329,7 +363,7 @@ impl PrivateDeployService {
         let row = sqlx::query_as::<_, DedicatedIPDbRow>(
             "INSERT INTO ent_dedicated_ips (id, tenant_id, deployment_id, ip_address, status, emails_sent_total, bounces_total, complaints_total, blocklisted, created_at)
              VALUES ($1,$2,$3,$4::inet,'pending',0,0,0,false,NOW())
-             RETURNING id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at"
+             RETURNING id, tenant_id, deployment_id, host(ip_address) AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at"
         )
         .bind(id).bind(&tenant_id).bind(deployment_id).bind(ip_address)
         .fetch_one(&self.db)
@@ -373,9 +407,13 @@ impl PrivateDeployService {
             .await
             .map_err(|e| format!("Advisory lock: {e}"))?;
 
-        // Find an available IP from the pool, preferring warmed IPs if requested
+        // Find an available IP from the pool, preferring warmed IPs if requested.
+        // `host(ip_address)` yields the bare address: `ip_address::text` renders
+        // INET with its /32 mask suffix, and sqlx cannot decode INET into a
+        // Rust String at all (the query used to fail at decode time on every
+        // call).
         let query = if prefer_warmed {
-            "SELECT id, ip_address, region, datacenter, provider, reputation_score, ptr_record
+            "SELECT id, host(ip_address) AS ip_address, region, datacenter, provider, reputation_score, ptr_record
              FROM ip_pool_available
              WHERE status = 'available'
                AND ($1::text IS NULL OR region = $1)
@@ -383,7 +421,7 @@ impl PrivateDeployService {
              LIMIT 1
              FOR UPDATE SKIP LOCKED"
         } else {
-            "SELECT id, ip_address, region, datacenter, provider, reputation_score, ptr_record
+            "SELECT id, host(ip_address) AS ip_address, region, datacenter, provider, reputation_score, ptr_record
              FROM ip_pool_available
              WHERE status = 'available'
                AND ($1::text IS NULL OR region = $1)
@@ -439,7 +477,7 @@ impl PrivateDeployService {
                 blocklisted, reputation_score, region, ptr_record, created_at
              )
              VALUES ($1, $2, $3, $4::inet, 'active', 0, 0, 0, false, $5, $6, $7, NOW())
-             RETURNING id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at",
+             RETURNING id, tenant_id, deployment_id, host(ip_address) AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at",
         )
         .bind(id)
         .bind(&tenant_id)
@@ -482,7 +520,7 @@ impl PrivateDeployService {
 
         // Get the IP address
         let ip_row: Option<(String,)> = sqlx::query_as(
-            "SELECT ip_address::text FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2",
+            "SELECT host(ip_address) AS ip_address FROM ent_dedicated_ips WHERE id = $1 AND tenant_id = $2",
         )
         .bind(ip_id)
         .bind(&tenant_id)
@@ -550,7 +588,7 @@ impl PrivateDeployService {
     /// Get dedicated IP by ID
     pub async fn get_dedicated_ip(&self, id: Uuid) -> Result<ApiResult<DedicatedIP>, String> {
         let row =
-            sqlx::query_as::<_, DedicatedIPDbRow>("SELECT id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at FROM ent_dedicated_ips WHERE id = $1")
+            sqlx::query_as::<_, DedicatedIPDbRow>("SELECT id, tenant_id, deployment_id, host(ip_address) AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at FROM ent_dedicated_ips WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.db)
                 .await
@@ -570,7 +608,7 @@ impl PrivateDeployService {
         offset: i64,
     ) -> Result<ApiResult<Vec<DedicatedIP>>, String> {
         let rows = sqlx::query_as::<_, DedicatedIPDbRow>(
-            "SELECT id, tenant_id, deployment_id, ip_address::text AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at FROM ent_dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+            "SELECT id, tenant_id, deployment_id, host(ip_address) AS ip_address, region, ptr_record, status, warming_started_at, warming_progress_percent, warming_plan, current_daily_limit, reputation_score, reputation_history, emails_sent_total, bounces_total, complaints_total, blocklisted, blocklist_details, created_at FROM ent_dedicated_ips WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(&tenant_id)
         .bind(limit)

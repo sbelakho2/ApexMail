@@ -228,4 +228,53 @@ mod tests {
             Err(ConnectError::SourceIp(SourceIpError::FamilyMismatch { .. }))
         ));
     }
+
+    #[tokio::test]
+    async fn shared_pool_connect_failure_is_an_io_error() {
+        // Bind a listener only to learn a free port, then close it: nothing
+        // listens there anymore.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+
+        let result = connect_bound(addr, None, Duration::from_secs(2)).await;
+        match result {
+            Err(ConnectError::Io { remote, message }) => {
+                assert_eq!(remote, addr);
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected ConnectError::Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_ip_errors_render_the_requested_address() {
+        let ip: IpAddr = "203.0.113.9".parse().expect("ip");
+        for error in [
+            SourceIpError::SocketAllocation {
+                requested: ip,
+                message: "too many fds".into(),
+            },
+            SourceIpError::Bind {
+                requested: ip,
+                message: "EADDRNOTAVAIL".into(),
+            },
+            SourceIpError::Unverified {
+                requested: ip,
+                actual: "203.0.113.10".parse().expect("ip"),
+            },
+            SourceIpError::LocalAddressUnavailable {
+                requested: ip,
+                message: "socket closed".into(),
+            },
+        ] {
+            let text = error.to_string();
+            assert!(
+                text.contains("203.0.113.9"),
+                "the refusal must name the requested IP: {text}"
+            );
+        }
+    }
 }

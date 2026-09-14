@@ -175,3 +175,193 @@ async fn poll_snds(
     let client = snds::SndsClient::new(snds::SndsCredentials { access_key })?;
     snds::ingest_all(db, &client).await
 }
+
+#[cfg(test)]
+mod tests {
+    //! Adversarial scheduler tests: every poll outcome (no creds, unknown
+    //! provider, secret-resolution failure, malformed secret JSON, missing
+    //! keys) must be recorded on the credential row and must never abort the
+    //! tick. DB-backed via the canonical schema; TEST_DATABASE_URL unset
+    //! soft-skips, a configured provisioning failure panics.
+
+    use super::*;
+    use std::sync::Arc;
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn resolver_returning(value: Result<&'static str, &'static str>) -> SecretResolver {
+        Arc::new(move |_secret_ref: String| {
+            let value = value.map(str::to_string).map_err(str::to_string);
+            Box::pin(async move { value })
+        })
+    }
+
+    async fn insert_credential(
+        pool: &PgPool,
+        id: &str,
+        provider: &str,
+        secret_ref: &str,
+        enabled: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO postmaster_credentials (id, provider, label, secret_ref, enabled)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(provider)
+        .bind(format!("label-{id}"))
+        .bind(secret_ref)
+        .bind(enabled)
+        .execute(pool)
+        .await
+        .expect("insert credential");
+    }
+
+    async fn credential_state(pool: &PgPool, id: &str) -> (Option<String>, i32) {
+        sqlx::query_as::<_, (Option<String>, i32)>(
+            "SELECT last_error, consecutive_failures FROM postmaster_credentials WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("credential row")
+    }
+
+    #[tokio::test]
+    async fn run_once_with_no_enabled_credentials_is_ok_and_touches_nothing() {
+        let Some(pool) = test_pool("scheduler_empty").await else {
+            return;
+        };
+        insert_credential(&pool, "disabled", "google", "does-not-matter", false).await;
+        run_once(&pool, &resolver_returning(Ok("{}")))
+            .await
+            .expect("an empty poll set is a successful tick");
+        let (last_error, failures) = credential_state(&pool, "disabled").await;
+        assert_eq!(last_error, None, "disabled credentials are never polled");
+        assert_eq!(failures, 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_is_recorded_and_does_not_abort_the_tick() {
+        let Some(pool) = test_pool("scheduler_unknown").await else {
+            return;
+        };
+        insert_credential(&pool, "weird", "carrier-pigeon", "ref", true).await;
+        run_once(&pool, &resolver_returning(Ok("{}")))
+            .await
+            .expect("a per-credential failure must not fail the tick");
+        let (last_error, failures) = credential_state(&pool, "weird").await;
+        assert!(
+            last_error
+                .clone()
+                .unwrap_or_default()
+                .contains("unknown provider"),
+            "unknown providers must be recorded: {last_error:?}"
+        );
+        assert_eq!(failures, 1, "consecutive_failures increments");
+    }
+
+    #[tokio::test]
+    async fn google_secret_failures_are_recorded_without_network_access() {
+        let Some(pool) = test_pool("scheduler_google_errors").await else {
+            return;
+        };
+        insert_credential(&pool, "g-missing", "google", "ref-missing", true).await;
+        insert_credential(&pool, "g-badjson", "google", "ref-badjson", true).await;
+        insert_credential(&pool, "g-halfjson", "google", "ref-halfjson", true).await;
+
+        let resolver: SecretResolver = Arc::new(|secret_ref: String| {
+            Box::pin(async move {
+                match secret_ref.as_str() {
+                    "ref-missing" => Err("secret_ref not found".to_string()),
+                    "ref-badjson" => Ok("not json at all".to_string()),
+                    _ => Ok("{\"client_id\":\"only\"}".to_string()),
+                }
+            })
+        });
+        run_once(&pool, &resolver)
+            .await
+            .expect("tick must survive every per-credential failure");
+
+        let (err_missing, failures_missing) = credential_state(&pool, "g-missing").await;
+        assert_eq!(err_missing.as_deref(), Some("secret_ref not found"));
+        assert_eq!(failures_missing, 1);
+
+        let (err_json, failures_json) = credential_state(&pool, "g-badjson").await;
+        assert!(
+            err_json.unwrap_or_default().starts_with("secret JSON"),
+            "malformed secret JSON is reported as such"
+        );
+        assert_eq!(failures_json, 1);
+
+        let (err_half, _) = credential_state(&pool, "g-halfjson").await;
+        assert_eq!(
+            err_half.as_deref(),
+            Some("missing client_secret"),
+            "a JSON object missing required keys is refused before any HTTP call"
+        );
+    }
+
+    #[tokio::test]
+    async fn snds_secret_shapes_are_validated_before_any_network_call() {
+        let Some(pool) = test_pool("scheduler_snds_errors").await else {
+            return;
+        };
+        insert_credential(&pool, "m-resolverr", "microsoft", "ref-err", true).await;
+        insert_credential(&pool, "m-badjson", "microsoft", "ref-badjson", true).await;
+        insert_credential(&pool, "m-nokey", "microsoft", "ref-nokey", true).await;
+
+        let resolver: SecretResolver = Arc::new(|secret_ref: String| {
+            Box::pin(async move {
+                match secret_ref.as_str() {
+                    "ref-err" => Err("vault unavailable".to_string()),
+                    "ref-badjson" => Ok("{ not json".to_string()),
+                    _ => Ok("{\"other\":\"value\"}".to_string()),
+                }
+            })
+        });
+        run_once(&pool, &resolver).await.expect("tick survives");
+
+        assert_eq!(
+            credential_state(&pool, "m-resolverr").await.0.as_deref(),
+            Some("vault unavailable")
+        );
+        assert!(credential_state(&pool, "m-badjson")
+            .await
+            .0
+            .unwrap_or_default()
+            .starts_with("secret JSON"));
+        assert_eq!(
+            credential_state(&pool, "m-nokey").await.0.as_deref(),
+            Some("missing access_key"),
+            "JSON without access_key is refused before the HTTP client is built"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_ticks_and_can_be_aborted() {
+        let Some(pool) = test_pool("scheduler_spawn").await else {
+            return;
+        };
+        let handle = spawn(
+            pool,
+            ScheduleConfig {
+                interval: Duration::from_millis(10),
+            },
+            resolver_returning(Ok("{}")),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !handle.is_finished(),
+            "spawned scheduler runs until aborted"
+        );
+        handle.abort();
+        let default_cfg = ScheduleConfig::default();
+        assert_eq!(default_cfg.interval, Duration::from_secs(6 * 60 * 60));
+    }
+}

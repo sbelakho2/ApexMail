@@ -173,6 +173,13 @@ fn validation_comment_err(message: impl Into<String>) -> Result<ApiResult<Ticket
     Ok(ApiResult::err(message, "VALIDATION"))
 }
 
+/// Postgres TEXT/VARCHAR cannot store NUL bytes: a hostile embedded NUL would
+/// otherwise reach the database and surface as an encoding error (a 500)
+/// instead of a clean validation refusal.
+fn contains_nul(value: &str) -> bool {
+    value.contains('\u{0}')
+}
+
 /// RFC-5321-ish sanity check for a contact/recipient address: exactly one @,
 /// non-empty local part and domain, no whitespace, no control characters,
 /// bounded length. Deliberately permissive on dot-atom details.
@@ -386,6 +393,9 @@ impl SupportService {
         if tenant_id.trim().is_empty() || tenant_id.len() > 26 {
             return validation_err("tenant_id must be 1..=26 characters");
         }
+        if contains_nul(tenant_id) {
+            return validation_err("tenant_id must not contain NUL");
+        }
         let subject_trimmed = subject.trim();
         if subject_trimmed.is_empty() {
             return validation_err("subject must not be empty");
@@ -395,6 +405,9 @@ impl SupportService {
                 "subject must not exceed {TICKET_SUBJECT_MAX_CHARS} characters"
             ));
         }
+        if contains_nul(subject) {
+            return validation_err("subject must not contain NUL");
+        }
         if description.trim().is_empty() {
             return validation_err("description must not be empty");
         }
@@ -403,6 +416,9 @@ impl SupportService {
                 "description must not exceed {TICKET_DESCRIPTION_MAX_CHARS} characters"
             ));
         }
+        if contains_nul(description) {
+            return validation_err("description must not contain NUL");
+        }
         if !is_valid_priority(priority) {
             return validation_err(format!(
                 "priority must be one of: {}",
@@ -410,13 +426,16 @@ impl SupportService {
             ));
         }
         let category = category.trim();
-        if category.is_empty() || category.chars().count() > TICKET_CATEGORY_MAX_CHARS {
+        if category.is_empty()
+            || category.chars().count() > TICKET_CATEGORY_MAX_CHARS
+            || contains_nul(category)
+        {
             return validation_err(format!(
-                "category must be 1..={TICKET_CATEGORY_MAX_CHARS} characters"
+                "category must be 1..={TICKET_CATEGORY_MAX_CHARS} characters without NUL"
             ));
         }
         if let Some(email) = contact_email {
-            if !email.trim().is_empty() && !is_plausible_email(email) {
+            if !email.trim().is_empty() && (!is_plausible_email(email) || contains_nul(email)) {
                 return validation_err("contact_email is not a valid email address");
             }
         }

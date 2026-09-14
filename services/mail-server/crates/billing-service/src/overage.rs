@@ -3919,4 +3919,50 @@ mod coverage_adversarial {
             assert_eq!(sweep_result.payg_invoices_created, 0);
         }
     );
+
+    /// The kill-switch must short-circuit BEFORE any database work: a state
+    /// wired to unreachable lazy pools still returns the empty result. This
+    /// test is the only reader of `OVERAGE_INVOICING_ENABLED` in the test
+    /// process, so the env mutation cannot race a sibling test.
+    #[tokio::test]
+    async fn overage_kill_switch_short_circuits_before_any_db_work() {
+        let previous = std::env::var("OVERAGE_INVOICING_ENABLED").ok();
+
+        // Truth-table of the parser itself.
+        for (value, expected) in [
+            (Some("false"), false),
+            (Some("0"), false),
+            (Some("true"), true),
+            (Some("1"), true),
+            (Some(""), true),
+            (None, true),
+        ] {
+            match value {
+                Some(value) => std::env::set_var("OVERAGE_INVOICING_ENABLED", value),
+                None => std::env::remove_var("OVERAGE_INVOICING_ENABLED"),
+            }
+            assert_eq!(overage_invoicing_enabled(), expected, "value {value:?}");
+        }
+
+        // Disabled: unreachable pools must never be touched.
+        std::env::set_var("OVERAGE_INVOICING_ENABLED", "false");
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost:1/unused")
+            .expect("lazy pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let state = AppState::new(db, redis, crate::config::BillingConfig::default());
+        let result = sweep_period_overage(&state)
+            .await
+            .expect("disabled sweep is not an error");
+        assert_eq!(result.invoices_created, 0);
+        assert_eq!(result.payg_invoices_created, 0);
+        assert_eq!(result.failed_periods, 0);
+
+        match previous {
+            Some(value) => std::env::set_var("OVERAGE_INVOICING_ENABLED", value),
+            None => std::env::remove_var("OVERAGE_INVOICING_ENABLED"),
+        }
+    }
 }

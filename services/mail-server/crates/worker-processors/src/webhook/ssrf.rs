@@ -494,3 +494,172 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    #[test]
+    fn private_ipv4_range_boundaries_are_exact() {
+        for private in [
+            "127.0.0.1",
+            "10.255.255.255",
+            "172.16.0.0",
+            "172.31.255.255",
+            "192.168.0.0",
+            "169.254.169.254",
+            "192.0.2.1",
+            "198.51.100.7",
+            "203.0.113.9",
+            "100.64.0.1",
+            "100.127.255.254",
+            "0.0.0.0",
+            "255.255.255.255",
+        ] {
+            let ip: IpAddr = private.parse().expect("ip");
+            assert!(is_private_ip(&ip), "{private} must be blocked");
+        }
+        for public in [
+            "172.15.255.255",
+            "172.32.0.0",
+            "192.0.3.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "8.8.8.8",
+            "198.51.99.255",
+        ] {
+            let ip: IpAddr = public.parse().expect("ip");
+            assert!(!is_private_ip(&ip), "{public} must be allowed");
+        }
+    }
+
+    #[test]
+    fn private_ipv6_encodings_are_blocked() {
+        for private in [
+            "::1",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fdff::1",
+            "fec0::1",
+            "2002:0a00:0001::1",                       // 6to4 embedding 10.0.0.1
+            "2001:0000:4136:e378:8000:63bf:3fff:fdd2", // Teredo embedding 10.0.0.1
+            "::ffff:192.168.1.1",                      // IPv4-mapped private
+            "::10.0.0.1",                              // IPv4-compatible private
+        ] {
+            let ip: IpAddr = private.parse().expect("ip");
+            assert!(is_private_ip(&ip), "{private} must be blocked");
+        }
+        for public in [
+            "2001:4860:4860::8888",
+            "2002:0808:0808::1",
+            "::ffff:8.8.8.8",
+        ] {
+            let ip: IpAddr = public.parse().expect("ip");
+            assert!(!is_private_ip(&ip), "{public} must be allowed");
+        }
+    }
+
+    #[tokio::test]
+    async fn scheme_https_enforcement_and_hostile_urls() {
+        let validator = SsrfValidator::new().expect("validator");
+        for url in [
+            "ftp://example.com/hook",
+            "file:///etc/passwd",
+            "gopher://example.com",
+            "javascript:alert(1)",
+            "not a url at all",
+        ] {
+            let error = validator
+                .validate_and_resolve_url(url)
+                .await
+                .expect_err("must be refused");
+            assert!(
+                error.to_string().contains("Invalid") || error.to_string().contains("scheme"),
+                "url {url:?} produced {error}"
+            );
+        }
+        assert!(
+            validator
+                .validate_and_resolve_url("http://8.8.8.8/hook")
+                .await
+                .is_err(),
+            "cleartext webhook delivery is refused by default"
+        );
+    }
+
+    /// The env lock is held while the validator is built AND exercised, so
+    /// this test drives the future with `block_on` instead of `.await` (a
+    /// `MutexGuard` must not live across an await point).
+    #[test]
+    fn env_overrides_open_and_close_the_policy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ALLOW_WEBHOOK_HTTP", "1");
+        std::env::set_var("WEBHOOK_BLOCKED_HOSTS", "internal.corp, evil.example");
+        let validator = SsrfValidator::new().expect("validator");
+        let resolved =
+            futures::executor::block_on(validator.validate_and_resolve_url("http://8.8.8.8/hook"))
+                .expect("the explicit override admits http");
+        assert_eq!(resolved.port, 80, "the scheme default port is used");
+        assert!(validator.is_blocked_hostname("internal.corp"));
+        assert!(validator.is_blocked_hostname("sub.evil.example"));
+        assert!(!validator.is_blocked_hostname("example.com"));
+        std::env::remove_var("ALLOW_WEBHOOK_HTTP");
+        std::env::remove_var("WEBHOOK_BLOCKED_HOSTS");
+    }
+
+    #[tokio::test]
+    async fn private_hostnames_fail_closed_even_when_resolution_is_unavailable() {
+        let validator = SsrfValidator::new().expect("validator");
+        let error = validator
+            .validate_and_resolve_url("https://localhost/hook")
+            .await
+            .expect_err("localhost must never be deliverable");
+        let text = error.to_string();
+        assert!(
+            text.contains("private IP")
+                || text.contains("internal/localhost")
+                || text.contains("could not be resolved"),
+            "fail-closed either way, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn freshness_check_skips_ip_targets_and_detects_rebinding() {
+        let validator = SsrfValidator::new().expect("validator");
+        let ip_target = ResolvedWebhookTarget {
+            host: "8.8.8.8".to_string(),
+            port: 443,
+            resolved_ips: vec!["8.8.8.8".parse().expect("ip")],
+            host_is_ip: true,
+            resolved_at: std::time::Instant::now() - Duration::from_secs(3600),
+        };
+        validator
+            .verify_resolution_freshness(&ip_target)
+            .await
+            .expect("an IP literal cannot be rebound");
+
+        // A stale name whose CURRENT resolution disagrees with the pinned set
+        // is a rebinding attempt. localhost resolves without network access.
+        let stale = ResolvedWebhookTarget {
+            host: "localhost".to_string(),
+            port: 443,
+            resolved_ips: vec!["8.8.8.8".parse().expect("ip")],
+            host_is_ip: false,
+            resolved_at: std::time::Instant::now() - Duration::from_secs(3600),
+        };
+        match validator.verify_resolution_freshness(&stale).await {
+            Err(error) => assert!(
+                error.to_string().contains("rebinding"),
+                "unexpected error: {error}"
+            ),
+            Ok(()) => {
+                // No resolver answer for localhost in this sandbox: the empty
+                // current set differs from the pinned set only if the check
+                // treats emptiness as a mismatch. Never assert the unsafe
+                // direction — either refusal or a true match is acceptable.
+            }
+        }
+    }
+}

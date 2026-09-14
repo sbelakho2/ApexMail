@@ -521,3 +521,26 @@ mod tests {
         clear_tracking_env();
     }
 }
+
+#[cfg(test)]
+mod default_tests {
+    use super::*;
+
+    #[test]
+    fn analytics_defaults_are_documented_values() {
+        let config = AnalyticsConfig::default();
+        assert_eq!(config.base.name, "analytics");
+        assert_eq!(config.stats_ttl, Duration::from_secs(7 * 24 * 60 * 60));
+        assert_eq!(config.base.concurrency, 10);
+    }
+
+    #[test]
+    fn transport_type_from_env_selects_smtp_only_on_smtp() {
+        assert_eq!(TransportType::from_env("smtp"), TransportType::Smtp);
+        assert_eq!(TransportType::from_env("SMTP"), TransportType::Smtp);
+        assert_eq!(TransportType::from_env("ses"), TransportType::Ses);
+        assert_eq!(TransportType::from_env(""), TransportType::Ses);
+        assert_eq!(TransportType::from_env("anything-else"), TransportType::Ses);
+        assert_eq!(TransportType::default(), TransportType::Ses);
+    }
+}

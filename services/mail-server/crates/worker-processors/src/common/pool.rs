@@ -47,3 +47,51 @@ pub fn create_redis_pool(redis_url: &str, max_size: usize) -> ProcessorResult<Re
         .map_err(|e| ProcessorError::Config(format!("redis pool error: {e}")))?;
     Ok(pool)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn db_pool_rejects_unparseable_urls_without_connecting() {
+        let error = create_db_pool("not a database url", 1)
+            .await
+            .expect_err("garbage must be a configuration error");
+        assert!(
+            matches!(error, ProcessorError::Database(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_pool_connects_to_the_configured_database() {
+        let Some(url) = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+        else {
+            return;
+        };
+        let pool = create_db_pool(&url, 2).await.unwrap_or_else(|error| {
+            panic!(
+                "configured TEST_DATABASE_URL is unusable ({error}); \
+                     this is an infrastructure failure, not a skip"
+            )
+        });
+        let one: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("the pool must serve queries with statement caching enabled");
+        assert_eq!(one, 1);
+        pool.close().await;
+    }
+
+    #[test]
+    fn redis_pool_builds_lazily_from_a_url() {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let pool = create_redis_pool(&url, 2).expect("a valid URL must build a pool");
+        assert_eq!(pool.status().max_size, 2);
+    }
+}

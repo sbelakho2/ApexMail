@@ -264,6 +264,89 @@ mod tests {
     }
 
     #[test]
+    fn route_header_rejects_hostile_values() {
+        for value in [
+            "v1 dedicated id 203.0.113.10/24",         // no CIDR in the grammar
+            "v1 dedicated id 2001:db8::1",             // v6 parses, so accepted (see below)
+            "V1 dedicated id 203.0.113.10",            // case-sensitive version
+            "v1 dedicated id 203.0.113.10\t\r\nextra", // an extra token is refused
+            "v1 dedicated id 999.999.999.999",         // unparseable IP
+            "\u{0}v1 dedicated id 203.0.113.10",       // NUL prefix
+            "v1 dedicated <script> 203.0.113.10",      // markup is just an id token
+        ] {
+            let parsed = parse_route_header(value);
+            match value {
+                "v1 dedicated id 2001:db8::1" | "v1 dedicated <script> 203.0.113.10" => {
+                    assert!(parsed.is_some(), "{value:?} is grammatically valid")
+                }
+                _ => assert!(parsed.is_none(), "{value:?} must be refused"),
+            }
+        }
+        // Tab/space separated with a v6 address is a valid tail.
+        let route = parse_route_header("v1 dedicated id\t2001:db8::1").expect("valid");
+        assert_eq!(route.dedicated_ip_id, "id");
+        assert_eq!(
+            route.source_ip,
+            "2001:db8::1".parse::<IpAddr>().expect("ip")
+        );
+    }
+
+    #[test]
+    fn strip_internal_headers_is_case_and_whitespace_insensitive() {
+        let raw = b"x-APEXMAIL-route: v1 dedicated id 203.0.113.1\n  x-apexmail-source-ip: 203.0.113.1\n\tcontinued\nKeep: yes\n";
+        let clean = strip_internal_headers(raw);
+        assert_eq!(String::from_utf8(clean).expect("utf8"), "Keep: yes\n");
+
+        // A name that only shares the prefix up to a non-hyphen character is
+        // NOT reserved and survives.
+        let near_miss = b"X-ApexMailX: keep\nX-ApexMail: keep-too\n";
+        assert_eq!(
+            String::from_utf8(strip_internal_headers(near_miss)).expect("utf8"),
+            "X-ApexMailX: keep\nX-ApexMail: keep-too\n"
+        );
+
+        // A reserved-looking line without a colon is not a header at all.
+        let no_colon = b"X-ApexMail-Route\nSubject: s\n";
+        assert_eq!(
+            String::from_utf8(strip_internal_headers(no_colon)).expect("utf8"),
+            "X-ApexMail-Route\nSubject: s\n"
+        );
+    }
+
+    #[test]
+    fn strip_internal_headers_keeps_trusted_content_byte_exact() {
+        // Folded continuations of NON-reserved headers survive with their
+        // whitespace, and the header/body split is preserved.
+        let raw = b"Subject: a\r\n folded\r\n\tmore\r\nX-ApexMail-TenantId: t\r\nFrom: a@b.c\r\n\r\nline1\r\nX-ApexMail-Route: body text\r\n";
+        let clean = strip_internal_headers(raw);
+        let text = String::from_utf8(clean).expect("utf8");
+        let (headers, body) = text.split_once("\r\n\r\n").expect("separator");
+        assert!(headers.contains("Subject: a\r\n folded\r\n\tmore"));
+        assert!(headers.contains("From: a@b.c"));
+        assert!(!headers.to_ascii_lowercase().contains("x-apexmail"));
+        assert_eq!(body, "line1\r\nX-ApexMail-Route: body text\r\n");
+    }
+
+    #[test]
+    fn strip_internal_headers_handles_a_leading_blank_line_and_no_terminator() {
+        // A message starting with the header/body separator has no headers to
+        // strip; the remainder is copied verbatim.
+        let body_only = b"\r\nX-ApexMail-Route: not-a-header\r\n";
+        assert_eq!(
+            strip_internal_headers(body_only),
+            body_only.to_vec(),
+            "without a header section nothing may be stripped"
+        );
+        // A reserved header at EOF with no newline.
+        assert!(
+            strip_internal_headers(b"X-ApexMail-Route: v1 dedicated id 203.0.113.1").is_empty()
+        );
+        // A NUL byte inside a trusted line is preserved byte-exact.
+        let with_nul = b"Subject: a\x00b\n";
+        assert_eq!(strip_internal_headers(with_nul), with_nul.to_vec());
+    }
+
+    #[test]
     fn source_ip_reply_header_renders_contract_token() {
         let mut record = AcceptanceRecord {
             send_unit: "unit".into(),

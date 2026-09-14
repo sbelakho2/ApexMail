@@ -975,3 +975,140 @@ mod tests {
         assert!(strings.contains(&"meeting_request"));
     }
 }
+
+#[cfg(test)]
+mod return_date_tests {
+    //! Return-date extraction formats and DSN status precedence — the layer
+    //! that decides whether an OOO reply reschedules a sequence and whether a
+    //! bounce is hard or soft.
+
+    use super::*;
+
+    #[test]
+    fn every_supported_date_format_is_parsed() {
+        let iso = extract_return_date("I will be back on 2026-03-09.").expect("ISO");
+        assert_eq!(iso.date_naive().to_string(), "2026-03-09");
+        assert_eq!(
+            iso.time(),
+            chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+        );
+
+        let month_first =
+            extract_return_date("Back on March 9, 2026.").expect("month-first textual");
+        assert_eq!(month_first.date_naive().to_string(), "2026-03-09");
+
+        let day_first_textual =
+            extract_return_date("Returning 9 March 2026.").expect("day-first textual");
+        assert_eq!(day_first_textual.date_naive().to_string(), "2026-03-09");
+
+        let day_first_numeric = extract_return_date("Back 09/03/2026").expect("day-first numeric");
+        assert_eq!(day_first_numeric.date_naive().to_string(), "2026-03-09");
+
+        assert!(extract_return_date("no date here").is_none());
+        assert!(
+            extract_return_date("sometime in the future").is_none(),
+            "a vague statement must not invent a date"
+        );
+    }
+
+    #[test]
+    fn implausible_years_and_dates_are_refused() {
+        assert!(extract_return_date("back on 1899-01-01").is_none());
+        assert!(extract_return_date("back on 2200-01-01").is_none());
+        assert!(
+            extract_return_date("back on 2026-02-31").is_none(),
+            "an impossible calendar date is refused, not rolled over"
+        );
+        assert!(extract_return_date("back on 2026-13-01").is_none());
+    }
+
+    fn dsn(body: &str) -> Option<DeterministicVerdict> {
+        let input = ReplyInput::new("Undelivered Mail Returned to Sender", body).with_header(
+            "content-type",
+            "multipart/report; report-type=delivery-status",
+        );
+        classify(&input)
+    }
+
+    #[test]
+    fn dsn_status_precedence_hard_soft_and_unstated() {
+        let hard =
+            dsn("Final-Recipient: rfc822; user@example.com\nAction: failed\nStatus: 5.1.1\n")
+                .expect("DSN");
+        assert_eq!(hard.disposition, ReplyDisposition::BounceHard);
+
+        let soft =
+            dsn("Final-Recipient: rfc822; user@example.com\nAction: delayed\nStatus: 4.2.1\n")
+                .expect("DSN");
+        assert_eq!(soft.disposition, ReplyDisposition::BounceSoft);
+
+        // Action: failed with no Status line is still hard (the DSN says the
+        // delivery failed).
+        let failed_no_status =
+            dsn("Final-Recipient: rfc822; user@example.com\nAction: failed\n").expect("DSN");
+        assert_eq!(failed_no_status.disposition, ReplyDisposition::BounceHard);
+
+        // No Status, Action: delayed, and a 5xx only in Diagnostic-Code: the
+        // permanent evidence lives in the diagnostic.
+        let unstated_hard = dsn(
+            "Final-Recipient: rfc822; user@example.com\nAction: delayed\n\
+             Diagnostic-Code: smtp; 550 5.1.1 no such user\n",
+        )
+        .expect("DSN");
+        assert_eq!(unstated_hard.disposition, ReplyDisposition::BounceHard);
+
+        // Action: delayed with a 4xx diagnostic stays soft.
+        let unstated_soft = dsn(
+            "Final-Recipient: rfc822; user@example.com\nAction: delayed\n\
+             Diagnostic-Code: smtp; 451 4.3.0 try later\n",
+        )
+        .expect("DSN");
+        assert_eq!(unstated_soft.disposition, ReplyDisposition::BounceSoft);
+
+        // Human prose mentioning a bounce is NOT a DSN.
+        let prose = ReplyInput::new("Re: hello", "we had a bounce yesterday");
+        assert!(classify(&prose).is_none());
+    }
+
+    #[test]
+    fn final_recipient_is_extracted_from_the_dsn() {
+        let body = "Final-Recipient: rfc822; user@example.com\nAction: failed\n";
+        assert_eq!(
+            dsn_final_recipient(body).as_deref(),
+            Some("user@example.com")
+        );
+        assert!(dsn_final_recipient("Final-Recipient: rfc822; not-an-address\n").is_none());
+        assert!(dsn_final_recipient("no such field").is_none());
+    }
+
+    #[test]
+    fn ooo_headers_and_one_click_unsubscribe_are_deterministic() {
+        let one_click = ReplyInput::new("Re: hi", "body")
+            .with_header("List-Unsubscribe-Post", "List-Unsubscribe=One-Click");
+        let verdict = classify(&one_click).expect("unsubscribe");
+        assert_eq!(verdict.disposition, ReplyDisposition::Unsubscribe);
+
+        let mailto = ReplyInput::new("Re: hi", "body")
+            .with_header("List-Unsubscribe", "<mailto:unsub@example.com>");
+        let verdict = classify(&mailto).expect("mailto unsubscribe");
+        assert_eq!(verdict.disposition, ReplyDisposition::Unsubscribe);
+
+        // Auto-Submitted: no explicitly means NOT automated, so an OOO body
+        // falls through to the prose layer rather than a header verdict.
+        let explicit_no =
+            ReplyInput::new("Re: hi", "I am out of office").with_header("Auto-Submitted", "no");
+        let verdict = classify(&explicit_no);
+        assert!(
+            verdict
+                .as_ref()
+                .map(|v| v.disposition != ReplyDisposition::OutOfOffice)
+                .unwrap_or(true),
+            "Auto-Submitted: no must not read as an automated OOO message: {verdict:?}"
+        );
+
+        // The X-Autoreply header does make it an OOO verdict.
+        let autoreply = ReplyInput::new("Re: hi", "body").with_header("X-Autoreply", "yes");
+        let verdict = classify(&autoreply).expect("OOO");
+        assert_eq!(verdict.disposition, ReplyDisposition::OutOfOffice);
+    }
+}

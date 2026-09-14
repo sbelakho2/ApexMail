@@ -910,11 +910,14 @@ impl InboundServer {
         false
     }
 
-    async fn handle_session_tls(
-        self: Arc<Self>,
-        tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
-        peer: SocketAddr,
-    ) {
+    /// The ADMITTED implicit-TLS (port 465) session. Generic over the
+    /// transport so its distinct contract — AUTH is part of the port-465
+    /// service and TLS is already active — can be driven over an in-memory
+    /// duplex stream in tests.
+    async fn handle_session_tls<S>(self: Arc<Self>, tls_stream: S, peer: SocketAddr)
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let ip = peer.ip();
         if self.rate_limit_config.enabled
             && !super::bounce::try_admit_connection(
@@ -1928,7 +1931,7 @@ pub(crate) fn recipient_domain(recipient: &str) -> Option<&str> {
     }
 }
 
-fn parse_helo_hostname(raw_line: &str) -> Option<&str> {
+pub(crate) fn parse_helo_hostname(raw_line: &str) -> Option<&str> {
     let mut parts = raw_line.split_whitespace();
     let _command = parts.next()?;
     let host = parts.next()?.trim();
@@ -2257,7 +2260,7 @@ mod tests {
 
     /// Pool pointed at an unroutable Redis with a fast create timeout —
     /// the durable lockout layer fails over to memory quickly.
-    fn unroutable_redis_pool() -> deadpool_redis::Pool {
+    pub(super) fn unroutable_redis_pool() -> deadpool_redis::Pool {
         let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
         let mut pool_cfg = deadpool_redis::PoolConfig::default();
         pool_cfg.timeouts.create = Some(Duration::from_millis(100));
@@ -4158,5 +4161,888 @@ aY14LL/8JRUqaRQCYpFscgEyKD9ywto34vu1jzTWSB2IN/Hi8Wuc
             }
         }
         assert_eq!(received, b"220 inbound.test ESMTP\r\n");
+    }
+}
+
+#[cfg(test)]
+mod adversarial_session_tests {
+    //! End-to-end SMTP session tests for the inbound server, driven over
+    //! `tokio::io::duplex` through the real `run_plain_session` loop (no TCP,
+    //! no TLS handshakes). DB-backed cases provision the canonical schema
+    //! through `migrator::test_support`; `TEST_DATABASE_URL` unset soft-skips,
+    //! a configured provisioning failure panics.
+
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite};
+
+    /// Redis pool pointed at an unroutable endpoint with fast timeouts —
+    /// webhook pushes are best-effort, so no test depends on Redis.
+    pub(super) fn unroutable_redis_pool() -> deadpool_redis::Pool {
+        let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let mut pool_cfg = deadpool_redis::PoolConfig::default();
+        pool_cfg.timeouts.create = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.wait = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.recycle = Some(Duration::from_millis(100));
+        cfg.pool = Some(pool_cfg);
+        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction")
+    }
+    use sqlx::PgPool;
+    use tokio::io::AsyncWriteExt;
+
+    /// Accept-everything directory for session tests that are not about RCPT
+    /// resolution.
+    pub(super) struct AcceptAllDirectory;
+
+    #[async_trait::async_trait]
+    impl MailboxDirectory for AcceptAllDirectory {
+        async fn resolve(
+            &self,
+            recipient: &str,
+        ) -> Result<Option<ResolvedMailbox>, DirectoryUnavailable> {
+            Ok(Some(ResolvedMailbox {
+                mailbox_id: format!("mbx-{recipient}"),
+                email: recipient.to_string(),
+            }))
+        }
+    }
+
+    pub(super) async fn session_server(
+        pool: PgPool,
+        max_message_size: usize,
+    ) -> Arc<InboundServer> {
+        session_server_with(pool, max_message_size, 100).await
+    }
+
+    pub(super) async fn session_server_with(
+        pool: PgPool,
+        max_message_size: usize,
+        max_messages_per_connection: usize,
+    ) -> Arc<InboundServer> {
+        let max_messages_per_connection = max_messages_per_connection as u32;
+        let config = InboundConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 25,
+            secure_port: 465,
+            hostname: "inbound.test".into(),
+            max_message_size,
+            max_recipients: 100,
+            auth_required: false,
+            advertise_auth_port25: false,
+            require_fcrdns: false,
+            arc_seal: false,
+            tls: Default::default(),
+        };
+        let rate_limit = RateLimitConfig {
+            enabled: true,
+            max_connections_per_ip: 100,
+            max_messages_per_connection,
+            max_recipients_per_message: 100,
+        };
+        let authenticator = Arc::new(
+            crate::auth::EmailAuthenticator::new(
+                crate::config::EmailAuthConfig {
+                    require_spf: false,
+                    require_dkim: false,
+                    enforce_dmarc: false,
+                    allow_soft_fail: true,
+                    trusted_relays: Vec::new(),
+                    spf_cache_max_entries: 10_000,
+                },
+                "inbound.test".into(),
+            )
+            .await
+            .expect("authenticator construction"),
+        );
+        let mut server = InboundServer::new(
+            config,
+            rate_limit,
+            pool,
+            unroutable_redis_pool(),
+            authenticator,
+            "inbound.test".into(),
+            Vec::new(),
+        )
+        .expect("inbound server construction");
+        server.mailbox_directory = Arc::new(AcceptAllDirectory);
+        Arc::new(server)
+    }
+
+    pub(super) async fn read_smtp_response<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut BufStream<S>,
+    ) -> String {
+        let mut resp = String::new();
+        loop {
+            let mut line = String::new();
+            if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break;
+            }
+            let multiline = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            resp.push_str(&line);
+            if !multiline {
+                break;
+            }
+        }
+        resp
+    }
+
+    /// Drive one plaintext session over an in-memory duplex: send each
+    /// command, read the response, and return the greeting plus the full
+    /// transcript.
+    pub(super) async fn run_raw_session(
+        server: Arc<InboundServer>,
+        peer: SocketAddr,
+        steps: &[(&str, &str)],
+    ) -> (String, String) {
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer, None).await });
+        let mut client = BufStream::new(client);
+        let greeting = read_smtp_response(&mut client).await;
+        let mut transcript = String::new();
+        for (cmd, _expected) in steps {
+            client.write_all(cmd.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client).await;
+            transcript.push_str(&resp);
+        }
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = read_smtp_response(&mut client).await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+        (greeting, transcript)
+    }
+
+    pub(super) fn peer() -> SocketAddr {
+        "10.9.9.9:2525".parse().unwrap()
+    }
+
+    pub(super) fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool")
+    }
+
+    // ── greeting / EHLO / sequencing ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn greeting_ehlo_and_sequencing_errors() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (greeting, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                // RCPT before MAIL, and DATA before RCPT.
+                (
+                    "RCPT TO:<a@b.test>",
+                    "503 5.5.1 Error: send HELO/EHLO first",
+                ),
+                ("EHLO mail.example.test", "250-inbound.test"),
+                (
+                    "RCPT TO:<a@b.test>",
+                    "503 5.5.1 Error: need MAIL command first",
+                ),
+                ("DATA", "503 5.5.1 Bad sequence of commands"),
+                ("MAIL FROM:<a@b.test>", "250 2.0.0 Ok"),
+                ("MAIL FROM:<a@b.test>", "503 5.5.1 Nested MAIL command"),
+                ("RSET", "250 2.0.0 Ok"),
+                (
+                    "RCPT TO:<a@b.test>",
+                    "503 5.5.1 Error: need MAIL command first",
+                ),
+                ("DATA", "503 5.5.1 Bad sequence of commands"),
+            ],
+        )
+        .await;
+        assert!(
+            greeting.starts_with("220 inbound.test ESMTP"),
+            "{greeting:?}"
+        );
+        assert!(transcript.contains("250-8BITMIME"), "{transcript:?}");
+        // Port 25 does not advertise AUTH by default.
+        assert!(!transcript.contains("AUTH"), "{transcript:?}");
+        // No TLS configured: STARTTLS must not be advertised.
+        assert!(!transcript.contains("STARTTLS"), "{transcript:?}");
+    }
+
+    #[tokio::test]
+    async fn malformed_commands_and_unknown_verbs() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (_, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                ("EHLO mail.example.test", "250"),
+                ("MAIL FROMX:<a@b.test>", "501 5.5.4 Syntax: MAIL FROM"),
+                ("RCPT TOX:<a@b.test>", "501 5.5.4 Syntax: RCPT TO"),
+                ("DATA extra", "501 5.5.4 Syntax: DATA"),
+                ("STARTTLS extra", "501 5.5.4 Syntax: STARTTLS"),
+                ("STARTTLS", "454 4.7.0 TLS not available"),
+                ("HELP", "214 2.0.0 Commands"),
+                ("VRFY someone", "252 2.5.2 Cannot VRFY user"),
+                ("EXPN list", "502 5.5.1 EXPN command not supported"),
+                ("FROB", "500 5.5.2 Command not recognised"),
+                ("DATABASE", "500 5.5.2 Command not recognised"),
+            ],
+        )
+        .await;
+        assert!(!transcript.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_helo_is_refused_then_a_valid_one_recovers() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (_, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                ("EHLO bad host", "501 5.5.4 Invalid HELO/EHLO hostname"),
+                ("EHLO -bad", "501 5.5.4 Invalid HELO/EHLO hostname"),
+                (
+                    "RCPT TO:<a@b.test>",
+                    "503 5.5.1 Error: send HELO/EHLO first",
+                ),
+                ("HELO mail.example.test", "250 inbound.test"),
+            ],
+        )
+        .await;
+        assert!(!transcript.contains("550"));
+    }
+
+    #[tokio::test]
+    async fn auth_is_disabled_on_port25_by_default() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (_, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                ("EHLO mail.example.test", "250"),
+                (
+                    "AUTH PLAIN AHRlc3QAdGVzdA==",
+                    "502 5.5.1 AUTH not available on this port",
+                ),
+            ],
+        )
+        .await;
+        assert!(!transcript.contains("334"), "{transcript:?}");
+    }
+
+    #[tokio::test]
+    async fn overlong_command_line_is_refused_but_session_survives() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let long = "A".repeat(200_000);
+        let (_, transcript) = run_raw_session(
+            server,
+            peer(),
+            &[
+                ("EHLO mail.example.test", "250"),
+                (&format!("NOOP {long}"), "500 5.5.2 Line too long"),
+                ("NOOP", "250 2.0.0 Ok"),
+            ],
+        )
+        .await;
+        assert!(transcript.contains("250 2.0.0 Ok"));
+    }
+
+    #[tokio::test]
+    async fn bare_lf_command_is_refused_and_cannot_smuggle() {
+        // A bare-LF command line must be refused; the following CRLF command
+        // must still be honored (session stays synchronized).
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let greeting = read_smtp_response(&mut client).await;
+        assert!(greeting.starts_with("220"));
+        client.write_all(b"EHLO mail.example.test\n").await.unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(resp.contains("500 5.5.2 Bare LF not allowed"), "{resp:?}");
+        client.write_all(b"NOOP\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(resp.contains("250 2.0.0 Ok"), "{resp:?}");
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+    }
+
+    #[tokio::test]
+    async fn pipelined_commands_get_ordered_replies() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        // One write, four commands.
+        client
+            .write_all(
+                b"EHLO pipelined.test\r\nNOOP\r\nMAIL FROM:<a@b.test>\r\nRCPT TO:<c@d.test>\r\n",
+            )
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let ehlo = read_smtp_response(&mut client).await;
+        let noop = read_smtp_response(&mut client).await;
+        let mail = read_smtp_response(&mut client).await;
+        let rcpt = read_smtp_response(&mut client).await;
+        assert!(ehlo.starts_with("250-"), "{ehlo:?}");
+        assert!(noop.starts_with("250 "), "{noop:?}");
+        assert!(mail.starts_with("250 "), "{mail:?}");
+        assert!(rcpt.starts_with("250 "), "{rcpt:?}");
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+    }
+
+    #[tokio::test]
+    async fn too_many_errors_close_the_session_with_421() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        let mut saw_421 = false;
+        for _ in 0..40 {
+            if client.write_all(b"FROB\r\n").await.is_err() {
+                break;
+            }
+            if client.flush().await.is_err() {
+                break;
+            }
+            let resp = read_smtp_response(&mut client).await;
+            if resp.is_empty() {
+                break;
+            }
+            if resp.contains("421 4.7.0 Too many errors") {
+                saw_421 = true;
+                break;
+            }
+        }
+        // The 421 may already be buffered after the final 500 (the server
+        // writes both lines back-to-back and then closes).
+        if !saw_421 {
+            let rest =
+                tokio::time::timeout(Duration::from_secs(2), read_smtp_response(&mut client))
+                    .await
+                    .unwrap_or_default();
+            saw_421 = rest.contains("421 4.7.0 Too many errors");
+        }
+        assert!(saw_421, "MAX_SESSION_ERRORS must end the session");
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+    }
+}
+
+#[cfg(test)]
+mod adversarial_data_tests {
+    //! DATA-path adversarial tests: real SMTP session loop over duplex, real
+    //! writes into the canonical schema.
+
+    use super::adversarial_session_tests::*;
+    use super::*;
+    use sqlx::PgPool;
+    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    pub(super) fn peer() -> SocketAddr {
+        "10.9.9.9:2525".parse().unwrap()
+    }
+
+    pub(super) async fn read_smtp_response<S: AsyncRead + AsyncWrite + Unpin>(
+        stream: &mut BufStream<S>,
+    ) -> String {
+        let mut resp = String::new();
+        loop {
+            let mut line = String::new();
+            if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break;
+            }
+            let multiline = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            resp.push_str(&line);
+            if !multiline {
+                break;
+            }
+        }
+        resp
+    }
+
+    /// Run a full transaction and return the DATA reply plus the transcript.
+    async fn run_transaction(
+        server: Arc<InboundServer>,
+        helo: &str,
+        mail_from: &str,
+        rcpt: &str,
+        body: &[u8],
+    ) -> (String, String) {
+        let (client, server_side) = tokio::io::duplex(256 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let mut transcript = String::new();
+        let greeting = read_smtp_response(&mut client).await;
+        transcript.push_str(&greeting);
+        for cmd in [
+            format!("EHLO {helo}"),
+            format!("MAIL FROM:<{mail_from}>"),
+            format!("RCPT TO:<{rcpt}>"),
+            "DATA".to_string(),
+        ] {
+            client.write_all(cmd.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client).await;
+            transcript.push_str(&resp);
+            assert!(
+                resp.starts_with("2") || resp.starts_with("3"),
+                "{cmd} -> {resp:?}"
+            );
+        }
+        // Body, dot-stuffing any leading dots, then the terminator. The
+        // caller supplies CRLF line endings; strip them here so lines are
+        // re-terminated exactly once.
+        let parts: Vec<&[u8]> = body.split(|&b| b == b'\n').collect();
+        for (idx, raw_line) in parts.iter().enumerate() {
+            let mut line: &[u8] = raw_line;
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
+            }
+            // The final element is the artifact of a trailing newline; blank
+            // lines elsewhere are body data and must be transmitted.
+            if idx + 1 == parts.len() && line.is_empty() {
+                continue;
+            }
+            let mut out = Vec::new();
+            if line.first() == Some(&b'.') {
+                out.push(b'.');
+            }
+            out.extend_from_slice(line);
+            out.extend_from_slice(b"\r\n");
+            client.write_all(&out).await.unwrap();
+        }
+        client.write_all(b".\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        transcript.push_str(&resp);
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = read_smtp_response(&mut client).await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+        (resp, transcript)
+    }
+
+    #[tokio::test]
+    async fn accepted_data_is_persisted_exactly_once_with_trace_headers() {
+        let Some(pool) = test_pool("inbound_session_accept").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        let body = b"From: sender@invalid.invalid\r\nSubject: hi\r\n\r\nhello\r\n";
+        let (reply, transcript) = run_transaction(
+            server,
+            "invalid.invalid",
+            "sender@invalid.invalid",
+            "rcpt@invalid.invalid",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "transcript: {transcript}");
+
+        let rows: Vec<(String, String, Vec<u8>, i64, String, String)> = sqlx::query_as(
+            "SELECT mail_from, helo_hostname, raw_message, raw_size, spf_result, disposition
+               FROM inbound_messages",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("query inbound_messages");
+        assert_eq!(rows.len(), 1, "exactly one message row: {rows:?}");
+        let (mail_from, helo, raw, raw_size, _spf, disposition) = &rows[0];
+        assert_eq!(mail_from, "sender@invalid.invalid");
+        assert_eq!(helo, "invalid.invalid");
+        assert_eq!(*raw_size, body.len() as i64);
+        assert_eq!(disposition, "accept");
+        let raw_text = String::from_utf8_lossy(raw);
+        assert!(
+            raw_text.starts_with("Received: from invalid.invalid"),
+            "{raw_text:?}"
+        );
+        assert!(
+            raw_text.contains("with ESMTP id inb_"),
+            "trace header protocol: {raw_text:?}"
+        );
+        assert!(
+            raw_text.contains("Authentication-Results:"),
+            "auth results header: {raw_text:?}"
+        );
+        assert!(raw_text.ends_with("hello\r\n"), "{raw_text:?}");
+
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_recipients")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 1, "one delivery job");
+    }
+
+    #[tokio::test]
+    async fn null_bytes_and_8bit_body_bytes_survive_verbatim() {
+        let Some(pool) = test_pool("inbound_session_8bit").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        // 8-bit Latin-1 byte and a NUL byte in the body. The NUL is sent raw
+        // on the wire; the server stores bytes verbatim.
+        let mut body = Vec::new();
+        body.extend_from_slice(b"Subject: caf\xe9\r\n\r\n");
+        body.extend_from_slice(b"line with \xe9 and ");
+        body.push(0);
+        body.extend_from_slice(b" nul\r\n");
+        let (reply, transcript) = run_transaction(
+            server,
+            "invalid.invalid",
+            "s@invalid.invalid",
+            "r@invalid.invalid",
+            &body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{transcript}");
+        let raw: Vec<u8> = sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            raw.windows(5).any(|w| w == b"\xe9 and"),
+            "8-bit bytes must survive: {:?}",
+            String::from_utf8_lossy(&raw)
+        );
+        assert!(raw.contains(&0), "NUL byte must survive");
+    }
+
+    #[tokio::test]
+    async fn dot_stuffed_lines_are_unstuffed_exactly_once() {
+        let Some(pool) = test_pool("inbound_session_dots").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        // Message CONTENT lines; run_transaction acts as the SMTP client and
+        // applies the RFC 5321 §4.5.2 stuffing.
+        let (reply, _) = run_transaction(
+            server,
+            "invalid.invalid",
+            "s@invalid.invalid",
+            "r@invalid.invalid",
+            b"Subject: dots\r\n\r\n.hidden\r\n..double\r\nplain\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("250"));
+        let raw: Vec<u8> = sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.contains("\r\n.hidden\r\n"),
+            "one stuffed dot unstuffs to the original single dot: {text:?}"
+        );
+        assert!(
+            text.contains("\r\n..double\r\n"),
+            "the original double dot survives a stuff/unstuff round trip: {text:?}"
+        );
+        assert!(
+            text.contains("\r\nplain\r\n"),
+            "ordinary lines are unchanged: {text:?}"
+        );
+        // The blank line between headers and body must survive as data.
+        assert!(text.contains("\r\n\r\n"), "blank line preserved: {text:?}");
+    }
+
+    #[tokio::test]
+    async fn routing_loop_with_forty_received_headers_is_refused_550() {
+        let Some(pool) = test_pool("inbound_session_loop").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        let mut body = Vec::new();
+        body.extend_from_slice(b"Subject: loop\r\n");
+        for i in 0..40 {
+            body.extend_from_slice(format!("Received: from hop{i}\r\n").as_bytes());
+        }
+        body.extend_from_slice(b"\r\nbody\r\n");
+        let (reply, transcript) = run_transaction(
+            server,
+            "invalid.invalid",
+            "s@invalid.invalid",
+            "r@invalid.invalid",
+            &body,
+        )
+        .await;
+        assert!(
+            reply.starts_with("550") && reply.contains("5.4.6"),
+            "routing loop must be 550 5.4.6: {transcript}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a refused loop must not be persisted");
+    }
+
+    #[tokio::test]
+    async fn declared_size_and_streamed_body_over_the_limit_are_refused() {
+        let Some(pool) = test_pool("inbound_session_size").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 512).await;
+
+        // Declared SIZE over the cap is refused at MAIL time.
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        client.write_all(b"EHLO invalid.invalid\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client).await;
+        client
+            .write_all(b"MAIL FROM:<s@invalid.invalid> SIZE=4096\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(resp.starts_with("552"), "declared SIZE over cap: {resp:?}");
+
+        // A body streamed past the cap is refused at end-of-DATA.
+        client
+            .write_all(b"MAIL FROM:<s@invalid.invalid>\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client).await;
+        client
+            .write_all(b"RCPT TO:<r@invalid.invalid>\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client).await;
+        client.write_all(b"DATA\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client).await;
+        let big = vec![b'x'; 1024];
+        client.write_all(&big).await.unwrap();
+        client.write_all(b"\r\n.\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(
+            resp.starts_with("552"),
+            "streamed body over cap must be 552: {resp:?}"
+        );
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "oversized mail must not be persisted");
+    }
+
+    #[tokio::test]
+    async fn truncated_data_is_451_and_nothing_is_persisted() {
+        let Some(pool) = test_pool("inbound_session_truncated").await else {
+            return;
+        };
+        let server = session_server(pool.clone(), 1024 * 1024).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        for cmd in [
+            "EHLO invalid.invalid",
+            "MAIL FROM:<s@invalid.invalid>",
+            "RCPT TO:<r@invalid.invalid>",
+            "DATA",
+        ] {
+            client.write_all(cmd.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let _ = read_smtp_response(&mut client).await;
+        }
+        // Partial body, then close the write direction (client vanished).
+        client
+            .write_all(b"Subject: trunc\r\n\r\npartial")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        client.shutdown().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(
+            resp.starts_with("451"),
+            "truncated DATA must be 451: {resp:?}"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "truncated mail must never be persisted");
+    }
+
+    #[tokio::test]
+    async fn recipient_cap_and_control_characters_are_refused() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        for cmd in ["EHLO invalid.invalid", "MAIL FROM:<s@invalid.invalid>"] {
+            client.write_all(cmd.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let _ = read_smtp_response(&mut client).await;
+        }
+        // A NUL byte inside the address is a syntax error (501), not a panic.
+        client
+            .write_all(b"RCPT TO:<a\x00b@invalid.invalid>\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(resp.starts_with("501"), "NUL in address: {resp:?}");
+
+        // 101 recipients exceed max_recipients=100.
+        let mut last = String::new();
+        for i in 0..101 {
+            client
+                .write_all(format!("RCPT TO:<r{i}@invalid.invalid>\r\n").as_bytes())
+                .await
+                .unwrap();
+            client.flush().await.unwrap();
+            last = read_smtp_response(&mut client).await;
+            if last.starts_with("452") {
+                break;
+            }
+        }
+        assert!(last.starts_with("452"), "recipient cap: {last:?}");
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+    }
+
+    #[tokio::test]
+    async fn max_messages_per_connection_closes_with_421_after_the_accepted_message() {
+        let Some(pool) = test_pool("inbound_session_budget").await else {
+            return;
+        };
+        let server = session_server_with(pool.clone(), 1024 * 1024, 1).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.run_plain_session(server_side, peer(), None).await });
+        let mut client = BufStream::new(client);
+        let _ = read_smtp_response(&mut client).await;
+        for cmd in [
+            "EHLO invalid.invalid",
+            "MAIL FROM:<s@invalid.invalid>",
+            "RCPT TO:<r@invalid.invalid>",
+            "DATA",
+        ] {
+            client.write_all(cmd.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let _ = read_smtp_response(&mut client).await;
+        }
+        client
+            .write_all(b"Subject: one\r\n\r\nbody\r\n.\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let ack = read_smtp_response(&mut client).await;
+        assert!(ack.starts_with("250"), "{ack:?}");
+        let closing = read_smtp_response(&mut client).await;
+        assert!(
+            closing.starts_with("421"),
+            "per-connection message budget must close: {closing:?}"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the accepted message is persisted exactly once");
+    }
+
+    #[tokio::test]
+    async fn implicit_tls_session_is_admitted_with_auth_enabled() {
+        // Port 465 contract: TLS is already active and AUTH is advertised.
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.handle_session_tls(server_side, peer()).await });
+        let mut client = BufStream::new(client);
+        let greeting = read_smtp_response(&mut client).await;
+        assert!(
+            greeting.starts_with("220 inbound.test ESMTP"),
+            "{greeting:?}"
+        );
+        client
+            .write_all(b"EHLO tls.example.test\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let ehlo = read_smtp_response(&mut client).await;
+        assert!(
+            ehlo.contains("AUTH PLAIN LOGIN"),
+            "port 465 must advertise AUTH: {ehlo:?}"
+        );
+        assert!(
+            !ehlo.contains("STARTTLS"),
+            "already on TLS: no STARTTLS offer: {ehlo:?}"
+        );
+        // AUTH runs (and fails against the unreachable DB) instead of 502.
+        client
+            .write_all(b"AUTH PLAIN AHRlc3QAdGVzdA==\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client).await;
+        assert!(
+            !resp.contains("502"),
+            "AUTH must be processed on 465: {resp:?}"
+        );
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = read_smtp_response(&mut client).await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+    }
+
+    #[tokio::test]
+    async fn implicit_tls_connection_cap_refusal_says_421() {
+        let server = session_server(lazy_pool(), 1024 * 1024).await;
+        // Fill the per-IP slot table by hand (cap is enforced by the same
+        // DashMap the listener admission uses).
+        let ip = peer().ip();
+        server.connections.insert(ip, u32::MAX);
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { server.handle_session_tls(server_side, peer()).await });
+        let mut client = BufStream::new(client);
+        let resp = read_smtp_response(&mut client).await;
+        assert!(
+            resp.starts_with("421 4.7.0 Too many connections"),
+            "over-cap 465 connection must be told why: {resp:?}"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
     }
 }

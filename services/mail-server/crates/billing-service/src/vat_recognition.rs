@@ -377,8 +377,13 @@ pub async fn materialize_invoice_recognition_by_id(
 ) -> Result<Option<RecognitionEntry>, String> {
     let row: Option<InvoiceRecognitionSourceRow> = sqlx::query_as(
         r#"
-            SELECT tenant_id, currency, COALESCE(subtotal, amount, 0)::bigint,
-                   COALESCE(vat_rate, 0)::double precision, COALESCE(vat_total, 0)::bigint,
+            -- Explicit aliases: PostgreSQL names a bare COALESCE(...) column
+            -- "coalesce", which sqlx's FromRow cannot map, so this query used
+            -- to fail at decode time on EVERY call (the whole by-id
+            -- materializer was dead code in production).
+            SELECT tenant_id, currency, COALESCE(subtotal, amount, 0)::bigint AS subtotal,
+                   COALESCE(vat_rate, 0)::double precision AS vat_rate,
+                   COALESCE(vat_total, 0)::bigint AS vat_total,
                    issued_at, paid_at, billing_country
             FROM invoices
             WHERE id = $1

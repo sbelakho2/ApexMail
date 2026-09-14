@@ -874,28 +874,83 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::test_support::MemoryLedger;
     use crate::relay::{AcceptanceRecord, RecipientOutcome, RecipientResult};
 
+    /// The Postgres test URL: the crate-wide `TEST_DATABASE_URL` (the
+    /// canonical provisioned schema), with the historical crate-specific
+    /// variable as a fallback. `None` = the suite is unconfigured and
+    /// soft-skips; a CONFIGURED URL that cannot be used panics.
+    fn pg_ledger_test_url() -> Option<String> {
+        std::env::var("OUTBOUND_MTA_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| {
+                std::env::var("TEST_DATABASE_URL")
+                    .ok()
+                    .filter(|url| !url.trim().is_empty())
+            })
+    }
+
+    async fn pg_ledger_pool(test_name: &str) -> Option<PgPool> {
+        let url = pg_ledger_test_url()?;
+        let pool = PgPool::connect(&url).await.unwrap_or_else(|error| {
+            panic!(
+                "configured {test_name} database is unreachable ({error}); \
+                     TEST_DATABASE_URL is set, so this is an infrastructure failure"
+            )
+        });
+        let table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('public.outbound_relay_ledger')::text")
+                .fetch_one(&pool)
+                .await
+                .expect("probe outbound_relay_ledger");
+        assert!(
+            table.is_some(),
+            "configured test database has no outbound_relay_ledger table \
+             (migration 212) — refusing to hand-write a schema subset"
+        );
+        let _ = sqlx::query("DELETE FROM outbound_relay_ledger WHERE send_unit LIKE $1")
+            .bind(format!("outbound-mta-test:{test_name}:%"))
+            .execute(&pool)
+            .await;
+        Some(pool)
+    }
+
+    /// The Postgres-backed tests share one table: serialize them so a
+    /// table-wide sweep (`claim_due` / `reclaim_expired`) in one test cannot
+    /// observe another test's rows.
+    static PG_LEDGER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn seed_row(pool: &PgPool, send_unit: &str, state: &str) {
+        sqlx::query(
+            "INSERT INTO outbound_relay_ledger \
+                 (send_unit, tenant_id, state, recipients, message, attempt, max_attempts, \
+                  next_attempt_at, lease_until, accepted_at) \
+             VALUES ($1, 'tenant-seed', $2, '[\"seed@example.com\"]'::jsonb, \
+                     'seed'::bytea, 1, 12, NOW(), NULL, \
+                     CASE WHEN $2 = 'accepted' THEN NOW() ELSE NULL END) \
+             ON CONFLICT (send_unit) DO NOTHING",
+        )
+        .bind(send_unit)
+        .bind(state)
+        .execute(pool)
+        .await
+        .expect("seed ledger row");
+    }
+
     /// Round-trips every ledger statement against a REAL Postgres schema
-    /// (migration 212). Gated on `OUTBOUND_MTA_TEST_DATABASE_URL` so the
-    /// default `cargo test` run stays hermetic.
+    /// (migration 212). Gated on `TEST_DATABASE_URL` (or the historical
+    /// `OUTBOUND_MTA_TEST_DATABASE_URL`) so the default `cargo test` run
+    /// stays hermetic.
     #[tokio::test]
     async fn pg_ledger_round_trip_is_idempotent() {
-        let Ok(url) = std::env::var("OUTBOUND_MTA_TEST_DATABASE_URL") else {
-            eprintln!("skipping: OUTBOUND_MTA_TEST_DATABASE_URL is not set");
+        let _guard = PG_LEDGER_LOCK.lock().await;
+        let Some(pool) = pg_ledger_pool("round-trip").await else {
             return;
         };
-        let pool = PgPool::connect(&url)
-            .await
-            .expect("connect to OUTBOUND_MTA_TEST_DATABASE_URL");
         let ledger = PgLedger::new(pool.clone());
-        // Clear rows left behind by a previously failed run of this test.
-        let _ = sqlx::query(
-            "DELETE FROM outbound_relay_ledger WHERE send_unit LIKE 'outbound-mta-test:%'",
-        )
-        .execute(&pool)
-        .await;
-        let unit = format!("outbound-mta-test:{}", Uuid::new_v4());
+        let unit = format!("outbound-mta-test:round-trip:{}", Uuid::new_v4());
         let submission = || NewSubmission {
             send_unit: unit.clone(),
             tenant_id: Some("tenant-test".to_string()),
@@ -1038,5 +1093,460 @@ mod tests {
             .bind(format!("{unit}%"))
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    async fn pg_ledger_classifies_existing_rows_and_rejects_corruption() {
+        let _guard = PG_LEDGER_LOCK.lock().await;
+        let Some(pool) = pg_ledger_pool("classify").await else {
+            return;
+        };
+        let ledger = PgLedger::new(pool.clone());
+        let submission = |send_unit: &str| NewSubmission {
+            send_unit: send_unit.to_string(),
+            tenant_id: Some("tenant-classify".to_string()),
+            queue_id: None,
+            envelope_from: Some("sender@example.com".to_string()),
+            recipients: vec!["user@example.com".to_string()],
+            message: b"From: x\r\n\r\nbody".to_vec(),
+            requested_source_ip: None,
+            max_attempts: 12,
+        };
+
+        // A queued (pending) row classifies as AlreadyQueued with its stored
+        // schedule.
+        let queued = format!("outbound-mta-test:classify:queued:{}", Uuid::new_v4());
+        seed_row(&pool, &queued, "pending").await;
+        sqlx::query(
+            "UPDATE outbound_relay_ledger SET next_attempt_at = NOW() + INTERVAL '1 hour' \
+             WHERE send_unit = $1",
+        )
+        .bind(&queued)
+        .execute(&pool)
+        .await
+        .expect("schedule");
+        match ledger
+            .claim_submission(submission(&queued), Utc::now(), Duration::from_secs(60))
+            .await
+            .expect("claim queued")
+        {
+            ClaimOutcome::AlreadyQueued {
+                attempt,
+                next_attempt_at,
+            } => {
+                assert_eq!(attempt, 1);
+                assert!(next_attempt_at > Utc::now());
+            }
+            other => panic!("expected AlreadyQueued, got {other:?}"),
+        }
+
+        // A terminal failure returns the stored error text.
+        let failed = format!("outbound-mta-test:classify:failed:{}", Uuid::new_v4());
+        seed_row(&pool, &failed, "failed").await;
+        sqlx::query(
+            "UPDATE outbound_relay_ledger SET last_error = '5.1.1 nope' WHERE send_unit = $1",
+        )
+        .bind(&failed)
+        .execute(&pool)
+        .await
+        .expect("last_error");
+        match ledger
+            .claim_submission(submission(&failed), Utc::now(), Duration::from_secs(60))
+            .await
+            .expect("claim failed")
+        {
+            ClaimOutcome::PermanentlyFailed {
+                attempt,
+                last_error,
+            } => {
+                assert_eq!(attempt, 1);
+                assert_eq!(last_error.as_deref(), Some("5.1.1 nope"));
+            }
+            other => panic!("expected PermanentlyFailed, got {other:?}"),
+        }
+
+        // A crashed `delivering` row with an EXPIRED lease is daemon-owned:
+        // a duplicate submit must not deliver it.
+        let crashed = format!("outbound-mta-test:classify:crashed:{}", Uuid::new_v4());
+        seed_row(&pool, &crashed, "delivering").await;
+        sqlx::query("UPDATE outbound_relay_ledger SET lease_until = NOW() - INTERVAL '1 second' WHERE send_unit = $1")
+            .bind(&crashed)
+            .execute(&pool)
+            .await
+            .expect("expire lease");
+        assert!(matches!(
+            ledger
+                .claim_submission(submission(&crashed), Utc::now(), Duration::from_secs(60))
+                .await
+                .expect("claim crashed"),
+            ClaimOutcome::AlreadyQueued { .. }
+        ));
+
+        // An `accepted` row WITHOUT an acceptance_record is corrupt evidence,
+        // not a silent success.
+        let corrupt = format!("outbound-mta-test:classify:corrupt:{}", Uuid::new_v4());
+        seed_row(&pool, &corrupt, "accepted").await;
+        let error = ledger
+            .claim_submission(submission(&corrupt), Utc::now(), Duration::from_secs(60))
+            .await
+            .expect_err("accepted without a record must be corrupt");
+        assert!(
+            matches!(error, LedgerError::Corrupt { .. }),
+            "got {error:?}"
+        );
+
+        // A row whose recipients column is not a string array is corrupt on
+        // read rather than delivered.
+        let bad_recipients = format!("outbound-mta-test:classify:recipients:{}", Uuid::new_v4());
+        seed_row(&pool, &bad_recipients, "pending").await;
+        sqlx::query(
+            "UPDATE outbound_relay_ledger SET recipients = '{\"not\": \"an-array\"}'::jsonb \
+             WHERE send_unit = $1",
+        )
+        .bind(&bad_recipients)
+        .execute(&pool)
+        .await
+        .expect("corrupt recipients");
+        let error = ledger
+            .get(&bad_recipients)
+            .await
+            .expect_err("corrupt recipients are surfaced");
+        assert!(
+            matches!(error, LedgerError::Corrupt { .. }),
+            "got {error:?}"
+        );
+
+        for unit in [queued, failed, crashed, corrupt, bad_recipients] {
+            let _ = sqlx::query("DELETE FROM outbound_relay_ledger WHERE send_unit = $1")
+                .bind(unit)
+                .execute(&pool)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn pg_ledger_due_sweep_is_ordered_bounded_and_lease_safe() {
+        let _guard = PG_LEDGER_LOCK.lock().await;
+        let Some(pool) = pg_ledger_pool("due-sweep").await else {
+            return;
+        };
+        let ledger = PgLedger::new(pool.clone());
+        let base = format!("outbound-mta-test:due-sweep:{}", Uuid::new_v4());
+        let early = format!("{base}:early");
+        let late = format!("{base}:late");
+        let live = format!("{base}:live");
+        seed_row(&pool, &early, "pending").await;
+        seed_row(&pool, &late, "pending").await;
+        seed_row(&pool, &live, "delivering").await;
+        sqlx::query(
+            "UPDATE outbound_relay_ledger SET next_attempt_at = TIMESTAMPTZ '2000-01-01' WHERE send_unit = $1",
+        )
+        .bind(&early)
+        .execute(&pool)
+        .await
+        .expect("age early");
+        sqlx::query(
+            "UPDATE outbound_relay_ledger SET next_attempt_at = NOW() - INTERVAL '1 minute' WHERE send_unit = $1",
+        )
+        .bind(&late)
+        .execute(&pool)
+        .await
+        .expect("age late");
+        sqlx::query(
+            "UPDATE outbound_relay_ledger SET lease_until = NOW() + INTERVAL '10 minutes' WHERE send_unit = $1",
+        )
+        .bind(&live)
+        .execute(&pool)
+        .await
+        .expect("live lease");
+
+        // limit 1 → exactly the oldest due row, attempt incremented.
+        let first = ledger
+            .claim_due(Utc::now(), Duration::from_secs(60), 1)
+            .await
+            .expect("claim one");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].send_unit, early);
+        assert_eq!(first[0].attempt, 2);
+
+        // The next sweep takes the second; the live lease is never stolen.
+        let second = ledger
+            .claim_due(Utc::now(), Duration::from_secs(60), 10)
+            .await
+            .expect("claim rest");
+        let ours: Vec<&str> = second
+            .iter()
+            .filter(|row| row.send_unit.starts_with(&base))
+            .map(|row| row.send_unit.as_str())
+            .collect();
+        assert_eq!(ours, vec![late.as_str()]);
+
+        // The due rows are not re-claimable while their fresh lease lives.
+        let again = ledger
+            .claim_due(Utc::now(), Duration::from_secs(60), 10)
+            .await
+            .expect("no double claim");
+        assert!(
+            !again.iter().any(|row| row.send_unit.starts_with(&base)),
+            "a fresh lease must not be double-claimed"
+        );
+
+        // Reclaim only EXPIRED delivering rows.
+        let reclaimed = ledger
+            .reclaim_expired(Utc::now() + chrono::Duration::hours(1))
+            .await
+            .expect("reclaim");
+        assert!(reclaimed >= 1, "the expired delivery lease is reclaimed");
+        let row = ledger.get(&live).await.expect("get").expect("row");
+        assert_eq!(row.state, "pending");
+        assert!(row
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("lease expired"));
+
+        let stats = ledger.stats().await.expect("stats");
+        assert!(stats.pending >= 3);
+        let _ = sqlx::query("DELETE FROM outbound_relay_ledger WHERE send_unit LIKE $1")
+            .bind(format!("{base}%"))
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn pg_ledger_state_writes_are_fenced_and_round_trip_every_field() {
+        let _guard = PG_LEDGER_LOCK.lock().await;
+        let Some(pool) = pg_ledger_pool("state-writes").await else {
+            return;
+        };
+        let ledger = PgLedger::new(pool.clone());
+        let unit = format!("outbound-mta-test:state-writes:{}", Uuid::new_v4());
+        let queue_id = Uuid::new_v4();
+        let claimed = ledger
+            .claim_submission(
+                NewSubmission {
+                    send_unit: unit.clone(),
+                    tenant_id: Some("tenant-rt".to_string()),
+                    queue_id: Some(queue_id),
+                    envelope_from: None,
+                    recipients: vec!["Ünïcode@example.com".to_string()],
+                    message: b"Subject: rt\r\n\r\nbody\x00binary".to_vec(),
+                    requested_source_ip: Some("2001:db8::1".parse().expect("v6")),
+                    max_attempts: 7,
+                },
+                Utc::now(),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("claim");
+        let row = match claimed {
+            ClaimOutcome::Claimed(row) => *row,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        assert_eq!(row.envelope_from, None, "null reverse path round-trips");
+        assert_eq!(row.recipients, vec!["Ünïcode@example.com".to_string()]);
+        assert_eq!(
+            row.requested_source_ip,
+            Some("2001:db8::1".parse().expect("v6"))
+        );
+        assert_eq!(row.queue_id, Some(queue_id));
+        assert_eq!(row.max_attempts, 7);
+
+        // record_retry only matches a `delivering` row.
+        let next = Utc::now() + chrono::Duration::minutes(5);
+        ledger
+            .record_retry(&unit, 1, next, "test transient")
+            .await
+            .expect("record retry");
+        // A second retry write now matches a `pending` row and must no-op.
+        ledger
+            .record_retry(&unit, 1, next, "stale writer")
+            .await
+            .expect("stale retry is a no-op");
+        let stored = ledger.get(&unit).await.expect("get").expect("row");
+        assert_eq!(stored.state, "pending");
+        assert_eq!(stored.last_error.as_deref(), Some("test transient"));
+
+        // Acceptance requires the `delivering` state.
+        let due = ledger
+            .claim_due(
+                next + chrono::Duration::seconds(1),
+                Duration::from_secs(60),
+                10,
+            )
+            .await
+            .expect("claim due");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempt, 2);
+        let record = AcceptanceRecord {
+            send_unit: unit.clone(),
+            state: "accepted".to_string(),
+            accepted_at: Utc::now(),
+            attempt: 2,
+            remote_mx: Some("mx.example".to_string()),
+            tls_used: true,
+            requested_source_ip: Some("2001:db8::1".parse().expect("v6")),
+            actual_source_ip: Some("2001:db8::1".parse().expect("v6")),
+            recipients: Vec::new(),
+            dsn_send_units: Vec::new(),
+        };
+        ledger
+            .record_accepted(&unit, &record)
+            .await
+            .expect("record accepted");
+        // A second acceptance write no longer matches `delivering`.
+        let mut tampered = record.clone();
+        tampered.remote_mx = Some("mx.other".to_string());
+        ledger
+            .record_accepted(&unit, &tampered)
+            .await
+            .expect("stale acceptance write no-ops");
+        // A permanent write after acceptance no-ops too.
+        ledger
+            .record_permanent(&unit, 2, "stale failure")
+            .await
+            .expect("stale permanent write no-ops");
+
+        let stored = ledger.get(&unit).await.expect("get").expect("row");
+        assert_eq!(stored.state, "accepted");
+        assert_eq!(stored.remote_mx.as_deref(), Some("mx.example"));
+        assert!(stored.tls_used);
+        assert_eq!(
+            stored.actual_source_ip,
+            Some("2001:db8::1".parse().expect("v6"))
+        );
+        let acceptance = stored.acceptance.expect("acceptance record");
+        assert_eq!(acceptance.send_unit, unit);
+        assert_eq!(acceptance.attempt, 2);
+
+        // A garbage lease duration is refused before touching the table.
+        let error = ledger
+            .claim_submission(
+                NewSubmission {
+                    send_unit: format!("{unit}:lease"),
+                    tenant_id: None,
+                    queue_id: None,
+                    envelope_from: None,
+                    recipients: vec!["u@example.com".to_string()],
+                    message: b"x".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 1,
+                },
+                Utc::now(),
+                Duration::from_secs(u64::MAX),
+            )
+            .await
+            .expect_err("an impossible lease must be refused");
+        assert!(matches!(error, LedgerError::Lease(_)), "got {error:?}");
+
+        let _ = sqlx::query("DELETE FROM outbound_relay_ledger WHERE send_unit LIKE $1")
+            .bind(format!("{unit}%"))
+            .execute(&pool)
+            .await;
+    }
+
+    /// The in-memory double must classify, fence and count exactly like the
+    /// Postgres ledger.
+    #[tokio::test]
+    async fn memory_ledger_matches_the_pg_semantics() {
+        let ledger = MemoryLedger::new();
+        let now = Utc::now();
+        let submission = |unit: &str| NewSubmission {
+            send_unit: unit.to_string(),
+            tenant_id: None,
+            queue_id: None,
+            envelope_from: None,
+            recipients: vec!["u@example.com".to_string()],
+            message: b"x".to_vec(),
+            requested_source_ip: None,
+            max_attempts: 3,
+        };
+
+        assert!(ledger.get("missing").await.expect("get").is_none());
+        assert_eq!(ledger.reclaim_expired(now).await.expect("reclaim"), 0);
+        assert_eq!(
+            ledger
+                .claim_due(now, Duration::from_secs(1), 0)
+                .await
+                .expect("limit 0")
+                .len(),
+            0
+        );
+
+        let first = ledger
+            .claim_submission(submission("mem-1"), now, Duration::from_secs(60))
+            .await
+            .expect("claim");
+        assert!(matches!(first, ClaimOutcome::Claimed(_)));
+        // Writes against a live lease: retry/permanent fence on delivering.
+        ledger
+            .record_retry("mem-1", 1, now + chrono::Duration::minutes(1), "later")
+            .await
+            .expect("retry");
+        let row = ledger.get("mem-1").await.expect("get").expect("row");
+        assert_eq!(row.state, "pending");
+        assert_eq!(row.attempt, 1);
+
+        // A queued retry is not yet due.
+        assert_eq!(
+            ledger
+                .claim_due(now, Duration::from_secs(60), 10)
+                .await
+                .expect("not due")
+                .len(),
+            0
+        );
+        let due = ledger
+            .claim_due(
+                now + chrono::Duration::minutes(2),
+                Duration::from_secs(60),
+                10,
+            )
+            .await
+            .expect("due");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempt, 2);
+
+        // record_accepted then record_permanent: the second must no-op.
+        let record = AcceptanceRecord {
+            send_unit: "mem-1".to_string(),
+            state: "accepted".to_string(),
+            accepted_at: now,
+            attempt: 2,
+            remote_mx: None,
+            tls_used: false,
+            requested_source_ip: None,
+            actual_source_ip: None,
+            recipients: Vec::new(),
+            dsn_send_units: Vec::new(),
+        };
+        ledger
+            .record_accepted("mem-1", &record)
+            .await
+            .expect("accept");
+        ledger
+            .record_permanent("mem-1", 2, "stale")
+            .await
+            .expect("no-op");
+        let row = ledger.get("mem-1").await.expect("get").expect("row");
+        assert_eq!(row.state, "accepted");
+        assert!(row.acceptance.is_some());
+
+        // DSN enqueue is insert-once; the DSN starts pending with attempt 0.
+        let mut dsn = submission("mem-1:dsn");
+        dsn.envelope_from = None;
+        assert!(ledger.enqueue_dsn(dsn.clone(), now).await.expect("dsn"));
+        assert!(!ledger.enqueue_dsn(dsn, now).await.expect("dsn replay"));
+        let dsn_row = ledger.get("mem-1:dsn").await.expect("get").expect("row");
+        assert_eq!(dsn_row.state, "pending");
+        assert_eq!(dsn_row.attempt, 0);
+        assert_eq!(dsn_row.envelope_from, None);
+
+        // Stats count every state bucket.
+        let stats = ledger.stats().await.expect("stats");
+        assert_eq!(stats.accepted, 1);
+        assert_eq!(stats.pending, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.delivering, 0);
     }
 }

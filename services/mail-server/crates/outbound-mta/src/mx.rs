@@ -283,6 +283,12 @@ pub mod test_support {
             self
         }
 
+        /// Multiple ordered targets for one domain (MX fallback tests).
+        pub fn with_targets(mut self, domain: &str, targets: Vec<MxTarget>) -> Self {
+            self.insert(domain, Ok(targets));
+            self
+        }
+
         pub fn with_error(mut self, domain: &str, error: MxError) -> Self {
             self.insert(domain, Err(error));
             self
@@ -314,6 +320,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mx::test_support::StaticMxResolver;
 
     fn record(priority: u16, exchange: &str) -> MxRecord {
         MxRecord::new(priority, exchange)
@@ -383,5 +390,133 @@ mod tests {
     #[test]
     fn canonical_exchange_strips_root_dot_and_case() {
         assert_eq!(canonical_exchange("MX.Example.COM."), "mx.example.com");
+        assert_eq!(canonical_exchange("  mx.example.com.  "), "mx.example.com");
+        assert_eq!(canonical_exchange("."), "");
+        assert_eq!(canonical_exchange(""), "");
+    }
+
+    #[test]
+    fn dedup_keeps_the_most_preferred_record_of_a_duplicated_exchange() {
+        let ordered = order_records(
+            "example.com",
+            vec![record(30, "MX.example.com"), record(10, "mx.example.com.")],
+        )
+        .expect("valid records");
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(
+            ordered[0].priority, 10,
+            "the best preference survives dedup"
+        );
+    }
+
+    #[test]
+    fn null_mx_detection_tolerates_whitespace_and_empty_exchanges() {
+        for exchange in [".", " . ", "", "   "] {
+            assert!(
+                is_null_mx(exchange),
+                "exchange {exchange:?} must be a null MX"
+            );
+            let error = order_records("example.com", vec![record(0, exchange)])
+                .expect_err("null MX must refuse");
+            assert!(matches!(error, MxError::NullMx(_)));
+        }
+        assert!(!is_null_mx("mx.example.com"));
+    }
+
+    #[test]
+    fn placeholder_addresses_are_not_usable() {
+        for bad in ["0.0.0.0", "255.255.255.255", "224.0.0.1", "::", "ff02::1"] {
+            let ip: IpAddr = bad.parse().expect("ip");
+            assert!(!is_usable_address(&ip), "{bad} must be refused");
+        }
+        for good in ["127.0.0.1", "203.0.113.9", "::1", "2606:4700::1111"] {
+            let ip: IpAddr = good.parse().expect("ip");
+            assert!(is_usable_address(&ip), "{good} must be usable");
+        }
+    }
+
+    #[test]
+    fn domain_validation_enforces_the_length_and_label_rules() {
+        let long_label = format!("{}.example", "a".repeat(64));
+        assert!(normalize_domain(&long_label).is_err());
+        assert!(normalize_domain(&format!("user@{long_label}")).is_err());
+        let long_domain = format!("{}.{}", "a".repeat(63), "b".repeat(63));
+        assert!(normalize_domain(&long_domain).is_ok());
+        assert!(
+            normalize_domain(&format!("{}.{}", "a".repeat(63), "b".repeat(190))).is_err(),
+            "a 254+ character domain is invalid"
+        );
+        assert!(normalize_domain("  Example.COM  ").is_ok());
+        assert_eq!(
+            normalize_domain("  Example.COM  ").expect("valid"),
+            "example.com"
+        );
+        assert!(normalize_domain("exämple.com").is_err(), "non-ASCII labels");
+        assert!(normalize_domain("exam_ple.com").is_err());
+        assert!(normalize_domain("example..com").is_err());
+    }
+
+    #[test]
+    fn dns_errors_map_to_the_documented_mx_disposition() {
+        use apexmail_dns_resolver::lookup::DnsError;
+        let no_records = map_dns_error(
+            "example.com",
+            DnsError::NoRecords("example.com".to_string()),
+        );
+        assert!(matches!(no_records, MxError::NoMxRecords(_)));
+        assert!(no_records.is_permanent());
+
+        let invalid = map_dns_error(
+            "bad_domain",
+            DnsError::InvalidDomain("bad_domain".to_string()),
+        );
+        assert!(matches!(invalid, MxError::InvalidDomain(_)));
+        assert!(invalid.is_permanent());
+
+        let timeout = map_dns_error("example.com", DnsError::Timeout("example.com".to_string()));
+        assert!(matches!(timeout, MxError::Transient { .. }));
+        assert!(!timeout.is_permanent());
+
+        let no_address = MxError::NoAddress {
+            domain: "example.com".to_string(),
+            message: "all hosts failed".to_string(),
+        };
+        assert!(
+            !no_address.is_permanent(),
+            "A/AAAA resolution failure is retryable — the host may come back"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_resolver_reports_unknown_domains_and_serves_order() {
+        let first: SocketAddr = "203.0.113.9:25".parse().expect("addr");
+        let second: SocketAddr = "203.0.113.10:25".parse().expect("addr");
+        let resolver = StaticMxResolver::new().with_targets(
+            "example.com",
+            vec![
+                MxTarget {
+                    preference: 20,
+                    exchange: "mx2.example.com".to_string(),
+                    addresses: vec![second],
+                },
+                MxTarget {
+                    preference: 10,
+                    exchange: "mx1.example.com".to_string(),
+                    addresses: vec![first],
+                },
+            ],
+        );
+        let targets = resolver.resolve("EXAMPLE.com").await.expect("targets");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets[0].preference, 20,
+            "the static double preserves order"
+        );
+        let error = resolver
+            .resolve("unknown.example")
+            .await
+            .expect_err("unknown domains must refuse");
+        assert!(matches!(error, MxError::NoMxRecords(_)));
+        assert!(error.is_permanent());
     }
 }

@@ -4965,3 +4965,857 @@ db_test!(
         }
     }
 );
+
+// ---------------------------------------------------------------------------
+// VAT / statutory: KMD from the recognition ledger; cash-special timing
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_recognition_entry(
+    h: &Harness,
+    supply_id: &str,
+    tenant: &str,
+    event_type: &str,
+    recognition_period: &str,
+    taxable_cents: i64,
+    vat_rate: f64,
+    vat_cents: i64,
+    currency: &str,
+    scheme: &str,
+) {
+    sqlx::query(
+        "INSERT INTO vat_recognition_entries
+             (id, supply_id, tenant_id, event_type, taxable_event_at, recognition_period,
+              taxable_amount_cents, vat_rate, vat_amount_cents, currency, scheme)
+         VALUES (gen_random_uuid(), $1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(supply_id)
+    .bind(tenant)
+    .bind(event_type)
+    .bind(recognition_period)
+    .bind(taxable_cents)
+    .bind(vat_rate)
+    .bind(vat_cents)
+    .bind(currency)
+    .bind(scheme)
+    .execute(&h.pool)
+    .await
+    .expect("seed recognition entry");
+}
+
+db_test!(
+    vat_kmd_totals_equal_ledger_and_exclude_other_currencies,
+    |h| {
+        let tenant_a = "cov_kmd_ledger_a";
+        let tenant_b = "cov_kmd_ledger_b";
+        seed_tenant(&h, tenant_a, "growth").await;
+        seed_tenant(&h, tenant_b, "growth").await;
+        assert!(
+            billing_service::vat_kmd::kmd_table_exists(&h.pool).await,
+            "canonical schema carries the KMD table"
+        );
+
+        // EUR ledger rows across two tenants, two rates; one USD row excluded.
+        seed_recognition_entry(
+            &h, "kmd-1", tenant_a, "supply", "2026-05", 10_000, 24.0, 2_400, "EUR", "general",
+        )
+        .await;
+        seed_recognition_entry(
+            &h, "kmd-2", tenant_a, "supply", "2026-05", 20_000, 24.0, 4_800, "EUR", "general",
+        )
+        .await;
+        seed_recognition_entry(
+            &h, "kmd-3", tenant_b, "supply", "2026-05", 5_000, 9.0, 450, "eur", "general",
+        )
+        .await;
+        seed_recognition_entry(
+            &h, "kmd-4", tenant_b, "supply", "2026-05", 7_000, 24.0, 1_680, "USD", "general",
+        )
+        .await;
+        // Different period: never included.
+        seed_recognition_entry(
+            &h, "kmd-5", tenant_a, "supply", "2026-04", 999_999, 24.0, 239_999, "EUR", "general",
+        )
+        .await;
+
+        let result = billing_service::vat_kmd::generate_kmd_return(&h.pool, 2026, 5)
+            .await
+            .expect("generate KMD");
+        assert_eq!(
+            result.total_taxable_cents, 35_000,
+            "EUR taxable sums exactly"
+        );
+        assert_eq!(result.total_vat_cents, 7_650, "EUR VAT sums exactly");
+        assert_eq!(result.invoice_count, 3, "distinct EUR supplies");
+        assert_eq!(result.tenant_count, 2);
+        // Rate buckets must reconcile with the headline totals to the cent.
+        let bucket_taxable: i64 = result.rates.iter().map(|b| b.taxable_amount_cents).sum();
+        let bucket_vat: i64 = result.rates.iter().map(|b| b.vat_amount_cents).sum();
+        assert_eq!(bucket_taxable, result.total_taxable_cents);
+        assert_eq!(bucket_vat, result.total_vat_cents);
+        assert_eq!(result.rates.len(), 2, "24% and 9% buckets");
+        // The USD supply is visible but excluded from the EUR return.
+        assert_eq!(result.excluded_other_currency.len(), 1);
+        assert_eq!(result.excluded_other_currency[0].currency, "USD");
+        assert_eq!(
+            result.excluded_other_currency[0].taxable_amount_cents,
+            7_000
+        );
+
+        // Persisted return round-trips through the latest-return reader.
+        let latest = billing_service::vat_kmd::get_latest_kmd_return(&h.pool)
+            .await
+            .expect("latest KMD")
+            .expect("one return");
+        assert_eq!((latest.tax_year, latest.tax_month), (2026, 5));
+        assert_eq!(latest.total_vat_cents, 7_650);
+        assert_eq!(latest.kmd_id, result.kmd_id);
+        let periods = billing_service::vat_kmd::list_generated_kmd_periods(&h.pool)
+            .await
+            .expect("list periods");
+        assert_eq!(periods, vec![(2026, 5)]);
+
+        // Re-filing the same period is refused (unique period identity), never
+        // silently doubled.
+        let replay = billing_service::vat_kmd::generate_kmd_return(&h.pool, 2026, 5).await;
+        assert!(replay.is_err(), "replay must not create a second return");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vat_kmd_returns")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        // Filing deadline: 23:59:59 Tallinn on the 20th, expressed in UTC.
+        let may = billing_service::vat_kmd::vat_return_due_date(2026, 5);
+        assert_eq!(
+            may.to_rfc3339(),
+            "2026-06-20T20:59:59+00:00",
+            "EEST is UTC+3"
+        );
+        let dec = billing_service::vat_kmd::vat_return_due_date(2026, 12);
+        assert_eq!(
+            dec.to_rfc3339(),
+            "2027-01-20T21:59:59+00:00",
+            "EET is UTC+2"
+        );
+    }
+);
+
+/// `identity` is `(invoice_number, status, billing_country)`;
+/// `money` is `(subtotal_cents, vat_rate, vat_total_cents)`.
+async fn seed_invoice_row(
+    h: &Harness,
+    tenant: &str,
+    identity: (&str, &str, &str),
+    issued_at: DateTime<Utc>,
+    paid_at: Option<DateTime<Utc>>,
+    money: (i64, f64, i64),
+) -> Uuid {
+    let (number, status, country) = identity;
+    let (subtotal, vat_rate, vat_total) = money;
+    sqlx::query_scalar(
+        "INSERT INTO invoices (id, tenant_id, invoice_number, status, currency, subtotal, vat_rate,
+             vat_total, total, issued_at, due_at, paid_at, billing_country)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'EUR', $4, $5, $6, $4 + $6, $7, $7 + INTERVAL '30 days',
+                 $8, $9)
+         RETURNING id",
+    )
+    .bind(tenant)
+    .bind(number)
+    .bind(status)
+    .bind(subtotal)
+    .bind(vat_rate)
+    .bind(vat_total)
+    .bind(issued_at)
+    .bind(paid_at)
+    .bind(country)
+    .fetch_one(&h.pool)
+    .await
+    .expect("seed invoice")
+}
+
+db_test!(vat_recognition_general_and_cash_special_timing, |h| {
+    let tenant = "cov_recog_general";
+    let cash = "cov_recog_cash";
+    seed_tenant(&h, tenant, "growth").await;
+    seed_tenant(&h, cash, "growth").await;
+    let now = Utc::now();
+
+    // General scheme: issuing the invoice is the taxable event, in the
+    // Tallinn month of issue.
+    let issued = now - chrono::Duration::days(3);
+    let general_invoice = seed_invoice_row(
+        &h,
+        tenant,
+        ("REC-GEN-1", "pending", "EE"),
+        issued,
+        None,
+        (10_000, 24.0, 2_400),
+    )
+    .await;
+    let entry = billing_service::vat_recognition::materialize_invoice_recognition_by_id(
+        &h.pool,
+        general_invoice,
+        now,
+    )
+    .await
+    .expect("materialize")
+    .expect("general scheme always recognises");
+    assert_eq!(entry.event_type.as_str(), "supply");
+    assert_eq!(entry.taxable_amount_cents, 10_000);
+    assert_eq!(entry.vat_amount_cents, 2_400);
+    assert_eq!(entry.currency, "EUR");
+    let expected_period = issued.format("%Y-%m").to_string();
+    assert_eq!(entry.recognition_period, expected_period);
+
+    // Replay replaces the current row, never duplicates it.
+    let replay = billing_service::vat_recognition::materialize_invoice_recognition_by_id(
+        &h.pool,
+        general_invoice,
+        now,
+    )
+    .await
+    .expect("replay")
+    .expect("still recognised");
+    assert_eq!(replay.recognition_period, expected_period);
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM vat_recognition_entries WHERE supply_id = $1 AND scheme = 'general'",
+    )
+    .bind(general_invoice.to_string())
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1, "replay is a single current entry");
+
+    // Missing invoice → None, nothing written.
+    let missing = billing_service::vat_recognition::materialize_invoice_recognition_by_id(
+        &h.pool,
+        Uuid::new_v4(),
+        now,
+    )
+    .await
+    .expect("missing is not an error");
+    assert!(missing.is_none());
+
+    // Cash-special: an unpaid supply inside the deferral window recognises
+    // nothing yet.
+    sqlx::query(
+        "INSERT INTO vat_accounting_bases (tenant_id, scheme, effective_from, authorised_at, authorisation_reference)
+         VALUES ($1, 'cash_special', $2::date - interval '1 year', $2::date - interval '1 year', 'EMTA-123')",
+    )
+    .bind(cash)
+    .bind(now.date_naive())
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    let recent = seed_invoice_row(
+        &h,
+        cash,
+        ("REC-CASH-RECENT", "pending", "EE"),
+        now - chrono::Duration::days(10),
+        None,
+        (50_000, 24.0, 12_000),
+    )
+    .await;
+    let deferred = billing_service::vat_recognition::materialize_invoice_recognition_by_id(
+        &h.pool, recent, now,
+    )
+    .await
+    .expect("deferral is not an error");
+    assert!(
+        deferred.is_none(),
+        "unpaid cash-special supply inside the 3-month window recognises nothing"
+    );
+
+    // Paid before the fallback → the payment date is the taxable event.
+    let paid_invoice = seed_invoice_row(
+        &h,
+        cash,
+        ("REC-CASH-PAID", "paid", "EE"),
+        now - chrono::Duration::days(40),
+        Some(now - chrono::Duration::days(35)),
+        (20_000, 24.0, 4_800),
+    )
+    .await;
+    let paid_entry = billing_service::vat_recognition::materialize_invoice_recognition_by_id(
+        &h.pool,
+        paid_invoice,
+        now,
+    )
+    .await
+    .expect("materialize paid")
+    .expect("payment recognised");
+    assert_eq!(paid_entry.event_type.as_str(), "payment");
+    assert_eq!(
+        paid_entry.recognition_period,
+        (now - chrono::Duration::days(35))
+            .format("%Y-%m")
+            .to_string()
+    );
+
+    // Never paid, issued more than two months ago → the fallback sweep
+    // materialises the cash_special_due event exactly once.
+    // Issued far enough back that the third-calendar-month fallback has
+    // already arrived (now - 100 days => fallback < now).
+    let stale = seed_invoice_row(
+        &h,
+        cash,
+        ("REC-CASH-STALE", "pending", "EE"),
+        now - chrono::Duration::days(100),
+        None,
+        (30_000, 24.0, 7_200),
+    )
+    .await;
+    let swept = billing_service::vat_recognition::materialize_due_cash_special(&h.pool, now)
+        .await
+        .expect("fallback sweep");
+    assert_eq!(swept, 1, "exactly the stale unpaid supply");
+    let event_type: String = sqlx::query_scalar(
+        "SELECT event_type FROM vat_recognition_entries WHERE supply_id = $1 AND scheme = 'cash_special'",
+    )
+    .bind(stale.to_string())
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(event_type, "cash_special_due");
+    // Replay of the sweep is a no-op.
+    let swept_again = billing_service::vat_recognition::materialize_due_cash_special(&h.pool, now)
+        .await
+        .expect("fallback replay");
+    assert_eq!(swept_again, 0, "already-materialised supplies are skipped");
+
+    // Backfill: idempotent over an explicit period range.
+    let from = (now - chrono::Duration::days(80))
+        .format("%Y-%m")
+        .to_string();
+    let to = now.format("%Y-%m").to_string();
+    let written =
+        billing_service::vat_recognition::backfill_recognition_from_invoices(&h.pool, &from, &to)
+            .await
+            .expect("backfill");
+    assert!(
+        written >= 2,
+        "general + cash invoices are re-materialised: {written}"
+    );
+    let written_again =
+        billing_service::vat_recognition::backfill_recognition_from_invoices(&h.pool, &from, &to)
+            .await
+            .expect("backfill replay");
+    assert_eq!(
+        written_again, written,
+        "backfill is idempotent (replace, never append)"
+    );
+});
+
+// ---------------------------------------------------------------------------
+// invoices.rs — numbering under concurrency, immutable snapshots, overflow
+// ---------------------------------------------------------------------------
+
+db_test!(
+    invoice_numbering_is_gap_free_and_monotonic_under_concurrency,
+    |h| {
+        use billing_service::invoices::generate_invoice_number;
+
+        let pool = h.pool.clone();
+        let futures = (0..16).map(|_| generate_invoice_number(&pool));
+        let results = futures::future::join_all(futures).await;
+        let mut serials: Vec<i64> = results
+            .into_iter()
+            .map(|r| {
+                let number = r.expect("numbering must not fail");
+                let (year, serial) = number.split_once('-').expect("YYYY-NNNNNN");
+                assert_eq!(year.len(), 4);
+                assert_eq!(serial.len(), 6, "zero-padded to six digits: {number}");
+                serial.parse::<i64>().expect("numeric serial")
+            })
+            .collect();
+        serials.sort_unstable();
+        assert_eq!(serials.len(), 16);
+        assert!(
+            serials.windows(2).all(|w| w[1] == w[0] + 1),
+            "concurrent numbering must be monotonic and gap-free: {serials:?}"
+        );
+    }
+);
+
+db_test!(
+    invoice_creation_validates_and_freezes_immutable_snapshot,
+    |h| {
+        use billing_service::invoices::{
+            allocate_vat_across_lines, create_invoice, CreateInvoiceInput, InvoiceError,
+            NewLineItem,
+        };
+
+        let tenant = "cov_inv_snapshot";
+        seed_tenant(&h, tenant, "growth").await;
+        let now = Utc::now();
+        let input = || CreateInvoiceInput {
+            tenant_id: tenant.to_string(),
+            stripe_invoice_id: None,
+            line_items: vec![NewLineItem {
+                description: "Usage 2026-09".into(),
+                quantity: 10,
+                unit_price: 10_000,
+            }],
+            period_start: now - chrono::Duration::days(30),
+            period_end: now,
+            due_at: None,
+            currency: None,
+            overage_period: None,
+        };
+
+        // No billing address → typed refusal, no invoice row.
+        let missing = create_invoice(&h.pool, input()).await;
+        assert!(
+            matches!(missing, Err(InvoiceError::NoBillingAddress)),
+            "missing address must be refused: {missing:?}"
+        );
+        assert_eq!(invoice_count(&h, tenant).await, 0);
+
+        seed_billing_address(&h, tenant, "EE").await;
+
+        // quantity × unit_price overflow → typed refusal before any INSERT.
+        let mut overflow_input = input();
+        overflow_input.line_items[0].quantity = i64::MAX;
+        overflow_input.line_items[0].unit_price = 2;
+        let overflow = create_invoice(&h.pool, overflow_input).await;
+        assert!(
+            matches!(overflow, Err(InvoiceError::PdfGeneration(_))),
+            "overflow must be refused: {overflow:?}"
+        );
+        assert_eq!(invoice_count(&h, tenant).await, 0, "refusals never persist");
+
+        // Valid invoice: totals reconcile to the cent and per-line VAT sums
+        // exactly to the headline VAT.
+        let invoice = create_invoice(&h.pool, input()).await.expect("invoice");
+        assert_eq!(invoice.subtotal, 100_000);
+        assert_eq!(invoice.total, invoice.subtotal + invoice.vat_total);
+        let rate = invoice.line_items[0].vat_rate;
+        let allocated = allocate_vat_across_lines(&[100_000], rate);
+        assert_eq!(
+            invoice.line_items.iter().map(|l| l.vat_amount).sum::<i64>(),
+            invoice.vat_total,
+            "per-line VAT must reconcile with the headline total"
+        );
+        assert_eq!(invoice.line_items[0].vat_amount, allocated[0]);
+        assert!(invoice
+            .invoice_number
+            .starts_with(&now.format("%Y").to_string()));
+
+        // The issued snapshot survives a later address change.
+        let before: Option<String> =
+            sqlx::query_scalar("SELECT billing_address FROM invoices WHERE id = $1")
+                .bind(invoice.id)
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        let before = before.expect("F08 snapshot stored");
+        assert!(
+            before.contains("Coverage"),
+            "snapshot carries the buyer name"
+        );
+        sqlx::query(
+            "UPDATE billing_addresses SET company_name = 'Changed OÜ', country = 'DE',
+             address_line1 = 'Elsewhere 9' WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let after: Option<String> =
+            sqlx::query_scalar("SELECT billing_address FROM invoices WHERE id = $1")
+                .bind(invoice.id)
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            before,
+            after.expect("snapshot survives"),
+            "F08 immutability"
+        );
+
+        // The snapshot is also served back through the reader.
+        let reread = billing_service::invoices::get_invoice_by_id(&h.pool, invoice.id)
+            .await
+            .expect("re-read invoice")
+            .expect("invoice exists");
+        assert_eq!(reread.invoice_number, invoice.invoice_number);
+        assert_eq!(reread.total, invoice.total);
+    }
+);
+
+// ---------------------------------------------------------------------------
+// accounting_export.rs — hostile names are RFC 4180 escaped, formula-safe
+// ---------------------------------------------------------------------------
+
+db_test!(accounting_export_escapes_hostile_names_and_formulas, |h| {
+    use billing_service::accounting_export::export_accounting_csv;
+
+    let tenant = "cov_export_x";
+    seed_tenant(&h, tenant, "growth").await;
+    // Hostile buyer name: quote, comma, and an embedded newline that must
+    // never split the CSV record; company_name stays NULL so the tenant name
+    // is the exported customer name.
+    sqlx::query("UPDATE tenants SET name = $2 WHERE id = $1")
+        .bind(tenant)
+        .bind("O\"Brien, Ltd.\nSecond line")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO billing_addresses (tenant_id, company_name, address_line1, city, postal_code, country, vat_number)
+         VALUES ($1, NULL, '=SUM(A1:A2)', 'Tallinn', '10111', 'EE', 'EE123456789')",
+    )
+    .bind(tenant)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    seed_invoice_row(
+        &h,
+        tenant,
+        ("EXP-1", "paid", "EE"),
+        Utc::now(),
+        None,
+        (1_000, 24.0, 240),
+    )
+    .await;
+
+    let csv = export_accounting_csv(
+        &h.pool,
+        Utc::now() - chrono::Duration::hours(1),
+        Utc::now() + chrono::Duration::hours(1),
+    )
+    .await
+    .expect("export");
+
+    // BOM + header retained.
+    assert!(csv.starts_with('\u{feff}'));
+    assert!(csv.contains("\"Arve number\""));
+    // Embedded quotes are doubled; commas and the newline stay inside one
+    // quoted field (exactly one data record follows the header).
+    assert!(
+        csv.contains("\"O\"\"Brien, Ltd.\nSecond line\""),
+        "customer name must be RFC 4180 escaped: {csv}"
+    );
+    // The embedded newline stays inside the quoted field: the physical
+    // lines are header, record-part-1 (unclosed quote), record-part-2, and
+    // the trailing newline — never a broken/duplicated data record.
+    let records: Vec<&str> = csv.split('\n').collect();
+    assert_eq!(
+        records.len(),
+        4,
+        "record not split incorrectly: {records:?}"
+    );
+    assert!(
+        records[1].starts_with("\"EXP-1\",") && records[1].ends_with("O\"\"Brien, Ltd."),
+        "attribute columns precede the newline-bearing name"
+    );
+    assert!(records[2].starts_with("Second line\","));
+    // Leading '='/+/-/@ values are prefixed so spreadsheets do not execute
+    // them as formulas.
+    assert!(
+        csv.contains("\"'=SUM(A1:A2), Tallinn, 10111, EE\""),
+        "address formula neutralized inside its quoted field: {csv}"
+    );
+    assert!(
+        !csv.contains(",\"=cmd"),
+        "formula must never start an unescaped cell: {csv}"
+    );
+    // Amounts: VTA rate is derived by integer half-up: 240/1000 → 24%.
+    assert!(csv.contains("\"24%\""));
+    assert!(csv.contains("\"EUR\""));
+    // A window that excludes the invoice yields only the header.
+    let empty = export_accounting_csv(
+        &h.pool,
+        Utc::now() + chrono::Duration::days(1),
+        Utc::now() + chrono::Duration::days(2),
+    )
+    .await
+    .expect("empty export");
+    assert_eq!(empty.lines().count(), 1, "header only");
+});
+
+// ---------------------------------------------------------------------------
+// credit_notes.rs — idempotent replay: matching returns, mismatch refuses
+// ---------------------------------------------------------------------------
+
+db_test!(credit_note_replay_matches_payload_or_refuses, |h| {
+    use billing_service::credit_notes::{
+        create_credit_note, CreateCreditNoteInput, CreditNoteError,
+    };
+
+    let tenant = "cov_cn_replay";
+    seed_tenant(&h, tenant, "growth").await;
+    let invoice = seed_invoice_row(
+        &h,
+        tenant,
+        ("CN-1", "paid", "EE"),
+        Utc::now(),
+        Some(Utc::now()),
+        (10_000, 24.0, 2_400),
+    )
+    .await;
+
+    let input = || CreateCreditNoteInput {
+        invoice_id: invoice,
+        amount: 500,
+        reason: "goodwill".into(),
+        tenant_id: tenant.to_string(),
+        idempotency_key: "cov-cn-key".into(),
+    };
+    let first = create_credit_note(&h.pool, input())
+        .await
+        .expect("first credit");
+    assert_eq!(first.amount, 500);
+
+    // Exact replay returns the SAME row and mints nothing new.
+    let replay = create_credit_note(&h.pool, input()).await.expect("replay");
+    assert_eq!(replay.id, first.id, "replay returns the stored record");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_notes WHERE tenant_id = $1")
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "no duplicate credit note");
+
+    // Same key, different amount → typed refusal, no write.
+    let mut divergent = input();
+    divergent.amount = 501;
+    let mismatched = create_credit_note(&h.pool, divergent).await;
+    assert!(
+        matches!(
+            mismatched,
+            Err(CreditNoteError::IdempotencyKeyReused { .. })
+        ),
+        "divergent reuse must be refused: {mismatched:?}"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_notes WHERE tenant_id = $1")
+        .bind(tenant)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+});
+
+db_test!(overage_sweep_backfills_legacy_pricing_snapshot_once, |h| {
+    use billing_service::overage::{default_period_currency, invalidate_subscription_cache};
+
+    let tenant = "cov_over_legacy_rate";
+    seed_tenant(&h, tenant, "growth").await;
+    seed_billing_address(&h, tenant, "EE").await;
+    let now = Utc::now();
+    let start = now - chrono::Duration::days(31);
+    let end = now - chrono::Duration::days(2);
+    // Legacy period: pricing columns unset (pre-snapshot rows).
+    let period = seed_billing_period(&h, tenant, start, end, "growth", Some(100), None).await;
+    seed_metering(
+        &h,
+        tenant,
+        "emails_sent",
+        1_100,
+        start + chrono::Duration::days(1),
+    )
+    .await;
+
+    let result = billing_service::overage::sweep_period_overage(&h.state)
+        .await
+        .expect("sweep");
+    assert_eq!(result.invoices_created, 1, "{result:?}");
+
+    let (rate, snapshot): (Option<i64>, Option<serde_json::Value>) = sqlx::query_as(
+        "SELECT overage_rate_millicents::bigint, pricing_snapshot
+         FROM billing_periods WHERE id = $1",
+    )
+    .bind(period)
+    .fetch_one(&h.pool)
+    .await
+    .expect("period row");
+    assert_eq!(
+        rate,
+        Some(35),
+        "builtin plan rate backfilled onto the period"
+    );
+    let snapshot = snapshot.expect("legacy period gains a pricing snapshot");
+    assert_eq!(snapshot["backfilled"], true);
+    assert_eq!(snapshot["planName"], "growth");
+    assert_eq!(snapshot["emailAllowance"], 100);
+    assert_eq!(snapshot["overageRateMillicents"], 35);
+    assert_eq!(snapshot["currency"], default_period_currency());
+    assert_eq!(default_period_currency(), "EUR");
+
+    // The invoice's own money invariant: total = subtotal + VAT.
+    let (inv_subtotal, inv_vat, inv_total): (i64, i64, i64) =
+        sqlx::query_as("SELECT subtotal, vat_total, total FROM invoices WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&h.pool)
+            .await
+            .expect("invoice");
+    // 1 000 excess emails × 35 millicents = 35 000 millicents = 35 cents.
+    assert_eq!(inv_subtotal, 35, "exact integer money, no float drift");
+    assert_eq!(inv_total, inv_subtotal + inv_vat);
+    assert_eq!(
+        inv_total, 43,
+        "35c + 24% VAT (8c half-up) reconciles exactly"
+    );
+
+    // Cache invalidation is safe for known and unknown tenants.
+    invalidate_subscription_cache(tenant);
+    invalidate_subscription_cache("tenant-that-does-not-exist");
+});
+
+db_test!(
+    stripe_webhook_cross_tenant_binding_and_bad_states_refuse,
+    |h| {
+        let app = billing_service::routes::router(h.state.clone());
+        let tenant_a = "cov_wh_bind_a";
+        let tenant_b = "cov_wh_bind_b";
+        seed_tenant(&h, tenant_a, "free").await;
+        seed_tenant(&h, tenant_b, "free").await;
+        seed_stripe_plan(&h, "growth", "price_cov_monthly").await;
+        let now = Utc::now().timestamp();
+
+        // Bind the subscription to tenant A.
+        expect_webhook_ok(
+            &h,
+            &app,
+            &stripe_event(
+                "evt_cov_bind_a",
+                "customer.subscription.created",
+                subscription_object(
+                    tenant_a,
+                    "sub_cov_bound",
+                    "active",
+                    "price_cov_monthly",
+                    now,
+                    now + 2_592_000,
+                ),
+            ),
+            "evt_cov_bind_a",
+        )
+        .await;
+        let plan_a: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant_a)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(plan_a, "growth");
+
+        // The SAME Stripe subscription id claimed by another tenant is refused:
+        // a webhook can never move a subscription (or paid entitlement) across
+        // tenants.
+        let (status, _) = post_signed_webhook(
+            &app,
+            &stripe_event(
+                "evt_cov_bind_b",
+                "customer.subscription.updated",
+                subscription_object(
+                    tenant_b,
+                    "sub_cov_bound",
+                    "active",
+                    "price_cov_monthly",
+                    now,
+                    now + 2_592_000,
+                ),
+            ),
+            now,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (error,): (Option<String>,) = sqlx::query_as(
+            "SELECT error FROM stripe_webhook_events WHERE stripe_event_id = 'evt_cov_bind_b'",
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert!(
+            error
+                .unwrap_or_default()
+                .contains("already bound to a different tenant"),
+            "cross-tenant binding must be recorded as a refusal"
+        );
+        let plan_b: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant_b)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(plan_b, "free", "tenant B gains nothing");
+
+        // An impossible status transition is refused (active -> incomplete).
+        let (status, _) = post_signed_webhook(
+            &app,
+            &stripe_event(
+                "evt_cov_bad_transition",
+                "customer.subscription.updated",
+                subscription_object(
+                    tenant_a,
+                    "sub_cov_bound",
+                    "incomplete",
+                    "price_cov_monthly",
+                    now,
+                    now + 2_592_000,
+                ),
+            ),
+            now,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let status_text: String = sqlx::query_scalar(
+        "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_cov_bound'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+        assert_eq!(status_text, "active", "refused event never rewinds state");
+
+        // A subscription with no line-item price cannot grant anything.
+        let mut no_price = subscription_object(
+            tenant_b,
+            "sub_cov_noprice",
+            "active",
+            "price_cov_monthly",
+            now,
+            now + 2_592_000,
+        );
+        no_price["items"]["data"] = serde_json::json!([]);
+        let (status, _) = post_signed_webhook(
+            &app,
+            &stripe_event("evt_cov_noprice", "customer.subscription.created", no_price),
+            now,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // An unknown Stripe price id cannot grant anything either.
+        let (status, _) = post_signed_webhook(
+            &app,
+            &stripe_event(
+                "evt_cov_unknownprice",
+                "customer.subscription.created",
+                subscription_object(
+                    tenant_b,
+                    "sub_cov_unknownprice",
+                    "active",
+                    "price_that_does_not_exist",
+                    now,
+                    now + 2_592_000,
+                ),
+            ),
+            now,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let plan_b: String = sqlx::query_scalar("SELECT plan FROM tenants WHERE id = $1")
+            .bind(tenant_b)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(plan_b, "free", "no unverified price may grant a plan");
+        let subs_b: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+                .bind(tenant_b)
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert_eq!(subs_b, 0, "refused events write no subscription rows");
+    }
+);

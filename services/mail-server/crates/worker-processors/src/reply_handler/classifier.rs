@@ -837,3 +837,157 @@ mod tests {
         assert_eq!(CLASSIFIER_INPUT_CAP, MAX_CLASSIFIER_INPUT_BYTES);
     }
 }
+
+#[cfg(test)]
+mod legacy_heuristic_tests {
+    //! The legacy pattern layer, exercised directly: it is still the
+    //! fallback for the synchronous `classify` entry point, and every pattern
+    //! family must drive a distinct disposition rather than collapsing into
+    //! Unknown.
+
+    use super::*;
+
+    #[test]
+    fn inputs_without_quick_patterns_return_unknown_without_regex_work() {
+        let result = legacy_heuristic_classify("Re: hello", "zzzz qqqq");
+        assert_eq!(result.classification, ReplyClassification::Unknown);
+        assert_eq!(result.confidence, 0.3);
+        assert_eq!(result.reasoning, "No quick patterns matched");
+    }
+
+    #[test]
+    fn every_pattern_family_drives_its_classification() {
+        let cases = [
+            (
+                "out of office until monday",
+                ReplyClassification::OutOfOffice,
+            ),
+            (
+                "we are not interested, thanks",
+                ReplyClassification::NotInterested,
+            ),
+            (
+                "wrong person, contact jane",
+                ReplyClassification::WrongPerson,
+            ),
+            ("please unsubscribe me", ReplyClassification::Unsubscribe),
+            (
+                "can we schedule a call? calendly works",
+                ReplyClassification::MeetingRequest,
+            ),
+            (
+                "this is an unacceptable complaint, remove me",
+                ReplyClassification::Complaint,
+            ),
+            (
+                "stop emailing your unsolicited spam",
+                ReplyClassification::Spam,
+            ),
+        ];
+        for (body, expected) in cases {
+            let result = legacy_heuristic_classify("Re: note", body);
+            assert_eq!(
+                result.classification, expected,
+                "body {body:?} produced {:?} ({})",
+                result.classification, result.reasoning
+            );
+            assert!(!result.reasoning.is_empty());
+        }
+    }
+
+    #[test]
+    fn oversized_inputs_are_truncated_before_matching() {
+        // A body far past the ReDoS cap still classifies (on the truncated
+        // prefix) instead of stalling or panicking on a mid-codepoint cut.
+        let body = format!(
+            "unsubscribe {}",
+            "🎉中文".repeat(MAX_CLASSIFIER_INPUT_BYTES)
+        );
+        let result = legacy_heuristic_classify("Re: big", &body);
+        assert_eq!(result.classification, ReplyClassification::Unsubscribe);
+        assert!(!result.reasoning.is_empty());
+    }
+
+    #[test]
+    fn confidence_scales_with_the_number_of_actual_pattern_matches() {
+        // One unsubscribe pattern: confidence 0.5, high urgency, and the
+        // suggested action is the only auto-executed removal path.
+        let single = legacy_heuristic_classify("Re: x", "unsubscribe");
+        assert_eq!(single.classification, ReplyClassification::Unsubscribe);
+        assert_eq!(single.confidence, 0.5);
+        assert_eq!(single.suggested_action.action, ActionType::Unsubscribe);
+        assert!(single.suggested_action.auto_execute);
+
+        // Three out-of-office patterns: confidence 0.85, low urgency, snooze.
+        let triple =
+            legacy_heuristic_classify("Re: x", "auto-reply: out of the office on annual leave");
+        assert_eq!(triple.classification, ReplyClassification::OutOfOffice);
+        assert_eq!(triple.confidence, 0.85);
+        assert_eq!(triple.suggested_action.action, ActionType::Snooze);
+        assert_eq!(triple.suggested_action.priority, Urgency::Low);
+    }
+
+    #[test]
+    fn suggested_actions_cover_every_disposition() {
+        let expectations = [
+            (ReplyClassification::OutOfOffice, ActionType::Snooze),
+            (ReplyClassification::NotInterested, ActionType::Suppress),
+            (ReplyClassification::Interested, ActionType::FlagSales),
+            (ReplyClassification::TellMeMore, ActionType::FlagSales),
+            (
+                ReplyClassification::WrongPerson,
+                ActionType::RequestReferral,
+            ),
+            (ReplyClassification::Unsubscribe, ActionType::Unsubscribe),
+            (
+                ReplyClassification::MeetingRequest,
+                ActionType::ScheduleDemo,
+            ),
+            (
+                ReplyClassification::PositiveIntent,
+                ActionType::ScheduleDemo,
+            ),
+            (ReplyClassification::Complaint, ActionType::Escalate),
+            (ReplyClassification::Spam, ActionType::Ignore),
+            (ReplyClassification::Unknown, ActionType::Ignore),
+        ];
+        for (classification, action) in expectations {
+            let suggested = build_suggested_action(classification, Sentiment::Neutral);
+            assert_eq!(
+                suggested.action, action,
+                "classification {classification:?} must suggest {action:?}"
+            );
+        }
+        // Unsubscribe is auto-executed; a complaint is escalated with high
+        // urgency; plain Unknown never auto-executes.
+        let unsubscribe =
+            build_suggested_action(ReplyClassification::Unsubscribe, Sentiment::Negative);
+        assert!(unsubscribe.auto_execute);
+        assert_eq!(unsubscribe.priority, Urgency::High);
+        let unknown = build_suggested_action(ReplyClassification::Unknown, Sentiment::Neutral);
+        assert!(!unknown.auto_execute);
+    }
+
+    #[tokio::test]
+    async fn full_path_reports_the_deciding_layer() {
+        struct NeverCalled;
+        #[async_trait::async_trait]
+        impl ReplyClassifier for NeverCalled {
+            async fn classify(
+                &self,
+                _input: &ReplyInput,
+            ) -> Result<AiClassification, ai::ClassifyError> {
+                panic!("the deterministic layer must win before the AI is consulted")
+            }
+        }
+        // A DSN body is deterministic (bounce), so the AI is never asked.
+        let input = ReplyInput::new(
+            "Undelivered Mail Returned",
+            "Final-Recipient: rfc822; user@example.com\nStatus: 5.1.1\nAction: failed",
+        );
+        let outcome = classify_full(&NeverCalled, &input).await;
+        assert_eq!(outcome.classifier, ClassifierKind::Deterministic);
+        assert_eq!(outcome.disposition, ReplyDisposition::BounceHard);
+        assert!(!outcome.result.reasoning.is_empty());
+    }
+}

@@ -260,3 +260,61 @@ mod tests {
         assert_eq!(cb.state(), CircuitState::Closed);
     }
 }
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn default_breaker_starts_closed_and_permits_calls() {
+        let breaker = CircuitBreaker::default();
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        assert!(breaker.is_allowed());
+        assert!(breaker.last_used() <= std::time::Instant::now());
+    }
+
+    #[test]
+    fn reset_closes_a_tripped_breaker() {
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            open_duration: Duration::from_secs(60),
+            ..Default::default()
+        });
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitState::Open);
+        assert!(!breaker.is_allowed());
+        breaker.reset();
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        assert!(breaker.is_allowed());
+    }
+
+    #[test]
+    fn success_while_open_is_ignored_and_a_probe_resets_after_the_window() {
+        let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 2,
+            open_duration: Duration::from_millis(50),
+            window_duration: Duration::from_secs(60),
+        });
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitState::Open);
+        assert!(breaker.last_used() <= std::time::Instant::now());
+
+        // A success arriving while the breaker is Open (a straggler from
+        // before the trip) must not close it.
+        breaker.record_success();
+        assert_eq!(breaker.state(), CircuitState::Open);
+        assert!(!breaker.is_allowed(), "the open window is not over yet");
+
+        std::thread::sleep(Duration::from_millis(55));
+        assert!(breaker.is_allowed(), "the probe is admitted");
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+        // Half-open stays permissive for further probes.
+        assert!(breaker.is_allowed());
+        breaker.record_success();
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+        breaker.record_success();
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        assert!(breaker.is_allowed());
+    }
+}

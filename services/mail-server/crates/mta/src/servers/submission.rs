@@ -450,11 +450,14 @@ impl SubmissionServer {
                 // or missing argument is rejected with 501 5.5.4, matching
                 // the inbound server (RFC 5321 §4.1.1.1) instead of being
                 // silently accepted as "unknown".
-                let host = match trimmed
-                    .split_whitespace()
-                    .nth(1)
-                    .filter(|host| super::inbound::is_valid_helo_hostname(host))
-                {
+                //
+                // RFC 5321 §4.1.1.1 gives the command EXACTLY one argument:
+                // n extra whitespace-separated tokens are a syntax error.
+                // Truncating at the first whitespace (the previous behavior)
+                // accepted `EHLO bad host` as the domain `bad` while the
+                // inbound server refused the same line — the same strict
+                // parser is used here.
+                let host = match super::inbound::parse_helo_hostname(trimmed) {
                     Some(host) => host,
                     None => {
                         log_smtp_reject(
@@ -3602,6 +3605,195 @@ mod tests {
             "mail.example.com"
         ));
         assert!(super::super::inbound::is_valid_helo_hostname("[127.0.0.1]"));
+    }
+
+    // ── adversarial: command matrix, sequencing and AUTH gates ─────────────
+
+    mod adversarial_matrix {
+        use super::*;
+
+        /// One session, many commands: every verb/sequencing reply is pinned.
+        #[tokio::test]
+        async fn unauthenticated_plaintext_command_matrix() {
+            let server = Arc::new(test_server(None));
+            let transcript = run_session(
+                server,
+                test_peer(11),
+                false, // no STARTTLS offered
+                false, // plaintext session
+                &[
+                    ("EHLO mail.example.test", "250-submission.test"),
+                    // On an unauthenticated session the AUTH gate answers
+                    // before any RCPT syntax check.
+                    ("RCPT TOX:<a@b.test>", "530 5.7.0 Authentication required"),
+                    ("RCPT TO:<a@b.test>", "530 5.7.0 Authentication required"),
+                    ("MAIL FROM:<a@b.test>", "530 5.7.0 Authentication required"),
+                    ("MAIL FROMX:<a@b.test>", "501 5.5.4 Syntax: MAIL FROM"),
+                    ("STARTTLS", "454 4.7.0 TLS not available"),
+                    ("DATA", "530 5.7.0 Authentication required"),
+                    ("NOOP", "250"),
+                    ("RSET", "250"),
+                    ("VRFY user", "252"),
+                    ("EXPN list", "502"),
+                    ("FROBNICATE", "500 5.5.2 Command not recognised"),
+                    ("DATABASE", "500 5.5.2 Command not recognised"),
+                ],
+            )
+            .await;
+            // Nothing in the matrix may have authenticated the session.
+            assert!(!transcript.contains("235"), "{transcript}");
+            assert!(
+                !transcript.contains("AUTH"),
+                "plaintext EHLO must not advertise AUTH: {transcript}"
+            );
+        }
+
+        #[tokio::test]
+        async fn tls_session_command_matrix() {
+            let server = Arc::new(test_server(None));
+            let transcript = run_session(
+                server,
+                test_peer(12),
+                false, // allow_starttls=false: irrelevant on the TLS leg
+                true,  // already_tls
+                &[
+                    ("EHLO mail.example.test", "250-AUTH PLAIN LOGIN"),
+                    // Nested STARTTLS and protocol errors are answered
+                    // before any auth check.
+                    ("STARTTLS", "503 5.5.1 TLS already active"),
+                    ("MAIL FROMX:<a@b.test>", "501 5.5.4 Syntax: MAIL FROM"),
+                    ("RCPT TOX:<a@b.test>", "530 5.7.0 Authentication required"),
+                    (
+                        "AUTH FROBNICATE",
+                        "504 5.5.4 Unrecognized authentication type",
+                    ),
+                    ("AUTH", "504 5.5.4 Unrecognized authentication type"),
+                    ("RSET", "250"),
+                ],
+            )
+            .await;
+            // AUTH PLAIN LOGIN is advertised exactly once on the TLS leg.
+            assert!(transcript.contains("250-AUTH PLAIN LOGIN"), "{transcript}");
+            assert!(transcript.contains("250 SMTPUTF8"), "{transcript}");
+        }
+
+        #[tokio::test]
+        async fn starttls_syntax_and_sequencing_errors() {
+            let server = Arc::new(test_server(None));
+            // STARTTLS before EHLO → 503; with an argument → 501.
+            let transcript = run_session(
+                server,
+                test_peer(13),
+                true,
+                false,
+                &[
+                    ("STARTTLS", "503 5.5.1 Error: send HELO/EHLO first"),
+                    ("EHLO mail.example.test", "250-STARTTLS"),
+                    ("STARTTLS extra", "501 5.5.4 Syntax: STARTTLS"),
+                    ("AUTH PLAIN AGFiYw==", "530 5.7.0 Must issue STARTTLS first"),
+                    ("MAIL FROM:<a@b.test>", "530 5.7.0 Authentication required"),
+                ],
+            )
+            .await;
+            // AUTH credentials must not have reached the store: nothing in
+            // this transcript can have authenticated.
+            assert!(!transcript.contains("235"));
+        }
+
+        #[tokio::test]
+        async fn auth_plain_malformed_payloads_are_rejected() {
+            let server = Arc::new(test_server(None));
+            // Malformed base64 → 501 (RFC 4954 §4).
+            let transcript = run_session(
+                server,
+                test_peer(14),
+                false,
+                true,
+                &[
+                    ("EHLO mail.example.test", "250"),
+                    ("AUTH PLAIN !!!not-base64!!!", "501 5.5.2 Invalid base64"),
+                ],
+            )
+            .await;
+            assert!(!transcript.contains("235"), "{transcript}");
+        }
+
+        #[tokio::test]
+        async fn ehlo_argument_validation_and_reset() {
+            let server = Arc::new(test_server(None));
+            let transcript = run_session(
+                server,
+                test_peer(15),
+                false,
+                true,
+                &[
+                    ("EHLO bad host", "501 5.5.4 Invalid HELO/EHLO hostname"),
+                    ("EHLO", "501 5.5.4 Invalid HELO/EHLO hostname"),
+                    (
+                        "EHLO mail.example.test",
+                        "250-submission.test Hello mail.example.test",
+                    ),
+                    // A second EHLO is legal and resets the greeting.
+                    (
+                        "EHLO other.example.test",
+                        "250-submission.test Hello other.example.test",
+                    ),
+                ],
+            )
+            .await;
+            assert_eq!(transcript.matches("250-submission.test").count(), 2);
+        }
+
+        #[tokio::test]
+        async fn oversized_command_line_cannot_smuggle_a_followup_command() {
+            let server = Arc::new(test_server(None));
+            let (client, server_side) = tokio::io::duplex(256 * 1024);
+            let task = tokio::spawn(async move {
+                let mut stream = BufStream::new(server_side);
+                server
+                    .run_session_loop(&mut stream, test_peer(16), false, true)
+                    .await
+            });
+            let mut client = BufStream::new(client);
+            // run_session_loop does not greet (the accept loop owns the
+            // banner); start straight at EHLO.
+            client
+                .write_all(b"EHLO mail.example.test\r\n")
+                .await
+                .unwrap();
+            client.flush().await.unwrap();
+            let _ = read_smtp_response(&mut client).await;
+            // A 200 KB argument: the line's remainder is drained through its
+            // newline, the session stays synchronized, and the following
+            // command is honored.
+            let long = format!("NOOP {}\r\n", "A".repeat(200_000));
+            client.write_all(long.as_bytes()).await.unwrap();
+            client.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client).await;
+            assert!(resp.starts_with("500 5.5.2 Line too long"), "{resp:?}");
+
+            client.write_all(b"NOOP\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let mut answered_250 = false;
+            for _ in 0..3 {
+                let resp = read_smtp_response(&mut client).await;
+                if resp.is_empty() {
+                    break;
+                }
+                if resp.starts_with("250") {
+                    answered_250 = true;
+                    break;
+                }
+            }
+            assert!(
+                answered_250,
+                "the session must stay synchronized after an over-long line"
+            );
+            let _ = client.write_all(b"QUIT\r\n").await;
+            let _ = client.flush().await;
+            let _ = read_smtp_response(&mut client).await;
+            let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        }
     }
 }
 

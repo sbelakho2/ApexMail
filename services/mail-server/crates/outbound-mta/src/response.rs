@@ -47,6 +47,14 @@ impl SmtpReply {
         let code = parse_reply_code(first)?;
         let mut text_lines = Vec::with_capacity(lines.len());
         for line in lines {
+            // RFC 5321 §4.2: every line of a multiline reply carries the SAME
+            // reply code. A peer that changes the code mid-reply (e.g. a
+            // `250-...` line followed by `550 ...`) is protocol-confused at
+            // best and smuggling a failure past a first-line-only reader at
+            // worst — the whole reply is unparseable.
+            if parse_reply_code(line) != Some(code) {
+                return None;
+            }
             let rest = line.get(4..).unwrap_or("");
             text_lines.push(rest.trim().to_string());
         }
@@ -408,5 +416,184 @@ mod tests {
         let reply = SmtpReply::parse("550 5.1.1 user unknown").expect("parse");
         assert_eq!(reply.diagnostic(), "550 5.1.1 user unknown");
         assert_eq!(reply.dsn_status(), "5.1.1");
+    }
+
+    #[test]
+    fn multiline_parsing_requires_one_code_on_every_line() {
+        // Same code on every line: valid, including the 3-char bare form.
+        assert!(multiline(&["250-a", "250-b", "250"]).code == 250);
+
+        // A code change mid-reply is unparseable: a first-line-only reader
+        // would wrongly accept the `550` tail as part of a 250.
+        assert!(SmtpReply::parse_multiline(&[
+            "250-fake".to_string(),
+            "550 actually no".to_string()
+        ])
+        .is_none());
+        assert!(
+            SmtpReply::parse_multiline(&["250-fake".to_string(), "garbage".to_string()]).is_none()
+        );
+
+        // Invalid separators / missing lines are refused.
+        assert!(SmtpReply::parse_multiline(&[]).is_none());
+        assert!(SmtpReply::parse("").is_none());
+        assert!(SmtpReply::parse("25").is_none());
+        assert!(SmtpReply::parse("250x nope").is_none());
+        assert!(SmtpReply::parse("+250 nope").is_none());
+        assert!(SmtpReply::parse("250").is_some(), "a bare code is a reply");
+    }
+
+    #[test]
+    fn multiline_text_is_joined_and_enhanced_status_reads_the_first_token() {
+        // The enhanced status is the FIRST token of the reply text — a
+        // multiline reply whose first line is a greeting leaves it unset.
+        let reply = multiline(&["250-2.1.5 Ok", "250-SIZE 10485760", "250 8BITMIME"]);
+        assert_eq!(reply.text, "2.1.5 Ok SIZE 10485760 8BITMIME");
+        assert_eq!(
+            reply.enhanced,
+            Some(EnhancedStatusCode {
+                class: 2,
+                subject: 1,
+                detail: 5
+            })
+        );
+        // A first token that is not an enhanced code leaves it unset.
+        let plain = multiline(&["250-fake.example greets us", "250 Ok"]);
+        assert!(plain.enhanced.is_none());
+        let empty_text = multiline(&["250-", "250 "]);
+        assert_eq!(
+            empty_text.text, " ",
+            "line texts are joined with a space even when empty"
+        );
+        assert_eq!(empty_text.lines, vec!["", ""]);
+    }
+
+    #[test]
+    fn dsn_status_synthesizes_every_documented_code() {
+        for (line, expected) in [
+            ("450 full", "4.2.0"),
+            ("451 try later", "4.3.0"),
+            ("452 too many", "4.2.2"),
+            ("550 nope", "5.1.1"),
+            ("551 nope", "5.1.6"),
+            ("552 too large", "5.2.2"),
+            ("553 bad name", "5.1.3"),
+            ("554 nope", "5.0.0"),
+            ("421 other 4xx", "4.0.0"),
+            ("521 other 5xx", "5.0.0"),
+            ("250 ok", "2.0.0"),
+        ] {
+            assert_eq!(
+                SmtpReply::parse(line).expect("reply").dsn_status(),
+                expected,
+                "line {line:?}"
+            );
+        }
+        // An enhanced code always wins over the synthesized one.
+        assert_eq!(
+            SmtpReply::parse("550 5.7.1 policy")
+                .expect("reply")
+                .dsn_status(),
+            "5.7.1"
+        );
+    }
+
+    #[test]
+    fn diagnostic_without_text_is_just_the_code() {
+        let reply = SmtpReply::parse("421").expect("parse");
+        assert_eq!(reply.diagnostic(), "421");
+        assert_eq!(reply.dsn_status(), "4.0.0");
+    }
+
+    #[test]
+    fn classification_refuses_impossible_codes_and_stages() {
+        for line in ["100 anything", "199 odd", "600 future"] {
+            let reply = SmtpReply::parse(line).expect("parse");
+            assert_eq!(
+                classify(SmtpStage::RcptTo, &reply),
+                ReplyDisposition::Unexpected,
+                "line {line:?}"
+            );
+        }
+        let permanent = SmtpReply::parse("554 nope").expect("parse");
+        assert_eq!(
+            classify(SmtpStage::Ehlo, &permanent),
+            ReplyDisposition::PeerRefusal
+        );
+        assert_eq!(
+            classify(SmtpStage::StartTls, &permanent),
+            ReplyDisposition::PeerRefusal
+        );
+        // 354 is only meaningful at the DATA command, but the classifier
+        // reports the shape, not the stage legality.
+        let intermediate = SmtpReply::parse("354 go").expect("parse");
+        assert_eq!(
+            classify(SmtpStage::Greeting, &intermediate),
+            ReplyDisposition::Intermediate
+        );
+        assert!(intermediate.is_intermediate());
+        assert!(!intermediate.is_positive());
+    }
+
+    #[test]
+    fn enhanced_status_classes_classify_transience() {
+        let transient = EnhancedStatusCode::parse("4.2.1").expect("parse");
+        assert!(transient.is_transient());
+        assert!(!transient.is_permanent());
+        assert_eq!(transient.to_string(), "4.2.1");
+        let permanent = EnhancedStatusCode::parse("5.1.1").expect("parse");
+        assert!(permanent.is_permanent());
+        assert!(!permanent.is_transient());
+        assert!(EnhancedStatusCode::parse("6.0.0").is_none());
+        assert!(EnhancedStatusCode::parse("5.1.1111").is_none());
+        assert!(EnhancedStatusCode::parse("5..1").is_none());
+        assert!(EnhancedStatusCode::parse("").is_none());
+    }
+
+    #[test]
+    fn stages_render_their_wire_names() {
+        let pairs = [
+            (SmtpStage::Greeting, "greeting"),
+            (SmtpStage::Ehlo, "EHLO"),
+            (SmtpStage::StartTls, "STARTTLS"),
+            (SmtpStage::MailFrom, "MAIL FROM"),
+            (SmtpStage::RcptTo, "RCPT TO"),
+            (SmtpStage::Data, "DATA"),
+            (SmtpStage::EndOfData, "end-of-DATA"),
+        ];
+        for (stage, expected) in pairs {
+            assert_eq!(stage.as_str(), expected);
+            assert_eq!(stage.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn permanent_dsn_inputs_map_every_field_and_refuse_non_permanent() {
+        let reply = SmtpReply::parse("554 5.7.1 rejected").expect("parse");
+        let arrival = Utc::now();
+        let inputs = reply
+            .permanent_dsn_inputs(
+                "user@example.com".to_string(),
+                None,
+                arrival,
+                Some("env-1".to_string()),
+            )
+            .expect("a 5xx yields DSN inputs");
+        assert_eq!(inputs.action, DsnAction::Failed);
+        assert_eq!(inputs.status, "5.7.1");
+        assert_eq!(inputs.diagnostic_code, "smtp; 554 5.7.1 rejected");
+        assert_eq!(inputs.remote_mta, None);
+        assert_eq!(inputs.arrival_date, arrival);
+        assert_eq!(inputs.original_envelope_id.as_deref(), Some("env-1"));
+
+        for line in ["250 ok", "354 go", "451 later", "199 odd"] {
+            let reply = SmtpReply::parse(line).expect("parse");
+            assert!(
+                reply
+                    .permanent_dsn_inputs("u@example.com".to_string(), None, arrival, None)
+                    .is_none(),
+                "line {line:?} must not produce DSN inputs"
+            );
+        }
     }
 }
