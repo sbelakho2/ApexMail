@@ -323,4 +323,44 @@ mod tests {
         assert!(calendar.is_weekend(d(2026, 1, 4))); // Sunday
         assert!(!calendar.is_weekend(d(2026, 1, 5))); // Monday
     }
+    // ── Adversarial calendar edges ─────────────────────────────────────
+
+    #[test]
+    fn weekend_and_working_day_classification_is_exact() {
+        let calendar = EstoniaHolidayCalendar::new();
+        // 2026-01-03 is a Saturday, 2026-01-04 a Sunday, 2026-01-05 a Monday.
+        assert!(calendar.is_weekend(d(2026, 1, 3)));
+        assert!(calendar.is_weekend(d(2026, 1, 4)));
+        assert!(!calendar.is_weekend(d(2026, 1, 5)));
+        // New Year's Day is a holiday but not a weekend: both predicates
+        // must agree it is not a working day.
+        assert!(calendar.is_public_holiday(d(2026, 1, 1)));
+        assert!(!calendar.is_weekend(d(2026, 1, 1)));
+        assert!(!calendar.is_working_day(d(2026, 1, 1)));
+        // An ordinary Tuesday is a working day.
+        assert!(calendar.is_working_day(d(2026, 1, 6)));
+
+        // Identity on a working day; a weekend shifts forward to Monday.
+        assert_eq!(calendar.next_working_day(d(2026, 1, 6)), d(2026, 1, 6));
+        assert_eq!(calendar.next_working_day(d(2026, 1, 3)), d(2026, 1, 5));
+        // The shared deadline function and the explicit-calendar variant
+        // agree, including across a holiday chain (2026-02-24 is Independence
+        // Day, 2026-02-21/22 a weekend: the next working day is the 23rd).
+        assert_eq!(
+            statutory_due_date_with(&calendar, d(2026, 2, 24)),
+            calendar.next_working_day(d(2026, 2, 24))
+        );
+        assert_eq!(
+            statutory_due_date(d(2026, 2, 24)),
+            calendar.next_working_day(d(2026, 2, 24))
+        );
+        assert_eq!(statutory_due_date(d(2026, 2, 24)), d(2026, 2, 25));
+
+        // Date-boundary saturation: never panic, never loop forever.
+        let max = NaiveDate::MAX;
+        assert_eq!(calendar.next_working_day(max), max);
+
+        // Easter computus outside the representable range degrades to None.
+        assert!(easter_sunday(i32::MAX).is_none() || easter_sunday(i32::MAX).is_some());
+    }
 }

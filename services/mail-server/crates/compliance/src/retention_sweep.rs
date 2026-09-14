@@ -556,7 +556,7 @@ impl RetentionSweeper {
         {
             Ok(c) => c,
             Err(e) if is_missing_store(&e) => {
-                return skipped_result(target, default_days, default_cutoff, &e);
+                return skipped_result(target, default_days, default_cutoff, legal_hold_check, &e);
             }
             Err(e) => {
                 return failed_result(target, default_days, default_cutoff, &e);
@@ -587,7 +587,13 @@ impl RetentionSweeper {
             {
                 Ok(n) => deleted += n,
                 Err(e) if is_missing_store(&e) => {
-                    return skipped_result(target, default_days, default_cutoff, &e)
+                    return skipped_result(
+                        target,
+                        default_days,
+                        default_cutoff,
+                        legal_hold_check,
+                        &e,
+                    )
                 }
                 Err(e) => failure = Some(e),
             }
@@ -616,7 +622,13 @@ impl RetentionSweeper {
                 {
                     Ok(n) => deleted += n,
                     Err(e) if is_missing_store(&e) => {
-                        return skipped_result(target, default_days, default_cutoff, &e)
+                        return skipped_result(
+                            target,
+                            default_days,
+                            default_cutoff,
+                            legal_hold_check,
+                            &e,
+                        )
                     }
                     Err(e) => {
                         failure = Some(e);
@@ -748,6 +760,7 @@ fn skipped_result(
     target: &SweepTarget,
     retention_days: u32,
     cutoff: DateTime<Utc>,
+    legal_hold_check: LegalHoldCheck,
     err: &sqlx::Error,
 ) -> CategorySweepResult {
     warn!(store = target.store, error = %err, "retention sweep: store absent — skipped");
@@ -759,7 +772,10 @@ fn skipped_result(
         considered: 0,
         deleted: 0,
         skipped_legal_hold: 0,
-        legal_hold_check: LegalHoldCheck::TenantsTableMissing,
+        // The store is absent, but whether HOLDS could be consulted is a
+        // property of the deployment, not of this store: report the run's
+        // real check instead of claiming the tenants table is missing.
+        legal_hold_check,
         zero_retention_tenants: 0,
         custom_retention_tenants: 0,
         status: SweepStatus::SkippedMissingStore,

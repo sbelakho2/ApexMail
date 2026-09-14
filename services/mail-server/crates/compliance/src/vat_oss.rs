@@ -236,6 +236,15 @@ pub(crate) const VD_ENTRY_DERIVATION_SQL: &str = r#"
     WHERE to_char(i.issued_at AT TIME ZONE 'Europe/Tallinn', 'YYYY-MM') = $2
       AND COALESCE(i.vat_rate, 0) = 0
       AND i.vat_evidence_id IS NOT NULL
+      -- Migration 218's contract: only a VALID, in-force evidence row
+      -- authorises a reverse charge. Without these filters an invoice
+      -- snapshotted onto an outage, an invalid number, or expired /
+      -- not-yet-in-force evidence would be reported as a zero-rated supply.
+      AND e.valid = TRUE
+      AND e.outage_state IS NULL
+      AND e.valid_from <= (i.issued_at AT TIME ZONE 'Europe/Tallinn')::date
+      AND (e.valid_until IS NULL
+           OR e.valid_until >= (i.issued_at AT TIME ZONE 'Europe/Tallinn')::date)
       AND UPPER(COALESCE(i.billing_country, ba.country, 'EE')) <> 'EE'
       AND UPPER(i.currency) = 'EUR'
       AND i.status NOT IN ('void', 'draft', 'uncollectible')
@@ -1416,5 +1425,117 @@ mod db_tests {
         // explicit runtime configuration (never an implicit filing).
         assert!(oss_submission_is_implemented());
         assert!(vd_submission_is_implemented());
+    }
+    /// An invoice snapshotted onto OUT-OF-FORCE evidence must NOT be reported
+    /// as a zero-rated intra-Community supply: the migration's own contract
+    /// says only a valid, in-force row authorises a reverse charge, and the
+    /// VD totals must equal the sum of the reported entries.
+    #[tokio::test]
+    async fn vd_entries_exclude_expired_and_invalid_vies_evidence() {
+        let Some(pool) = pool("vd_evidence_force").await else {
+            return;
+        };
+        let now = Utc::now();
+        let period = period_key(now.date_naive().year(), now.date_naive().month()).expect("period");
+        let today = now.date_naive();
+
+        // (evidence INSERT, taxable amount) — only the first is in force.
+        let evidence_sql = "INSERT INTO vat_validation_evidence \
+               (id, vat_number, country, source, requested_at, valid, response_hash, \
+                valid_from, valid_until, outage_state) \
+             VALUES (gen_random_uuid(), $1, 'DE', 'VIES', NOW(), $2, 'hash', $3, $4, $5) \
+             RETURNING id";
+        type EvidenceCase = (
+            i64,
+            &'static str,
+            bool,
+            chrono::NaiveDate,
+            Option<chrono::NaiveDate>,
+            Option<&'static str>,
+        );
+        let cases: [EvidenceCase; 5] = [
+            (
+                1000,
+                "DE811234567",
+                true,
+                today - chrono::Duration::days(5),
+                None,
+                None,
+            ),
+            (
+                2000,
+                "DE811234568",
+                true,
+                today - chrono::Duration::days(400),
+                Some(today - chrono::Duration::days(1)),
+                None,
+            ),
+            (3000, "DE811234569", false, today, None, None),
+            (
+                4000,
+                "DE811234570",
+                false,
+                today,
+                None,
+                Some("MS_UNAVAILABLE"),
+            ),
+            (
+                5000,
+                "DE811234571",
+                true,
+                today + chrono::Duration::days(1),
+                None,
+                None,
+            ),
+        ];
+        for (amount, vat_number, valid, valid_from, valid_until, outage) in cases {
+            let evidence: Uuid = sqlx::query_scalar(evidence_sql)
+                .bind(vat_number)
+                .bind(valid)
+                .bind(valid_from)
+                .bind(valid_until)
+                .bind(outage)
+                .fetch_one(&pool)
+                .await
+                .expect("evidence");
+            sqlx::query(
+                "INSERT INTO invoices
+                   (id, tenant_id, amount, currency, status, issued_at, created_at, updated_at,
+                    subtotal, vat_total, total, billing_country, vat_rate, vat_evidence_id)
+                 VALUES (gen_random_uuid(), 'oss-tenant', $1, 'EUR', 'paid', NOW(), NOW(), NOW(),
+                         $1, 0, $1, 'DE', 0, $2)",
+            )
+            .bind(amount)
+            .bind(evidence)
+            .execute(&pool)
+            .await
+            .expect("invoice");
+        }
+
+        let return_id = generate_vd_return(&pool, &period).await.expect("vd return");
+        let (taxable, vat, count): (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_taxable_cents, total_vat_cents, line_count FROM vd_returns WHERE id = $1",
+        )
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .expect("totals");
+        assert_eq!(
+            count, 1,
+            "only the in-force valid evidence authorises the zero-rated supply"
+        );
+        assert_eq!(taxable, 1000);
+        assert_eq!(vat, 0);
+
+        // The return totals are exactly the sum of the reported entries.
+        let (entry_sum, entry_count): (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE(SUM(taxable_amount_cents),0)::bigint, COUNT(*)::bigint \
+             FROM vd_entries WHERE return_id = $1",
+        )
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .expect("entry sums");
+        assert_eq!((taxable, count), (entry_sum, entry_count));
     }
 }

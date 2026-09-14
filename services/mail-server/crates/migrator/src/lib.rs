@@ -996,3 +996,5 @@ mod tests {
         format!("{:016x}{:016x}", n, 0u64)
     }
 }
+
+// Migration chain re-embedded: 229 (user_id columns carry users.id).

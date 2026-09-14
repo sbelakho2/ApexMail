@@ -284,8 +284,17 @@ fn default_sort_column() -> String {
 const KEYSET_CURSOR_SEP: char = '\n';
 
 /// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
+///
+/// The timestamp MUST be RFC 3339: `DateTime`'s `Display` renders a space
+/// and a `UTC` suffix ("2026-01-01 00:00:00 UTC"), which
+/// [`decode_keyset_cursor`]'s `parse_from_rfc3339` rejects — every
+/// cursor-follow request used to fail with 400 on a cursor this function
+/// had just minted.
 fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
-    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+    encode_cursor(&format!(
+        "{}{KEYSET_CURSOR_SEP}{id}",
+        created_at.to_rfc3339()
+    ))
 }
 
 /// Decode and validate a `(created_at, id)` keyset cursor. Malformed
@@ -1094,7 +1103,11 @@ struct LedgerRow {
     payload_hash: String,
     principal_id: String,
     status: String,
-    response_status: Option<i64>,
+    /// `idempotency_records.response_status` is INTEGER: sqlx refuses to
+    /// decode it into `Option<i64>` ("Rust type Option<i64> is not
+    /// compatible with SQL type INT4"), which 500'd every ledger lookup —
+    /// including the plain duplicate-key preflight.
+    response_status: Option<i32>,
     response_body: Option<String>,
 }
 
@@ -1109,7 +1122,7 @@ async fn fetch_ledger_row(
         String,
         String,
         String,
-        Option<i64>,
+        Option<i32>,
         Option<String>,
     )> = sqlx::query_as(
         "SELECT request_method, request_route, payload_hash, principal_id, status,
@@ -1167,7 +1180,7 @@ fn classify_ledger_row(
     }
     match row.status.as_str() {
         "complete" => LedgerReplay::Complete {
-            response_status: row.response_status.unwrap_or(202),
+            response_status: row.response_status.map(i64::from).unwrap_or(202),
             response_body: row.response_body.clone(),
         },
         _ => LedgerReplay::InFlight,
@@ -1348,7 +1361,9 @@ async fn complete_ledger_in_tx(
     .bind(tenant_id)
     .bind(key)
     .bind(owner_token)
-    .bind(response_status)
+    // `response_status` is INTEGER; bind the same width so the parameter
+    // type matches the column exactly (HTTP statuses always fit i32).
+    .bind(response_status as i32)
     .bind(response_body)
     .execute(&mut **tx)
     .await;
@@ -2213,7 +2228,15 @@ async fn send_batch(
             validate_send_with_domain_cache(msg, &state.db, &auth.tenant_id, Some(&domain_ids))
                 .await
         {
-            reject_item!(e.to_string());
+            // Validation refusals carry the field-level details in the
+            // error; `to_string()` would flatten them to "validation
+            // failed" and the batch caller could not tell WHICH field was
+            // wrong (the single-send endpoint names it).
+            let detail = match &e {
+                ApiError::Validation(details) => details.join("; "),
+                other => other.to_string(),
+            };
+            reject_item!(detail);
             continue;
         }
 
@@ -2576,6 +2599,12 @@ async fn get_message(
 ) -> Result<Json<ApiResponse<MessageDetail>>, ApiError> {
     require_scopes(&auth, &["messages:read"])?;
 
+    // A path id that is not a UUID can never name a row: it is a client
+    // error (404), not a database 500 from the `$1::uuid` cast.
+    if Uuid::parse_str(&id).is_err() {
+        return Err(ApiError::NotFound("message not found".into()));
+    }
+
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
          FROM messages WHERE id = $1::uuid AND tenant_id = $2",
@@ -2595,6 +2624,12 @@ async fn cancel_message(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<MessageResponse>>, ApiError> {
     require_scopes(&auth, &["messages:send"])?;
+
+    // Same client-error contract as get_message: a non-UUID path id is a
+    // 404, never a 500 from the `$1::uuid` cast inside the transaction.
+    if Uuid::parse_str(&id).is_err() {
+        return Err(ApiError::NotFound("message not found".into()));
+    }
 
     let mut tx = state.db.begin().await.map_err(|error| {
         tracing::error!(error = %error, tenant_id = %auth.tenant_id, message_id = %id, "failed to begin message cancellation transaction");
@@ -4985,5 +5020,1348 @@ Bcc: victim@example.com"@example.com"#
                 "reply_to keeps its display form for the MIME header"
             );
         }
+    }
+
+    // ── Pure-helper adversarial tests (error arms) ─────────────────
+
+    #[test]
+    fn validate_send_options_errors_name_every_offending_field() {
+        // template_id non-empty is rejected; whitespace-only is tolerated.
+        let mut body = options_request();
+        body.template_id = Some("tpl_1".into());
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("template_id")));
+        body.template_id = Some("   ".into());
+        assert!(validate_send_options(&body).is_empty());
+
+        // template_data null is tolerated; a real value is rejected.
+        body.template_id = None;
+        body.template_data = Some(serde_json::Value::Null);
+        assert!(validate_send_options(&body).is_empty());
+        body.template_data = Some(serde_json::json!({"k": "v"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("template_data")));
+        body.template_data = None;
+
+        // reply_to: malformed is rejected naming the field; empty is fine.
+        body.reply_to = Some("not a mailbox".into());
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("invalid reply_to")));
+        body.reply_to = Some("  ".into());
+        assert!(validate_send_options(&body).is_empty());
+        body.reply_to = None;
+
+        // headers must be an object.
+        body.headers = Some(serde_json::json!(["array"]));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("must be an object")));
+
+        // Protected headers (From/To/Subject/...) and the dedicated
+        // reply-to spelling get distinct messages.
+        body.headers = Some(serde_json::json!({"From": "evil@example.com"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("protected and cannot be set")));
+        body.headers = Some(serde_json::json!({"Reply-To": "evil@example.com"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("use the reply_to field instead")));
+
+        // The whole internal namespace is reserved case-insensitively.
+        for name in [
+            "X-ApexMail-TenantId",
+            "x-apexmail-anything",
+            "X-APEXMAIL-FOO",
+        ] {
+            body.headers = Some(serde_json::json!({ name: "v" }));
+            assert!(
+                validate_send_options(&body)
+                    .iter()
+                    .any(|e| e.contains("reserved X-ApexMail-*")),
+                "{name} must be reserved"
+            );
+        }
+
+        // Malformed header names (empty, spaces, colons, over-long, control)
+        // and non-string values.
+        for name in ["", "bad name", "bad:name", &"x".repeat(999)] {
+            body.headers = Some(serde_json::json!({ name: "v" }));
+            assert!(
+                validate_send_options(&body)
+                    .iter()
+                    .any(|e| e.contains("invalid custom header name")),
+                "name {name:?} must be rejected"
+            );
+        }
+        body.headers = Some(serde_json::json!({"X-Custom": 42}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("must have a string value")));
+        body.headers = Some(serde_json::json!({"X-Custom": "a\r\nb"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("must not contain line breaks")));
+        // A clean custom header produces no error.
+        body.headers = Some(serde_json::json!({"X-Custom": "v"}));
+        assert!(validate_send_options(&body).is_empty());
+        body.headers = None;
+
+        // Priority outside the contract range (reachable when the struct is
+        // built directly, not through the deserializer).
+        body.priority = Some(99);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("priority must be between")));
+        body.priority = None;
+
+        // Category: invalid values are rejected through the shared
+        // admission normalizer; a valid one passes.
+        body.category = Some("bad!category".into());
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("category must be")));
+        body.category = Some("transactional".into());
+        assert!(validate_send_options(&body).is_empty());
+        body.category = None;
+
+        // Attachments: count, filename, content type, base64 validity.
+        let mk = |filename: &str, content: &str, content_type: &str| SendAttachment {
+            filename: filename.into(),
+            content: content.into(),
+            content_type: content_type.into(),
+        };
+        let too_many: Vec<SendAttachment> = (0..=MAX_ATTACHMENTS)
+            .map(|i| mk(&format!("f{i}.txt"), "aGVsbG8=", "text/plain"))
+            .collect();
+        body.attachments = Some(too_many);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("at most")));
+        for bad_name in ["", "a\r\nb", &"n".repeat(256)] {
+            body.attachments = Some(vec![mk(bad_name, "aGVsbG8=", "text/plain")]);
+            assert!(
+                validate_send_options(&body)
+                    .iter()
+                    .any(|e| e.contains("filename must be")),
+                "filename {bad_name:?}"
+            );
+        }
+        body.attachments = Some(vec![mk("a.txt", "aGVsbG8=", "")]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("contentType must be")));
+        body.attachments = Some(vec![mk("a.txt", "not base64!!", "text/plain")]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("not valid base64")));
+        body.attachments = Some(vec![mk("a.txt", "aGVsbG8=", "text/plain")]);
+        assert!(validate_send_options(&body).is_empty());
+        body.attachments = None;
+    }
+
+    #[test]
+    fn attachment_size_limits_are_enforced_on_decoded_bytes() {
+        use base64::Engine as _;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let mut body = options_request();
+
+        // One attachment above the per-attachment decoded ceiling.
+        let oversized = engine.encode(vec![b'a'; MAX_ATTACHMENT_BYTES + 1]);
+        body.attachments = Some(vec![SendAttachment {
+            filename: "big.bin".into(),
+            content: oversized,
+            content_type: "application/octet-stream".into(),
+        }]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("maximum decoded size")));
+
+        // Each under the per-item ceiling, together above the total ceiling.
+        let chunk = engine.encode(vec![b'b'; MAX_TOTAL_ATTACHMENT_BYTES / 3 + 1024]);
+        body.attachments = Some(vec![
+            SendAttachment {
+                filename: "a.bin".into(),
+                content: chunk.clone(),
+                content_type: "application/octet-stream".into(),
+            },
+            SendAttachment {
+                filename: "b.bin".into(),
+                content: chunk.clone(),
+                content_type: "application/octet-stream".into(),
+            },
+            SendAttachment {
+                filename: "c.bin".into(),
+                content: chunk,
+                content_type: "application/octet-stream".into(),
+            },
+        ]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("maximum total decoded size")));
+    }
+
+    #[test]
+    fn sanitize_customer_metadata_rejects_non_object_and_oversized_shapes() {
+        // Absent and JSON null are "no metadata".
+        assert_eq!(sanitize_customer_metadata(&None).unwrap(), None);
+        assert_eq!(
+            sanitize_customer_metadata(&Some(serde_json::Value::Null)).unwrap(),
+            None
+        );
+        // The empty object is also "no metadata".
+        assert_eq!(
+            sanitize_customer_metadata(&Some(serde_json::json!({}))).unwrap(),
+            None
+        );
+
+        // Scalars, arrays, booleans and strings are rejected with the type
+        // named (and type_name_of sees every variant).
+        for (value, expected) in [
+            (serde_json::json!(1), "a number"),
+            (serde_json::json!(true), "a boolean"),
+            (serde_json::json!("s"), "a string"),
+            (serde_json::json!([1]), "an array"),
+        ] {
+            let errors = sanitize_customer_metadata(&Some(value)).unwrap_err();
+            assert!(
+                errors.iter().any(|e| e.contains(expected)),
+                "want {expected} in {errors:?}"
+            );
+        }
+
+        // Too many keys.
+        let big: serde_json::Map<String, serde_json::Value> = (0..=MAX_METADATA_KEYS)
+            .map(|i| (format!("k{i}"), serde_json::json!(i)))
+            .collect();
+        let errors = sanitize_customer_metadata(&Some(serde_json::Value::Object(big))).unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("at most")));
+
+        // Server-reserved operational keys.
+        for key in RESERVED_METADATA_KEYS {
+            let errors = sanitize_customer_metadata(&Some(serde_json::json!({ key: "forged" })))
+                .unwrap_err();
+            assert!(
+                errors.iter().any(|e| e.contains("reserved")),
+                "{key}: {errors:?}"
+            );
+        }
+
+        // Serialized size ceiling.
+        let errors = sanitize_customer_metadata(&Some(serde_json::json!({
+            "blob": "x".repeat(MAX_METADATA_BYTES + 1)
+        })))
+        .unwrap_err();
+        assert!(errors.iter().any(|e| e.contains("maximum serialized size")));
+
+        // A bounded customer object passes through unchanged.
+        let value = serde_json::json!({"campaign": "spring", "n": 1});
+        assert_eq!(
+            sanitize_customer_metadata(&Some(value.clone())).unwrap(),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn keyset_cursor_decode_rejects_every_malformed_shape() {
+        // Not even hex.
+        assert!(matches!(
+            decode_keyset_cursor("zz"),
+            Err(ApiError::BadRequest(message)) if message.contains("malformed encoding")
+        ));
+        // Valid hex, no separator.
+        assert!(matches!(
+            decode_keyset_cursor(&encode_cursor("no-separator-here")),
+            Err(ApiError::BadRequest(message)) if message.contains("created_at timestamp and row id")
+        ));
+        // Bad RFC3339 timestamp.
+        let bad_ts = encode_cursor(&format!("not-a-time{KEYSET_CURSOR_SEP}row-id"));
+        assert!(matches!(
+            decode_keyset_cursor(&bad_ts),
+            Err(ApiError::BadRequest(message)) if message.contains("encoded created_at timestamp")
+        ));
+        // Malformed row ids: empty, over 64 bytes, control characters.
+        for bad_id in ["", &"i".repeat(65), "bad\u{7}id"] {
+            let cursor = encode_cursor(&format!("2026-01-01T00:00:00Z{KEYSET_CURSOR_SEP}{bad_id}"));
+            assert!(
+                matches!(
+                    decode_keyset_cursor(&cursor),
+                    Err(ApiError::BadRequest(message)) if message.contains("malformed row id")
+                ),
+                "id {bad_id:?} must be rejected"
+            );
+        }
+        // A well-formed cursor round-trips.
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (decoded_ts, decoded_id) = decode_keyset_cursor(&encode_keyset_cursor(
+            &ts,
+            "11111111-1111-4111-8111-111111111111",
+        ))
+        .expect("valid cursor");
+        assert_eq!(decoded_ts, ts);
+        assert_eq!(decoded_id, "11111111-1111-4111-8111-111111111111");
+    }
+
+    #[test]
+    fn parse_mailbox_covers_every_rejection_form() {
+        // Control characters.
+        assert!(parse_mailbox("a\u{0}b@example.com").is_err());
+        // Empty / whitespace.
+        assert!(parse_mailbox("   ").is_err());
+        // Over the 998-character line limit.
+        let long = format!("{}@example.com", "x".repeat(1000));
+        assert!(parse_mailbox(&long).unwrap_err().contains("998"));
+        // Unclosed angle bracket.
+        assert!(parse_mailbox("Name <a@example.com").is_err());
+        // More than one mailbox in a single entry.
+        assert!(parse_mailbox("A <a@example.com> <b@example.com>").is_err());
+        // Display name over the 320-character ceiling.
+        let long_name = format!("{} <a@example.com>", "n".repeat(321));
+        assert!(parse_mailbox(&long_name).unwrap_err().contains("320"));
+        // Angle brackets around an invalid address.
+        assert!(parse_mailbox("Name <nope>").is_err());
+        // '>' with no '<'.
+        assert!(parse_mailbox("a@example.com>").is_err());
+        // Bare invalid address.
+        assert!(parse_mailbox("nope").is_err());
+
+        // Accepted forms: bare, display, quoted display; whitespace trimmed;
+        // an empty quoted name means no display name.
+        assert_eq!(
+            parse_mailbox(" a@example.com ").unwrap(),
+            ParsedMailbox {
+                display_name: None,
+                addr_spec: "a@example.com".into()
+            }
+        );
+        let named = parse_mailbox("Ada <ada@example.com>").unwrap();
+        assert_eq!(named.display_name.as_deref(), Some("Ada"));
+        let quoted = parse_mailbox("\"Ada Lovelace\" <ada@example.com>").unwrap();
+        assert_eq!(quoted.display_name.as_deref(), Some("Ada Lovelace"));
+        let bare_quoted = parse_mailbox("\"\" <ada@example.com>").unwrap();
+        assert_eq!(bare_quoted.display_name, None);
+    }
+
+    #[test]
+    fn parse_send_addresses_collects_every_field_error() {
+        let mut body = options_request();
+        body.from = "bad-from".into();
+        body.to = vec!["bad-to".into(), "good@example.com".into()];
+        body.cc = Some(vec!["bad-cc".into()]);
+        body.bcc = Some(vec!["bad-bcc".into()]);
+        body.reply_to = Some("bad-reply".into());
+        let errors = parse_send_addresses(&body).expect_err("every field is malformed");
+        let joined = errors.join(" | ");
+        for field in [
+            "invalid from",
+            "invalid to entry",
+            "invalid cc entry",
+            "invalid bcc entry",
+            "invalid reply_to",
+        ] {
+            assert!(joined.contains(field), "missing {field}: {joined}");
+        }
+
+        // An empty reply_to is treated as absent, not an error.
+        let mut ok = options_request();
+        ok.reply_to = Some("   ".into());
+        let parsed = parse_send_addresses(&ok).expect("empty reply_to is absent");
+        assert!(parsed.reply_to.is_none());
+
+        // delivery_recipients falls back to an empty list on parse failure.
+        let mut broken = options_request();
+        broken.to = vec!["bad".into()];
+        assert!(delivery_recipients(&broken).is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_ledger_response_versions_and_corruption() {
+        async fn body_of(response: axum::response::Response) -> serde_json::Value {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+
+        // Empty body is an explicit error — never a synthesized success.
+        assert!(matches!(
+            replay_ledger_response(202, "   "),
+            Err(ApiError::Internal(message)) if message.contains("corrupt")
+        ));
+        // Non-JSON body.
+        assert!(matches!(
+            replay_ledger_response(202, "{not json"),
+            Err(ApiError::Internal(_))
+        ));
+        // v2 without an object envelope.
+        assert!(matches!(
+            replay_ledger_response(202, r#"{"v":2,"body":"nope"}"#),
+            Err(ApiError::Internal(_))
+        ));
+        // Unknown schema version.
+        assert!(matches!(
+            replay_ledger_response(202, r#"{"v":99,"body":{}}"#),
+            Err(ApiError::Internal(_))
+        ));
+        // Non-object JSON (a bare array) is not a legacy record either.
+        assert!(matches!(
+            replay_ledger_response(202, "[1,2]"),
+            Err(ApiError::Internal(_))
+        ));
+
+        // v2 replays the exact stored envelope and status.
+        let response =
+            replay_ledger_response(201, r#"{"v":2,"body":{"data":{"id":"m1"},"error":null}}"#)
+                .expect("v2 replays");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let json = body_of(response).await;
+        assert_eq!(json["data"]["id"], "m1");
+
+        // Legacy v1 (bare MessageResponse object) is wrapped in the standard
+        // envelope.
+        let response = replay_ledger_response(202, r#"{"id":"m2","status":"queued"}"#)
+            .expect("legacy replays");
+        let json = body_of(response).await;
+        assert_eq!(json["data"]["id"], "m2");
+        assert!(json["error"].is_null());
+
+        // An out-of-range stored status falls back to 202 rather than
+        // panicking.
+        let response = replay_ledger_response(99999, r#"{"v":2,"body":{}}"#).unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // A zero status is invalid for HTTP and also falls back.
+        let response = replay_ledger_response(0, r#"{"v":2,"body":{}}"#).unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+    // ── Router-level tests (handler paths against the real schema) ──
+
+    use axum::body::Body;
+    use axum::http::{HeaderMap, Method};
+
+    struct MsgFixture {
+        state: AppState,
+        pool: sqlx::PgPool,
+        redis: deadpool_redis::Pool,
+        tenant: String,
+        other_tenant: String,
+        domain: String,
+        key_send: String,
+        key_read: String,
+        key_both: String,
+        key_send_2: String,
+    }
+
+    impl MsgFixture {
+        fn router(&self) -> axum::Router {
+            axum::Router::new()
+                .merge(router())
+                .with_state(self.state.clone())
+        }
+
+        async fn cleanup(&self) {
+            for tenant in [&self.tenant, &self.other_tenant] {
+                let _ = sqlx::query("DELETE FROM email_queue WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM messages WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM suppressions WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM plan_overrides WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM idempotency_records WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+            }
+            let _ = self.pool.close().await;
+        }
+    }
+
+    async fn msg_fixture(test_name: &str) -> Option<MsgFixture> {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            // Surface handler tracing::error! output (opt-in via RUST_LOG).
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+                )
+                .with_test_writer()
+                .try_init();
+        });
+        let pool = crate::test_db::optional_pg_pool(test_name).await?;
+        let tenant = insert_test_tenant(&pool, "adv-send").await;
+        let other_tenant = insert_test_tenant(&pool, "adv-other").await;
+        let domain = unique_sender_domain();
+        let _domain_id = insert_verified_domain(&pool, &tenant, &domain).await;
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let key_send =
+            crate::app::test_support::seed_api_key_for(&pool, &tenant, &["messages:send"]).await;
+        let key_read =
+            crate::app::test_support::seed_api_key_for(&pool, &tenant, &["messages:read"]).await;
+        let key_both = crate::app::test_support::seed_api_key_for(
+            &pool,
+            &tenant,
+            &["messages:read", "messages:send"],
+        )
+        .await;
+        let key_send_2 =
+            crate::app::test_support::seed_api_key_for(&pool, &tenant, &["messages:send"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some(MsgFixture {
+            state,
+            pool,
+            redis,
+            tenant,
+            other_tenant,
+            domain,
+            key_send,
+            key_read,
+            key_both,
+            key_send_2,
+        })
+    }
+
+    async fn msg_call(
+        app: &axum::Router,
+        key: &str,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+        extra_headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, serde_json::Value) {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-api-key", key);
+        let body = match body {
+            Some(value) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        for (name, value) in extra_headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = tower::ServiceExt::oneshot(app.clone(), builder.body(body).unwrap())
+            .await
+            .expect("messages request must dispatch");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, headers, json)
+    }
+
+    fn send_payload(domain: &str, to: Vec<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "from": format!("sender@{domain}"),
+            "to": to,
+            "subject": "Adversarial",
+            "html": "<p>hello</p>",
+        })
+    }
+
+    async fn seed_message_row(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        status: &str,
+        minutes_ago: i64,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at, updated_at)
+             VALUES ($1, $2, 'sender@example.com', '[\"to@example.com\"]'::jsonb, 'seed', $3,
+                     NOW() - make_interval(mins => $4::int), NOW() - make_interval(mins => $4::int))",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(status)
+        .bind(minutes_ago as i32)
+        .execute(pool)
+        .await
+        .expect("seed message row");
+        id
+    }
+
+    #[tokio::test]
+    async fn send_endpoint_persists_queue_and_replays_idempotently() {
+        let Some(fixture) = msg_fixture("adv_send_idempotency").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_both;
+        let payload = serde_json::json!({
+            "from": format!("sender@{}", fixture.domain),
+            "to": ["to@example.com"],
+            "cc": ["cc@example.com"],
+            "bcc": ["bcc@example.com"],
+            "subject": "Idempotent",
+            "html": "<p>hello</p>",
+        });
+
+        let (status, _, first) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(payload.clone()),
+            &[("idempotency-key", "adv-idem-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {first}");
+        assert!(
+            Uuid::parse_str(first["data"]["id"].as_str().unwrap()).is_ok(),
+            "the response id must be the persisted UUID: {first}"
+        );
+        assert_eq!(first["data"]["status"], "queued");
+
+        let (messages, queued): (i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(messages, 1);
+        assert_eq!(queued, 3, "one queue row per to+cc+bcc recipient");
+
+        // Exact replay: same key, same payload → the stored response,
+        // byte-identical (same id and created_at).
+        let (status, _, replay) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(payload.clone()),
+            &[("idempotency-key", "adv-idem-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {replay}");
+        assert_eq!(replay, first, "idempotent replay must be byte-identical");
+
+        // Same key, DIFFERENT payload → 409, and no second message.
+        let mut changed = payload.clone();
+        changed["subject"] = serde_json::json!("Different");
+        let (status, _, conflict) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(changed),
+            &[("idempotency-key", "adv-idem-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {conflict}");
+        assert!(conflict["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different request body"));
+
+        // Same key, same payload, DIFFERENT principal → 409.
+        let (status, _, conflict) = msg_call(
+            &app,
+            &fixture.key_send_2,
+            Method::POST,
+            "/",
+            Some(payload.clone()),
+            &[("idempotency-key", "adv-idem-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {conflict}");
+        assert!(conflict["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different authenticated principal"));
+
+        // Same key on a DIFFERENT route (batch) → 409 endpoint conflict.
+        let (status, _, conflict) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/batch",
+            Some(serde_json::json!({ "messages": [payload] })),
+            &[("idempotency-key", "adv-idem-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {conflict}");
+        assert!(conflict["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("different endpoint"));
+
+        let still_one: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(still_one, 1, "no conflict path may enqueue a message");
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn send_endpoint_rejects_invalid_payloads_and_writes_nothing() {
+        let Some(fixture) = msg_fixture("adv_send_validation").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_send;
+        let domain = fixture.domain.clone();
+        let good = send_payload(&domain, vec!["to@example.com"]);
+
+        let mut cases: Vec<(serde_json::Value, StatusCode, &str)> = Vec::new();
+        let with = |patch: fn(&mut serde_json::Value)| {
+            let mut value = good.clone();
+            patch(&mut value);
+            value
+        };
+        cases.push((
+            with(|v| v["template_id"] = serde_json::json!("tpl")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "template_id",
+        ));
+        cases.push((
+            with(|v| v["metadata"] = serde_json::json!("scalar")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "metadata must be a JSON object",
+        ));
+        cases.push((
+            with(|v| v["metadata"] = serde_json::json!({"lease_token": "forged"})),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "reserved",
+        ));
+        cases.push((
+            with(|v| v["headers"] = serde_json::json!(["not", "an", "object"])),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "must be an object",
+        ));
+        cases.push((
+            with(|v| v["headers"] = serde_json::json!({"From": "evil@example.com"})),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "protected",
+        ));
+        cases.push((
+            with(|v| v["attachments"] = serde_json::json!([{"filename":"a.txt","content":"%%%","contentType":"text/plain"}])),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not valid base64",
+        ));
+        cases.push((
+            with(|v| v["subject"] = serde_json::json!("")),
+            StatusCode::BAD_REQUEST,
+            "subject is required",
+        ));
+        cases.push((
+            with(|v| v["subject"] = serde_json::json!("a\r\nBcc: evil@example.com")),
+            StatusCode::BAD_REQUEST,
+            "line breaks",
+        ));
+        cases.push((
+            with(|v| {
+                v.as_object_mut().unwrap().remove("html");
+            }),
+            StatusCode::BAD_REQUEST,
+            "html or text body is required",
+        ));
+        cases.push((
+            with(|v| v["to"] = serde_json::json!(["not-an-email"])),
+            StatusCode::BAD_REQUEST,
+            "invalid to entry",
+        ));
+        cases.push((
+            with(|v| v["from"] = serde_json::json!("bad-from")),
+            StatusCode::BAD_REQUEST,
+            "invalid from",
+        ));
+        // Axum's JSON extractor rejects unknown fields with a plain-text
+        // 422 body (not the JSON envelope), so only the status is asserted.
+        cases.push((
+            with(|v| v["unexpected"] = serde_json::json!(true)),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "",
+        ));
+        let many: Vec<String> = (0..=*MAX_RECIPIENTS)
+            .map(|i| format!("r{i}@example.com"))
+            .collect();
+        let mut oversized_recipients = good.clone();
+        oversized_recipients["to"] = serde_json::json!(many);
+        cases.push((
+            oversized_recipients,
+            StatusCode::BAD_REQUEST,
+            "exceeds maximum",
+        ));
+
+        for (payload, expected_status, expected_message) in cases {
+            let (status, _, body) =
+                msg_call(&app, key, Method::POST, "/", Some(payload), &[]).await;
+            assert_eq!(
+                status, expected_status,
+                "want {expected_status} ({expected_message}), got {status}: {body}"
+            );
+            assert!(
+                body.to_string().contains(expected_message),
+                "want {expected_message:?} in {body}"
+            );
+        }
+
+        let (messages, queued): (i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(messages, 0, "a refused send must write nothing");
+        assert_eq!(queued, 0);
+
+        // A read-only principal is refused by the handler scope gate.
+        let (status, _, body) =
+            msg_call(&app, &fixture.key_read, Method::POST, "/", Some(good), &[]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn send_endpoint_domain_suppression_circuit_and_quota_refusals() {
+        let Some(fixture) = msg_fixture("adv_send_gates").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_send;
+
+        // Unverified sender domain.
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(send_payload(
+                "not-verified.example.com",
+                vec!["to@example.com"],
+            )),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body.to_string().contains("not ready"));
+
+        // Suppressed recipient (case-insensitive canonical match).
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+             VALUES ($1, $2, 'blocked@example.com', 'unsubscribe', 'test', NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("sup", 22))
+        .bind(&fixture.tenant)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed suppression");
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(send_payload(&fixture.domain, vec!["BLOCKED@example.com"])),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body.to_string().contains("suppressed"));
+
+        // An open tenant circuit refuses the send with 503.
+        let mut conn = fixture
+            .redis
+            .get()
+            .await
+            .expect("redis must be reachable for the circuit test");
+        let open_key = tenant_message_circuit_open_key(&fixture.tenant);
+        let _: () = deadpool_redis::redis::AsyncCommands::set_ex(&mut *conn, &open_key, "1", 60)
+            .await
+            .expect("set circuit open");
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(send_payload(&fixture.domain, vec!["to@example.com"])),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+        assert!(body.to_string().contains("circuit"));
+        let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &open_key)
+            .await
+            .expect("clear circuit");
+
+        // Quota: a plan override with a 1-email allowance admits exactly one
+        // send and then refuses with the documented 403 contract.
+        let plan = format!("advq{}", &Uuid::new_v4().simple().to_string()[..22]);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, email_limit, api_call_limit, price_cents, features, is_active)
+             VALUES (substring(replace(gen_random_uuid()::text,'-','') from 1 for 26), $1, 'Adv Quota', 1, 100000, 0, '{}'::jsonb, true)",
+        )
+        .bind(&plan)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed plan");
+        sqlx::query(
+            "INSERT INTO plan_overrides (tenant_id, plan, active, overridden_by, reason)
+             VALUES ($1, $2, true, 'test', 'adversarial quota boundary')",
+        )
+        .bind(&fixture.tenant)
+        .bind(&plan)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed plan override");
+
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(send_payload(&fixture.domain, vec!["first@example.com"])),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
+
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(send_payload(&fixture.domain, vec!["second@example.com"])),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("quota exceeded"),
+            "body: {body}"
+        );
+
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 1, "the quota-refused send must not enqueue");
+
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan)
+            .execute(&fixture.pool)
+            .await
+            .ok();
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn list_messages_paginates_filters_and_honours_etags() {
+        let Some(fixture) = msg_fixture("adv_list_messages").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_read;
+
+        seed_message_row(&fixture.pool, &fixture.tenant, "queued", 1).await;
+        seed_message_row(&fixture.pool, &fixture.tenant, "sent", 2).await;
+        seed_message_row(&fixture.pool, &fixture.tenant, "queued", 3).await;
+        // Another tenant's row must never appear.
+        seed_message_row(&fixture.pool, &fixture.other_tenant, "queued", 1).await;
+
+        let (status, headers, page) =
+            msg_call(&app, key, Method::GET, "/?limit=2", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "body: {page}");
+        assert_eq!(page["data"].as_array().unwrap().len(), 2);
+        assert_eq!(page["meta"]["hasMore"], true);
+        let cursor = page["meta"]["nextCursor"].as_str().unwrap().to_string();
+        let etag = headers.get("etag").unwrap().to_str().unwrap().to_string();
+        assert!(etag.starts_with("W/\""));
+
+        // Follow the cursor: the (created_at, id) keyset must not repeat or
+        // skip rows.
+        let (status, _, next) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            &format!("/?limit=2&cursor={cursor}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {next}");
+        assert_eq!(next["data"].as_array().unwrap().len(), 1);
+        assert_eq!(next["meta"]["hasMore"], false);
+
+        // Status filter.
+        let (status, _, filtered) =
+            msg_call(&app, key, Method::GET, "/?status=sent", None, &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
+        assert_eq!(filtered["data"][0]["status"], "sent");
+
+        // Malformed cursors are client errors, never database 500s.
+        for bad in ["zz", &encode_cursor("no-separator")] {
+            let (status, _, body) = msg_call(
+                &app,
+                key,
+                Method::GET,
+                &format!("/?cursor={bad}"),
+                None,
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "cursor {bad:?}: {body}");
+            assert!(body.to_string().contains("invalid cursor"));
+        }
+        let bad_ts = encode_cursor("not-a-time\nrowid");
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            &format!("/?cursor={bad_ts}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+        // Cursor + non-default sort is rejected, as is an unknown sort.
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            &format!("/?cursor={cursor}&sort_by=subject"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        let (status, _, body) = msg_call(&app, key, Method::GET, "/?sort_by=evil", None, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body.to_string().contains("invalid sort_by"));
+
+        // The same representation returns 304 on If-None-Match.
+        let (status, _, _) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            "/?limit=2",
+            None,
+            &[("if-none-match", &etag)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+        // A changed representation still returns 200 with a new ETag.
+        let (status, headers, _) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            "/?limit=3",
+            None,
+            &[("if-none-match", &etag)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(headers.get("etag").unwrap().to_str().unwrap(), etag);
+
+        // A read-scope principal on the send route is refused.
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/",
+            Some(send_payload(&fixture.domain, vec!["to@example.com"])),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn get_and_cancel_message_scope_lifecycle_and_error_contracts() {
+        let Some(fixture) = msg_fixture("adv_get_cancel").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_both;
+
+        // A pending message with one pending queue row is cancellable.
+        let cancellable = seed_message_row(&fixture.pool, &fixture.tenant, "queued", 5).await;
+        sqlx::query(
+            "INSERT INTO email_queue (id, message_id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, 'sender@example.com', ARRAY['to@example.com'], 's', 'pending', NOW(), NOW())",
+        )
+        .bind(cancellable)
+        .bind(&fixture.tenant)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed queue row");
+
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::GET,
+            &format!("/{cancellable}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["data"]["id"], cancellable.to_string());
+
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            &format!("/{cancellable}/cancel"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["data"]["status"], "cancelled");
+        let (parent, queued): (String, String) = (
+            sqlx::query_scalar(
+                "SELECT status FROM messages WHERE id = $1::uuid AND tenant_id = $2",
+            )
+            .bind(cancellable)
+            .bind(&fixture.tenant)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap(),
+            sqlx::query_scalar(
+                "SELECT status FROM email_queue WHERE message_id = $1::uuid AND tenant_id = $2 LIMIT 1",
+            )
+            .bind(cancellable)
+            .bind(&fixture.tenant)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap(),
+        );
+        assert_eq!(parent, "cancelled");
+        assert_eq!(queued, "cancelled");
+
+        // A second cancel is a conflict, not a silent success.
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            &format!("/{cancellable}/cancel"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+
+        // A worker-claimed recipient crosses the irreversible boundary.
+        let claimed = seed_message_row(&fixture.pool, &fixture.tenant, "processing", 6).await;
+        sqlx::query(
+            "INSERT INTO email_queue (id, message_id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, 'sender@example.com', ARRAY['to@example.com'], 's', 'processing', NOW(), NOW())",
+        )
+        .bind(claimed)
+        .bind(&fixture.tenant)
+        .execute(&fixture.pool)
+        .await
+        .expect("seed claimed row");
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            &format!("/{claimed}/cancel"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+        assert!(body.to_string().contains("dispatch has already started"));
+        let still_processing: String = sqlx::query_scalar(
+            "SELECT status FROM messages WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(claimed)
+        .bind(&fixture.tenant)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            still_processing, "processing",
+            "refusal must change nothing"
+        );
+
+        // Unknown / cross-tenant / malformed ids are all 404 with no leak.
+        let foreign = seed_message_row(&fixture.pool, &fixture.other_tenant, "queued", 1).await;
+        for id in [
+            Uuid::new_v4().to_string(),
+            foreign.to_string(),
+            "not-a-uuid".to_string(),
+        ] {
+            let (status, _, body) =
+                msg_call(&app, key, Method::GET, &format!("/{id}"), None, &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "GET {id}: {body}");
+            assert!(!body.to_string().contains("sender@example.com"));
+            let (status, _, _) =
+                msg_call(&app, key, Method::POST, &format!("/{id}/cancel"), None, &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "cancel {id}");
+        }
+
+        fixture.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn batch_send_is_partial_per_item_and_idempotent() {
+        let Some(fixture) = msg_fixture("adv_batch_send").await else {
+            return;
+        };
+        let app = fixture.router();
+        let key = &fixture.key_send;
+        let domain = fixture.domain.clone();
+
+        // One good item and one invalid item: the good one is accepted, the
+        // bad one rejected with its error, in order.
+        let batch = serde_json::json!({
+            "messages": [
+                send_payload(&domain, vec!["good@example.com"]),
+                {
+                    "from": format!("sender@{domain}"),
+                    "to": ["bad@example.com"],
+                    "subject": "",
+                    "html": "<p>x</p>"
+                }
+            ]
+        });
+        let (status, _, body) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/batch",
+            Some(batch.clone()),
+            &[("idempotency-key", "adv-batch-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["data"]["accepted"], 1);
+        assert_eq!(body["data"]["rejected"], 1);
+        assert_eq!(body["data"]["results"][0]["index"], 0);
+        assert!(body["data"]["results"][0]["id"].is_string());
+        assert_eq!(body["data"]["results"][1]["index"], 1);
+        assert_eq!(body["data"]["results"][1]["status"], "rejected");
+        assert!(
+            body["data"]["results"][1]["error"]
+                .as_str()
+                .unwrap()
+                .contains("subject is required"),
+            "batch item error must name the field: {body}"
+        );
+
+        let (messages, queued): (i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(messages, 1, "only the accepted item is persisted");
+        assert_eq!(queued, 1);
+
+        // Replay: identical response, no new rows.
+        let (status, _, replay) = msg_call(
+            &app,
+            key,
+            Method::POST,
+            "/batch",
+            Some(batch),
+            &[("idempotency-key", "adv-batch-1")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay, body, "batch replay must be byte-identical");
+        let messages_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(messages_after, 1);
+
+        // A batch with every item rejected keeps the caller's error detail
+        // and writes nothing.
+        let all_bad = serde_json::json!({
+            "messages": [{ "from": "bad", "to": ["x"], "subject": "", "html": "h" }]
+        });
+        let (status, _, body) =
+            msg_call(&app, key, Method::POST, "/batch", Some(all_bad), &[]).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["data"]["accepted"], 0);
+        assert_eq!(body["data"]["rejected"], 1);
+
+        // Batch size ceiling.
+        let oversized = serde_json::json!({
+            "messages": (0..=*MAX_BATCH_SIZE)
+                .map(|_| send_payload(&domain, vec!["x@example.com"]))
+                .collect::<Vec<_>>()
+        });
+        let (status, _, body) =
+            msg_call(&app, key, Method::POST, "/batch", Some(oversized), &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body.to_string().contains("exceeds maximum"));
+
+        fixture.cleanup().await;
     }
 }

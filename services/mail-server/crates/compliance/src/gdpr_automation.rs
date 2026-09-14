@@ -680,12 +680,31 @@ impl GdprAutomation {
         .await?;
 
         // The subject's active sessions (device/IP accountability trail).
+        // sessions.user_id and users.id are both UUID since migration 229, so
+        // the subquery compares UUID to UUID (the old `id::text` cast only
+        // existed to match the VARCHAR(26) column).
         self.export_table(
             &mut data,
             &mut stores,
             "sessions",
             "SELECT row_to_json(s) FROM sessions s
              WHERE tenant_id = $2 AND user_id IN \
+               (SELECT id FROM users WHERE LOWER(email) = LOWER($1))",
+            email,
+            tid,
+        )
+        .await?;
+
+        // AI assistant chat history (migration 123). The erasure map deletes
+        // these conversations with the subject's account, so a SAR must
+        // disclose them: the export/erasure data maps are mirrored (F9).
+        // Ownership resolves through the users row, exactly as erasure does.
+        self.export_table(
+            &mut data,
+            &mut stores,
+            "ai_chat_messages",
+            "SELECT row_to_json(a) FROM ai_chat_messages a
+             WHERE tenant_id = $2 AND user_id IN
                (SELECT id::text FROM users WHERE LOWER(email) = LOWER($1))",
             email,
             tid,
@@ -1040,12 +1059,12 @@ impl GdprAutomation {
                 };
             }
             SessionsByUserEmail => {
-                // users.id is UUID while sessions.user_id is TEXT — cast to
-                // text or Postgres rejects the IN-subquery (uuid = text has
-                // no operator).
+                // sessions.user_id and users.id are both UUID since migration
+                // 229: the subquery is UUID = UUID, so no text cast is needed
+                // (and a cast would now fail the other way).
                 sqlx::query(
                     "DELETE FROM sessions WHERE user_id IN \
-                     (SELECT id::text FROM users WHERE LOWER(email) = LOWER($1))",
+                     (SELECT id FROM users WHERE LOWER(email) = LOWER($1))",
                 )
                 .bind(email)
                 .execute(&self.db)
@@ -4060,5 +4079,146 @@ mod db_tests {
         assert_eq!(stats["total"], serde_json::json!(1));
         assert_eq!(stats["verified"], serde_json::json!(1));
         assert_eq!(stats["pending_verification"], serde_json::json!(0));
+    }
+    // ── Adversarial: hostile strings, boundaries, tenant isolation ──────
+
+    #[test]
+    fn hostile_text_redaction_never_panics_and_never_splits_utf8() {
+        let email = "user@example.com";
+        let marker = redact_marker(email);
+        let cases = [
+            format!("Ünïcode ✉ {email} — fertig"),
+            format!("\u{0}NUL {email}\u{0}"),
+            format!("' OR 1=1; SELECT 1; -- {email}"),
+            email.to_uppercase(),
+            format!("{email}{email}"),
+            "no match at all".to_string(),
+            String::new(),
+        ];
+        for case in cases {
+            let out = replace_ignore_ascii_case(&case, email, &marker);
+            assert!(
+                !out.to_lowercase().contains(email),
+                "every ASCII-case-insensitive occurrence is replaced: {out:?}"
+            );
+        }
+        // The needle cannot be longer than the haystack, and an empty needle
+        // is the identity.
+        assert_eq!(replace_ignore_ascii_case("abc", "abcdef", "X"), "abc");
+        assert_eq!(replace_ignore_ascii_case("abc", "", "X"), "abc");
+        // A trailing partial match does not panic or corrupt the tail.
+        assert_eq!(
+            replace_ignore_ascii_case("prefix user@exa", email, &marker),
+            "prefix user@exa"
+        );
+        // Mixed-case copies everywhere are redacted.
+        let mixed = format!("{email} / {} / UsEr@ExAmPlE.CoM", email.to_uppercase());
+        let out = replace_ignore_ascii_case(&mixed, email, &marker);
+        assert!(!out.to_lowercase().contains(email));
+        assert_eq!(out.matches(&marker).count(), 3);
+    }
+
+    #[test]
+    fn tombstone_marker_sanitizes_hostile_tenant_ids() {
+        let marker = user_tombstone_marker("user@example.com", "t/../../etc\u{0}passwd");
+        assert!(marker.starts_with("erased+") && marker.ends_with("@invalid"));
+        assert!(!marker.contains('/') && !marker.contains('\u{0}'));
+        // Long tenant ids are truncated deterministically.
+        assert_eq!(
+            user_tombstone_marker("a@b.c", &"x".repeat(200)),
+            user_tombstone_marker("a@b.c", &"x".repeat(13))
+        );
+        // Multi-byte tenant ids are replaced char-by-char, never sliced
+        // mid-code-point.
+        let emoji = user_tombstone_marker("a@b.c", "😀😀😀");
+        assert!(std::str::from_utf8(emoji.as_bytes()).is_ok());
+        // Same email, different tenants ⇒ different tombstones (no collision).
+        assert_ne!(
+            user_tombstone_marker("a@b.c", "t1"),
+            user_tombstone_marker("a@b.c", "t2")
+        );
+    }
+
+    #[test]
+    fn statutory_due_at_handles_month_end_leap_and_dst() {
+        let at = |s: &str| {
+            DateTime::parse_from_rfc3339(s)
+                .expect("test timestamp")
+                .with_timezone(&Utc)
+        };
+        // Calendar-month arithmetic clamps at month end.
+        assert_eq!(
+            statutory_due_at(at("2026-01-31T15:30:00Z")),
+            at("2026-02-28T15:30:00Z")
+        );
+        assert_eq!(
+            statutory_due_at(at("2028-01-31T15:30:00Z")),
+            at("2028-02-29T15:30:00Z")
+        );
+        // Year rollover.
+        assert_eq!(
+            statutory_due_at(at("2026-12-31T22:00:00Z")),
+            at("2027-01-31T22:00:00Z")
+        );
+        // The EU DST switch (2026-03-29 01:00Z) does not change the instant.
+        assert_eq!(
+            statutory_due_at(at("2026-02-28T23:30:00Z")),
+            at("2026-03-28T23:30:00Z")
+        );
+        assert_eq!(
+            extended_due_at(at("2026-01-31T15:30:00Z")),
+            at("2026-03-31T15:30:00Z")
+        );
+        // Extension validation boundaries: 10 chars is the minimum, a
+        // notification up to 5 minutes ahead is tolerated.
+        let received = Utc::now() - TimeDelta::hours(1);
+        assert!(validate_extension("", Utc::now(), received).is_err());
+        assert!(validate_extension("123456789", Utc::now(), received).is_err());
+        assert!(validate_extension("1234567890", Utc::now(), received).is_ok());
+        assert!(validate_extension(
+            "justified reason",
+            received - TimeDelta::seconds(1),
+            received
+        )
+        .is_err());
+        assert!(validate_extension(
+            "justified reason",
+            Utc::now() + TimeDelta::minutes(4),
+            received
+        )
+        .is_ok());
+        assert!(validate_extension(
+            "justified reason",
+            Utc::now() + TimeDelta::minutes(6),
+            received
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn queue_decoding_is_hostile_input_safe() {
+        assert_eq!(decode_queue_entry(""), "");
+        assert_eq!(decode_queue_entry("{"), "{");
+        // A non-string id is not a decode: the raw entry is returned.
+        assert_eq!(decode_queue_entry(r#"{"id": 5}"#), r#"{"id": 5}"#);
+        assert_eq!(
+            decode_queue_entry(r#"{"id": "req-1", "at": "nonsense"}"#),
+            "req-1"
+        );
+        let cutoff = Utc::now();
+        // Missing or unparseable timestamps are stale (recoverable).
+        assert!(queue_entry_is_stale(r#"{"id":"r"}"#, cutoff));
+        assert!(queue_entry_is_stale(
+            r#"{"id":"r","at":"not-a-date"}"#,
+            cutoff
+        ));
+        assert!(queue_entry_is_stale(r#"{"id":"r","at":42}"#, cutoff));
+        // A future timestamp is not stale.
+        let future = serde_json::json!({
+            "id": "r",
+            "at": (Utc::now() + TimeDelta::seconds(60)).to_rfc3339(),
+        })
+        .to_string();
+        assert!(!queue_entry_is_stale(&future, cutoff));
     }
 }

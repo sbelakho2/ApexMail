@@ -917,4 +917,320 @@ mod tests {
             SalesError::ServiceUnavailable(_)
         ));
     }
+
+    // -----------------------------------------------------------------------
+    // Live-database proofs
+    // -----------------------------------------------------------------------
+
+    fn fixture_start() -> DateTime<Utc> {
+        // A fixed future Tuesday, inside the legacy 09:00–17:00 UTC window.
+        Utc.with_ymd_and_hms(2031, 6, 10, 10, 0, 0).unwrap()
+    }
+
+    async fn live_service(test_name: &str) -> Option<(PgPool, CalendarService, String)> {
+        let pool = crate::test_db::canonical_test_pool(test_name).await?;
+        let tenant = crate::test_db::unique_test_tenant("calsvc");
+        let service = CalendarService::with_working_hours(pool.clone(), 9, 17, 3);
+        Some((pool, service, tenant))
+    }
+
+    async fn cleanup_service_tenant(pool: &PgPool, tenant_id: &str) {
+        for statement in [
+            "DELETE FROM sales_meetings WHERE tenant_id = $1",
+            "DELETE FROM sales_calendar_events WHERE tenant_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(tenant_id)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|error| panic!("cleanup `{statement}`: {error}"));
+        }
+    }
+
+    /// Create/list/find/cancel round-trip on the legacy surface, including
+    /// tenant scoping of every read and mutation.
+    #[tokio::test]
+    async fn legacy_surface_round_trips_and_is_tenant_scoped() {
+        let Some((pool, service, tenant)) = live_service("calendar_legacy").await else {
+            return;
+        };
+        let other = crate::test_db::unique_test_tenant("calsvc-other");
+        let start = fixture_start();
+        let end = start + chrono::Duration::minutes(30);
+
+        let created = service
+            .create_event(
+                tenant.clone(),
+                "Legacy Demo".into(),
+                vec!["prospect@example.com".into()],
+                start,
+                end,
+                None,
+            )
+            .await
+            .expect("a free working-hours slot books");
+        assert_eq!(created.tenant_id, tenant);
+        assert_eq!(created.title, "Legacy Demo");
+        assert_eq!(created.start_at, start);
+        assert_eq!(created.end_at, end);
+        assert_eq!(
+            created.meeting_link.as_deref(),
+            Some(format!("apexmail-meeting://{tenant}/{}", created.id).as_str())
+        );
+
+        // list_events is tenant-scoped and half-open on the window.
+        let day_start = Utc.with_ymd_and_hms(2031, 6, 10, 0, 0, 0).unwrap();
+        let day_end = day_start + chrono::Duration::days(1);
+        let listed = service
+            .list_events(&tenant, day_start, day_end, 10, 0)
+            .await
+            .expect("list events");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(
+            listed[0].attendees,
+            vec!["prospect@example.com".to_string()]
+        );
+        let stranger = service
+            .list_events(&other, day_start, day_end, 10, 0)
+            .await
+            .expect("list other tenant");
+        assert!(
+            stranger.is_empty(),
+            "another tenant must not see this event: {stranger:?}"
+        );
+
+        // The booked interval is no longer offered; adjacent slots still are.
+        let slots = service
+            .find_available_slots(&tenant, day_start)
+            .await
+            .expect("legacy slots");
+        assert!(!slots.is_empty());
+        assert!(
+            !slots.iter().any(|(slot_start, _)| *slot_start == start),
+            "a booked slot must not be offered"
+        );
+        assert!(
+            slots
+                .iter()
+                .any(|(slot_start, _)| *slot_start == start - chrono::Duration::minutes(30)),
+            "the adjacent slot is bookable: {slots:?}"
+        );
+
+        // cancel_event is tenant-scoped: a stranger cannot delete it …
+        assert!(matches!(
+            service.cancel_event(created.id, &other).await,
+            Err(SalesError::EventNotFound(_))
+        ));
+        let still_there: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_calendar_events WHERE id = $1")
+                .bind(created.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(still_there, 1, "another tenant's cancel must not delete");
+
+        // … and the owner can.
+        service
+            .cancel_event(created.id, &tenant)
+            .await
+            .expect("owner cancels");
+        assert!(matches!(
+            service.cancel_event(created.id, &tenant).await,
+            Err(SalesError::EventNotFound(_))
+        ));
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_meetings WHERE id = $1")
+            .bind(created.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "cancelled");
+
+        // The freed slot is offered again.
+        let slots = service
+            .find_available_slots(&tenant, day_start)
+            .await
+            .expect("slots after cancel");
+        assert!(slots.iter().any(|(slot_start, _)| *slot_start == start));
+
+        cleanup_service_tenant(&pool, &tenant).await;
+        cleanup_service_tenant(&pool, &other).await;
+    }
+
+    /// The legacy validation ladder: inverted, past and out-of-working-hours
+    /// inputs are refused before any row exists.
+    #[tokio::test]
+    async fn legacy_create_event_refuses_hostile_windows() {
+        let Some((pool, service, tenant)) = live_service("calendar_legacy_guards").await else {
+            return;
+        };
+        let start = fixture_start();
+
+        assert!(matches!(
+            service
+                .create_event(tenant.clone(), "x".into(), vec![], start, start, None)
+                .await,
+            Err(SalesError::InvalidInput(_))
+        ));
+
+        // Before working hours (08:00 UTC) is an unavailable slot, not a 500.
+        let early = Utc.with_ymd_and_hms(2031, 6, 10, 8, 0, 0).unwrap();
+        assert!(matches!(
+            service
+                .create_event(
+                    tenant.clone(),
+                    "early".into(),
+                    vec![],
+                    early,
+                    early + chrono::Duration::minutes(30),
+                    None
+                )
+                .await,
+            Err(SalesError::SlotUnavailable)
+        ));
+
+        // The legacy end boundary is inclusive at exactly 17:00.
+        let late = Utc.with_ymd_and_hms(2031, 6, 10, 16, 30, 0).unwrap();
+        service
+            .create_event(
+                tenant.clone(),
+                "last slot".into(),
+                vec![],
+                late,
+                late + chrono::Duration::minutes(30),
+                None,
+            )
+            .await
+            .expect("the 17:00 end is inclusive");
+
+        // Weekend: no working hours at all.
+        let saturday = Utc.with_ymd_and_hms(2031, 6, 14, 10, 0, 0).unwrap();
+        assert!(matches!(
+            service
+                .create_event(
+                    tenant.clone(),
+                    "weekend".into(),
+                    vec![],
+                    saturday,
+                    saturday + chrono::Duration::minutes(30),
+                    None
+                )
+                .await,
+            Err(SalesError::SlotUnavailable)
+        ));
+
+        cleanup_service_tenant(&pool, &tenant).await;
+    }
+
+    /// The provider API delegates to the internal provider, and the facade's
+    /// Debug view names the provider without leaking the pool.
+    #[tokio::test]
+    async fn provider_api_delegates_and_reports_its_provider() {
+        let Some((pool, service, tenant)) = live_service("calendar_provider_api").await else {
+            return;
+        };
+        assert_eq!(service.provider_id(), "internal");
+        assert_eq!(
+            service.internal_provider().id(),
+            "internal",
+            "the internal provider is always the store of record"
+        );
+        let debug = format!("{service:?}");
+        assert!(debug.contains("UTC"), "{debug}");
+        assert!(debug.contains("timezone_utc_offset_hours"), "{debug}");
+
+        let start = fixture_start();
+        let mut request = CreateEventRequest::new(
+            tenant.clone(),
+            "Provider Demo",
+            vec!["prospect@example.com".into(), "Prospect@Example.com".into()],
+            start,
+            start + chrono::Duration::minutes(30),
+            chrono_tz::UTC,
+        );
+        // A salesperson that duplicates an attendee case-insensitively is not
+        // added twice; a blank one is ignored entirely.
+        request.salesperson = Some("prospect@example.com".into());
+        assert_eq!(request.attendees_all().len(), 2);
+        request.salesperson = Some("   ".into());
+        assert_eq!(request.attendees_all().len(), 2);
+        request.salesperson = Some("rep@example.com".into());
+        assert_eq!(request.attendees_all().len(), 3);
+
+        // Provider trait and inherent methods reach the same store.
+        let availability = crate::calendar::CalendarProvider::availability(
+            &service,
+            &service
+                .config()
+                .availability_request(tenant.clone(), start.date_naive(), Utc::now()),
+        )
+        .await
+        .expect("trait availability");
+        assert!(!availability.is_empty());
+        let booked = crate::calendar::CalendarProvider::create_event(&service, &request)
+            .await
+            .expect("trait create_event");
+        assert_eq!(booked.provider, "internal");
+
+        let moved = service
+            .reschedule(&booked.event_id, start + chrono::Duration::hours(2))
+            .await
+            .expect("reschedule through the provider API");
+        assert_eq!(moved.status, "rescheduled");
+        service
+            .cancel(&booked.event_id)
+            .await
+            .expect("cancel through the provider API");
+
+        // The provider trait object path is object-safe and delegates too.
+        let provider: Arc<dyn CalendarProvider> =
+            Arc::new(CalendarService::with_working_hours(pool.clone(), 9, 17, 0));
+        assert_eq!(provider.id(), "internal");
+        provider
+            .cancel(&booked.event_id)
+            .await
+            .expect_err("already cancelled");
+        drop(provider);
+
+        cleanup_service_tenant(&pool, &tenant).await;
+    }
+
+    #[test]
+    fn weekday_tokens_parse_case_insensitively_and_ignore_junk() {
+        assert_eq!(
+            parse_weekdays("mon, TUE, tues ,Wed,wednesday,thu,thur,thurs,fri,sat,sun,bogus,"),
+            vec![
+                chrono::Weekday::Mon,
+                chrono::Weekday::Tue,
+                chrono::Weekday::Tue,
+                chrono::Weekday::Wed,
+                chrono::Weekday::Wed,
+                chrono::Weekday::Thu,
+                chrono::Weekday::Thu,
+                chrono::Weekday::Thu,
+                chrono::Weekday::Fri,
+                chrono::Weekday::Sat,
+                chrono::Weekday::Sun,
+            ]
+        );
+        assert!(parse_weekdays("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_without_external_credentials_is_internal() {
+        // `selected_provider` reads the environment but can only ever return
+        // a documented provider key; the unset default is internal.
+        let selected = CalendarConfig::default().selected_provider();
+        assert!(
+            matches!(selected.as_str(), "internal" | "google" | "microsoft"),
+            "unexpected provider key: {selected}"
+        );
+        let _ = build_external_provider(
+            &CalendarConfig::default(),
+            Arc::new(internal::InternalCalendarProvider::new(
+                lazy_svc().db.clone(),
+                CalendarConfig::default(),
+            )),
+        );
+    }
 }

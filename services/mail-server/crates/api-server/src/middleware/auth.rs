@@ -264,7 +264,12 @@ async fn verify_tenant_membership(
     db: &sqlx::PgPool,
 ) -> Result<bool, ApiError> {
     let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM user_tenant_membership WHERE user_id = $1 AND tenant_id = $2",
+        // user_id is UUID (migration 229) and the bound value is the JWT
+        // subject's UUID string: without the cast the comparison is
+        // uuid = text (no such operator), and before 229 the column was
+        // VARCHAR(26), where a UUID string could never be stored — a real
+        // membership could never match.
+        "SELECT COUNT(*) FROM user_tenant_membership WHERE user_id = $1::uuid AND tenant_id = $2",
     )
     .bind(user_id)
     .bind(tenant_id)
@@ -2766,6 +2771,94 @@ mod tests {
             "an expired API key must be rejected despite a live cache entry"
         );
 
+        pool.close().await;
+    }
+
+    /// The membership check binds the JWT's UUID subject against
+    /// `user_tenant_membership.user_id`. Migration 229 is what makes that
+    /// matchable: while the column was VARCHAR(26) no row could carry a real
+    /// user id, so a legitimate member of a second tenant was always refused.
+    #[tokio::test]
+    async fn membership_check_matches_a_real_row_and_refuses_strangers() {
+        let Some(pool) = crate::test_db::optional_pg_pool("mw_membership_uuid").await else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant_a = format!("mwa{suffix}");
+        let tenant_b = format!("mwb{suffix}");
+        let tenant_c = format!("mwc{suffix}");
+        for tenant in [&tenant_a, &tenant_b, &tenant_c] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+                 VALUES ($1, 'membership test', 'free', 'active', NOW(), NOW())",
+            )
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+        }
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Member', 'x', 'owner', 'active', true, NOW(), NOW())",
+        )
+        .bind(user_id)
+        .bind(&tenant_a)
+        .bind(format!("mw-{suffix}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+
+        // A genuine second-tenant membership. Before migration 229 this INSERT
+        // failed outright (a 36-char UUID into VARCHAR(26)).
+        sqlx::query(
+            "INSERT INTO user_tenant_membership (user_id, tenant_id, role) VALUES ($1, $2, 'member')",
+        )
+        .bind(user_id)
+        .bind(&tenant_b)
+        .execute(&pool)
+        .await
+        .expect("seed membership");
+
+        let subject = user_id.to_string();
+        assert!(
+            verify_tenant_membership(&subject, &tenant_b, &pool)
+                .await
+                .expect("member check"),
+            "a real membership row must admit the user"
+        );
+        assert!(
+            !verify_tenant_membership(&subject, &tenant_c, &pool)
+                .await
+                .expect("stranger check"),
+            "a tenant with no membership row must refuse"
+        );
+        assert!(
+            !verify_tenant_membership(&uuid::Uuid::new_v4().to_string(), &tenant_b, &pool)
+                .await
+                .expect("unknown user check"),
+            "an unknown user id must refuse even when the tenant has a row"
+        );
+
+        // Cleanup: this test's own rows only.
+        let pattern = format!("%{suffix}%");
+        let _ = sqlx::query(
+            "DELETE FROM user_tenant_membership WHERE tenant_id IN (SELECT id FROM tenants WHERE id LIKE $1)",
+        )
+        .bind(&pattern)
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query(
+            "DELETE FROM users WHERE tenant_id IN (SELECT id FROM tenants WHERE id LIKE $1)",
+        )
+        .bind(&pattern)
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id LIKE $1")
+            .bind(&pattern)
+            .execute(&pool)
+            .await;
         pool.close().await;
     }
 }

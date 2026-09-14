@@ -4140,4 +4140,427 @@ mod tests {
 
         cleanup_sequenced_fixture(&pool, &fx.tenant).await;
     }
+
+    // -----------------------------------------------------------------------
+    // Legacy campaign batch + reply paths (live DB)
+    // -----------------------------------------------------------------------
+
+    struct LegacySendFixture {
+        tenant: String,
+        domain: String,
+        campaign_id: Uuid,
+        template_id: String,
+    }
+
+    async fn seed_legacy_send_fixture(
+        pool: &PgPool,
+        label: &str,
+        verified_domain: bool,
+    ) -> LegacySendFixture {
+        let tenant = crate::test_db::unique_test_tenant(label);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'starter', 'active') ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&tenant)
+        .bind(format!("test {tenant}"))
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        let domain = format!(
+            "saleslegacy-{}.example.com",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
+        if verified_domain {
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, \
+                 ses_verified, dkim_selector, dkim_public_key, dkim_private_key) \
+                 VALUES ($1, $2, $3, 'verified', true, true, true, 'legacy-selector', \
+                         'legacy-public', 'dkim:v1:legacy-test')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(&domain)
+            .execute(pool)
+            .await
+            .expect("insert verified domain");
+        }
+        let template_id = format!("tpl_{}", &Uuid::new_v4().simple().to_string()[..16]);
+        sqlx::query(
+            "INSERT INTO templates (id, tenant_id, name, slug, subject, html_body, text_body) \
+             VALUES ($1, $2, 'Legacy Template', $3, 'Hello {{first_name}}', \
+                     '<p>Hi {{name}}</p>', 'Hi {{first_name}}')",
+        )
+        .bind(&template_id)
+        .bind(&tenant)
+        .bind(&template_id)
+        .execute(pool)
+        .await
+        .expect("insert template");
+        let campaign_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_campaigns (id, tenant_id, name, template_id, audience, status) \
+             VALUES ($1, $2, 'Legacy Campaign', $3, 'all', 'active')",
+        )
+        .bind(campaign_id)
+        .bind(&tenant)
+        .bind(&template_id)
+        .execute(pool)
+        .await
+        .expect("insert campaign");
+        LegacySendFixture {
+            tenant,
+            domain,
+            campaign_id,
+            template_id,
+        }
+    }
+
+    async fn cleanup_legacy_send_fixture(pool: &PgPool, fixture: &LegacySendFixture) {
+        for statement in [
+            "DELETE FROM email_queue WHERE tenant_id = $1",
+            "DELETE FROM messages WHERE tenant_id = $1",
+            "DELETE FROM sales_campaign_recipients WHERE campaign_id = $2",
+            "DELETE FROM sales_campaigns WHERE tenant_id = $1",
+            "DELETE FROM templates WHERE tenant_id = $1",
+            "DELETE FROM suppressions WHERE tenant_id = $1",
+            "DELETE FROM sales_unsubscribes WHERE tenant_id = $1",
+            "DELETE FROM sales_inbox_messages WHERE tenant_id = $1",
+            "DELETE FROM domains WHERE tenant_id = $1",
+            "DELETE FROM tenants WHERE id = $1",
+        ] {
+            let mut query = sqlx::query(statement).bind(&fixture.tenant);
+            if statement.contains("campaign_id") {
+                query = query.bind(fixture.campaign_id);
+            }
+            query
+                .execute(pool)
+                .await
+                .unwrap_or_else(|error| panic!("cleanup `{statement}`: {error}"));
+        }
+    }
+
+    fn legacy_dispatcher(
+        pool: &PgPool,
+        domain: &str,
+        admission: Arc<FakeAdmissionBackend>,
+    ) -> ProductionCampaignDispatcher {
+        let cfg = DispatchConfig {
+            from_email: format!("sales@{domain}"),
+            ..test_dispatch_config()
+        };
+        ProductionCampaignDispatcher::new(cfg, pool.clone(), admission)
+            .expect("a configured dispatcher")
+    }
+
+    /// The batch send path: an unverified sender domain refuses the whole
+    /// batch before any admission, a verified one enqueues exactly once per
+    /// recipient, and an exact replay (or a suppressed recipient) never
+    /// produces a second message.
+    #[tokio::test]
+    async fn dispatch_batch_refuses_unready_domains_and_never_double_sends() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let fx = seed_legacy_send_fixture(&pool, "dispatch-batch", false).await;
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = legacy_dispatcher(&pool, &fx.domain, admission.clone());
+
+        // Empty batch is a no-op, no domain check needed.
+        assert_eq!(
+            dispatcher
+                .dispatch_batch(&fx.tenant, fx.campaign_id, &fx.template_id, &[])
+                .await
+                .expect("empty batch"),
+            0
+        );
+
+        // Unverified domain: the batch is refused before any quota is taken.
+        let recipients = vec![DispatchRecipient::new(
+            "legacy-one@example.com",
+            "https://unsubscribe.example/u/1",
+        )];
+        let error = dispatcher
+            .dispatch_batch(&fx.tenant, fx.campaign_id, &fx.template_id, &recipients)
+            .await
+            .expect_err("an unverified sender domain must refuse the batch");
+        assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+        assert!(
+            error.to_string().contains("not verified/DKIM-ready"),
+            "{error}"
+        );
+        assert_eq!(admission.reserved(), 0, "no admission was attempted");
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 0);
+
+        // Verify the domain and seed the ledger row, then send.
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, \
+             ses_verified, dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'legacy-selector', \
+                     'legacy-public', 'dkim:v1:legacy-test')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&fx.tenant)
+        .bind(&fx.domain)
+        .execute(&pool)
+        .await
+        .expect("verify the sender domain");
+        sqlx::query("INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2)")
+            .bind(fx.campaign_id)
+            .bind("legacy-one@example.com")
+            .execute(&pool)
+            .await
+            .expect("seed the ledger row");
+
+        assert_eq!(
+            dispatcher
+                .dispatch_batch(&fx.tenant, fx.campaign_id, &fx.template_id, &recipients)
+                .await
+                .expect("a verified batch dispatches"),
+            1
+        );
+        let (messages, queued): (i64, i64) = (
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_queue WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+        );
+        assert_eq!((messages, queued), (1, 1));
+        let category: String = sqlx::query_scalar(
+            "SELECT message_category FROM email_queue WHERE tenant_id = $1 LIMIT 1",
+        )
+        .bind(&fx.tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(category, SALES_MARKETING_CATEGORY);
+        let sent: i64 = sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
+            .bind(fx.campaign_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sent, 1, "the campaign counter moved exactly once");
+
+        // An exact replay is refused by the ledger claim: no second message.
+        assert_eq!(
+            dispatcher
+                .dispatch_batch(&fx.tenant, fx.campaign_id, &fx.template_id, &recipients)
+                .await
+                .expect("replay"),
+            0,
+            "a claimed recipient must not be enqueued twice"
+        );
+        let messages_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages_after, 1, "a replay must never double-send");
+        let sent: i64 = sqlx::query_scalar("SELECT sent FROM sales_campaigns WHERE id = $1")
+            .bind(fx.campaign_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sent, 1);
+
+        // A tenant-level opt-out refuses the recipient inside the transaction.
+        sqlx::query("INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2)")
+            .bind(fx.campaign_id)
+            .bind("legacy-two@example.com")
+            .execute(&pool)
+            .await
+            .expect("seed second ledger row");
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&fx.tenant)
+            .bind("legacy-two@example.com")
+            .execute(&pool)
+            .await
+            .expect("suppress the second recipient");
+        let suppressed = vec![DispatchRecipient::new(
+            "legacy-two@example.com",
+            "https://unsubscribe.example/u/2",
+        )];
+        assert_eq!(
+            dispatcher
+                .dispatch_batch(&fx.tenant, fx.campaign_id, &fx.template_id, &suppressed)
+                .await
+                .expect("suppressed batch"),
+            0,
+            "an opted-out recipient is skipped, not sent"
+        );
+        let messages_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages_after, 1);
+        // The skipped send's admission slot is released, not leaked: the one
+        // committed charge belongs to the first, real send.
+        assert_eq!(admission.released(), 1);
+        assert_eq!(admission.used(), 1);
+
+        cleanup_legacy_send_fixture(&pool, &fx).await;
+    }
+
+    /// The 1:1 reply path: exactly one reply per inbox message, transactional
+    /// category, platform suppression honoured, and a replay is
+    /// `AlreadyReplied` with nothing new enqueued.
+    #[tokio::test]
+    async fn enqueue_reply_is_exactly_once_and_honours_platform_suppression() {
+        let Some(pool) = live_pool().await else {
+            return;
+        };
+        let fx = seed_legacy_send_fixture(&pool, "dispatch-reply", true).await;
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = legacy_dispatcher(&pool, &fx.domain, admission.clone());
+
+        let inbox_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+             VALUES ($1, $2, 'prospect@example.com', 'Re: demo', 'positive')",
+        )
+        .bind(inbox_id)
+        .bind(&fx.tenant)
+        .execute(&pool)
+        .await
+        .expect("insert inbox message");
+        let sender_email = format!(
+            "sender-{}@corp.example",
+            &inbox_id.simple().to_string()[..8]
+        );
+
+        let outcome = dispatcher
+            .enqueue_reply(
+                &fx.tenant,
+                inbox_id,
+                &sender_email,
+                "Re: demo",
+                Some("<p>Thanks!</p>"),
+                "Thanks!",
+            )
+            .await
+            .expect("first reply enqueues");
+        let first_message_id = match outcome {
+            ReplyOutcome::Enqueued { message_id } => message_id,
+            other => panic!("expected Enqueued, got {other:?}"),
+        };
+        let replied: bool =
+            sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(inbox_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(replied, "the flag and the enqueue commit together");
+        let category: String = sqlx::query_scalar(
+            "SELECT message_category FROM email_queue WHERE tenant_id = $1 LIMIT 1",
+        )
+        .bind(&fx.tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            category, SALES_REPLY_CATEGORY,
+            "a 1:1 reply is transactional correspondence"
+        );
+
+        // Replay: already replied, no second message, same id is reported.
+        let replay = dispatcher
+            .enqueue_reply(
+                &fx.tenant,
+                inbox_id,
+                &sender_email,
+                "Re: demo",
+                None,
+                "again",
+            )
+            .await
+            .expect("replay is not an error");
+        match replay {
+            ReplyOutcome::AlreadyReplied { message_id } => {
+                assert_eq!(message_id, Some(first_message_id));
+            }
+            other => panic!("expected AlreadyReplied, got {other:?}"),
+        }
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 1, "a replay must never send a second reply");
+
+        // A hard-bounced correspondent is refused before any enqueue.
+        let bounced_inbox = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_inbox_messages (id, tenant_id, sender, subject, category) \
+             VALUES ($1, $2, 'bounce@example.com', 'hi', 'other')",
+        )
+        .bind(bounced_inbox)
+        .bind(&fx.tenant)
+        .execute(&pool)
+        .await
+        .expect("insert second inbox message");
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) \
+             VALUES ($1, $2, 'bounce@example.com', 'hard_bounce', 'platform', NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("sup", 22))
+        .bind(&fx.tenant)
+        .execute(&pool)
+        .await
+        .expect("platform-suppress the correspondent");
+        let error = dispatcher
+            .enqueue_reply(
+                &fx.tenant,
+                bounced_inbox,
+                "bounce@example.com",
+                "hi",
+                None,
+                "hello",
+            )
+            .await
+            .expect_err("a suppressed correspondent must be refused");
+        assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+        assert!(error.to_string().contains("suppressed"), "{error}");
+        let replied: bool =
+            sqlx::query_scalar("SELECT replied FROM sales_inbox_messages WHERE id = $1")
+                .bind(bounced_inbox)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            !replied,
+            "a refused reply must leave the message unanswered for retry"
+        );
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 1);
+
+        cleanup_legacy_send_fixture(&pool, &fx).await;
+    }
+
+    /// `live_pool` is defined in the sequenced tests section; this local alias
+    /// keeps the legacy tests readable.
+    async fn live_pool() -> Option<PgPool> {
+        crate::test_db::canonical_test_pool("dispatcher::tests::legacy_batch").await
+    }
 }

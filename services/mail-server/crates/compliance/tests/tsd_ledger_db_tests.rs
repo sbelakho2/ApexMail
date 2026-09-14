@@ -975,3 +975,116 @@ async fn tsd_refuses_an_entity_with_no_books() {
         Err(TsdSourceError::InvalidPeriod { .. })
     ));
 }
+
+// ── Adversarial wave 2: error provenance ───────────────────────────────────
+
+/// Missing entities and invalid months are NAMED errors, never empty or
+/// zero declarations: an entity with no books must not look like a zero month.
+#[tokio::test]
+async fn tsd_source_errors_name_the_entity_and_the_invalid_period() {
+    let Some(pool) = canonical_pool("errors_named").await else {
+        return;
+    };
+    let missing_id = Uuid::new_v4();
+    let error = read_month(&pool, missing_id, 2026, 1)
+        .await
+        .expect_err("unknown entity id refused");
+    assert!(matches!(error, TsdSourceError::EntityIdNotFound { .. }));
+    let text = error.to_string();
+    assert!(
+        text.contains(&missing_id.to_string()),
+        "the error names the missing entity: {text}"
+    );
+
+    let error = read_month_by_registry_code(&pool, "99999999", 2026, 1)
+        .await
+        .expect_err("unknown registry code refused");
+    assert!(matches!(error, TsdSourceError::EntityNotFound { .. }));
+    assert!(error.to_string().contains("99999999"));
+
+    for (year, month) in [(2026, 0u32), (2026, 13)] {
+        let error = month_bounds(year, month).expect_err("invalid month refused");
+        assert!(
+            matches!(error, TsdSourceError::InvalidPeriod { .. }),
+            "{year}-{month} must be InvalidPeriod"
+        );
+    }
+    // Display covers every variant without panicking.
+    let display = TsdSourceError::Lookup {
+        what: "fiscal_periods",
+        detail: "boom".into(),
+    }
+    .to_string();
+    assert!(display.contains("fiscal_periods") && display.contains("boom"));
+}
+
+/// A broken source read reports WHICH read failed instead of returning an
+/// empty (falsely zero) declaration.
+#[tokio::test]
+async fn tsd_lookup_failures_name_the_failing_source() {
+    let Some(pool) = canonical_pool("lookup_failures").await else {
+        return;
+    };
+    let entity = seed_entity(&pool, "18999999").await;
+    let _period = create_period(
+        &pool,
+        entity,
+        "month",
+        "2026-01",
+        d(2026, 1, 1),
+        d(2026, 1, 31),
+        "open",
+    )
+    .await;
+
+    // fiscal_periods missing.
+    sqlx::query("ALTER TABLE fiscal_periods RENAME TO fiscal_periods_hidden")
+        .execute(&pool)
+        .await
+        .expect("hide fiscal_periods");
+    let error = read_month(&pool, entity, 2026, 1)
+        .await
+        .expect_err("fiscal_periods lookup must fail visibly");
+    match &error {
+        TsdSourceError::Lookup { what, .. } => assert_eq!(*what, "fiscal_periods"),
+        other => panic!("expected Lookup, got {other:?}"),
+    }
+    sqlx::query("ALTER TABLE fiscal_periods_hidden RENAME TO fiscal_periods")
+        .execute(&pool)
+        .await
+        .expect("restore fiscal_periods");
+
+    // The posted-ledger view missing.
+    sqlx::query("ALTER VIEW v_accounting_payroll_taxes RENAME TO v_payroll_hidden")
+        .execute(&pool)
+        .await
+        .expect("hide payroll view");
+    let error = read_month(&pool, entity, 2026, 1)
+        .await
+        .expect_err("payroll view lookup must fail visibly");
+    match &error {
+        TsdSourceError::Lookup { what, .. } => {
+            assert!(what.contains("v_accounting_payroll_taxes"), "got {what}")
+        }
+        other => panic!("expected Lookup, got {other:?}"),
+    }
+    sqlx::query("ALTER VIEW v_payroll_hidden RENAME TO v_accounting_payroll_taxes")
+        .execute(&pool)
+        .await
+        .expect("restore payroll view");
+
+    // The unposted-payroll count source missing.
+    sqlx::query("ALTER TABLE payroll_records RENAME TO payroll_records_hidden")
+        .execute(&pool)
+        .await
+        .expect("hide payroll_records");
+    let error = read_month(&pool, entity, 2026, 1)
+        .await
+        .expect_err("unposted count must fail visibly");
+    match &error {
+        TsdSourceError::Lookup { what, .. } => {
+            assert!(what.contains("payroll_records"), "got {what}")
+        }
+        other => panic!("expected Lookup, got {other:?}"),
+    }
+}

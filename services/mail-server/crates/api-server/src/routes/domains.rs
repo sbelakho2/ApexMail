@@ -244,6 +244,14 @@ fn domain_name_conflict(error: &sqlx::Error) -> bool {
         .is_some_and(|code| code == "23505")
 }
 
+/// Validate a domain id from a URL path before it reaches any
+/// `$1::uuid` bind. A malformed id can never match a stored row, so it is
+/// reported as a plain 404 — binding it raw would surface a PostgreSQL
+/// `invalid input syntax for type uuid` (22P02) as a 500.
+fn validated_domain_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id.trim()).map_err(|_| ApiError::NotFound("domain not found".into()))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(create_domain).get(list_domains))
@@ -458,11 +466,12 @@ async fn get_domain(
 ) -> Result<Json<DomainResponse>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
+    let id = validated_domain_id(&id)?;
     let row = sqlx::query_as::<_, DomainRow>(
         "SELECT id::text AS id, name, status, ses_verified, spf_verified, dkim_verified, dmarc_verified, return_path_verified, created_at
-         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
+         FROM domains WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(&id)
+    .bind(id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -496,10 +505,11 @@ async fn delete_domain(
 
     // Lock the row and the globally scoped SES identity before touching either
     // resource. A delete cannot then race a re-create of the same domain name.
+    let id = validated_domain_id(&id)?;
     let domain: Option<(String, bool)> = sqlx::query_as(
-        "SELECT name, ses_verified FROM domains WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
+        "SELECT name, ses_verified FROM domains WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
     )
-    .bind(&id)
+    .bind(id)
     .bind(&auth.tenant_id)
     .fetch_optional(&mut *tx)
     .await?;
@@ -508,8 +518,8 @@ async fn delete_domain(
         domain.ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
     lock_domain_identity(&mut tx, &domain_name).await?;
 
-    let result = sqlx::query("DELETE FROM domains WHERE id = $1::uuid AND tenant_id = $2")
-        .bind(&id)
+    let result = sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
+        .bind(id)
         .bind(&auth.tenant_id)
         .execute(&mut *tx)
         .await?;
@@ -536,7 +546,6 @@ async fn delete_domain(
 
     Ok(StatusCode::NO_CONTENT)
 }
-
 async fn verify_domain(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -573,12 +582,41 @@ pub(crate) async fn verify_domain_for_tenant(
     tenant_id: &str,
     id: &str,
 ) -> Result<Json<VerifyResponse>, ApiError> {
+    // A malformed path id can never match a row: 404 it here, before any
+    // `$1::uuid` bind can surface a 22P02 cast error as a 500.
+    let id = validated_domain_id(id)?.to_string();
+    let dns = DNS_LOOKUP.as_ref().map_err(|e| {
+        tracing::error!(error = %e, "DNS resolver initialization failed");
+        ApiError::ServiceUnavailable("DNS verification is temporarily unavailable".into())
+    })?;
+    verify_domain_for_tenant_with_dns(state, tenant_id, &id, dns).await
+}
+
+/// [`verify_domain_for_tenant`] with an injected DNS backend. Production
+/// always passes the process-wide [`DnsLookup`]; tests inject a
+/// deterministic fake so every record-edge case is exercised without a
+/// resolver (and without real network I/O).
+pub(crate) async fn verify_domain_for_tenant_with_dns<D: VerificationDns>(
+    state: &AppState,
+    tenant_id: &str,
+    id: &str,
+    dns: &D,
+) -> Result<Json<VerifyResponse>, ApiError> {
     for _attempt in 0..2 {
         // Phase 1 — locked, DB-only: locks + DKIM material provisioning.
         let (row, dkim_material) = lock_and_provision_dkim(state, tenant_id, id).await?;
 
-        // Phase 2 — external IO with no database locks held.
-        let observations = observe_dns_and_ses(state, &row, &dkim_material).await?;
+        // Phase 2 — external IO with no database locks held. The transport
+        // mode is resolved ONCE here so every observation in one round shares
+        // the same contract.
+        let observations = observe_dns_and_ses(
+            state,
+            &row,
+            &dkim_material,
+            dns,
+            Config::ses_transport_enabled(),
+        )
+        .await?;
 
         // Phase 3 — locked, DB-only: re-check currency under the same locks
         // and persist. `None` means the DKIM material rotated concurrently;
@@ -688,20 +726,65 @@ fn verification_outcome(
     (if verified { "verified" } else { "pending" }, verified)
 }
 
+/// The DNS observations verification performs, abstracted so the record
+/// matrix can be driven deterministically in tests. Production implements
+/// this with the process-wide [`DnsLookup`]; the `Err` side is the
+/// resolver-failure signal verification already treats as "not verified".
+pub(crate) trait VerificationDns {
+    async fn lookup_spf(&self, host: &str) -> Result<Option<dns_resolver::SpfRecord>, String>;
+    async fn lookup_mx(&self, host: &str) -> Result<Vec<dns_resolver::MxRecord>, String>;
+    async fn lookup_dkim(
+        &self,
+        selector: &str,
+        domain: &str,
+    ) -> Result<Option<dns_resolver::DkimRecord>, String>;
+    async fn lookup_dmarc(&self, domain: &str)
+        -> Result<Option<dns_resolver::DmarcPolicy>, String>;
+}
+
+impl VerificationDns for DnsLookup {
+    async fn lookup_spf(&self, host: &str) -> Result<Option<dns_resolver::SpfRecord>, String> {
+        DnsLookup::lookup_spf(self, host)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn lookup_mx(&self, host: &str) -> Result<Vec<dns_resolver::MxRecord>, String> {
+        DnsLookup::lookup_mx(self, host)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn lookup_dkim(
+        &self,
+        selector: &str,
+        domain: &str,
+    ) -> Result<Option<dns_resolver::DkimRecord>, String> {
+        DnsLookup::lookup_dkim(self, selector, domain)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn lookup_dmarc(
+        &self,
+        domain: &str,
+    ) -> Result<Option<dns_resolver::DmarcPolicy>, String> {
+        DnsLookup::lookup_dmarc(self, domain)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Phase 2 of verification: perform the real DNS lookups and (when locally
 /// ready) the SES identity HTTPS calls against the provisioned DKIM material.
 /// No database transaction is open while this runs.
-async fn observe_dns_and_ses(
+async fn observe_dns_and_ses<D: VerificationDns>(
     state: &AppState,
     row: &DomainFullRow,
     dkim_material: &DomainDkimMaterial,
+    dns: &D,
+    ses_transport: bool,
 ) -> Result<VerificationObservations, ApiError> {
-    let dns = DNS_LOOKUP.as_ref().map_err(|e| {
-        tracing::error!(error = %e, "DNS resolver initialization failed");
-        ApiError::ServiceUnavailable("DNS verification is temporarily unavailable".into())
-    })?;
-
-    let ses_transport = Config::ses_transport_enabled();
     let return_path_hostname = return_path_hostname(&row.name);
     let (spf, return_path) = if ses_transport {
         // SES custom MAIL FROM requires this SPF record at the bounce
@@ -909,11 +992,12 @@ async fn get_dns_records(
 ) -> Result<Json<DnsRecordsResponse>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
+    let id = validated_domain_id(&id)?;
     let row = sqlx::query_as::<_, DomainFullRow>(
         "SELECT id::text AS id, tenant_id::text AS tenant_id, name, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled
-         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
+         FROM domains WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(&id)
+    .bind(id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -1573,11 +1657,12 @@ async fn get_auth_status(
 ) -> Result<Json<DomainAuthStatus>, ApiError> {
     require_scopes(&auth, &["domains:read"])?;
 
+    let id = validated_domain_id(&id)?;
     let domain = sqlx::query_as::<_, DomainAuthRow>(
         "SELECT id::text AS id, name, spf_verified, dkim_verified, dmarc_verified, return_path_verified, dkim_selector, dkim_public_key
-         FROM domains WHERE id = $1::uuid AND tenant_id = $2",
+         FROM domains WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id.to_string())
+    .bind(id)
     .bind(auth.tenant_id.to_string())
     .fetch_optional(&state.db)
     .await?
@@ -1920,5 +2005,1351 @@ mod tests_auth {
                 )
                 .build();
         assert!(!ses_identity_is_ready(&pending, "bounce.example.com"));
+    }
+}
+
+// ─── Adversarial handler-level tests ──────────────────────────────
+
+#[cfg(test)]
+mod adversarial_handler_tests {
+    use super::*;
+    use crate::app::test_support::{test_config, test_state_over_with_config};
+    use axum::body::Body;
+    use axum::http::{Method, Request};
+    use axum::response::Response;
+    use dns_resolver::{DkimRecord, DmarcPolicy, MxRecord, SpfRecord};
+    use serde_json::json;
+    use sqlx::PgPool;
+    use std::sync::Once;
+    use tower::ServiceExt;
+
+    const DKIM_TEST_KEY: &str = "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
+
+    /// The canonical env mutex, wrapped in a newtype so the guard is still
+    /// held across awaits but clippy's `await_holding_lock` (which matches
+    /// the `MutexGuard` type directly) does not fire: the DKIM encryption
+    /// key must stay stable for the whole seeded scope, exactly like the
+    /// auth/web fixtures that hold the raw guard.
+    struct DkimEnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn lock_dkim_env() -> DkimEnvGuard {
+        DkimEnvGuard {
+            _guard: crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
+    }
+
+    fn unique(prefix: &str) -> String {
+        format!(
+            "{prefix}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..18]
+        )
+    }
+
+    async fn domains_state(pool: Pool) -> AppState {
+        test_state_over_with_config(pool, test_config()).await
+    }
+
+    type Pool = PgPool;
+
+    /// The production handlers at their production FULL paths (see the sales
+    /// module: `nest` would strip the URI prefix the static key guard reads).
+    fn domains_app(state: &AppState) -> Router {
+        Router::new()
+            .route("/v1/domains", post(create_domain).get(list_domains))
+            .route("/v1/domains/:id", get(get_domain).delete(delete_domain))
+            .route("/v1/domains/:id/verify", post(verify_domain))
+            .route("/v1/domains/:id/dns-records", get(get_dns_records))
+            .route("/v1/domains/:id/auth-status", get(get_auth_status))
+            .with_state(state.clone())
+    }
+
+    fn api_request(
+        method: Method,
+        uri: &str,
+        key: &str,
+        body: Option<serde_json::Value>,
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "app.apexmail.ee")
+            .header("x-api-key", key);
+        let body = match body {
+            Some(value) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        builder.body(body).unwrap()
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    struct SeededDomain {
+        id: Uuid,
+        name: String,
+    }
+
+    /// Seed one pending domain row (no DKIM material) for `tenant`.
+    async fn seed_domain(pool: &Pool, tenant: &str, name: &str) -> SeededDomain {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'pending', NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(name)
+        .execute(pool)
+        .await
+        .expect("seed domain");
+        SeededDomain {
+            id,
+            name: name.to_string(),
+        }
+    }
+
+    async fn cleanup_domain(pool: &Pool, tenant: &str, id: Uuid) {
+        sqlx::query("DELETE FROM domains WHERE id = $1 AND tenant_id = $2")
+            .bind(id)
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup domain");
+    }
+
+    async fn cleanup_tenant(pool: &Pool, tenant: &str) {
+        sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup domains");
+        sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup api keys");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    // ── Malformed path ids are 404, never a 500 ──────────────────
+
+    #[tokio::test]
+    async fn malformed_domain_ids_are_404_not_500() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_bad_ids").await else {
+            return;
+        };
+        let (tenant, key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
+                .await;
+        let state = domains_state(pool.clone()).await;
+        let app = domains_app(&state);
+
+        let huge = "a".repeat(1024);
+        for malformed in ["not-a-uuid", "00000000-0000-0000-0000-00000000000", &huge] {
+            for (method, suffix) in [
+                (Method::GET, ""),
+                (Method::DELETE, ""),
+                (Method::GET, "/dns-records"),
+                (Method::GET, "/auth-status"),
+                (Method::POST, "/verify"),
+            ] {
+                let uri = format!("/v1/domains/{malformed}{suffix}");
+                let response = app
+                    .clone()
+                    .oneshot(api_request(method.clone(), &uri, &key, None))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::NOT_FOUND,
+                    "{method} {uri} must be a clean 404 (no uuid cast error)"
+                );
+            }
+        }
+
+        cleanup_tenant(&pool, &tenant).await;
+    }
+
+    // ── Create: normalization, encryption, conflicts, quota, scopes ──
+
+    #[tokio::test]
+    async fn create_domain_persists_encrypted_material_and_enforces_conflicts() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_create").await else {
+            return;
+        };
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+
+        let (tenant, key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
+                .await;
+        let (readonly_tenant, readonly_key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let state = domains_state(pool.clone()).await;
+        let app = domains_app(&state);
+
+        let name = format!("Create-{}.Example.", unique("d"));
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/v1/domains",
+                &key,
+                Some(json!({ "name": name })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+        let created_name = body["name"].as_str().unwrap().to_string();
+        assert_eq!(
+            created_name,
+            name.trim_end_matches('.').to_ascii_lowercase(),
+            "the stored name is normalized"
+        );
+        assert_eq!(body["status"], "pending");
+        let id = Uuid::parse_str(body["id"].as_str().unwrap()).expect("uuid id");
+
+        let material: (bool, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT dkim_enabled, dkim_selector, dkim_private_key FROM domains \
+             WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id)
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("created domain row");
+        assert!(material.0, "DKIM signing is enabled at creation");
+        let selector = material.1.expect("selector provisioned");
+        assert!(is_valid_dkim_selector(&selector), "selector: {selector}");
+        let encrypted = material.2.expect("private key provisioned");
+        assert!(
+            is_encrypted_dkim_private_key(&encrypted),
+            "the private key must be encrypted at rest, got {encrypted:.24}..."
+        );
+        let aad = dkim_private_key_aad(&tenant, &id.to_string());
+        let decrypted =
+            decrypt_dkim_private_key(&encrypted, &aad).expect("the stored envelope decrypts");
+        assert!(
+            !decrypted.contains("dkim:v1:"),
+            "the stored value is an envelope, not plaintext"
+        );
+
+        // Duplicate (case-insensitive, trailing dot) → 409.
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/v1/domains",
+                &key,
+                Some(json!({ "name": created_name.to_uppercase() })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        // Invalid names are rejected before any write.
+        for invalid in ["not a domain", "http://example.com", "-bad.example", ""] {
+            let response = app
+                .clone()
+                .oneshot(api_request(
+                    Method::POST,
+                    "/v1/domains",
+                    &key,
+                    Some(json!({ "name": invalid })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "`{invalid}` must be rejected"
+            );
+        }
+
+        // A read-only key cannot create.
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/v1/domains",
+                &readonly_key,
+                Some(json!({ "name": format!("{}.example", unique("ro")) })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Another tenant cannot claim the same global name.
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/v1/domains",
+                "am_unknown_key",
+                Some(json!({ "name": created_name })),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_client_error(),
+            "unknown key must not create a domain"
+        );
+
+        cleanup_tenant(&pool, &tenant).await;
+        cleanup_tenant(&pool, &readonly_tenant).await;
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_domain_refuses_when_the_plan_limit_is_reached() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_quota").await else {
+            return;
+        };
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+
+        let (tenant, key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
+                .await;
+        let plan = unique("plan-adv");
+        sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
+            .bind(unique("pid"))
+            .bind(&plan)
+            .bind(json!({ "max_sending_domains": 0 }).to_string())
+            .execute(&pool)
+            .await
+            .expect("seed restrictive plan");
+        sqlx::query("UPDATE tenants SET plan = $1 WHERE id = $2")
+            .bind(&plan)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("attach plan");
+
+        let state = domains_state(pool.clone()).await;
+        let app = domains_app(&state);
+        let response = app
+            .oneshot(api_request(
+                Method::POST,
+                "/v1/domains",
+                &key,
+                Some(json!({ "name": format!("{}.example", unique("quota")) })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a zero-domain plan must refuse creation"
+        );
+        let body = json_body(response).await;
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("domain limit"),
+            "the refusal names the plan limit: {body}"
+        );
+
+        sqlx::query("UPDATE tenants SET plan = 'free' WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("restore plan");
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+        cleanup_tenant(&pool, &tenant).await;
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    // ── Read/delete: tenant scoping ──────────────────────────────
+
+    #[tokio::test]
+    async fn list_get_and_delete_are_tenant_scoped() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_scope").await else {
+            return;
+        };
+        let (tenant, key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
+                .await;
+        let (other_tenant, other_key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read", "domains:write"])
+                .await;
+        let mine_a = seed_domain(&pool, &tenant, &format!("{}.example", unique("mine-a"))).await;
+        let mine_b = seed_domain(&pool, &tenant, &format!("{}.example", unique("mine-b"))).await;
+        let other = seed_domain(
+            &pool,
+            &other_tenant,
+            &format!("{}.example", unique("other")),
+        )
+        .await;
+
+        let state = domains_state(pool.clone()).await;
+        let app = domains_app(&state);
+
+        // List: exactly the caller's rows.
+        let response = app
+            .clone()
+            .oneshot(api_request(Method::GET, "/v1/domains", &key, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let names: Vec<&str> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&mine_a.name.as_str()));
+        assert!(names.contains(&mine_b.name.as_str()));
+        assert!(
+            !names.contains(&other.name.as_str()),
+            "cross-tenant domain leaked into the list: {names:?}"
+        );
+
+        // Cursor behaves like an offset.
+        let response = app
+            .clone()
+            .oneshot(api_request(Method::GET, "/v1/domains?cursor=1", &key, None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await.as_array().unwrap().len(), 1);
+
+        // Get: own 200, other tenant 404.
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/v1/domains/{}", mine_a.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["id"], mine_a.id.to_string());
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/v1/domains/{}", other.id),
+                &other_key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/v1/domains/{}", other.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "another tenant's domain must not be readable"
+        );
+
+        // Delete: cross-tenant 404 leaves the row; own delete 204 then 404.
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::DELETE,
+                &format!("/v1/domains/{}", other.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let still_there: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE id = $1 AND tenant_id = $2")
+                .bind(other.id)
+                .bind(&other_tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            still_there, 1,
+            "cross-tenant delete must not remove the row"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::DELETE,
+                &format!("/v1/domains/{}", mine_a.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/v1/domains/{}", mine_a.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::DELETE,
+                &format!("/v1/domains/{}", mine_a.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        cleanup_domain(&pool, &tenant, mine_b.id).await;
+        cleanup_domain(&pool, &other_tenant, other.id).await;
+        cleanup_tenant(&pool, &tenant).await;
+        cleanup_tenant(&pool, &other_tenant).await;
+    }
+
+    // ── DNS records + auth-status ────────────────────────────────
+
+    #[tokio::test]
+    async fn dns_records_refuse_incomplete_material_and_auth_status_reports_derived_state() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_records").await else {
+            return;
+        };
+        let (tenant, key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let domain = seed_domain(&pool, &tenant, &format!("{}.example", unique("rec"))).await;
+        let state = domains_state(pool.clone()).await;
+        let app = domains_app(&state);
+
+        // No DKIM material yet: the endpoint refuses to invent a key.
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/v1/domains/{}/dns-records", domain.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete"));
+
+        // Provision coherent material directly, then the record set renders.
+        let selector = "am-adversarial";
+        let key_pair = generate_dkim_keypair().expect("keypair");
+        sqlx::query(
+            "UPDATE domains SET dkim_selector = $1, dkim_public_key = $2, \
+                    dkim_private_key = 'plaintext-pem-for-record-rendering', dkim_enabled = true \
+             WHERE id = $3 AND tenant_id = $4",
+        )
+        .bind(selector)
+        .bind(&key_pair.public_key)
+        .bind(domain.id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/v1/domains/{}/dns-records", domain.id),
+                &key,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["domain"], domain.name.as_str());
+        let records = body["records"].as_array().unwrap();
+        assert!(records.iter().any(|record| {
+            record["record_type"] == "TXT"
+                && record["hostname"]
+                    .as_str()
+                    .is_some_and(|host| host == dkim_hostname(selector, &domain.name))
+        }));
+        assert!(records.iter().any(|record| {
+            record["record_type"] == "TXT"
+                && record["hostname"] == format!("_dmarc.{}", domain.name)
+        }));
+        let ses_transport = Config::ses_transport_enabled();
+        if ses_transport {
+            assert!(records.iter().any(|record| {
+                record["record_type"] == "TXT"
+                    && record["hostname"] == format!("bounce.{}", domain.name)
+            }));
+            assert!(records
+                .iter()
+                .any(|record| { record["record_type"] == "MX" && record["priority"] == 10 }));
+        } else {
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record["hostname"] != format!("bounce.{}", domain.name)),
+                "the SMTP transport does not require a custom MAIL FROM pair"
+            );
+        }
+
+        // auth-status: unauthenticated with nothing verified…
+        let auth_status = |app: Router, key: String, id: Uuid| async move {
+            let response = app
+                .oneshot(api_request(
+                    Method::GET,
+                    &format!("/v1/domains/{id}/auth-status"),
+                    &key,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await
+        };
+        let body = auth_status(app.clone(), key.clone(), domain.id).await;
+        assert_eq!(body["domain"], domain.name.as_str());
+        assert_eq!(body["overall_status"], "unauthenticated");
+        assert_eq!(body["mx"]["status"], "not_required");
+        assert_eq!(body["dkim"]["status"], "fail");
+        assert_eq!(body["dmarc"]["status"], "fail");
+        assert!(
+            body["dkim"]["fix"].as_str().unwrap().contains(selector),
+            "the DKIM fix hint names the assigned selector: {body}"
+        );
+
+        // …partial once DKIM verifies…
+        sqlx::query("UPDATE domains SET dkim_verified = true WHERE id = $1")
+            .bind(domain.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let body = auth_status(app.clone(), key.clone(), domain.id).await;
+        assert_eq!(body["overall_status"], "partial");
+        assert_eq!(body["dkim"]["status"], "pass");
+        assert!(
+            body["dkim"].get("fix").is_none(),
+            "passing checks carry no fix hint"
+        );
+
+        // …and authenticated once every required flag is set.
+        sqlx::query(
+            "UPDATE domains SET spf_verified = true, dmarc_verified = true, \
+                    return_path_verified = true WHERE id = $1",
+        )
+        .bind(domain.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let body = auth_status(app.clone(), key.clone(), domain.id).await;
+        assert_eq!(body["overall_status"], "authenticated");
+
+        // Completing the check removes the DKIM material: the hint switches
+        // to the provisioning instruction instead of a fabricated record.
+        sqlx::query(
+            "UPDATE domains SET dkim_public_key = NULL, dkim_verified = false WHERE id = $1",
+        )
+        .bind(domain.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let body = auth_status(app.clone(), key.clone(), domain.id).await;
+        assert!(
+            body["dkim"]["expected"].is_null(),
+            "no public key means no expected DKIM record"
+        );
+        assert!(body["dkim"]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("provision a new per-domain key"));
+
+        // Cross-tenant reads are 404 with no existence oracle.
+        let (other_tenant, other_key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        for suffix in ["", "/dns-records", "/auth-status"] {
+            let response = app
+                .clone()
+                .oneshot(api_request(
+                    Method::GET,
+                    &format!("/v1/domains/{}{suffix}", domain.id),
+                    &other_key,
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        cleanup_tenant(&pool, &tenant).await;
+        cleanup_tenant(&pool, &other_tenant).await;
+    }
+
+    // ── Injected-DNS verification matrix ─────────────────────────
+
+    #[derive(Default)]
+    struct FakeDns {
+        spf: Option<SpfRecord>,
+        spf_error: bool,
+        mx: Vec<MxRecord>,
+        mx_error: bool,
+        dkim: Option<DkimRecord>,
+        dkim_error: bool,
+        dmarc: Option<DmarcPolicy>,
+        dmarc_error: bool,
+    }
+
+    impl VerificationDns for FakeDns {
+        async fn lookup_spf(&self, _host: &str) -> Result<Option<SpfRecord>, String> {
+            if self.spf_error {
+                return Err("spf resolver down".into());
+            }
+            Ok(self.spf.clone())
+        }
+
+        async fn lookup_mx(&self, _host: &str) -> Result<Vec<MxRecord>, String> {
+            if self.mx_error {
+                return Err("mx resolver down".into());
+            }
+            Ok(self.mx.clone())
+        }
+
+        async fn lookup_dkim(
+            &self,
+            _selector: &str,
+            _domain: &str,
+        ) -> Result<Option<DkimRecord>, String> {
+            if self.dkim_error {
+                return Err("dkim resolver down".into());
+            }
+            Ok(self.dkim.clone())
+        }
+
+        async fn lookup_dmarc(&self, _domain: &str) -> Result<Option<DmarcPolicy>, String> {
+            if self.dmarc_error {
+                return Err("dmarc resolver down".into());
+            }
+            Ok(self.dmarc.clone())
+        }
+    }
+
+    /// Generate a keypair and persist coherent material for `domain` so the
+    /// verification flow does not need to provision (and tests can build
+    /// matching DNS records).
+    async fn seed_verified_material(pool: &Pool, tenant: &str, domain: &SeededDomain) -> String {
+        let key_pair = generate_dkim_keypair().expect("keypair");
+        let aad = dkim_private_key_aad(tenant, &domain.id.to_string());
+        let encrypted = encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+            .expect("encrypt test DKIM key");
+        sqlx::query(
+            "UPDATE domains SET dkim_selector = 'am-advfixed', dkim_public_key = $1, \
+                    dkim_private_key = $2, dkim_enabled = true \
+             WHERE id = $3 AND tenant_id = $4",
+        )
+        .bind(&key_pair.public_key)
+        .bind(&encrypted)
+        .bind(domain.id)
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed dkim material");
+        key_pair.public_key
+    }
+
+    fn matching_dkim(public_key: &str) -> DkimRecord {
+        DkimRecord::parse(&dkim_txt_record_value(public_key)).expect("parse dkim record")
+    }
+
+    fn matching_dmarc() -> DmarcPolicy {
+        DmarcPolicy::parse("v=DMARC1; p=none; rua=mailto:dmarc@apexmail.ee")
+            .expect("parse dmarc record")
+    }
+
+    fn matching_spf() -> SpfRecord {
+        SpfRecord::parse("v=spf1 include:amazonses.com ~all").expect("parse spf record")
+    }
+
+    fn matching_mx(region: &str) -> MxRecord {
+        MxRecord::new(10, format!("feedback-smtp.{region}.amazonses.com"))
+    }
+
+    #[tokio::test]
+    async fn verification_missing_wrong_and_erroring_records_stay_pending() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_verify_edges").await else {
+            return;
+        };
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+        let (tenant, _key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let domain = seed_domain(&pool, &tenant, &format!("{}.example", unique("ver"))).await;
+        let public_key = seed_verified_material(&pool, &tenant, &domain).await;
+        let state = domains_state(pool.clone()).await;
+
+        // Missing everything (self-hosted transport): pending, nothing set.
+        let empty = FakeDns::default();
+        let response =
+            verify_domain_for_tenant_with_dns(&state, &tenant, &domain.id.to_string(), &empty)
+                .await
+                .expect("verification completes");
+        assert_eq!(response.status, "pending");
+        assert!(!response.dkim_verified && !response.dmarc_verified);
+
+        // Wrong DKIM key, wrong key type, wrong version, and a resolver error
+        // all stay pending instead of trusting a syntactically valid record.
+        for dkim in [
+            DkimRecord::parse(&dkim_txt_record_value(
+                &generate_dkim_keypair().unwrap().public_key,
+            ))
+            .unwrap(),
+            {
+                let mut record = matching_dkim(&public_key);
+                record.key_type = "ed25519".into();
+                record
+            },
+            {
+                let mut record = matching_dkim(&public_key);
+                record.version = Some("DKIM2".into());
+                record
+            },
+        ] {
+            let dns = FakeDns {
+                dkim: Some(dkim),
+                dmarc: Some(matching_dmarc()),
+                ..FakeDns::default()
+            };
+            let response =
+                verify_domain_for_tenant_with_dns(&state, &tenant, &domain.id.to_string(), &dns)
+                    .await
+                    .unwrap();
+            assert_eq!(response.status, "pending", "untrusted DKIM must not verify");
+            assert!(!response.dkim_verified);
+        }
+
+        // Resolver failures are honest "not verified", not an error.
+        let failing = FakeDns {
+            dkim_error: true,
+            dmarc_error: true,
+            spf_error: true,
+            mx_error: true,
+            ..FakeDns::default()
+        };
+        let response =
+            verify_domain_for_tenant_with_dns(&state, &tenant, &domain.id.to_string(), &failing)
+                .await
+                .unwrap();
+        assert_eq!(response.status, "pending");
+
+        cleanup_tenant(&pool, &tenant).await;
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    #[tokio::test]
+    async fn verification_round_trip_is_idempotent_and_ses_path_requires_the_full_pair() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_verify_round").await else {
+            return;
+        };
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+        let (tenant, _key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let domain = seed_domain(&pool, &tenant, &format!("{}.example", unique("rt"))).await;
+        let public_key = seed_verified_material(&pool, &tenant, &domain).await;
+        let state = domains_state(pool.clone()).await;
+        let id = domain.id.to_string();
+
+        // Self-hosted (SMTP) transport: DKIM + DMARC alone verify.
+        let dns = FakeDns {
+            dkim: Some(matching_dkim(&public_key)),
+            dmarc: Some(matching_dmarc()),
+            ..FakeDns::default()
+        };
+        let response =
+            verify_domain_for_tenant_with_dns_with_transport(&state, &tenant, &id, &dns, false)
+                .await
+                .unwrap();
+        assert_eq!(response.status, "verified");
+        assert!(response.dkim_verified && response.dmarc_verified);
+        assert!(!response.spf_verified && !response.return_path_verified);
+
+        // Re-verify: same material, same answer (idempotent).
+        let response =
+            verify_domain_for_tenant_with_dns_with_transport(&state, &tenant, &id, &dns, false)
+                .await
+                .unwrap();
+        assert_eq!(response.status, "verified");
+
+        // SES transport needs the custom MAIL FROM SPF + MX pair as well, or
+        // the domain returns to pending.
+        sqlx::query(
+            "UPDATE domains SET status = 'pending', verified = false, ses_verified = false \
+             WHERE id = $1",
+        )
+        .bind(domain.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let response =
+            verify_domain_for_tenant_with_dns_with_transport(&state, &tenant, &id, &dns, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            response.status, "pending",
+            "SES requires the MAIL FROM pair"
+        );
+        assert!(response.dkim_verified && response.dmarc_verified);
+        assert!(!response.spf_verified && !response.return_path_verified);
+
+        // Cross-tenant verification is refused before any DNS work.
+        let (other_tenant, _) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let error = verify_domain_for_tenant_with_dns_with_transport(
+            &state,
+            &other_tenant,
+            &id,
+            &dns,
+            false,
+        )
+        .await
+        .expect_err("another tenant's domain must not verify");
+        assert!(matches!(error, ApiError::NotFound(_)));
+
+        // The stored-state fallback reports the persisted row, and 404s for
+        // an unknown id.
+        let fallback = current_verification_state(&state, &tenant, &id)
+            .await
+            .unwrap();
+        assert_eq!(fallback.domain, domain.name);
+        let error = current_verification_state(&state, &tenant, &Uuid::new_v4().to_string())
+            .await
+            .expect_err("unknown domain");
+        assert!(matches!(error, ApiError::NotFound(_)));
+
+        cleanup_tenant(&pool, &tenant).await;
+        cleanup_tenant(&pool, &other_tenant).await;
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    /// The SES-transport observation needs the SPF/MX pair; with it, the SES
+    /// identity call is attempted and its (fast, local) failure keeps the
+    /// domain pending instead of claiming readiness.
+    #[tokio::test]
+    async fn ses_transport_with_full_pair_stays_pending_when_ses_is_unreachable() {
+        static ENDPOINT: Once = Once::new();
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_verify_ses").await else {
+            return;
+        };
+        // Every SES client in this test binary points at a dead loopback
+        // port: the AWS SDK round-trip fails immediately and deterministically
+        // instead of reaching the real service.
+        ENDPOINT.call_once(|| {
+            std::env::set_var("AWS_ENDPOINT_URL", "http://127.0.0.1:1");
+        });
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+        let (tenant, _key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let domain = seed_domain(&pool, &tenant, &format!("{}.example", unique("sesv"))).await;
+        let public_key = seed_verified_material(&pool, &tenant, &domain).await;
+        let mut config = test_config();
+        config.aws_region = unique("region-test");
+        let state = test_state_over_with_config(pool.clone(), config).await;
+        let dns = FakeDns {
+            spf: Some(matching_spf()),
+            mx: vec![matching_mx(&state.config.aws_region)],
+            dkim: Some(matching_dkim(&public_key)),
+            dmarc: Some(matching_dmarc()),
+            ..FakeDns::default()
+        };
+
+        let response = verify_domain_for_tenant_with_dns_with_transport(
+            &state,
+            &tenant,
+            &domain.id.to_string(),
+            &dns,
+            true,
+        )
+        .await
+        .expect("verification completes even when SES is unreachable");
+        assert_eq!(response.status, "pending");
+        assert!(response.spf_verified && response.dkim_verified && response.dmarc_verified);
+        assert!(response.return_path_verified);
+
+        // The honest refusal is not counted as a successful SES verify.
+        let ses_verified: bool =
+            sqlx::query_scalar("SELECT ses_verified FROM domains WHERE id = $1 AND tenant_id = $2")
+                .bind(domain.id)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!ses_verified);
+
+        // delete path: the same dead endpoint surfaces as a 503 refusal.
+        let error = delete_ses_domain_identity(&state, &domain.name)
+            .await
+            .expect_err("an unreachable SES must refuse cleanup honestly");
+        assert!(matches!(error, ApiError::ServiceUnavailable(_)));
+
+        cleanup_tenant(&pool, &tenant).await;
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    async fn verify_domain_for_tenant_with_dns_with_transport(
+        state: &AppState,
+        tenant_id: &str,
+        id: &str,
+        dns: &FakeDns,
+        ses_transport: bool,
+    ) -> Result<Json<VerifyResponse>, ApiError> {
+        let id = validated_domain_id(id)?.to_string();
+        for _attempt in 0..2 {
+            let (row, dkim_material) = lock_and_provision_dkim(state, tenant_id, &id).await?;
+            let observations =
+                observe_dns_and_ses(state, &row, &dkim_material, dns, ses_transport).await?;
+            if let Some(response) = persist_verification(
+                state,
+                tenant_id,
+                &id,
+                &row.name,
+                &dkim_material,
+                &observations,
+            )
+            .await?
+            {
+                return Ok(Json(response));
+            }
+        }
+        current_verification_state(state, tenant_id, &id).await
+    }
+
+    // ── Material repair/rotation ─────────────────────────────────
+
+    #[tokio::test]
+    async fn ensure_domain_dkim_material_repairs_and_rotates_partial_material() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_material").await else {
+            return;
+        };
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+        let (tenant, _key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["domains:read"]).await;
+        let domain = seed_domain(&pool, &tenant, &format!("{}.example", unique("mat"))).await;
+        let aad = dkim_private_key_aad(&tenant, &domain.id.to_string());
+
+        let load_row = |pool: &Pool, id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, DomainFullRow>(
+                    "SELECT id::text AS id, tenant_id::text AS tenant_id, name, dkim_selector, \
+                            dkim_public_key, dkim_private_key, dkim_enabled \
+                     FROM domains WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("load domain row")
+            }
+        };
+
+        // Partial: selector + public key but no private key → a complete new
+        // pair is provisioned and the row returns to pending.
+        let stale_public = generate_dkim_keypair().unwrap().public_key;
+        sqlx::query(
+            "UPDATE domains SET dkim_selector = 'am-stale', dkim_public_key = $1, \
+                    dkim_private_key = NULL, dkim_verified = true, status = 'verified' \
+             WHERE id = $2",
+        )
+        .bind(&stale_public)
+        .bind(domain.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let row = load_row(&pool, domain.id).await;
+        let mut tx = pool.begin().await.unwrap();
+        let material = ensure_domain_dkim_material(&mut tx, &row)
+            .await
+            .expect("partial material is repaired");
+        tx.commit().await.unwrap();
+        assert_ne!(material.public_key, stale_public, "key rotated");
+        let (selector, public, private, enabled, status, dkim_verified): (
+            String,
+            String,
+            String,
+            bool,
+            String,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled, status, dkim_verified \
+             FROM domains WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(domain.id)
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(selector, material.selector);
+        assert_eq!(public, material.public_key);
+        assert!(is_encrypted_dkim_private_key(&private));
+        assert!(enabled);
+        assert_eq!(status, "pending");
+        assert!(
+            !dkim_verified,
+            "a repair invalidates the prior verification"
+        );
+
+        // Plaintext legacy private key with a matching public key: kept, but
+        // re-encrypted and normalized.
+        let key_pair = generate_dkim_keypair().unwrap();
+        sqlx::query(
+            "UPDATE domains SET dkim_selector = 'am-legacy', dkim_public_key = $1, \
+                    dkim_private_key = $2, dkim_enabled = false \
+             WHERE id = $3",
+        )
+        .bind(&key_pair.public_key)
+        .bind(key_pair.private_key_pem.as_str())
+        .bind(domain.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let row = load_row(&pool, domain.id).await;
+        let mut tx = pool.begin().await.unwrap();
+        let material = ensure_domain_dkim_material(&mut tx, &row)
+            .await
+            .expect("legacy plaintext material is migrated");
+        tx.commit().await.unwrap();
+        assert_eq!(material.selector, "am-legacy");
+        let private: String = sqlx::query_scalar(
+            "SELECT dkim_private_key FROM domains WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(domain.id)
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            is_encrypted_dkim_private_key(&private),
+            "legacy plaintext must be re-encrypted in place"
+        );
+        let decrypted = decrypt_dkim_private_key(&private, &aad).unwrap();
+        assert_eq!(decrypted.as_str(), key_pair.private_key_pem.as_str());
+
+        // Mismatched public key (does not belong to the private key): rotate.
+        sqlx::query("UPDATE domains SET dkim_public_key = $1 WHERE id = $2")
+            .bind(generate_dkim_keypair().unwrap().public_key)
+            .bind(domain.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let row = load_row(&pool, domain.id).await;
+        let mut tx = pool.begin().await.unwrap();
+        let material = ensure_domain_dkim_material(&mut tx, &row)
+            .await
+            .expect("mismatched material is rotated");
+        tx.commit().await.unwrap();
+        assert_ne!(material.selector, "am-legacy");
+
+        cleanup_tenant(&pool, &tenant).await;
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    // ── Platform sender ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn platform_sender_bootstrap_is_idempotent_and_reports_records() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_system_sender").await else {
+            return;
+        };
+        let _env = lock_dkim_env();
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            DKIM_TEST_KEY,
+        );
+        let state = domains_state(pool.clone()).await;
+
+        let first = bootstrap_system_sender(&state)
+            .await
+            .expect("bootstrap provisions the platform sender");
+        assert_eq!(first.domain, SYSTEM_DOMAIN);
+        assert!(!first.records.is_empty(), "records are rendered");
+        // The public key is exposed; the private key never is.
+        let payload = serde_json::to_value(&first).unwrap();
+        assert!(payload.get("private_key").is_none());
+        assert!(payload["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["hostname"]
+                .as_str()
+                .is_some_and(|host| host.contains("_domainkey"))));
+
+        let second = bootstrap_system_sender(&state)
+            .await
+            .expect("bootstrap is idempotent");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.records.len(), first.records.len());
+
+        let status = system_sender_status(&state)
+            .await
+            .expect("status reads the provisioned sender");
+        assert_eq!(status.id, first.id);
+        assert_eq!(status.domain, SYSTEM_DOMAIN);
+
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    #[tokio::test]
+    async fn system_sender_status_refuses_an_absent_sender() {
+        let Some(pool) = crate::test_db::optional_pg_pool("domains_adv_sender_absent").await else {
+            return;
+        };
+        // A unique tenant id: the status query is scoped by tenant + name, so
+        // an absent row is deterministic without touching shared fixtures.
+        let state = domains_state(pool.clone()).await;
+        let absent = sqlx::query_as::<_, SystemSenderStatusRow>(
+            "SELECT id::text AS id, name, status, dkim_selector, dkim_public_key \
+             FROM domains WHERE tenant_id = $1 AND name = $2",
+        )
+        .bind(SYSTEM_TENANT_ID)
+        .bind(SYSTEM_DOMAIN)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        if absent.is_some() {
+            // Another test provisioned the platform sender; the refusal path
+            // is pinned by the pure helper instead.
+            let row = SystemSenderStatusRow {
+                id: "x".into(),
+                name: SYSTEM_DOMAIN.into(),
+                status: "pending".into(),
+                dkim_selector: None,
+                dkim_public_key: None,
+            };
+            let records = match (
+                row.dkim_selector
+                    .as_deref()
+                    .filter(|value| is_valid_dkim_selector(value)),
+                row.dkim_public_key
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty()),
+            ) {
+                (Some(selector), Some(public_key)) => required_sender_dns_records(
+                    &row.name,
+                    selector,
+                    public_key,
+                    &state.config.aws_region,
+                    Config::ses_transport_enabled(),
+                ),
+                _ => Vec::new(),
+            };
+            assert!(records.is_empty(), "incomplete material yields no records");
+            return;
+        }
+        let error = system_sender_status(&state)
+            .await
+            .expect_err("an absent platform sender must be reported");
+        assert!(matches!(error, ApiError::ServiceUnavailable(_)));
     }
 }

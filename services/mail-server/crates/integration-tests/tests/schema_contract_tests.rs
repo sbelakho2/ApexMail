@@ -542,17 +542,20 @@ async fn sessions_table_accepts_insert() {
     apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "sessinsert").await;
-    let _user_id = insert_test_user(&pool, &tenant_id, "sessinsert@test.com").await;
+    let user_id = insert_test_user(&pool, &tenant_id, "sessinsert@test.com").await;
 
-    // Canonical sessions shape (compliance suite's writer shape): VARCHAR(64)
-    // id, VARCHAR(26) user/tenant ids, expires_at NOT NULL. The tools-lineage
-    // token_hash column does not exist on the canonical table.
+    // Canonical sessions shape: VARCHAR(64) id, UUID user_id (migration 229 —
+    // it carries `users.id`), VARCHAR(26) tenant_id, expires_at NOT NULL. The
+    // tools-lineage token_hash column does not exist on the canonical table.
+    // Binding a short non-UUID id here would only pass because the pre-229
+    // VARCHAR(26) column could not hold a real user id at all.
+    let session_id = bounded_id("sess");
     let result = sqlx::query(
         "INSERT INTO sessions (id, user_id, tenant_id, expires_at)
          VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')",
     )
-    .bind(bounded_id("sess"))
-    .bind(bounded_id("usr"))
+    .bind(&session_id)
+    .bind(user_id)
     .bind(&tenant_id)
     .execute(&pool)
     .await;
@@ -562,6 +565,33 @@ async fn sessions_table_accepts_insert() {
         "INSERT INTO sessions failed: {:?}. \
         Sessions table may be missing required columns.",
         result.err()
+    );
+
+    // The stored subject round-trips as the user the FK names.
+    let stored: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM sessions WHERE id = $1")
+        .bind(&session_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("read back the session");
+    assert_eq!(
+        stored,
+        Some(user_id),
+        "sessions.user_id must be the user's id"
+    );
+
+    // And the FK refuses a subject that is not a user at all.
+    let orphan = sqlx::query(
+        "INSERT INTO sessions (id, user_id, tenant_id, expires_at)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')",
+    )
+    .bind(bounded_id("sess2"))
+    .bind(Uuid::new_v4())
+    .bind(&tenant_id)
+    .execute(&pool)
+    .await;
+    assert!(
+        orphan.is_err(),
+        "a session row for a non-existent user must be refused by fk_sessions_user"
     );
 }
 

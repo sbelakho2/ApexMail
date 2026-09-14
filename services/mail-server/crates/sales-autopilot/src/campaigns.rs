@@ -3169,4 +3169,200 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// The campaign state machine: illegal transitions are refused with the
+    /// exact error kind, terminal states are immutable, and a start from a
+    /// paused campaign is the one legal re-entry.
+    #[tokio::test]
+    async fn campaign_state_machine_refuses_illegal_transitions() {
+        let Some(pool) = canonical_test_pool("campaigns::tests::state_machine").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-sm");
+        let other = unique_test_tenant("camp-sm-other");
+        let mgr = CampaignManager::new(10, pool.clone());
+
+        let campaign = mgr
+            .create_campaign(
+                tenant.clone(),
+                "State Machine".into(),
+                "tmpl_sm".into(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(campaign.status, CampaignStatus::Draft);
+
+        let status = |pool: &PgPool, id: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>("SELECT status FROM sales_campaigns WHERE id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Pausing a draft is refused with InvalidInput and writes nothing.
+        let error = mgr
+            .pause_campaign(&tenant, campaign.id)
+            .await
+            .expect_err("a draft cannot be paused");
+        assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+        assert!(error.to_string().contains("not active"), "{error}");
+        assert_eq!(status(&pool, campaign.id).await, "draft");
+
+        // Starting an empty campaign never activates it: it parks in
+        // verification_pending and reports why (durable operation retained).
+        let (unchanged, report) = mgr
+            .start_campaign_operation(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(unchanged.status, CampaignStatus::Draft);
+        assert_eq!(report.phase, CampaignStartPhase::VerificationPending);
+        assert!(
+            report
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no recipients"),
+            "{report:?}"
+        );
+        let (state, operation): (Option<String>, Option<Uuid>) = sqlx::query_as(
+            "SELECT start_state, start_operation_id FROM sales_campaigns WHERE id = $1",
+        )
+        .bind(campaign.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state.as_deref(),
+            Some("verification_pending"),
+            "a zero-recipient start parks the operation"
+        );
+        assert_eq!(
+            operation,
+            Some(report.operation_id),
+            "the durable operation id is retained for the retry"
+        );
+
+        // Make it startable: a verified point and one recipient.
+        let email = format!("sm-{}@example.com", &tenant[..12]);
+        seed_verified_point(&pool, &tenant, &email).await;
+        assert_eq!(
+            mgr.add_recipients(&tenant, campaign.id, vec![email.clone()])
+                .await
+                .unwrap(),
+            1
+        );
+        let (started, resumed) = mgr
+            .start_campaign_operation(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(started.status, CampaignStatus::Active);
+        assert_eq!(resumed.phase, CampaignStartPhase::Active);
+        assert_eq!(
+            resumed.operation_id, report.operation_id,
+            "the retry must resume the same durable start operation"
+        );
+
+        // Starting an ACTIVE campaign is refused with the exact status.
+        let error = mgr
+            .start_campaign(&tenant, campaign.id)
+            .await
+            .expect_err("an active campaign cannot start again");
+        assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot start campaign in status active"),
+            "{error}"
+        );
+        assert_eq!(status(&pool, campaign.id).await, "active");
+
+        // The dispatcher-facing pause records WHY and is active-guarded.
+        mgr.pause_with_error(campaign.id, "email quota exhausted")
+            .await
+            .unwrap();
+        let (paused_status, last_error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, last_error FROM sales_campaigns WHERE id = $1")
+                .bind(campaign.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(paused_status, "paused");
+        assert_eq!(last_error.as_deref(), Some("email quota exhausted"));
+
+        // A paused campaign may legally restart.
+        let restarted = mgr.start_campaign(&tenant, campaign.id).await.unwrap();
+        assert_eq!(restarted.status, CampaignStatus::Active);
+
+        // complete_campaign only moves active → completed.
+        mgr.complete_campaign(campaign.id).await.unwrap();
+        assert_eq!(status(&pool, campaign.id).await, "completed");
+
+        // The terminal state is immutable: no start, no pause, no re-complete
+        // that could resurrect it, and the last_error stays cleared.
+        let error = mgr
+            .start_campaign(&tenant, campaign.id)
+            .await
+            .expect_err("a completed campaign is terminal");
+        assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot start campaign in status completed"),
+            "{error}"
+        );
+        let error = mgr
+            .pause_campaign(&tenant, campaign.id)
+            .await
+            .expect_err("a completed campaign cannot be paused");
+        assert!(error.to_string().contains("not active"), "{error}");
+        // No-op transitions write nothing.
+        mgr.complete_campaign(campaign.id).await.unwrap();
+        mgr.pause_with_error(campaign.id, "should not land")
+            .await
+            .unwrap();
+        let (final_status, final_error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, last_error FROM sales_campaigns WHERE id = $1")
+                .bind(campaign.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(final_status, "completed");
+        assert_eq!(
+            final_error, None,
+            "a terminal campaign must not absorb a later error"
+        );
+
+        // Every transition is tenant-scoped: a stranger gets NotFound, not a
+        // state change.
+        assert!(matches!(
+            mgr.start_campaign(&other, campaign.id).await,
+            Err(SalesError::CampaignNotFound(_))
+        ));
+        assert!(matches!(
+            mgr.pause_campaign(&other, campaign.id).await,
+            Err(SalesError::CampaignNotFound(_))
+        ));
+        assert_eq!(status(&pool, campaign.id).await, "completed");
+
+        // A draft campaign's start is not blocked by a second tenant's active
+        // campaign (the max-active count is per tenant).
+        let stranger_campaign = mgr
+            .create_campaign(other.clone(), "Other".into(), "tmpl_o".into(), "all".into())
+            .await
+            .unwrap();
+        assert_eq!(stranger_campaign.status, CampaignStatus::Draft);
+
+        cleanup_campaign_fixture(&pool, &tenant).await;
+        cleanup_campaign_fixture(&pool, &other).await;
+        sqlx::query("DELETE FROM sales_campaign_recipients WHERE campaign_id = $1")
+            .bind(campaign.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

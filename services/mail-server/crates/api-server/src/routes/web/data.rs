@@ -217,10 +217,15 @@ impl LoadState<i64> {
 /// Monotonic per-process correlation id shared by every loader log line of
 /// one page render (audit F14). Binds (tenant ids, search terms) are never
 /// logged — only the stable query identity and this id.
+///
+/// The sequence is zero-padded so the id stays lexicographically ordered for
+/// its whole range: the plain `web-data-{n}` form made `web-data-10` sort
+/// BEFORE `web-data-9`, which broke both log sorting and the monotonicity
+/// assertion once unrelated tests had consumed the shared counter past 9.
 fn next_correlation_id() -> String {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let seq = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("web-data-{seq}")
+    format!("web-data-{seq:012}")
 }
 
 /// Run one console-data query, preserving failure as uncertainty (audit

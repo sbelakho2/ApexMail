@@ -77,10 +77,12 @@ async fn report_client_error(
         "client-side error reported"
     );
 
-    // Persist to database for analysis
+    // Persist to database for analysis. user_id is UUID (migration 229): the
+    // JWT subject is a UUID string, and binding it without the cast made every
+    // authenticated report fail with "value too long for character varying(26)".
     sqlx::query(
         "INSERT INTO client_errors (id, tenant_id, user_id, error_message, stack_trace, url, user_agent, created_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())",
+         VALUES (gen_random_uuid(), $1, $2::uuid, $3, $4, $5, $6, NOW())",
     )
     .bind(auth.tenant_id.to_string())
     .bind(auth.user_id.as_deref())
@@ -165,5 +167,94 @@ mod tests {
         let output = truncate(&input, 2048);
         assert!(std::str::from_utf8(output.as_bytes()).is_ok());
         assert!(output.contains("😀"));
+    }
+
+    /// The authenticated report path persists the reporter's UUID subject.
+    /// Before migration 229 `client_errors.user_id` was VARCHAR(26) while the
+    /// JWT subject is a 36-character UUID, so every authenticated report
+    /// failed with "value too long" and the endpoint 500'd.
+    #[tokio::test]
+    async fn authenticated_report_persists_the_uuid_subject() {
+        let Some(pool) = crate::test_db::optional_pg_pool("client_errors_uuid_subject").await
+        else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("cerr{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'client error test', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Reporter', 'x', 'owner', 'active', true, NOW(), NOW())",
+        )
+        .bind(user_id)
+        .bind(&tenant)
+        .bind(format!("cerr-{suffix}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let auth = AuthUser {
+            tenant_id: tenant.clone(),
+            user_id: Some(user_id.to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let (status, Json(ack)) = report_client_error(
+            State(state),
+            auth,
+            Json(ClientErrorReport {
+                message: "boom".into(),
+                stack: None,
+                url: Some("https://cp.example/".into()),
+                source: None,
+                user_agent: Some("probe".into()),
+                severity: "error".into(),
+                context: None,
+            }),
+        )
+        .await
+        .expect("an authenticated report must be accepted");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(ack.accepted);
+
+        let stored: (Option<uuid::Uuid>,) = sqlx::query_as(
+            "SELECT user_id FROM client_errors WHERE tenant_id = $1
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("read the stored report");
+        assert_eq!(
+            stored.0,
+            Some(user_id),
+            "the stored report must carry the UUID subject"
+        );
+
+        // Cleanup.
+        let _ = sqlx::query("DELETE FROM client_errors WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await;
+        pool.close().await;
     }
 }

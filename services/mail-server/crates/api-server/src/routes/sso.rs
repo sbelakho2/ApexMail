@@ -847,6 +847,13 @@ fn sanitize_redirect(next: &str) -> String {
         return "/".to_string();
     }
 
+    // Control characters (CR/LF/TAB/DEL/C1) can smuggle headers when the
+    // value later reaches `Set-Cookie`/`Location`, and must never survive
+    // the sanitizer in either raw or percent-encoded form.
+    if next.chars().any(char::is_control) {
+        return "/dashboard".to_string();
+    }
+
     let first = next.as_bytes()[0];
     if first != b'/' {
         return "/dashboard".to_string();
@@ -863,6 +870,13 @@ fn sanitize_redirect(next: &str) -> String {
         Ok(d) => d.to_string(),
         Err(_) => return "/dashboard".to_string(),
     };
+
+    // Percent-encoded control characters must be caught after decoding too
+    // (the value returned below is `next`, so the raw check alone is not
+    // enough).
+    if decoded.chars().any(char::is_control) {
+        return "/dashboard".to_string();
+    }
 
     // Re-check after decoding (protocol-relative, backslash)
     if decoded.len() > 1 {
@@ -1695,5 +1709,877 @@ mod tests {
         assert_eq!(parsed.sub, Some("1234567890".into()));
         assert_eq!(parsed.email, Some("user@example.com".into()));
         assert_eq!(parsed.email_verified, Some("true".into()));
+    }
+}
+
+// ─── Adversarial handler-level tests ──────────────────────────────
+
+#[cfg(test)]
+mod adversarial_handler_tests {
+    use super::*;
+    use crate::app::test_support::{
+        test_config, test_state_over_lazy, test_state_over_with_config,
+    };
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use sqlx::PgPool;
+    use tower::ServiceExt;
+
+    fn unique(prefix: &str) -> String {
+        format!(
+            "{prefix}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..18]
+        )
+    }
+
+    /// A config with a REAL RSA keypair so `complete_sso_login` can actually
+    /// sign the session JWT (the default test config's placeholder PEM
+    /// cannot).
+    fn rsa_test_config() -> crate::config::Config {
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+            .expect("valid PKCS8 private key");
+        let mut config = test_config();
+        config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+        config.jwt_public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("public PKCS8 PEM")
+            .to_string();
+        config
+    }
+
+    fn sso_app(state: &AppState) -> Router {
+        Router::new()
+            .nest("/v1/auth/sso", router())
+            .with_state(state.clone())
+    }
+
+    async fn get(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(cookie) = cookie {
+            builder = builder.header("cookie", cookie);
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn cookie_named(response: &Response, prefix: &str) -> Option<String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find(|cookie| cookie.starts_with(prefix))
+            .map(str::to_string)
+    }
+
+    fn location(response: &Response) -> String {
+        response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    // ── Initiation ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn sso_initiation_requires_configured_providers() {
+        let state = test_state_over_lazy().await;
+        let app = sso_app(&state);
+        for provider in ["google", "github"] {
+            let response = get(&app, &format!("/v1/auth/sso/{provider}"), None).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "an unconfigured {provider} provider must be an explicit 404, never a silent success"
+            );
+            assert!(
+                cookie_named(&response, "am_sso_state_").is_none(),
+                "no state cookie may be issued by an unconfigured provider"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sso_initiation_redirects_with_a_signed_state_cookie() {
+        let mut config = test_config();
+        config.google_client_id = Some("google-client-id".into());
+        config.github_client_id = Some("github-client-id".into());
+        let state = test_state_over_with_config(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://x@127.0.0.1:1/x")
+                .unwrap(),
+            config,
+        )
+        .await;
+        let app = sso_app(&state);
+
+        // Google: authorization URL + state cookie.
+        let response = get(&app, "/v1/auth/sso/google?next=%2Fsettings%2Fbilling", None).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let auth_url = location(&response);
+        assert!(auth_url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
+        assert!(auth_url.contains("client_id=google-client-id"));
+        assert!(auth_url.contains(
+            "redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fv1%2Fauth%2Fsso%2Fgoogle%2Fcallback"
+        ));
+        let cookie = cookie_named(&response, "am_sso_state_google=").expect("state cookie");
+        assert!(cookie.contains("HttpOnly") && cookie.contains("Max-Age=600"));
+        assert!(!cookie.contains("Secure"), "dev cookies stay insecure");
+        let cookie_state = cookie
+            .strip_prefix("am_sso_state_google=")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let parsed = url::Url::parse(&auth_url).unwrap();
+        let query_state = parsed
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("state query parameter");
+        assert_eq!(query_state, cookie_state, "URL state and cookie must match");
+        assert!(cookie_state.ends_with(":/settings/billing"));
+
+        // GitHub: same contract, returnUrl alias.
+        let response = get(&app, "/v1/auth/sso/github?returnUrl=%2Fbilling", None).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let auth_url = location(&response);
+        assert!(auth_url.starts_with("https://github.com/login/oauth/authorize?"));
+        let cookie = cookie_named(&response, "am_sso_state_github=").expect("state cookie");
+        let cookie_state = cookie
+            .strip_prefix("am_sso_state_github=")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(cookie_state.ends_with(":/billing"), "{cookie_state}");
+
+        // Open-redirect attempt: the state embeds only the sanitized target.
+        let response = get(
+            &app,
+            "/v1/auth/sso/google?next=https%3A%2F%2Fevil.example",
+            None,
+        )
+        .await;
+        let cookie = cookie_named(&response, "am_sso_state_google=").unwrap();
+        let cookie_state = cookie
+            .strip_prefix("am_sso_state_google=")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(cookie_state.ends_with(":/dashboard"), "{cookie_state}");
+
+        // Unknown query parameters are rejected by the strict contract.
+        let response = get(&app, "/v1/auth/sso/google?unexpected=1", None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A CRLF-smuggling `next` must not reach the Set-Cookie header: the
+        // request stays a clean redirect with a sanitized target.
+        let response = get(
+            &app,
+            "/v1/auth/sso/google?next=%2Fdashboard%0D%0ASet-Cookie%3A%20x%3D1",
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "a header-smuggling next must not turn into a 500"
+        );
+        let cookie = cookie_named(&response, "am_sso_state_google=").expect("state cookie");
+        assert!(
+            !cookie.contains("Set-Cookie: x=1"),
+            "no injected header may survive into the cookie: {cookie}"
+        );
+
+        // Production adds the Secure attribute.
+        let mut config = test_config();
+        config.google_client_id = Some("google-client-id".into());
+        config.environment = crate::config::Environment::Production;
+        let prod_state = test_state_over_with_config(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://x@127.0.0.1:1/x")
+                .unwrap(),
+            config,
+        )
+        .await;
+        let prod_app = sso_app(&prod_state);
+        let response = get(&prod_app, "/v1/auth/sso/google", None).await;
+        let cookie = cookie_named(&response, "am_sso_state_google=").unwrap();
+        assert!(
+            cookie.contains("; Secure"),
+            "production state cookies are Secure"
+        );
+    }
+
+    // ── Callback state validation ────────────────────────────────
+
+    #[tokio::test]
+    async fn callbacks_refuse_denied_missing_and_mismatched_state() {
+        let mut config = test_config();
+        config.google_client_id = Some("google-client-id".into());
+        config.google_client_secret = Some("google-secret".into());
+        config.github_client_id = Some("github-client-id".into());
+        config.github_client_secret = Some("github-secret".into());
+        let state = test_state_over_with_config(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://x@127.0.0.1:1/x")
+                .unwrap(),
+            config,
+        )
+        .await;
+        let app = sso_app(&state);
+
+        for provider in ["google", "github"] {
+            // Provider-denied logins redirect to the friendly login error.
+            let response = get(
+                &app,
+                &format!("/v1/auth/sso/{provider}/callback?error=access_denied"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(location(&response), "/login?error=sso_denied");
+
+            // Missing state parameter.
+            let response = get(
+                &app,
+                &format!("/v1/auth/sso/{provider}/callback?code=abc"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+            // State parameter but no state cookie.
+            let state_token = generate_oauth_state("/dashboard").unwrap();
+            let encoded =
+                url::form_urlencoded::byte_serialize(state_token.as_bytes()).collect::<String>();
+            let response = get(
+                &app,
+                &format!("/v1/auth/sso/{provider}/callback?code=abc&state={encoded}"),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+            // Replayed state: the cookie carries a different token.
+            let attacker_state = generate_oauth_state("/dashboard").unwrap();
+            let attacker_encoded =
+                url::form_urlencoded::byte_serialize(attacker_state.as_bytes()).collect::<String>();
+            let cookie_name = format!("am_sso_state_{provider}=");
+            let response = get(
+                &app,
+                &format!("/v1/auth/sso/{provider}/callback?code=abc&state={attacker_encoded}"),
+                Some(&format!("{cookie_name}{state_token}")),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "a replayed/mismatched state must be refused"
+            );
+
+            // Matching state + code but no authorization code → 400.
+            let response = get(
+                &app,
+                &format!("/v1/auth/sso/{provider}/callback?state={encoded}"),
+                Some(&format!("{cookie_name}{state_token}")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // Matching state + code but a half-configured provider (client id,
+        // no secret) is refused before any token exchange — an unconfigured
+        // provider must never produce a session.
+        let mut half_configured = test_config();
+        half_configured.google_client_id = Some("google-client-id".into());
+        let half_state = test_state_over_with_config(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://x@127.0.0.1:1/x")
+                .unwrap(),
+            half_configured,
+        )
+        .await;
+        let half_app = sso_app(&half_state);
+        let state_token = generate_oauth_state("/dashboard").unwrap();
+        let encoded =
+            url::form_urlencoded::byte_serialize(state_token.as_bytes()).collect::<String>();
+        let response = get(
+            &half_app,
+            &format!("/v1/auth/sso/google/callback?code=abc&state={encoded}"),
+            Some(&format!("am_sso_state_google={state_token}")),
+        )
+        .await;
+        assert!(
+            response.status().is_server_error(),
+            "an unconfigured provider must fail, not fake a session: {}",
+            response.status()
+        );
+        assert!(cookie_named(&response, "am_session=").is_none());
+    }
+
+    #[test]
+    fn oauth_state_validation_matrix() {
+        let token = generate_oauth_state("/settings/profile").unwrap();
+        let headers = |cookie: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, cookie.parse().unwrap());
+            headers
+        };
+
+        // Matching state yields the sanitized return target.
+        assert_eq!(
+            validate_oauth_state(
+                &headers(&format!("am_sso_state_google={token}")),
+                "am_sso_state_google",
+                Some(&token)
+            )
+            .unwrap(),
+            "/settings/profile"
+        );
+        // Missing parameter / missing cookie / mismatched token.
+        assert!(matches!(
+            validate_oauth_state(
+                &headers(&format!("am_sso_state_google={token}")),
+                "am_sso_state_google",
+                None
+            ),
+            Err(ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_oauth_state(&headers("other=1"), "am_sso_state_google", Some(&token)),
+            Err(ApiError::Unauthorized(_))
+        ));
+        assert!(matches!(
+            validate_oauth_state(
+                &headers("am_sso_state_google=different"),
+                "am_sso_state_google",
+                Some(&token)
+            ),
+            Err(ApiError::Unauthorized(_))
+        ));
+        // A malicious target embedded in a valid state is still sanitized.
+        let evil = generate_oauth_state("https://evil.example").unwrap();
+        assert_eq!(
+            validate_oauth_state(
+                &headers(&format!("am_sso_state_github={evil}")),
+                "am_sso_state_github",
+                Some(&evil)
+            )
+            .unwrap(),
+            "/dashboard"
+        );
+    }
+
+    #[test]
+    fn redirect_sanitizer_rejects_every_escape_shape() {
+        for rejected in [
+            "//evil.example",
+            "/\\evil.example",
+            "/%2Fevil.example",
+            "/%5Cevil.example",
+            "/a/../b",
+            "/a/%00b",
+            "\u{1}",
+            "javascript:alert(1)",
+            "/dashboard\r\nSet-Cookie: x=1",
+            "/dashboard\u{7}bell",
+        ] {
+            assert_eq!(
+                sanitize_redirect(rejected),
+                "/dashboard",
+                "{rejected:?} must not survive"
+            );
+        }
+        // Honest paths keep their query/fragment-free form and unicode.
+        assert_eq!(sanitize_redirect("/sättings/billing"), "/sättings/billing");
+        assert_eq!(sanitize_redirect("/a/b?c=d"), "/a/b?c=d");
+    }
+
+    #[test]
+    fn state_cookie_helpers_refuse_header_injection() {
+        let mut response = Redirect::to("/").into_response();
+        assert!(matches!(
+            set_state_cookie(&mut response, "am_sso_state_google", "bad\nvalue", false),
+            Err(ApiError::Internal(_))
+        ));
+        assert!(matches!(
+            clear_state_cookie(&mut response, "bad\nname", false),
+            Err(ApiError::Internal(_))
+        ));
+        // Honest names/values still set and clear.
+        assert!(set_state_cookie(&mut response, "am_sso_state_google", "ok", false).is_ok());
+        assert!(clear_state_cookie(&mut response, "am_sso_state_google", false).is_ok());
+    }
+
+    // ── complete_sso_login against a real database ───────────────
+
+    async fn seed_tenant(pool: &PgPool, slug_prefix: &str) -> String {
+        let tenant = format!("tsso{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) \
+             VALUES ($1, 'SSO Adv Co', $2, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("{slug_prefix}-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("seed sso tenant");
+        tenant
+    }
+
+    async fn seed_user(
+        pool: &PgPool,
+        tenant: &str,
+        email: &str,
+        role: &str,
+        status: &str,
+        mfa_enabled: bool,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, \
+                    email_verified, mfa_enabled, metadata, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'SSO User', '$2b$04$placeholder', $4, $5, true, $6, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(email)
+        .bind(role)
+        .bind(status)
+        .bind(mfa_enabled)
+        .execute(pool)
+        .await
+        .expect("seed sso user");
+        id
+    }
+
+    async fn cleanup_tenant(pool: &PgPool, tenant: &str) {
+        sqlx::query(
+            "DELETE FROM user_identities WHERE user_id IN (SELECT id FROM users WHERE tenant_id = $1)",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("cleanup identities");
+        sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup users");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    async fn session_claims(
+        response: &Response,
+        config: &crate::config::Config,
+    ) -> crate::middleware::auth::JwtClaims {
+        let cookie = cookie_named(response, "am_session=").expect("session cookie");
+        assert!(
+            cookie.contains("HttpOnly"),
+            "session cookie must be HttpOnly: {cookie}"
+        );
+        assert!(cookie.contains("SameSite=Lax"));
+        let token = cookie
+            .strip_prefix("am_session=")
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        validation.validate_exp = true;
+        jsonwebtoken::decode::<crate::middleware::auth::JwtClaims>(
+            token,
+            &jsonwebtoken::DecodingKey::from_rsa_pem(config.jwt_public_key_pem.as_bytes())
+                .expect("decoding key"),
+            &validation,
+        )
+        .expect("the issued session JWT must verify with the configured key")
+        .claims
+    }
+
+    #[tokio::test]
+    async fn complete_sso_login_provisions_a_new_tenant_and_user() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sso_adv_provision").await else {
+            return;
+        };
+        let config = rsa_test_config();
+        let state = test_state_over_with_config(pool.clone(), config.clone()).await;
+        let subject = unique("sub-new");
+        let email = format!("{}@example.com", unique("newuser"));
+
+        let response = complete_sso_login(
+            &state,
+            "google",
+            &subject,
+            Some(&email),
+            "Alice Smith",
+            "/welcome",
+        )
+        .await
+        .expect("first SSO login provisions");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(location(&response), "/welcome");
+        let claims = session_claims(&response, &config).await;
+
+        let (tenant_id, role, status, email_verified, password_hash, user_email): (
+            String,
+            String,
+            String,
+            bool,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT tenant_id, role, status, email_verified, password_hash, email \
+             FROM users WHERE id = $1::uuid",
+        )
+        .bind(&claims.sub)
+        .fetch_one(&pool)
+        .await
+        .expect("provisioned user");
+        assert_eq!(tenant_id, claims.tenant_id);
+        assert_eq!(role, "owner", "the first SSO user owns the new tenant");
+        assert_eq!(status, "active");
+        assert!(
+            email_verified,
+            "the IdP verified the address before provisioning"
+        );
+        assert!(
+            password_hash.starts_with("$sso$google$"),
+            "no password may ever verify for an SSO-only account"
+        );
+        assert_eq!(user_email, email.to_lowercase());
+        assert_eq!(claims.scopes, vec!["*".to_string()]);
+        assert_eq!(claims.typ.as_deref(), Some("session"));
+        assert!(claims.exp > claims.iat);
+        uuid::Uuid::parse_str(&claims.sub).expect("user id is a uuid");
+        assert_eq!(claims.tenant_id.len(), 26, "ULID-shaped tenant id");
+
+        let tenant: (String, String) =
+            sqlx::query_as("SELECT name, metadata->>'sso_provider' FROM tenants WHERE id = $1")
+                .bind(&claims.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("provisioned tenant");
+        assert_eq!(tenant.0, "Alice");
+        assert_eq!(tenant.1, "google");
+        let identity: (String, String) = sqlx::query_as(
+            "SELECT user_id::text, COALESCE(email_at_link, '') FROM user_identities \
+             WHERE provider = 'google' AND subject = $1",
+        )
+        .bind(&subject)
+        .fetch_one(&pool)
+        .await
+        .expect("identity link bound at provisioning");
+        assert_eq!(identity.0, claims.sub);
+        assert_eq!(identity.1, email.to_lowercase());
+
+        cleanup_tenant(&pool, &claims.tenant_id).await;
+    }
+
+    #[tokio::test]
+    async fn complete_sso_login_binds_identity_first_and_survives_email_changes() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sso_adv_link").await else {
+            return;
+        };
+        let config = rsa_test_config();
+        let state = test_state_over_with_config(pool.clone(), config.clone()).await;
+        let tenant = seed_tenant(&pool, "sso-link").await;
+        let email = format!("{}@example.com", unique("linked"));
+        let user_id = seed_user(&pool, &tenant, &email, "developer", "active", false).await;
+        let subject = unique("sub-linked");
+
+        // First login: email match (case-insensitive) links the identity.
+        let response = complete_sso_login(
+            &state,
+            "google",
+            &subject,
+            Some(&email.to_uppercase()),
+            "Linked User",
+            "/dashboard",
+        )
+        .await
+        .expect("email-matched login");
+        let claims = session_claims(&response, &config).await;
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.tenant_id, tenant);
+        assert_eq!(
+            claims.scopes,
+            vec![
+                "messages:send",
+                "messages:read",
+                "domains:read",
+                "templates:read",
+                "templates:write",
+                "events:read",
+                "analytics:read",
+                "contacts:read",
+                "contacts:write",
+            ]
+        );
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_identities WHERE provider = 'google' AND subject = $1",
+        )
+        .bind(&subject)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(linked, 1, "first-link fallback records the identity");
+        let metadata: serde_json::Value =
+            sqlx::query_scalar("SELECT metadata FROM users WHERE id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(metadata["last_sso_provider"], "google");
+        assert!(metadata["last_sso_login"].is_string());
+
+        // The IdP-side email CHANGES: the identity link still resolves.
+        let response = complete_sso_login(
+            &state,
+            "google",
+            &subject,
+            Some("totally-different@example.com"),
+            "Renamed",
+            "/dashboard",
+        )
+        .await
+        .expect("identity-linked login");
+        let claims = session_claims(&response, &config).await;
+        assert_eq!(
+            claims.sub,
+            user_id.to_string(),
+            "email changes cannot re-point the account"
+        );
+        let identities: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE subject = $1")
+                .bind(&subject)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(identities, 1, "no second link is created");
+
+        cleanup_tenant(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn identity_link_wins_over_a_matching_email_on_another_account() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sso_adv_takeover").await else {
+            return;
+        };
+        let config = rsa_test_config();
+        let state = test_state_over_with_config(pool.clone(), config.clone()).await;
+        let victim_tenant = seed_tenant(&pool, "sso-victim").await;
+        let attacker_tenant = seed_tenant(&pool, "sso-attacker").await;
+        let shared_email = format!("{}@example.com", unique("shared"));
+        let victim = seed_user(
+            &pool,
+            &victim_tenant,
+            &shared_email,
+            "viewer",
+            "active",
+            false,
+        )
+        .await;
+        let attacker = seed_user(
+            &pool,
+            &attacker_tenant,
+            &format!("{}@example.com", unique("attacker")),
+            "viewer",
+            "active",
+            false,
+        )
+        .await;
+        let subject = unique("sub-attacker");
+        sqlx::query(
+            "INSERT INTO user_identities (provider, subject, user_id, email_at_link) \
+             VALUES ('github', $1, $2, 'attacker@example.com')",
+        )
+        .bind(&subject)
+        .bind(attacker)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The IdP account is linked to the attacker; the verified email names
+        // the victim. The link must win — email never re-points a link.
+        let response = complete_sso_login(
+            &state,
+            "github",
+            &subject,
+            Some(&shared_email),
+            "Attacker",
+            "/dashboard",
+        )
+        .await
+        .expect("linked login");
+        let claims = session_claims(&response, &config).await;
+        assert_eq!(
+            claims.sub,
+            attacker.to_string(),
+            "email must not hijack a linked account"
+        );
+        assert_ne!(claims.sub, victim.to_string());
+        let victim_links: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE user_id = $1")
+                .bind(victim)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            victim_links, 0,
+            "the victim account is never linked by email"
+        );
+
+        cleanup_tenant(&pool, &victim_tenant).await;
+        cleanup_tenant(&pool, &attacker_tenant).await;
+    }
+
+    #[tokio::test]
+    async fn complete_sso_login_gates_inactive_and_mfa_accounts() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sso_adv_gates").await else {
+            return;
+        };
+        let config = rsa_test_config();
+        let state = test_state_over_with_config(pool.clone(), config.clone()).await;
+        let tenant = seed_tenant(&pool, "sso-gates").await;
+
+        // Inactive account.
+        let inactive_email = format!("{}@example.com", unique("inactive"));
+        let inactive_subject = unique("sub-inactive");
+        seed_user(
+            &pool,
+            &tenant,
+            &inactive_email,
+            "developer",
+            "suspended",
+            false,
+        )
+        .await;
+        let response = complete_sso_login(
+            &state,
+            "google",
+            &inactive_subject,
+            Some(&inactive_email),
+            "Inactive",
+            "/dashboard",
+        )
+        .await
+        .unwrap();
+        assert_eq!(location(&response), "/login?error=account_inactive");
+        assert!(
+            cookie_named(&response, "am_session=").is_none(),
+            "an inactive account must never receive a session"
+        );
+
+        // MFA-enrolled user: SSO must not bypass the second factor.
+        let mfa_email = format!("{}@example.com", unique("mfa"));
+        let mfa_subject = unique("sub-mfa");
+        seed_user(&pool, &tenant, &mfa_email, "developer", "active", true).await;
+        let response = complete_sso_login(
+            &state,
+            "google",
+            &mfa_subject,
+            Some(&mfa_email),
+            "MFA",
+            "/dashboard",
+        )
+        .await
+        .unwrap();
+        assert_eq!(location(&response), "/login?error=mfa_required");
+        assert!(cookie_named(&response, "am_session=").is_none());
+
+        // Role-mandated MFA (owner) is gated even without enrollment.
+        let owner_email = format!("{}@example.com", unique("owner"));
+        let owner_subject = unique("sub-owner");
+        seed_user(&pool, &tenant, &owner_email, "owner", "active", false).await;
+        let response = complete_sso_login(
+            &state,
+            "google",
+            &owner_subject,
+            Some(&owner_email),
+            "Owner",
+            "/dashboard",
+        )
+        .await
+        .unwrap();
+        assert_eq!(location(&response), "/login?error=mfa_required");
+
+        cleanup_tenant(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn complete_sso_login_refuses_unverified_email_without_a_link() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sso_adv_unverified").await else {
+            return;
+        };
+        let config = rsa_test_config();
+        let state = test_state_over_with_config(pool.clone(), config.clone()).await;
+        let subject = unique("sub-unverified");
+        let response =
+            complete_sso_login(&state, "github", &subject, None, "No Email", "/dashboard")
+                .await
+                .expect("the refusal is a redirect, not an error");
+        assert_eq!(location(&response), "/login?error=sso_failed");
+        assert!(cookie_named(&response, "am_session=").is_none());
+        let identities: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE subject = $1")
+                .bind(&subject)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            identities, 0,
+            "nothing may be provisioned without a verified email"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_sso_login_fails_honestly_when_the_signing_key_is_broken() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sso_adv_bad_key").await else {
+            return;
+        };
+        // The default test config carries a placeholder PEM: signing must
+        // fail loudly instead of issuing an unverifiable session.
+        let state = test_state_over_with_config(pool.clone(), test_config()).await;
+        let tenant = seed_tenant(&pool, "sso-badkey").await;
+        let email = format!("{}@example.com", unique("badkey"));
+        seed_user(&pool, &tenant, &email, "developer", "active", false).await;
+        let error = complete_sso_login(
+            &state,
+            "google",
+            &unique("sub-badkey"),
+            Some(&email),
+            "Bad Key",
+            "/dashboard",
+        )
+        .await
+        .expect_err("a broken signing key must fail the login");
+        assert!(matches!(error, ApiError::Internal(_)));
+        cleanup_tenant(&pool, &tenant).await;
+    }
+
+    #[test]
+    fn viewer_and_unknown_role_scope_sets_are_bounded() {
+        // The scope mapping is embedded in complete_sso_login; this pins the
+        // vocabulary against the role table.
+        assert!(crate::routes::auth::role_requires_mfa("owner"));
+        assert!(crate::routes::auth::role_requires_mfa("admin"));
+        assert!(!crate::routes::auth::role_requires_mfa("developer"));
+        assert!(!crate::routes::auth::role_requires_mfa("viewer"));
     }
 }

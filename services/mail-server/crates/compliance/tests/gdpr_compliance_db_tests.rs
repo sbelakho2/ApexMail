@@ -1,10 +1,12 @@
 //! DB-backed integration tests for the compliance crate.
 //!
 //! Gated on `TEST_DATABASE_URL` (workspace convention — see
-//! `api-server/src/lib.rs`). A dedicated database (`<db>_compliance`) is
-//! derived from the URL, dropped and recreated once per binary run, and the
-//! minimal table shapes the crate's queries touch are created. When the
-//! variable is unset every test skips.
+//! `api-server/src/lib.rs`). Each test provisions its OWN throwaway database
+//! cloned from the canonical template carrying the REAL production migration
+//! chain (`migrator::test_support::fresh_canonical_pool`, audits F01/F76/F77),
+//! so the queries here run against the canonical schema, not a hand-written
+//! subset. When the variable is unset every test skips; a CONFIGURED
+//! provisioning failure panics.
 //!
 //! Coverage (audit items A, B, E, F, G, H, I-1):
 //! - erasure is scoped to the data subject (other users' data survives,
@@ -20,348 +22,41 @@ use compliance::config::{AuditConfig, GdprConfig};
 use compliance::gdpr_automation::{ErasureStore, GdprAutomation, StoreErasureStatus};
 use compliance::types::{AuditAction, AuditOutcome, AuditResource, LogContext};
 use sqlx::PgPool;
-use std::time::Duration;
 use uuid::Uuid;
 
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 
-const MAIN_SCHEMA: &str = r#"
--- The CP mirror production submits also write (gdpr_automation.rs
--- submit_request): without it the DB-backed submit tests fail with
--- "relation gdpr_requests does not exist" — these tests never ran before
--- TEST_DATABASE_URL was wired into the sweep.
-CREATE TABLE IF NOT EXISTS gdpr_requests (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    request_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    token_hash TEXT,
-    fulfilled_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS data_subject_requests (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    request_type TEXT NOT NULL,
-    email TEXT NOT NULL,
-    verification_token_hash TEXT NOT NULL,
-    verified BOOLEAN NOT NULL DEFAULT FALSE,
-    verified_at TIMESTAMPTZ,
-    status TEXT NOT NULL DEFAULT 'pending_verification',
-    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    processed_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ NOT NULL,
-    result JSONB,
-    -- Migration 213 statutory clock.
-    received_at TIMESTAMPTZ,
-    identity_verified_at TIMESTAMPTZ,
-    statutory_due_at TIMESTAMPTZ,
-    extension_due_at TIMESTAMPTZ,
-    extension_reason TEXT,
-    extension_notified_at TIMESTAMPTZ,
-    CONSTRAINT dsr_extension_requires_justification CHECK (
-        extension_due_at IS NULL
-        OR (extension_reason IS NOT NULL AND length(btrim(extension_reason)) > 0
-            AND extension_notified_at IS NOT NULL)
-    )
-);
--- Migration 213: the DSR verification outbox (previously runtime-created).
-CREATE TABLE IF NOT EXISTS dsr_verification_outbox (
-    id TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    verification_token TEXT NOT NULL,
-    verify_url TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    sent_at TIMESTAMPTZ
-);
--- Migration 214: retention classes; erasure resolves the statutory class.
-CREATE TABLE IF NOT EXISTS retention_classes (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL,
-    statutory BOOLEAN NOT NULL DEFAULT FALSE,
-    minimum_days INTEGER NOT NULL CHECK (minimum_days >= 0),
-    maximum_days INTEGER,
-    retention_days INTEGER NOT NULL CHECK (retention_days >= 0),
-    legal_basis_reference TEXT,
-    jurisdiction VARCHAR(10),
-    customer_selectable BOOLEAN NOT NULL DEFAULT FALSE,
-    registry_category_id TEXT,
-    review_status VARCHAR(30) NOT NULL DEFAULT 'legal_input_required',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- Migration 213: legally-restricted archive.
-CREATE TABLE IF NOT EXISTS legal_retention_archive (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    subject_email_hash TEXT NOT NULL,
-    source_table TEXT NOT NULL,
-    source_record_id TEXT NOT NULL,
-    retention_class_id TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    state VARCHAR(30) NOT NULL DEFAULT 'legally_restricted',
-    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    statutory_expiry_at TIMESTAMPTZ NOT NULL,
-    statutory_expired_at TIMESTAMPTZ,
-    deleted_at TIMESTAMPTZ,
-    disclosure JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (source_table, source_record_id)
-);
-CREATE TABLE IF NOT EXISTS gdpr_exports (
-    id TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    data JSONB NOT NULL,
-    export_url TEXT,
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS consent_records (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    subscriber_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    consent_type TEXT NOT NULL,
-    granted BOOLEAN NOT NULL,
-    granted_at TIMESTAMPTZ,
-    revoked_at TIMESTAMPTZ,
-    source TEXT NOT NULL,
-    ip_address TEXT,
-    user_agent TEXT,
-    proof_document TEXT,
-    expires_at TIMESTAMPTZ,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    UNIQUE (tenant_id, subscriber_id, consent_type)
-);
-CREATE TABLE IF NOT EXISTS double_opt_in_tokens (
-    tenant_id TEXT NOT NULL,
-    subscriber_id TEXT NOT NULL,
-    consent_type TEXT NOT NULL,
-    email TEXT NOT NULL,
-    token_hash TEXT NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id, subscriber_id, consent_type)
-);
-CREATE TABLE IF NOT EXISTS suppression_list (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, email)
-);
--- F1: the CANONICAL event store (migration 075) — the phantom
--- subscribers/message_events/tracking_events/engagement_events/
--- subscriber_analytics fixtures are gone; the tests now prove the real map.
-CREATE TABLE IF NOT EXISTS events (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    message_id TEXT,
-    event_type TEXT NOT NULL,
-    recipient TEXT,
-    metadata JSONB,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- Canonical message store (migration 073 shape; id UUID like 052/073).
-CREATE TABLE IF NOT EXISTS messages (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id TEXT NOT NULL,
-    from_email TEXT NOT NULL,
-    to_emails JSONB NOT NULL,
-    cc_emails JSONB,
-    bcc_emails JSONB,
-    subject TEXT NOT NULL,
-    html_body TEXT,
-    text_body TEXT,
-    status TEXT NOT NULL DEFAULT 'queued',
-    tags JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS contacts (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    name TEXT
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id TEXT,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    name TEXT,
-    password_hash TEXT,
-    mfa_secret TEXT,
-    status TEXT NOT NULL DEFAULT 'active'
-);
-CREATE TABLE IF NOT EXISTS api_keys (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS webhooks (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    url VARCHAR(2048) NOT NULL
-);
-CREATE TABLE IF NOT EXISTS invoices (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    amount BIGINT NOT NULL DEFAULT 0,
-    billing_address TEXT,
-    -- Canonical (052/056/076) accounting column the legal archive needs to
-    -- compute the seven-year statutory expiry: issued_at.
-    issued_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT,
-    user_id TEXT,
-    session_id TEXT,
-    action TEXT NOT NULL,
-    resource TEXT NOT NULL,
-    resource_id TEXT,
-    details JSONB NOT NULL,
-    ip_address TEXT,
-    user_agent TEXT,
-    outcome TEXT NOT NULL,
-    error_message TEXT,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    hash TEXT NOT NULL,
-    previous_hash TEXT,
-    signature TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS audit_logs_archive (LIKE audit_logs INCLUDING ALL);
-"#;
-
-/// Schema where the CANONICAL event store is a VIEW — DELETE fails with a
-/// non-missing-table error, injecting a genuine store failure (audit
-/// finding B) against the real erasure map.
-const FAILING_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS data_subject_requests (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    request_type TEXT NOT NULL,
-    email TEXT NOT NULL,
-    verification_token_hash TEXT NOT NULL,
-    verified BOOLEAN NOT NULL DEFAULT FALSE,
-    verified_at TIMESTAMPTZ,
-    status TEXT NOT NULL DEFAULT 'pending_verification',
-    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    processed_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ NOT NULL,
-    result JSONB,
-    received_at TIMESTAMPTZ,
-    identity_verified_at TIMESTAMPTZ,
-    statutory_due_at TIMESTAMPTZ,
-    extension_due_at TIMESTAMPTZ,
-    extension_reason TEXT,
-    extension_notified_at TIMESTAMPTZ
-);
-CREATE TABLE IF NOT EXISTS retention_classes (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL,
-    statutory BOOLEAN NOT NULL DEFAULT FALSE,
-    minimum_days INTEGER NOT NULL CHECK (minimum_days >= 0),
-    maximum_days INTEGER,
-    retention_days INTEGER NOT NULL CHECK (retention_days >= 0),
-    legal_basis_reference TEXT,
-    jurisdiction VARCHAR(10),
-    customer_selectable BOOLEAN NOT NULL DEFAULT FALSE,
-    registry_category_id TEXT,
-    review_status VARCHAR(30) NOT NULL DEFAULT 'legal_input_required',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS events_backing (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    recipient TEXT,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- DISTINCT makes the view non-auto-updatable: DELETE FROM events fails with
--- a non-missing-table error (SQLSTATE 42501) — a genuine store failure.
-CREATE VIEW events AS SELECT DISTINCT * FROM events_backing;
-"#;
-
-async fn isolated_pool(db_suffix: &str, schema: &str) -> Option<PgPool> {
-    let database_url = match std::env::var("TEST_DATABASE_URL") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => {
-            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed compliance tests");
-            return None;
-        }
-    };
-    let (server_part, db_part) = database_url.rsplit_once('/')?;
-    let db_only = db_part.split('?').next().unwrap_or(db_part);
-    let isolated = format!("{db_only}_{db_suffix}");
-    let isolated_url = format!("{server_part}/{isolated}");
-    let admin_url = format!("{server_part}/postgres");
-
-    let admin = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&admin_url)
-        .await
-        .ok()?;
-
-    let _ = sqlx::query(&format!(
-        r#"DROP DATABASE IF EXISTS "{isolated}" WITH (FORCE)"#
-    ))
-    .execute(&admin)
-    .await;
-    if sqlx::query(&format!(r#"CREATE DATABASE "{isolated}""#))
-        .execute(&admin)
-        .await
-        .is_err()
-    {
-        eprintln!("skipping: could not create isolated test database {isolated}");
-        return None;
-    }
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&isolated_url)
-        .await
-        .ok()?;
-
-    sqlx::raw_sql(schema)
-        .execute(&pool)
-        .await
-        .expect("failed to create test schema");
-
-    Some(pool)
-}
-
 /// Each test gets its OWN database (unique suffix): pools must never be
 /// shared across `#[tokio::test]` runtimes, and parallel tests must not
-/// drop each other's databases.
-async fn test_pool(test_name: &str, schema: &str) -> Option<PgPool> {
-    isolated_pool(&format!("compliance_{test_name}"), schema).await
+/// drop each other's databases. The database is a throwaway clone of the
+/// canonical template (the complete pinned production migration chain).
+///
+/// `TEST_DATABASE_URL` unset ⇒ soft skip (`None`); a configured provisioning
+/// failure panics with the failing stage named.
+async fn test_pool(test_name: &str) -> Option<PgPool> {
+    match migrator::test_support::fresh_canonical_pool(
+        &format!("compliance_{test_name}"),
+        &format!("compliance_{test_name}"),
+    )
+    .await
+    {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
+}
+
+/// Fault injection for the erasure-failure test (audit finding B): rename the
+/// canonical `events` store out of the way and expose a `DISTINCT` view under
+/// its name. The view is non-auto-updatable, so `DELETE FROM events ...` fails
+/// with a genuine (non-missing-table) error while the backing rows exist.
+async fn make_events_undeletable(pool: &PgPool) {
+    sqlx::raw_sql(
+        "ALTER TABLE events RENAME TO events_backing; \
+         CREATE VIEW events AS SELECT DISTINCT * FROM events_backing;",
+    )
+    .execute(pool)
+    .await
+    .expect("inject non-deletable events view");
 }
 
 /// Fake Redis pool — connection attempts fail at use time; the GDPR retry
@@ -400,13 +95,27 @@ fn automation(pool: PgPool) -> GdprAutomation {
     GdprAutomation::new(pool, dummy_redis(), test_gdpr_config())
 }
 
-/// A 26-char id for VARCHAR(26) columns (invoices, webhooks).
-fn short_id() -> String {
-    format!("i{}", &Uuid::new_v4().simple().to_string()[..25])
+/// A tenant id that fits every canonical `VARCHAR(26)` tenant column.
+fn unique_tenant() -> String {
+    format!("t-{}", &Uuid::new_v4().simple().to_string()[..24])
 }
 
-fn unique_tenant() -> String {
-    format!("t-{}", Uuid::new_v4().simple())
+fn short_tenant() -> String {
+    unique_tenant()
+}
+
+/// Canonical `users` / `messages` / `invoices` carry a real FK on
+/// `tenants.id`, so a test that seeds those stores must provision the tenant
+/// row first (production always has it; the hand-written subsets did not
+/// model the constraint).
+async fn seed_tenant(pool: &PgPool, tenant: &str) {
+    sqlx::query(
+        "INSERT INTO tenants (id, name) VALUES ($1, 'test tenant') ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tenant)
+    .execute(pool)
+    .await
+    .expect("seed tenant");
 }
 
 async fn seed_request(pool: &PgPool, id: &str, tenant: &str, email: &str, request_type: &str) {
@@ -455,10 +164,11 @@ async fn erasure_is_scoped_to_the_data_subject() {
         eprintln!("skipping: set TEST_REDIS_URL to run the erasure scoping test");
         return;
     };
-    let Some(pool) = test_pool("scoping", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("scoping").await else {
         return;
     };
     let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
     let subject = format!("subject-{}@x.com", Uuid::new_v4().simple());
     let other = format!("other-{}@x.com", Uuid::new_v4().simple());
     let req_id = Uuid::new_v4().to_string();
@@ -503,7 +213,9 @@ async fn erasure_is_scoped_to_the_data_subject() {
         .await
         .unwrap();
         sqlx::query("INSERT INTO sessions (id, user_id, tenant_id, expires_at) VALUES ($1,$2,$3, NOW() + INTERVAL '1 day')")
-            .bind(Uuid::new_v4().to_string()).bind(&user_id.0).bind(&tenant)
+            .bind(Uuid::new_v4().to_string())
+            .bind(Uuid::parse_str(&user_id.0).expect("users.id is a UUID"))
+            .bind(&tenant)
             .execute(&pool).await.unwrap();
     }
     sqlx::query(
@@ -515,23 +227,31 @@ async fn erasure_is_scoped_to_the_data_subject() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO api_keys (tenant_id, name) VALUES ($1,'tenant key')")
-        .bind(&tenant)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO webhooks (id, tenant_id, url) VALUES ($1,$2,'https://wh.example')")
-        .bind(Uuid::new_v4().to_string())
-        .bind(&tenant)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Canonical NOT NULL columns (key_hash/key_prefix, secret) are filled:
+    // the test asserts tenant-owned resources survive, not their contents.
+    sqlx::query(
+        "INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix) \
+         VALUES ($1, 'tenant key', 'erasure-scope-hash', 'ak_scope')",
+    )
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO webhooks (id, tenant_id, url, secret) \
+         VALUES ($1, $2, 'https://wh.example', 'whsec_test')",
+    )
+    .bind(format!("wh-{}", &Uuid::new_v4().simple().to_string()[..20]))
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .unwrap();
     // F82: the subject's PII on an invoice lives in the immutable
     // billing-address snapshot (there is no customer_email column).
     sqlx::query(
         "INSERT INTO invoices (id, tenant_id, amount, billing_address)          VALUES ($1,$2,100,$3)",
     )
-    .bind(short_id())
+    .bind(Uuid::new_v4())
     .bind(&tenant)
     .bind(serde_json::json!({ "email": subject, "country": "EE" }).to_string())
     .execute(&pool)
@@ -540,7 +260,7 @@ async fn erasure_is_scoped_to_the_data_subject() {
     sqlx::query(
         "INSERT INTO invoices (id, tenant_id, amount, billing_address)          VALUES ($1,$2,200,$3)",
     )
-    .bind(short_id())
+    .bind(Uuid::new_v4())
     .bind(&tenant)
     .bind(serde_json::json!({ "email": other, "country": "DE" }).to_string())
     .execute(&pool)
@@ -636,14 +356,14 @@ async fn erasure_is_scoped_to_the_data_subject() {
     // other user's session survives. (Sessions are deleted BEFORE the users
     // row is tombstoned — the lookup still resolves.)
     let subject_session: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id::text = s.user_id WHERE u.email = $1 OR u.email LIKE 'erased+%'",
+        "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.email = $1 OR u.email LIKE 'erased+%'",
     )
     .bind(&subject)
     .fetch_one(&pool)
     .await
     .unwrap();
     let other_session: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id::text = s.user_id WHERE u.email = $1",
+        "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id = s.user_id WHERE u.email = $1",
     )
     .bind(&other)
     .fetch_one(&pool)
@@ -760,7 +480,7 @@ async fn erasure_is_scoped_to_the_data_subject() {
 /// counted as deleted).
 #[tokio::test]
 async fn erasure_missing_table_is_reported_as_skipped() {
-    let Some(pool) = test_pool("missing_table", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("missing_table").await else {
         return;
     };
     let tenant = unique_tenant();
@@ -809,9 +529,10 @@ async fn erasure_missing_table_is_reported_as_skipped() {
 /// certificate — it retries, then fails with the error recorded.
 #[tokio::test]
 async fn erasure_store_failure_fails_the_request_after_retries() {
-    let Some(pool) = test_pool("failing", FAILING_SCHEMA).await else {
+    let Some(pool) = test_pool("failing").await else {
         return;
     };
+    make_events_undeletable(&pool).await;
     let tenant = unique_tenant();
     let subject = format!("fail-{}@x.com", Uuid::new_v4().simple());
     let req_id = Uuid::new_v4().to_string();
@@ -853,7 +574,7 @@ async fn erasure_store_failure_fails_the_request_after_retries() {
 
 #[tokio::test]
 async fn rectification_parks_in_pending_manual_review() {
-    let Some(pool) = test_pool("rectification", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("rectification").await else {
         return;
     };
     let tenant = unique_tenant();
@@ -891,7 +612,7 @@ async fn rectification_parks_in_pending_manual_review() {
 
 #[tokio::test]
 async fn consent_reconsent_updates_the_same_row() {
-    let Some(pool) = test_pool("consent", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("consent").await else {
         return;
     };
     let tenant = unique_tenant();
@@ -973,10 +694,11 @@ async fn consent_reconsent_updates_the_same_row() {
 
 #[tokio::test]
 async fn access_export_covers_all_stores_and_downloads() {
-    let Some(pool) = test_pool("access_export", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("access_export").await else {
         return;
     };
     let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
     let subject = format!("access-{}@x.com", Uuid::new_v4().simple());
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "access").await;
@@ -1030,7 +752,7 @@ async fn access_export_covers_all_stores_and_downloads() {
     sqlx::query(
         "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,42,$3)",
     )
-    .bind(short_id())
+    .bind(Uuid::new_v4())
     .bind(&tenant)
     .bind(serde_json::json!({ "email": subject.to_uppercase(), "country": "EE" }).to_string())
     .execute(&pool)
@@ -1332,7 +1054,7 @@ fn auth_headers() -> axum::http::HeaderMap {
 /// read-hash/insert race forked the chain under concurrency).
 #[tokio::test]
 async fn audit_chain_survives_concurrent_appends() {
-    let Some(pool) = test_pool("concurrency", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("concurrency").await else {
         return;
     };
     let audit = compliance::audit_logger::AuditLogger::new(
@@ -1397,7 +1119,7 @@ async fn audit_chain_survives_concurrent_appends() {
 /// atomic.
 #[tokio::test]
 async fn audit_chain_survives_concurrent_appends_from_independent_loggers() {
-    let Some(pool) = test_pool("multi_logger", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("multi_logger").await else {
         return;
     };
     let make_logger = || {
@@ -1498,7 +1220,7 @@ async fn audit_chain_survives_concurrent_appends_from_independent_loggers() {
 /// tables.
 #[tokio::test]
 async fn audit_archive_preserves_conflicts_and_verify_spans_tables() {
-    let Some(pool) = test_pool("archive", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("archive").await else {
         return;
     };
     let audit = compliance::audit_logger::AuditLogger::new(
@@ -1652,7 +1374,7 @@ async fn audit_archive_preserves_conflicts_and_verify_spans_tables() {
 
 #[tokio::test]
 async fn request_stats_are_tenant_scoped_and_aggregate() {
-    let Some(pool) = test_pool("stats", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("stats").await else {
         return;
     };
     let tenant_a = unique_tenant();
@@ -1696,7 +1418,7 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
         eprintln!("skipping: set TEST_REDIS_URL to run Redis-backed queue tests");
         return;
     };
-    let Some(pool) = test_pool("queue", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("queue").await else {
         return;
     };
     let tenant = unique_tenant();
@@ -1790,79 +1512,10 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
 
 // ── H-6: retention sweep enforcement ───────────────────────────────────────
 
-/// Extra schema for sweep tests: canonical `tenants` table (with legal_hold)
-/// and timestamp columns on the tracking/engagement stores.
-const SWEEP_EXTRA_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS tenants (
-    id VARCHAR(26) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL DEFAULT '',
-    slug VARCHAR(100) NOT NULL DEFAULT '',
-    plan VARCHAR(50) NOT NULL DEFAULT 'free',
-    status VARCHAR(20) NOT NULL DEFAULT 'active',
-    settings JSONB NOT NULL DEFAULT '{}',
-    metadata JSONB NOT NULL DEFAULT '{}',
-    legal_hold BOOLEAN NOT NULL DEFAULT false,
-    retention_days INT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_tenants_legal_hold ON tenants (id) WHERE legal_hold;
--- F4: the enterprise zero-retention contract flag (migration 092).
--- Migration 213: the per-run retention report (previously runtime-created).
-CREATE TABLE IF NOT EXISTS retention_report (
-    id TEXT PRIMARY KEY,
-    ran_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    plan_tier TEXT NOT NULL DEFAULT 'default',
-    report JSONB NOT NULL
-);
-CREATE TABLE IF NOT EXISTS legal_retention_archive (
-    id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    subject_email_hash TEXT NOT NULL,
-    source_table TEXT NOT NULL,
-    source_record_id TEXT NOT NULL,
-    retention_class_id TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    state VARCHAR(30) NOT NULL DEFAULT 'legally_restricted',
-    archived_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    statutory_expiry_at TIMESTAMPTZ NOT NULL,
-    statutory_expired_at TIMESTAMPTZ,
-    deleted_at TIMESTAMPTZ,
-    disclosure JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (source_table, source_record_id)
-);
-CREATE TABLE IF NOT EXISTS ent_compliance_configs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(26) NOT NULL UNIQUE,
-    enabled_frameworks TEXT[] NOT NULL DEFAULT '{}',
-    status VARCHAR(30) NOT NULL DEFAULT 'inactive',
-    zero_retention_mode BOOLEAN NOT NULL DEFAULT FALSE,
-    encryption_at_rest BOOLEAN NOT NULL DEFAULT FALSE,
-    encryption_in_transit BOOLEAN NOT NULL DEFAULT FALSE,
-    audit_log_retention_days INTEGER NOT NULL DEFAULT 2555,
-    data_retention_days INTEGER,
-    require_mfa BOOLEAN NOT NULL DEFAULT FALSE,
-    baa_signed BOOLEAN NOT NULL DEFAULT FALSE,
-    dpa_signed BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-"#;
-
-/// A tenant id that fits tenants.id VARCHAR(26).
-fn short_tenant() -> String {
-    format!("t{}", &Uuid::new_v4().simple().to_string()[..20])
-}
-
+/// The sweep writes `retention_report` and reads `tenants` /
+/// `legal_retention_archive` / `ent_compliance_configs` — all canonical.
 async fn sweep_pool(test_name: &str) -> Option<PgPool> {
-    let pool = test_pool(test_name, MAIN_SCHEMA).await?;
-    sqlx::raw_sql(SWEEP_EXTRA_SCHEMA)
-        .execute(&pool)
-        .await
-        .expect("sweep extra schema");
-    Some(pool)
+    test_pool(test_name).await
 }
 
 /// H-6: the sweep deletes expired rows from the CANONICAL stores (events per
@@ -2281,10 +1934,9 @@ async fn audit_archive_respects_legal_holds() {
 /// Missing canonical stores are reported as skipped — never silently counted.
 #[tokio::test]
 async fn retention_sweep_reports_missing_stores() {
-    // MAIN_SCHEMA has events; a deployment without the messages store. The
-    // sweep writes retention_report, which lives in SWEEP_EXTRA_SCHEMA, so
-    // this must provision through sweep_pool (a plain test_pool here made the
-    // sweep fail with "relation retention_report does not exist").
+    // The canonical chain has events; DROP messages simulates a deployment
+    // that never provisioned the message store. The sweep writes
+    // retention_report (canonical, migration 213).
     let Some(pool) = sweep_pool("sweep_missing").await else {
         return;
     };
@@ -2316,13 +1968,14 @@ async fn retention_sweep_reports_missing_stores() {
         compliance::retention_sweep::SweepStatus::SkippedMissingStore
     );
     assert_eq!(messages.deleted, 0);
-    // No tenants table in this deployment — reported honestly.
+    // The canonical tenants table exists, so holds were consultable (and no
+    // tenant is on hold in this fresh database).
     assert_eq!(
         messages.legal_hold_check,
-        compliance::retention_sweep::LegalHoldCheck::TenantsTableMissing
+        compliance::retention_sweep::LegalHoldCheck::TenantsTable
     );
-    // The sweep degrades gracefully: gdpr_exports table absent too, but the
-    // run itself completes and writes its report.
+    // The sweep degrades gracefully for the missing store: the run itself
+    // completes and writes its report.
     let report_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM retention_report")
         .fetch_one(&pool)
         .await
@@ -2337,7 +1990,7 @@ async fn retention_sweep_reports_missing_stores() {
 /// the handoff.
 #[tokio::test]
 async fn dsr_submit_writes_verification_outbox() {
-    let Some(pool) = test_pool("outbox", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("outbox").await else {
         return;
     };
     let gdpr = automation(pool.clone());
@@ -2399,68 +2052,10 @@ async fn dsr_submit_writes_verification_outbox() {
 
 // ── D: DSR outbox flush — pending rows become real system email ────────────
 
-/// Minimal mail-pipeline shapes the flush job touches (mirrors the prod
-/// columns written by api-server's system_sender / the sales dispatcher):
-/// the system `domains` row, the `messages` audit row, and `email_queue`
-/// (both column families), plus the `gdpr_requests` CP mirror submit writes.
-const OUTBOX_FLUSH_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS gdpr_requests (
-    id VARCHAR(26) PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    request_type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    token_hash TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS domains (
-    id UUID PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL,
-    dkim_enabled BOOLEAN NOT NULL DEFAULT false,
-    dkim_selector TEXT,
-    dkim_public_key TEXT,
-    dkim_private_key TEXT,
-    ses_verified BOOLEAN NOT NULL DEFAULT false
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id UUID PRIMARY KEY,
-    tenant_id TEXT,
-    from_email TEXT NOT NULL,
-    to_emails JSONB NOT NULL,
-    subject TEXT,
-    html_body TEXT,
-    text_body TEXT,
-    status TEXT NOT NULL,
-    tags JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS email_queue (
-    id UUID PRIMARY KEY,
-    message_id UUID,
-    tenant_id TEXT,
-    domain_id UUID,
-    from_address TEXT NOT NULL,
-    to_addresses TEXT[] NOT NULL,
-    subject TEXT NOT NULL,
-    "from" TEXT,
-    "to" TEXT,
-    html TEXT,
-    text TEXT,
-    tags TEXT[],
-    metadata JSONB,
-    scheduled_at TIMESTAMPTZ,
-    priority INT NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-"#;
-
+/// The flush job writes through the canonical mail pipeline (`domains`,
+/// `messages`, `email_queue`) — all present in the canonical chain.
 async fn flush_pool(test_name: &str) -> Option<PgPool> {
-    test_pool(test_name, &format!("{MAIN_SCHEMA}{OUTBOX_FLUSH_SCHEMA}")).await
+    test_pool(test_name).await
 }
 
 /// The email_queue columns the round-trip test asserts on (clippy: factored
@@ -2480,16 +2075,23 @@ type QueuedEmailRow = (
 );
 
 async fn seed_system_domain(pool: &PgPool) -> uuid::Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query(
+    // The canonical template already seeds the platform domain row
+    // (id 00000000-…-d1, status pending): make it send-ready in place rather
+    // than colliding with the global unique index on `domains.name`.
+    let (id,): (uuid::Uuid,) = sqlx::query_as(
         "INSERT INTO domains \
              (id, tenant_id, name, status, dkim_enabled, dkim_selector, \
               dkim_public_key, dkim_private_key, ses_verified) \
          VALUES ($1, 'system_internal_tenant01', 'apexmail.ee', 'verified', true, \
-                 'apexmail', 'pubkey', 'dkim:v1:encrypted', true)",
+                 'apexmail', 'pubkey', 'dkim:v1:encrypted', true) \
+         ON CONFLICT (name) DO UPDATE SET \
+             status = 'verified', dkim_enabled = true, dkim_selector = 'apexmail', \
+             dkim_public_key = 'pubkey', dkim_private_key = 'dkim:v1:encrypted', \
+             ses_verified = true \
+         RETURNING id",
     )
-    .bind(id)
-    .execute(pool)
+    .bind(Uuid::new_v4())
+    .fetch_one(pool)
     .await
     .unwrap();
     id
@@ -2704,10 +2306,11 @@ async fn dsr_outbox_flush_retries_then_caps_attempts() {
 /// snapshot + the tenant identity relation, not a mutable column).
 #[tokio::test]
 async fn invoice_export_survives_live_address_change() {
-    let Some(pool) = test_pool("f82_snapshot", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("f82_snapshot").await else {
         return;
     };
     let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
     let subject = format!("f82-{}@x.com", Uuid::new_v4().simple());
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "access").await;
@@ -2721,7 +2324,7 @@ async fn invoice_export_survives_live_address_change() {
     sqlx::query(
         "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,42,$3)",
     )
-    .bind(short_id())
+    .bind(Uuid::new_v4())
     .bind(&tenant)
     .bind(
         serde_json::json!({ "email": subject, "country": "EE", "company_name": "Subject OÜ" })
@@ -2763,10 +2366,11 @@ async fn invoice_export_survives_live_address_change() {
 /// subject's export — the mapping is explicit, not whole-tenant.
 #[tokio::test]
 async fn invoice_export_excludes_non_subject_snapshots() {
-    let Some(pool) = test_pool("f82_exclusion", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("f82_exclusion").await else {
         return;
     };
     let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
     let subject = format!("f82b-{}@x.com", Uuid::new_v4().simple());
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "access").await;
@@ -2776,7 +2380,7 @@ async fn invoice_export_excludes_non_subject_snapshots() {
     sqlx::query(
         "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,42,$3)",
     )
-    .bind(short_id())
+    .bind(Uuid::new_v4())
     .bind(&tenant)
     .bind(serde_json::json!({ "email": "billing@corp.example", "country": "DE" }).to_string())
     .execute(&pool)
@@ -2805,10 +2409,11 @@ async fn invoice_export_excludes_non_subject_snapshots() {
 /// invoice's snapshot survive untouched.
 #[tokio::test]
 async fn invoice_erasure_redacts_only_the_subject_snapshot() {
-    let Some(pool) = test_pool("f82_erasure", MAIN_SCHEMA).await else {
+    let Some(pool) = test_pool("f82_erasure").await else {
         return;
     };
     let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
     let subject = format!("f82e-{}@x.com", Uuid::new_v4().simple());
     let other = format!("other-{}@x.com", Uuid::new_v4().simple());
 
@@ -2816,7 +2421,7 @@ async fn invoice_erasure_redacts_only_the_subject_snapshot() {
         sqlx::query(
             "INSERT INTO invoices (id, tenant_id, amount, billing_address) VALUES ($1,$2,50,$3)",
         )
-        .bind(short_id())
+        .bind(Uuid::new_v4())
         .bind(&tenant)
         .bind(serde_json::json!({ "email": email, "country": "EE" }).to_string())
         .execute(&pool)
@@ -2885,4 +2490,879 @@ async fn invoice_erasure_redacts_only_the_subject_snapshot() {
     assert_eq!(total, 2, "financial records are retained, never deleted");
 
     pool.close().await;
+}
+
+// ── Adversarial wave 2: SAR completeness, statutory disclosure, archive ─────
+
+/// ClickHouse erasure enabled but unreachable: the best-effort mutation fails.
+fn clickhouse_unreachable_config() -> GdprConfig {
+    let mut config = test_gdpr_config();
+    config.clickhouse_erasure_enabled = true;
+    config.clickhouse_url = "http://127.0.0.1:1".into();
+    config
+}
+
+/// The SAR manifest is the completeness contract: every registered store
+/// appears, the per-store counts equal the seeded rows, and a message in
+/// which the subject is only a cc/bcc recipient is still the subject's data.
+#[tokio::test]
+async fn access_export_manifest_is_complete_and_counts_are_honest() {
+    let Some(pool) = test_pool("access_manifest").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("manifest-{}@x.com", Uuid::new_v4().simple());
+    let other = format!("other-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "access").await;
+
+    // contacts: 1 (canonical UNIQUE (tenant_id, email)).
+    sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'Subject')")
+        .bind(&subject)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // events: 3.
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO events (id, tenant_id, event_type, recipient) VALUES ($1,$2,'delivered',$3)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&tenant)
+            .bind(&subject)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // messages: one FROM the subject, one where the subject is only a CC.
+    for (from, to, cc) in [
+        (
+            &subject,
+            serde_json::json!([&other]),
+            serde_json::Value::Null,
+        ),
+        (
+            &other,
+            serde_json::json!([&other]),
+            serde_json::json!([&subject]),
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, cc_emails, subject, html_body)
+             VALUES ($1,$2,$3::jsonb,$4::jsonb,'s','<p>x</p>')",
+        )
+        .bind(&tenant)
+        .bind(from)
+        .bind(to)
+        .bind(cc)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // A user + session.
+    let (user_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO users (tenant_id, email, name, password_hash) VALUES ($1,$2,'n','h') RETURNING id",
+    )
+    .bind(&tenant)
+    .bind(&subject)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO sessions (id, user_id, tenant_id, expires_at) VALUES ($1,$2,$3,NOW()+INTERVAL '1 day')")
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // AI assistant conversation the subject owns (erased on request, so it
+    // must be disclosed on request).
+    sqlx::query(
+        "INSERT INTO ai_chat_messages (tenant_id, user_id, role, content)
+         VALUES ($1,$2,'user','hello assistant')",
+    )
+    .bind(&tenant)
+    .bind(user_id.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Consent, a pending double-opt-in token, a past export, suppression.
+    sqlx::query("INSERT INTO consent_records (id, tenant_id, subscriber_id, email, consent_type, granted, source) VALUES ($1,$2,$3,$4,'marketing',true,'api')")
+        .bind(Uuid::new_v4().to_string())
+        .bind(&tenant)
+        .bind(&subject)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO double_opt_in_tokens (tenant_id, subscriber_id, consent_type, email, token_hash, expires_at) VALUES ($1,$2,'marketing',$3,'h',NOW()+INTERVAL '1 day')")
+        .bind(&tenant)
+        .bind(&subject)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO gdpr_exports (id, request_id, tenant_id, email, data, expires_at) VALUES ($1,'old',$2,$3,'{}'::jsonb, NOW()+INTERVAL '1 day')")
+        .bind(Uuid::new_v4().to_string())
+        .bind(&tenant)
+        .bind(&subject)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO suppression_list (id, tenant_id, email, reason) VALUES ($1,$2,$3,'complaint')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // An audit trail entry referencing the subject (accountability record).
+    sqlx::query(
+        "INSERT INTO audit_logs (id, tenant_id, action, resource, resource_id, details, outcome, timestamp, hash, signature)
+         VALUES ($1,$2,'read','subscriber',$3,'{}'::jsonb,'success',NOW(),'h','s')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let gdpr = automation(pool.clone());
+    let result = gdpr.process_request(&req_id).await.expect("access export");
+
+    let (data,): (serde_json::Value,) =
+        sqlx::query_as("SELECT data FROM gdpr_exports WHERE request_id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let manifest = &data["manifest"];
+    // Every registered store is named in the manifest — no silent omission.
+    for store in compliance::gdpr_automation::export_store_names() {
+        assert!(
+            manifest["stores"].get(store).is_some(),
+            "manifest must name the {store} store"
+        );
+    }
+    // Counts equal the seeded rows, per store. (`consent_records` is keyed
+    // as `consents` in the payload; the manifest uses the canonical store
+    // name.)
+    for (store, payload_key, expected) in [
+        ("contacts", "contacts", 1),
+        ("events", "events", 3),
+        ("messages", "messages", 2),
+        ("users", "users", 1),
+        ("consent_records", "consents", 1),
+        ("double_opt_in_tokens", "double_opt_in_tokens", 1),
+        ("gdpr_exports", "gdpr_exports", 1),
+        ("sessions", "sessions", 1),
+        ("ai_chat_messages", "ai_chat_messages", 1),
+        ("suppression_list", "suppression_list", 1),
+        ("audit_logs", "audit_logs", 1),
+    ] {
+        assert_eq!(
+            data[payload_key].as_array().map(Vec::len),
+            Some(expected),
+            "export payload must carry {expected} {store} rows"
+        );
+        assert_eq!(
+            manifest["stores"][store]["records"], expected,
+            "manifest count for {store} must be honest"
+        );
+    }
+    // The cc-only message is the subject's data and is exported (and the
+    // export is not truncated for a small history).
+    assert_eq!(manifest["truncated"], false);
+    // contact_list_members is absent from the canonical chain: skipped, so
+    // the export is honestly partial.
+    assert_eq!(
+        manifest["stores"]["contact_list_members"]["included"],
+        false
+    );
+    assert_eq!(manifest["stores"]["clickhouse_events"]["included"], false);
+    assert_eq!(result.partial, Some(true));
+    let payload = serde_json::to_string(&data).unwrap();
+    assert!(
+        payload.contains(&subject),
+        "the subject's own rows are exported (not anonymized)"
+    );
+}
+
+/// A REQUIRED store's schema error aborts the export visibly: no partial
+/// completion, no export row, and the request keeps its retry work.
+#[tokio::test]
+async fn access_export_required_store_failure_is_never_silently_skipped() {
+    let Some(pool) = test_pool("access_required_failure").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("reqfail-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "access").await;
+    sqlx::query("ALTER TABLE invoices RENAME TO invoices_hidden")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let gdpr = automation(pool.clone());
+    // The retry branch can return Err purely because the (dummy) broker is
+    // unreachable; the durable outcome is what matters.
+    let _ = gdpr.process_request(&req_id).await;
+
+    let (status, result): (String, Option<serde_json::Value>) =
+        sqlx::query_as("SELECT status, result FROM data_subject_requests WHERE id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "retrying", "incomplete export must not complete");
+    let error = result.expect("failure recorded")["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("invoices"),
+        "the missing REQUIRED store must be named in the error, got: {error}"
+    );
+    let exports: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM gdpr_exports WHERE request_id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(exports, 0, "no export row for an incomplete export");
+}
+
+/// Art. 17 + statutory retention: the erasure certificate discloses exactly
+/// what was kept (invoice), why (EE seven-year accounting obligation) and
+/// until when, and the record lands in the legally-restricted archive with
+/// the subject email stored only as a hash.
+#[tokio::test]
+async fn erasure_discloses_statutory_retention_and_archives_the_invoice() {
+    let Some(redis) = redis_pool().await else {
+        eprintln!("skipping: set TEST_REDIS_URL for the statutory disclosure test");
+        return;
+    };
+    let Some(pool) = test_pool("erasure_disclosure").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("disc-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
+
+    let issued_at = chrono::Utc::now() - chrono::Duration::days(3);
+    let (invoice_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO invoices (tenant_id, amount, billing_address, issued_at)
+         VALUES ($1, 100, $2, $3) RETURNING id",
+    )
+    .bind(&tenant)
+    .bind(serde_json::json!({"email": subject, "country": "EE"}).to_string())
+    .bind(issued_at)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let gdpr = GdprAutomation::new(pool.clone(), redis, test_gdpr_config());
+    let result = gdpr.process_request(&req_id).await.expect("erasure");
+
+    // The financial record survives, redacted.
+    let (kept, snapshot): (i64, String) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(MIN(billing_address), '') FROM invoices WHERE tenant_id = $1",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1, "the statutory invoice is retained, never deleted");
+    assert!(!snapshot.contains(&subject), "subject PII redacted");
+    assert!(snapshot.contains("erased+"), "redaction marker present");
+
+    // The archive row names the record, the class, the reason and the expiry.
+    let (state, class_id, expiry, hash): (String, String, chrono::DateTime<chrono::Utc>, String) =
+        sqlx::query_as(
+            "SELECT state, retention_class_id, statutory_expiry_at, subject_email_hash
+             FROM legal_retention_archive WHERE source_record_id = $1",
+        )
+        .bind(invoice_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "legally_restricted");
+    assert_eq!(
+        class_id,
+        compliance::retention_classes::STATUTORY_ACCOUNTING_CLASS_ID
+    );
+    assert_eq!(
+        hash,
+        compliance::legal_archive::subject_email_hash(&subject),
+        "the archive stores the email only as a one-way hash"
+    );
+    // Seven-year EE accounting retention, computed from the issue date.
+    let expected = compliance::retention_classes::statutory_accounting_class(&pool)
+        .await
+        .expect("class")
+        .expiry_for(issued_at);
+    assert_eq!(expiry, expected);
+
+    // The DSAR result carries the disclosure; the certificate never claims
+    // those records were erased.
+    let disclosure = result.retained_disclosure.expect("disclosure present");
+    assert_eq!(disclosure["retained"][0]["source_table"], "invoices");
+    assert_eq!(disclosure["retained"][0]["state"], "legally_restricted");
+    let cert = result.deletion_confirmation.expect("certificate");
+    assert_eq!(
+        cert["retained_disclosure"]["retained"][0]["record_id"],
+        invoice_id.to_string()
+    );
+    assert!(
+        cert["confirmation"]
+            .as_str()
+            .unwrap()
+            .contains("statutory retention"),
+        "certificate must explain the retained records"
+    );
+    assert_eq!(result.partial, Some(true), "absent stores keep it honest");
+}
+
+/// Art. 16 rectification parks for human review: it must never auto-complete
+/// with a fabricated "0 records modified" success.
+#[tokio::test]
+async fn rectification_parks_with_review_required_and_no_completion_timestamp() {
+    let Some(pool) = test_pool("rectification_review").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("rect-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "rectification").await;
+
+    let gdpr = automation(pool.clone());
+    let result = gdpr.process_request(&req_id).await.expect("rectification");
+
+    assert!(result.review_required);
+    assert_eq!(result.modified_records, Some(0));
+    assert!(result.deletion_confirmation.is_none());
+    let (status, completed_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as("SELECT status, completed_at FROM data_subject_requests WHERE id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "pending_manual_review");
+    assert!(completed_at.is_none(), "review is not completion");
+}
+
+/// ClickHouse configured but unreachable: the best-effort purge fails, the
+/// request is PARTIAL, the certificate records the gap, and it never claims
+/// full erasure.
+#[tokio::test]
+async fn clickhouse_best_effort_failure_is_partial_and_never_certifies_completion() {
+    let Some(redis) = redis_pool().await else {
+        eprintln!("skipping: set TEST_REDIS_URL for the clickhouse best-effort test");
+        return;
+    };
+    let Some(pool) = test_pool("clickhouse_best_effort").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("ch-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
+
+    let gdpr = GdprAutomation::new(pool.clone(), redis, clickhouse_unreachable_config());
+    let result = gdpr.process_request(&req_id).await.expect("erasure");
+
+    assert_eq!(result.partial, Some(true));
+    let cert = result.deletion_confirmation.expect("certificate");
+    let clickhouse = cert["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["store"] == "clickhouse_events")
+        .expect("clickhouse store listed");
+    assert_eq!(clickhouse["status"], "best_effort_failed");
+    assert!(
+        !cert["confirmation"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("all in-scope personal data has been erased"),
+        "a best-effort gap forbids the full-erasure claim"
+    );
+    let (status,): (String,) =
+        sqlx::query_as("SELECT status FROM data_subject_requests WHERE id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "partial");
+}
+
+/// Per-store row counts in the erasure certificate equal the rows actually
+/// deleted/anonymized — an inflated "records_deleted" would be a false
+/// attestation.
+#[tokio::test]
+async fn erasure_certificate_row_counts_equal_the_rows_deleted() {
+    let Some(redis) = redis_pool().await else {
+        eprintln!("skipping: set TEST_REDIS_URL for the erasure count test");
+        return;
+    };
+    let Some(pool) = test_pool("erasure_counts").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+    let subject = format!("count-{}@x.com", Uuid::new_v4().simple());
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
+
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO events (id, tenant_id, event_type, recipient) VALUES ($1,$2,'delivered',$3)")
+            .bind(Uuid::new_v4().to_string())
+            .bind(&tenant)
+            .bind(&subject)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for _ in 0..2 {
+        sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'n')")
+            .bind(format!("{}-{}@x.com", subject, Uuid::new_v4().simple()))
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // Only the exact-email contact is the subject's; the others must survive.
+    sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'n')")
+        .bind(&subject)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let gdpr = GdprAutomation::new(pool.clone(), redis, test_gdpr_config());
+    let result = gdpr.process_request(&req_id).await.expect("erasure");
+    let cert = result.deletion_confirmation.expect("certificate");
+    let stores = cert["stores"].as_array().unwrap();
+    let by_name = |name: &str| {
+        stores
+            .iter()
+            .find(|s| s["store"] == name)
+            .unwrap_or_else(|| panic!("{name} listed"))
+    };
+    assert_eq!(by_name("events")["status"], "deleted");
+    assert_eq!(by_name("events")["rows_affected"], 3);
+    assert_eq!(by_name("contacts")["rows_affected"], 1);
+    let deleted_total: i64 = stores
+        .iter()
+        .map(|s| s["rows_affected"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        cert["records_deleted"].as_i64().unwrap(),
+        deleted_total,
+        "the certificate total must equal the per-store sum"
+    );
+    assert_eq!(result.deleted_records, Some(deleted_total));
+    // Non-subject contacts survive.
+    let survivors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contacts WHERE tenant_id = $1")
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(survivors, 2);
+}
+
+/// The statutory retention archive sweep: due rows advance exactly one step,
+/// the source invoice is deleted only after expiry, and an unowned source
+/// table is reported stuck instead of purged.
+#[tokio::test]
+async fn retention_sweep_deletes_expired_statutory_source_records_only() {
+    let Some(pool) = sweep_pool("archive_advance").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    seed_tenant(&pool, &tenant).await;
+
+    // An invoice past the seven-year statutory expiry, archived long ago.
+    let (invoice_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO invoices (tenant_id, amount, billing_address, issued_at)
+         VALUES ($1, 10, '{}', NOW() - INTERVAL '8 years') RETURNING id",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let expired_at = chrono::Utc::now() - chrono::Duration::days(1);
+    sqlx::query(
+        "INSERT INTO legal_retention_archive
+           (id, tenant_id, subject_email_hash, source_table, source_record_id,
+            retention_class_id, reason, state, archived_at, statutory_expiry_at)
+         VALUES ($1,$2,'hash','invoices',$3,'stat-accounting','seven years','legally_restricted',NOW(),$4)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(invoice_id.to_string())
+    .bind(expired_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // An expired row whose source table the archive does not own: must stay.
+    let stuck_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO legal_retention_archive
+           (id, tenant_id, subject_email_hash, source_table, source_record_id,
+            retention_class_id, reason, state, archived_at, statutory_expiry_at, statutory_expired_at)
+         VALUES ($1,$2,'hash','unowned_store','rec-1','c','r','statutory_expired',NOW(),$3,NOW())",
+    )
+    .bind(&stuck_id)
+    .bind(&tenant)
+    .bind(expired_at)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let audit = compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "archive-advance-key-0123456789".into(),
+        },
+    );
+    audit.initialize().await.expect("audit init");
+    let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 365);
+    let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
+
+    assert_eq!(report.archive_expired, 1, "one due row expired");
+    assert_eq!(report.archive_deleted, 1, "one expired row deleted");
+    assert_eq!(
+        report.archive_source_records_deleted, 1,
+        "the statutory source invoice is purged after expiry"
+    );
+    assert_eq!(
+        report.archive_stuck_unpurgeable, 1,
+        "an unowned source table is reported, never purged"
+    );
+    let invoices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(invoices, 0);
+    let (state,): (String,) =
+        sqlx::query_as("SELECT state FROM legal_retention_archive WHERE id = $1")
+            .bind(&stuck_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "statutory_expired", "stuck row is left, not purged");
+    // The archive lifecycle is monotonic: the DB trigger refuses a backward
+    // transition even by direct SQL.
+    let backward = sqlx::query(
+        "UPDATE legal_retention_archive SET state = 'legally_restricted' WHERE id = $1",
+    )
+    .bind(&stuck_id)
+    .execute(&pool)
+    .await;
+    assert!(backward.is_err(), "backward transition must be rejected");
+}
+
+/// The audit hash chain detects a mutated row and reports the exact entry;
+/// a time window that excludes the tampered row verifies cleanly.
+#[tokio::test]
+async fn audit_chain_detects_a_mutated_row_and_honours_time_windows() {
+    let Some(pool) = test_pool("audit_tamper").await else {
+        return;
+    };
+    let tenant = unique_tenant();
+    let audit = compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "tamper-audit-key-0123456789".into(),
+        },
+    );
+    audit.initialize().await.expect("init");
+    let ctx = LogContext {
+        tenant_id: Some(tenant.clone()),
+        user_id: None,
+        session_id: None,
+        ip_address: None,
+        user_agent: None,
+    };
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let entry = audit
+            .log(
+                AuditAction::Read,
+                AuditResource::Subscriber,
+                Some(&format!("row-{i}")),
+                serde_json::json!({"i": i}),
+                AuditOutcome::Success,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        ids.push(entry.id);
+    }
+    let clean = audit.verify_chain(Some(&tenant), None, None).await.unwrap();
+    assert!(clean.valid, "freshly appended chain is valid");
+    assert_eq!(clean.entries_checked, 3);
+
+    // Mutate the middle row's payload without re-signing: the hash no longer
+    // matches the stored chain hash.
+    sqlx::query("UPDATE audit_logs SET details = '{\"i\": 999}'::jsonb WHERE id = $1")
+        .bind(&ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let tampered = audit.verify_chain(Some(&tenant), None, None).await.unwrap();
+    assert!(!tampered.valid, "a mutated row must fail verification");
+    assert_eq!(
+        tampered.first_invalid_entry.as_deref(),
+        Some(ids[1].as_str()),
+        "the tampered entry is named"
+    );
+    // A window that excludes the tampered row verifies cleanly.
+    let (ts,): (chrono::DateTime<chrono::Utc>,) =
+        sqlx::query_as("SELECT timestamp FROM audit_logs WHERE id = $1")
+            .bind(&ids[1])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let after = audit
+        .verify_chain(Some(&tenant), Some(ts + chrono::Duration::seconds(1)), None)
+        .await
+        .unwrap();
+    assert!(after.valid, "window after the tampered row is clean");
+    let before = audit
+        .verify_chain(
+            None,
+            Some(ts - chrono::Duration::seconds(1)),
+            Some(ts - chrono::Duration::milliseconds(1)),
+        )
+        .await
+        .unwrap();
+    assert!(before.valid, "window before the tampered row is clean");
+    assert_eq!(before.entries_checked, 1);
+}
+
+/// The statutory clock: a submitted request falls due one calendar month
+/// later, an unjustified extension is refused, a justified+notified one is
+/// recorded, and the outbox mark-sent guard is single-use.
+#[tokio::test]
+async fn statutory_clock_and_outbox_guards() {
+    let Some(pool) = test_pool("statutory_clock").await else {
+        return;
+    };
+    let tenant = format!("clock-{}", &Uuid::new_v4().simple().to_string()[..20]);
+    seed_tenant(&pool, &tenant).await;
+    let gdpr = automation(pool.clone());
+    let subject = format!("clock-{}@x.com", Uuid::new_v4().simple());
+    let (request, token) = gdpr
+        .submit_request(
+            &tenant,
+            compliance::types::DataSubjectRequestType::Access,
+            &subject,
+        )
+        .await
+        .expect("submit");
+
+    let (received, due, status): (
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+        String,
+    ) = sqlx::query_as(
+        "SELECT received_at, statutory_due_at, status FROM data_subject_requests WHERE id = $1",
+    )
+    .bind(&request.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "pending_verification");
+    assert_eq!(
+        due,
+        compliance::gdpr_automation::statutory_due_at(received),
+        "due date is one calendar month after receipt"
+    );
+    // A wrong token never verifies; the right one consumes the pending state.
+    assert!(!gdpr
+        .verify_request(&request.id, "not-the-token")
+        .await
+        .unwrap());
+    let token_hash_matches: bool = sqlx::query_scalar(
+        "SELECT verification_token_hash = encode(sha256($2::bytea),'hex') FROM data_subject_requests WHERE id=$1",
+    )
+    .bind(&request.id)
+    .bind(token.as_bytes())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(token_hash_matches);
+    // Unjustified extension refused.
+    let err = gdpr
+        .extend_request(&request.id, "short", chrono::Utc::now())
+        .await
+        .expect_err("short reason refused");
+    assert!(err.contains("justification"), "got: {err}");
+    // Future notification timestamps are refused too.
+    let err = gdpr
+        .extend_request(
+            &request.id,
+            "complex request requiring further analysis",
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .expect_err("future notification refused");
+    assert!(err.contains("future"), "got: {err}");
+    // Justified + notified extension is recorded (statutory + 2 months).
+    let extended = gdpr
+        .extend_request(
+            &request.id,
+            "complex request requiring further analysis",
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("valid extension");
+    assert_eq!(
+        extended.extension_due_at,
+        Some(compliance::gdpr_automation::extended_due_at(
+            extended.statutory_due_at.unwrap()
+        ))
+    );
+    assert!(
+        !compliance::gdpr_automation::GdprAutomation::is_statutorily_overdue(
+            &extended,
+            chrono::Utc::now()
+        )
+    );
+    assert!(
+        compliance::gdpr_automation::GdprAutomation::is_statutorily_overdue(
+            &extended,
+            extended.extension_due_at.unwrap() + chrono::Duration::seconds(1)
+        )
+    );
+
+    // Outbox mark-sent is single-use (at-most-once handoff).
+    let pending = gdpr.pending_verification_outbox(10).await.unwrap();
+    let entry = pending.iter().find(|e| e.request_id == request.id).unwrap();
+    gdpr.mark_outbox_sent(&entry.id).await.unwrap();
+    assert!(
+        gdpr.mark_outbox_sent(&entry.id).await.is_err(),
+        "a sent outbox entry cannot be marked sent twice"
+    );
+}
+
+/// A DSR is scoped to ONE data subject in ONE tenant: an identical address
+/// in another tenant is not exported and not erased. This is the hostile
+/// "unauthorised tenant id" case — a tenant-scoping slip would cross
+/// customer boundaries.
+#[tokio::test]
+async fn dsr_never_crosses_tenant_boundaries_for_the_same_address() {
+    let Some(pool) = test_pool("tenant_isolation").await else {
+        return;
+    };
+    let tenant_a = unique_tenant();
+    let tenant_b = unique_tenant();
+    seed_tenant(&pool, &tenant_a).await;
+    seed_tenant(&pool, &tenant_b).await;
+    let subject = format!("shared-{}@x.com", Uuid::new_v4().simple());
+
+    for tenant in [&tenant_a, &tenant_b] {
+        for _ in 0..2 {
+            sqlx::query("INSERT INTO events (id, tenant_id, event_type, recipient) VALUES ($1,$2,'delivered',$3)")
+                .bind(Uuid::new_v4().to_string())
+                .bind(tenant)
+                .bind(&subject)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'n')")
+            .bind(&subject)
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, subject)
+             VALUES ($1,'noreply@x.com',$2::jsonb,'shared')",
+        )
+        .bind(tenant)
+        .bind(serde_json::json!([&subject]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Access export for tenant A only.
+    let req_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &req_id, &tenant_a, &subject, "access").await;
+    let gdpr = automation(pool.clone());
+    gdpr.process_request(&req_id).await.expect("export");
+    let (data,): (serde_json::Value,) =
+        sqlx::query_as("SELECT data FROM gdpr_exports WHERE request_id = $1")
+            .bind(&req_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(data["events"].as_array().map(Vec::len), Some(2));
+    assert_eq!(data["contacts"].as_array().map(Vec::len), Some(1));
+    assert_eq!(data["messages"].as_array().map(Vec::len), Some(1));
+
+    // Erasure for tenant A only: tenant B keeps every row. Deletable stores
+    // lose A's rows; the statutory message record is anonymized in A and
+    // untouched in B.
+    let erase_id = Uuid::new_v4().to_string();
+    seed_request(&pool, &erase_id, &tenant_a, &subject, "erasure").await;
+    let _ = gdpr.process_request(&erase_id).await;
+    for table in ["events", "contacts"] {
+        for (tenant, expected) in [
+            (&tenant_a, 0i64),
+            (&tenant_b, if table == "contacts" { 1 } else { 2 }),
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE tenant_id = $1"
+            ))
+            .bind(tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(count, expected, "{table} count for {tenant}");
+        }
+    }
+    let a_messages: String = sqlx::query_scalar(
+        "SELECT COALESCE(MIN(to_emails::text), '') FROM messages WHERE tenant_id = $1",
+    )
+    .bind(&tenant_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !a_messages.contains(&subject),
+        "tenant A's message is anonymized"
+    );
+    assert!(a_messages.contains("erased+"));
+    let b_messages: String = sqlx::query_scalar(
+        "SELECT COALESCE(MIN(to_emails::text), '') FROM messages WHERE tenant_id = $1",
+    )
+    .bind(&tenant_b)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        b_messages.contains(&subject),
+        "tenant B's message is untouched"
+    );
 }

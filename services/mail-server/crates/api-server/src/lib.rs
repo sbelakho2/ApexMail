@@ -32,6 +32,43 @@ pub(crate) mod test_db {
     /// key under each other mid-flight.
     pub(crate) static DKIM_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Deterministic environment for every AWS SDK client a test builds.
+    ///
+    /// Two failure modes this closes, both observed as flaky 15-90s test
+    /// failures under parallel load:
+    ///
+    ///  * the default provider chain probes the EC2 instance metadata service
+    ///    (with retries) unless it is disabled, so tests paid the timeout;
+    ///  * the SDK's rustls trust store was built from the platform "native
+    ///    roots" — on macOS that reads the keychain through the Security
+    ///    framework, which under load can come back empty and aborts the
+    ///    client with `TrustStore configured to enable native roots but no
+    ///    valid root certificates parsed!`. Pointing `AWS_CA_BUNDLE` at the
+    ///    system PEM bundle (when one exists) reads a plain file instead.
+    ///
+    /// Only set when the variable is absent: a developer's explicit choice
+    /// (or CI's own CA configuration) wins.
+    pub(crate) fn ensure_aws_test_env() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            if std::env::var_os("AWS_CA_BUNDLE").is_none() {
+                for candidate in [
+                    "/etc/ssl/cert.pem",
+                    "/etc/ssl/certs/ca-certificates.crt",
+                    "/etc/pki/tls/certs/ca-bundle.crt",
+                ] {
+                    if std::path::Path::new(candidate).is_file() {
+                        std::env::set_var("AWS_CA_BUNDLE", candidate);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     /// api-server unit tests run against the CANONICAL production schema:
     /// the bootstrap applies the full `services/mail-server/migrations` chain
     /// through the REAL production migrator (`migrator::MIGRATIONS`, the same
@@ -72,6 +109,7 @@ pub(crate) mod test_db {
     ///      `Migrator::run` with `Dirty(version)`/`VersionMismatch`/checksum
     ///      errors.
     pub(crate) async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
+        ensure_aws_test_env();
         static INIT_DB: OnceCell<()> = OnceCell::const_new();
 
         let database_url = match std::env::var("TEST_DATABASE_URL") {
@@ -312,6 +350,7 @@ pub(crate) mod test_db {
     /// CONFIGURED provisioning failure PANICS — the F01 contract: an
     /// infrastructure failure must fail the test, never read as a skip.
     pub(crate) async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
+        ensure_aws_test_env();
         match migrator::test_support::fresh_canonical_pool(
             db_suffix,
             &format!("api_canon_{db_suffix}"),

@@ -1212,3 +1212,264 @@ async fn governance_registry_seeds_stores_and_leaves_lawful_bases_to_legal() {
 
     pool.close().await;
 }
+
+// ── 3. Subject notifications, submission bookkeeping, certificate ──────────
+
+/// The Art. 34 half of the lifecycle: the outbox is durable and evidence-
+/// gated, a failure is recorded rather than silently dropped, and the
+/// certificate/resolution reflect the real chain. Every rejection is
+/// asserted with the named reason.
+#[tokio::test]
+async fn breach_subject_notification_and_certificate_lifecycle() {
+    use compliance::breach_notification::{BreachReportInput, BreachStatus, SubmissionChannel};
+    let Some(pool) = canonical_pool("breach_lifecycle").await else {
+        return;
+    };
+    let audit = audit_logger(&pool);
+    audit.initialize().await.expect("audit init");
+    let notifier = notifier(&pool, audit);
+    let tenant = format!("t{}", &Uuid::new_v4().simple().to_string()[..20]);
+
+    // Reported with the assessment fields still missing…
+    let report = notifier
+        .report_breach(
+            BreachReportInput {
+                tenant_id: tenant.clone(),
+                affected_records: 42,
+                data_types: vec!["email".into(), "iban".into()],
+                description: "Lifecycle breach".into(),
+                severity: "critical".into(),
+                dpo_contact: None,
+                likely_consequences: None,
+                measures_taken: None,
+            },
+            "reporter",
+        )
+        .await
+        .expect("report");
+    assert_eq!(report.status, BreachStatus::Detected.as_str());
+
+    // …then completed, and a no-op update must not clear recorded fields.
+    let updated = notifier
+        .update_assessment(
+            &report.id,
+            Some("dpo@apexmail.ee"),
+            Some("identity theft risk"),
+            Some("credentials rotated"),
+            "officer",
+        )
+        .await
+        .expect("assessment update");
+    assert_eq!(updated.dpo_contact.as_deref(), Some("dpo@apexmail.ee"));
+    let kept = notifier
+        .update_assessment(&report.id, None, None, None, "officer")
+        .await
+        .expect("no-op update");
+    assert_eq!(
+        kept.likely_consequences.as_deref(),
+        Some("identity theft risk")
+    );
+
+    // Triage needs a rationale and records the risk decision.
+    let err = notifier
+        .triage(&report.id, true, true, "   ", "officer")
+        .await
+        .expect_err("blank rationale refused");
+    assert!(err.contains("rationale"), "got: {err}");
+    let triaged = notifier
+        .triage(&report.id, true, true, "high risk to subjects", "officer")
+        .await
+        .expect("triage");
+    assert_eq!(triaged.status, BreachStatus::Notifiable.as_str());
+    assert!(triaged.subject_notification_required);
+
+    // Queue the authority notification; re-queueing is idempotent.
+    let submission = notifier
+        .queue_authority_notification(&report.id, "officer")
+        .await
+        .expect("queue");
+    let again = notifier
+        .queue_authority_notification(&report.id, "officer")
+        .await
+        .expect("re-queue is idempotent");
+    assert_eq!(again.id, submission.id);
+    let open_tasks = notifier.open_authority_tasks(50).await.expect("tasks");
+    assert!(
+        open_tasks.iter().any(|task| task.breach_id == report.id),
+        "a human task must exist for the queued submission"
+    );
+
+    // Subject notifications: empty list and blank addresses are refused.
+    let err = notifier
+        .queue_subject_notifications(&report.id, &[], "officer")
+        .await
+        .expect_err("empty recipients refused");
+    assert!(err.contains("at least one"), "got: {err}");
+    let err = notifier
+        .queue_subject_notifications(&report.id, &["   ".into()], "officer")
+        .await
+        .expect_err("blank recipient refused");
+    assert!(err.contains("must not be empty"), "got: {err}");
+    let recipients = vec![
+        format!("a-{}@x.com", Uuid::new_v4().simple()),
+        format!("b-{}@x.com", Uuid::new_v4().simple()),
+    ];
+    let queued = notifier
+        .queue_subject_notifications(&report.id, &recipients, "officer")
+        .await
+        .expect("queue subject notifications");
+    assert_eq!(queued, 2);
+    let pending: Vec<_> = notifier
+        .pending_subject_notifications(100)
+        .await
+        .expect("pending")
+        .into_iter()
+        .filter(|row| row.breach_id == report.id)
+        .collect();
+    assert_eq!(pending.len(), 2);
+
+    // Delivery is evidence-gated and single-use.
+    let err = notifier
+        .record_subject_notification_delivery(&pending[0].id, None, None)
+        .await
+        .expect_err("evidence required");
+    assert!(err.contains("evidence"), "got: {err}");
+    let delivered = notifier
+        .record_subject_notification_delivery(&pending[0].id, Some("provider-msg-1"), None)
+        .await
+        .expect("delivery");
+    assert_eq!(delivered.status, "sent");
+    let err = notifier
+        .record_subject_notification_delivery(&pending[0].id, Some("provider-msg-1"), None)
+        .await
+        .expect_err("double delivery refused");
+    assert!(err.contains("not pending"), "got: {err}");
+    // A delivery failure is recorded as `failed` with its reason.
+    notifier
+        .mark_subject_notification_failed(&pending[1].id, "smtp 550 mailbox unavailable")
+        .await
+        .expect("failure recorded");
+    assert!(
+        notifier
+            .pending_subject_notifications(100)
+            .await
+            .expect("pending after failure")
+            .iter()
+            .all(|row| row.breach_id != report.id),
+        "no pending subject notification may remain for this breach"
+    );
+
+    // Authority submission: reference and submitter are mandatory.
+    let err = notifier
+        .record_authority_submission(
+            &report.id,
+            &submission.id,
+            None,
+            "  ",
+            SubmissionChannel::HumanTask,
+            "officer",
+            "officer",
+        )
+        .await
+        .expect_err("reference required");
+    assert!(err.contains("authority reference"), "got: {err}");
+    let recorded = notifier
+        .record_authority_submission(
+            &report.id,
+            &submission.id,
+            None,
+            "AKI-REF-1",
+            SubmissionChannel::HumanTask,
+            "officer",
+            "officer",
+        )
+        .await
+        .expect("submission recorded");
+    assert_eq!(recorded.status, BreachStatus::AuthoritySubmitted.as_str());
+    let err = notifier
+        .record_authority_submission(
+            &report.id,
+            &submission.id,
+            None,
+            "AKI-REF-2",
+            SubmissionChannel::HumanTask,
+            "officer",
+            "officer",
+        )
+        .await
+        .expect_err("double submission refused");
+    assert!(err.contains("authority_queued"), "got: {err}");
+    let submissions = notifier
+        .authority_submissions(&report.id)
+        .await
+        .expect("read back");
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(
+        submissions[0].authority_reference.as_deref(),
+        Some("AKI-REF-1")
+    );
+
+    // A receipt cannot be blank; a real receipt acknowledges and closes the
+    // request.
+    let err = notifier
+        .record_authority_receipt(&report.id, "   ", None, "officer")
+        .await
+        .expect_err("blank receipt refused");
+    assert!(err.contains("receipt"), "got: {err}");
+    let acknowledged = notifier
+        .record_authority_receipt(&report.id, "AKI-RECEIPT-1", None, "officer")
+        .await
+        .expect("receipt");
+    assert_eq!(
+        acknowledged.status,
+        BreachStatus::AuthorityAcknowledged.as_str()
+    );
+
+    // The certificate carries the whole chain and a signature over it.
+    let certificate = notifier
+        .generate_certificate(&report.id)
+        .await
+        .expect("certificate");
+    assert_eq!(certificate.breach_id, report.id);
+    assert_eq!(
+        certificate.authority_reference.as_deref(),
+        Some("AKI-REF-1")
+    );
+    assert!(certificate.authority_receipt_received_at.is_some());
+    assert!(!certificate.signature.is_empty());
+
+    // Resolution: only from an acknowledged state, and only with no pending
+    // subject notifications.
+    let resolved = notifier
+        .resolve(&report.id, "officer")
+        .await
+        .expect("resolve");
+    assert!(resolved.resolved_at.is_some());
+    // Resolving again is idempotent (an acknowledged breach stays closable).
+    let again_resolved = notifier
+        .resolve(&report.id, "officer")
+        .await
+        .expect("idempotent resolve");
+    assert!(again_resolved.resolved_at.unwrap() >= resolved.resolved_at.unwrap());
+    // An unknown breach id is a named error, never a silent success.
+    let err = notifier
+        .resolve(&Uuid::new_v4().to_string(), "officer")
+        .await
+        .expect_err("unknown breach refused");
+    assert!(err.contains("not found"), "got: {err}");
+
+    // Tenant listing and unknown-id reads.
+    let listed = notifier
+        .list_for_tenant(&tenant, Some(10))
+        .await
+        .expect("list");
+    assert!(listed.iter().any(|b| b.id == report.id));
+    assert!(
+        notifier
+            .fetch(&Uuid::new_v4().to_string())
+            .await
+            .expect("fetch")
+            .is_none(),
+        "unknown breach ids are None, not an invented report"
+    );
+}

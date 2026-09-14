@@ -3597,4 +3597,512 @@ mod tests {
         assert_eq!(records[2].2.as_deref(), Some("list_not_found"));
         assert_eq!(records[3].2.as_deref(), Some("webhook_not_found"));
     }
+
+    // -----------------------------------------------------------------------
+    // Adversarial: malformed shapes and refusal paths
+    // -----------------------------------------------------------------------
+
+    async fn run_of(
+        pool: &PgPool,
+        tenant: &str,
+        automation_id: Uuid,
+        event_key: &str,
+    ) -> (String, Option<String>, bool) {
+        sqlx::query_as(
+            "SELECT status, skip_reason, retryable FROM automation_runs \
+             WHERE tenant_id = $1 AND automation_id = $2 AND trigger_event_key = $3",
+        )
+        .bind(tenant)
+        .bind(automation_id)
+        .bind(event_key)
+        .fetch_one(pool)
+        .await
+        .expect("run row")
+    }
+
+    async fn action_reasons(
+        pool: &PgPool,
+        tenant: &str,
+        automation_id: Uuid,
+        event_key: &str,
+    ) -> Vec<(String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT a.status, a.reason FROM automation_run_actions a \
+             JOIN automation_runs r ON r.id = a.run_id \
+             WHERE r.tenant_id = $1 AND r.automation_id = $2 AND r.trigger_event_key = $3 \
+             ORDER BY a.action_index",
+        )
+        .bind(tenant)
+        .bind(automation_id)
+        .bind(event_key)
+        .fetch_all(pool)
+        .await
+        .expect("action rows")
+    }
+
+    /// Every malformed rule/action shape is refused loudly and writes nothing:
+    /// no actions configured, an action without a type, an unsupported
+    /// condition shape, a non-matching trigger filter, and the whole send-email
+    /// validation ladder (invalid recipient, unsubscribed contact, missing
+    /// sender/template, unknown template).
+    #[tokio::test]
+    async fn malformed_rules_and_action_refusals_never_execute() {
+        let Some(pool) = fresh_pool("automations_lib_hostile", "sa_lib_auto_hostile").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-hostile");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend.clone());
+        let from = format!("sales@{domain}");
+        // Scope the refusal matrix to the subscribed fixture contact so each
+        // rule is reached exactly once, with the intended context.
+        let refuse_created = json!({
+            "type": "event", "event": "contact.created", "filters": { "tags": ["refuse"] }
+        });
+
+        let no_actions = insert_automation(
+            &pool,
+            &tenant,
+            "No actions",
+            refuse_created.clone(),
+            Value::Null,
+            json!("not-an-array"),
+        )
+        .await;
+        let no_type = insert_automation(
+            &pool,
+            &tenant,
+            "Action without type",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "config": { "tag": "x" } }]),
+        )
+        .await;
+        let bad_conditions = insert_automation(
+            &pool,
+            &tenant,
+            "Malformed conditions",
+            refuse_created.clone(),
+            json!("not-an-object"),
+            send_email_action(&from, &template),
+        )
+        .await;
+        let filter_miss = insert_automation(
+            &pool,
+            &tenant,
+            "Non-matching filter",
+            json!({ "type": "event", "event": "contact.created", "filters": { "tags": ["vip"] } }),
+            Value::Null,
+            send_email_action(&from, &template),
+        )
+        .await;
+        let invalid_recipient = insert_automation(
+            &pool,
+            &tenant,
+            "Invalid recipient",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "send_email", "config": {
+                "to": "one@example.com,two@example.com", "from": from, "template_id": template
+            } }]),
+        )
+        .await;
+        let missing_from = insert_automation(
+            &pool,
+            &tenant,
+            "Missing sender",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "send_email", "config": { "template_id": template } }]),
+        )
+        .await;
+        let missing_template = insert_automation(
+            &pool,
+            &tenant,
+            "Missing template",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "send_email", "config": { "from": from, "template_id": "   " } }]),
+        )
+        .await;
+        let unknown_template = insert_automation(
+            &pool,
+            &tenant,
+            "Unknown template",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "send_email", "config": {
+                "from": from, "template_id": "tpl_does_not_exist"
+            } }]),
+        )
+        .await;
+
+        // A subscribed contact for the rule matrix, a pending one for the
+        // subscription gate.
+        let contact = insert_contact(&pool, &tenant, "ada@example.com", &["refuse"]).await;
+        let pending: Uuid = sqlx::query_scalar(
+            "INSERT INTO contacts (tenant_id, email, name, tags, status) \
+             VALUES ($1, 'pending@example.com', 'Pending', '[\"pending\"]'::jsonb, 'pending') \
+             RETURNING id",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("insert pending contact");
+        let gated = insert_automation(
+            &pool,
+            &tenant,
+            "Unsubscribed gate",
+            json!({ "type": "event", "event": "contact.created", "filters": { "tags": ["pending"] } }),
+            Value::Null,
+            send_email_action(&from, &template),
+        )
+        .await;
+
+        let ada_key = format!("contact.created:{contact}");
+        let pending_key = format!("contact.created:{pending}");
+
+        // The schema triggers emitted contact.created for both contacts; the
+        // rules above must all refuse without producing mail.
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.events_processed, 2, "{report:?}");
+        assert_eq!(report.actions_enqueued, 0);
+        assert_eq!(
+            message_count(&pool, &tenant).await,
+            0,
+            "not one refusal may produce mail"
+        );
+        assert_eq!(backend.reserves(), 0, "no admission reservation happened");
+
+        let (status, reason, _) = run_of(&pool, &tenant, no_actions, &ada_key).await;
+        assert_eq!(status, "skipped");
+        assert_eq!(reason.as_deref(), Some("no actions configured"));
+
+        let (status, _, _) = run_of(&pool, &tenant, no_type, &ada_key).await;
+        assert_eq!(status, "skipped", "an action without a type is not success");
+        let reasons = action_reasons(&pool, &tenant, no_type, &ada_key).await;
+        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons[0].0, "unsupported");
+        assert_eq!(reasons[0].1.as_deref(), Some("action has no 'type'"));
+
+        let (status, reason, _) = run_of(&pool, &tenant, bad_conditions, &ada_key).await;
+        assert_eq!(status, "skipped");
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("unsupported_condition:"),
+            "{reason:?}"
+        );
+
+        let (status, reason, _) = run_of(&pool, &tenant, filter_miss, &ada_key).await;
+        assert_eq!(status, "skipped");
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("trigger_filter_not_met:"),
+            "{reason:?}"
+        );
+
+        for (rule, expected) in [
+            (invalid_recipient, "invalid_recipient"),
+            (missing_from, "missing_from"),
+            (missing_template, "missing_template_id"),
+            (unknown_template, "template_not_found"),
+        ] {
+            let reasons = action_reasons(&pool, &tenant, rule, &ada_key).await;
+            assert_eq!(reasons.len(), 1, "rule {rule}");
+            assert_eq!(
+                reasons[0].1.as_deref(),
+                Some(expected),
+                "rule {rule} reason: {reasons:?}"
+            );
+            assert_eq!(reasons[0].0, "skipped");
+        }
+
+        let (status, _, _) = run_of(&pool, &tenant, gated, &pending_key).await;
+        assert_eq!(status, "skipped");
+        let reasons = action_reasons(&pool, &tenant, gated, &pending_key).await;
+        assert_eq!(reasons[0].1.as_deref(), Some("contact_not_subscribed"));
+
+        // A tag/list/webhook action with no contact context (message.received
+        // carries only the sender) is refused, never executed.
+        let no_context_tag = insert_automation(
+            &pool,
+            &tenant,
+            "Tag without contact",
+            json!({ "type": "event", "event": "message.received" }),
+            Value::Null,
+            json!([{ "type": "add_tag", "config": { "tag": "x" } }]),
+        )
+        .await;
+        let missing_tag = insert_automation(
+            &pool,
+            &tenant,
+            "Missing tag",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "add_tag", "config": {} }]),
+        )
+        .await;
+        let invalid_tag = insert_automation(
+            &pool,
+            &tenant,
+            "Invalid tag",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "add_tag", "config": { "tags": ["ok", 42] } }]),
+        )
+        .await;
+        let missing_list = insert_automation(
+            &pool,
+            &tenant,
+            "Missing list",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "add_to_list", "config": {} }]),
+        )
+        .await;
+        let missing_webhook = insert_automation(
+            &pool,
+            &tenant,
+            "Missing webhook",
+            refuse_created.clone(),
+            Value::Null,
+            json!([{ "type": "webhook", "config": {} }]),
+        )
+        .await;
+
+        assert!(exec
+            .ingest_event(
+                &tenant,
+                "message.received",
+                "message.received:1",
+                None,
+                Some("sender@example.com"),
+                json!({ "from_email": "sender@example.com", "subject": "hi" }),
+            )
+            .await
+            .expect("ingest reply"));
+        // Re-arm the two contact events so the newly added refusal rules see
+        // them (the already-settled runs replay as no-ops).
+        sqlx::query(
+            "UPDATE automation_trigger_events SET status = 'pending', available_at = NOW(), \
+                    attempts = 0, processed_at = NULL, locked_until = NULL \
+             WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("re-arm contact events");
+        exec.tick().await.expect("tick");
+
+        let reasons = action_reasons(&pool, &tenant, no_context_tag, "message.received:1").await;
+        assert_eq!(reasons[0].1.as_deref(), Some("no_contact_context"));
+        for (rule, expected) in [
+            (missing_tag, "missing_tag"),
+            (invalid_tag, "invalid_tag"),
+            (missing_list, "missing_list_id"),
+            (missing_webhook, "missing_webhook_target"),
+        ] {
+            let reasons = action_reasons(&pool, &tenant, rule, &ada_key).await;
+            assert_eq!(
+                reasons[0].1.as_deref(),
+                Some(expected),
+                "rule {rule}: {reasons:?}"
+            );
+        }
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+    }
+
+    /// An event type the executor does not know fails closed (the event is
+    /// marked failed, no rule is consulted), a retryable failure whose budget
+    /// is spent fails the event instead of looping, and settled events are
+    /// pruned by age.
+    #[tokio::test]
+    async fn unknown_events_exhausted_budgets_and_pruning_fail_closed() {
+        let Some(pool) = fresh_pool("automations_lib_closed", "sa_lib_auto_closed").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-closed");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend.clone());
+        let contact = insert_contact(&pool, &tenant, "closed@example.com", &[]).await;
+        insert_automation(
+            &pool,
+            &tenant,
+            "Always sends",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+
+        // 1. Unknown event type, inserted past the executor's parser.
+        sqlx::query(
+            "INSERT INTO automation_trigger_events (tenant_id, event_type, event_key, payload) \
+             VALUES ($1, 'totally.unknown.event', 'unknown:1', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert unknown event");
+
+        // 2. The trigger-emitted contact event, with its attempt budget
+        //    already spent. (The contacts trigger emits the canonical key.)
+        let _ = contact;
+        let budget_key: String = sqlx::query_scalar(
+            "SELECT event_key FROM automation_trigger_events \
+             WHERE tenant_id = $1 AND event_type = 'contact.created'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("trigger-emitted contact event");
+        sqlx::query(
+            "UPDATE automation_trigger_events SET attempts = max_attempts \
+             WHERE tenant_id = $1 AND event_key = $2",
+        )
+        .bind(&tenant)
+        .bind(&budget_key)
+        .execute(&pool)
+        .await
+        .expect("spend the budget");
+        backend.set_limit(0); // every admission is a quota refusal
+
+        // 3. An old settled event, eligible for the retention prune.
+        sqlx::query(
+            "INSERT INTO automation_trigger_events \
+                 (tenant_id, event_type, event_key, payload, status, processed_at, updated_at) \
+             VALUES ($1, 'contact.created', 'settled:old', '{}'::jsonb, 'processed', \
+                     NOW(), NOW() - interval '40 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert settled event");
+
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.events_claimed, 2, "{report:?}");
+        assert_eq!(report.events_failed, 1, "the unknown event type fails");
+        assert_eq!(report.events_deferred, 1, "{report:?}");
+        assert_eq!(report.events_pruned, 1, "the aged settled event is pruned");
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+
+        let unknown_settled: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, last_error FROM automation_trigger_events \
+             WHERE tenant_id = $1 AND event_key = 'unknown:1'",
+        )
+        .bind(&tenant)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unknown_settled.map(|row| row.0).as_deref(),
+            Some("failed"),
+            "an unparseable event type must land in failed"
+        );
+
+        let (budget_status, budget_error): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_error FROM automation_trigger_events \
+             WHERE tenant_id = $1 AND event_key = $2",
+        )
+        .bind(&tenant)
+        .bind(&budget_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            budget_status, "failed",
+            "an exhausted retry budget must fail the event, not loop"
+        );
+        assert!(
+            budget_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("retry budget exhausted"),
+            "{budget_error:?}"
+        );
+
+        // The failed run is durable and explains the refusal.
+        let (run_status, retryable, error): (String, bool, Option<String>) = sqlx::query_as(
+            "SELECT status, retryable, error FROM automation_runs WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(run_status, "failed");
+        assert!(retryable, "the failure stays retryable for a fresh event");
+        assert_eq!(error.as_deref(), Some("quota_exceeded"));
+    }
+
+    /// Two workers ticking the same inbox concurrently: the lease/skip-locked
+    /// claim hands the event to exactly one of them, and exactly one message
+    /// is ever produced.
+    #[tokio::test]
+    async fn concurrent_ticks_claim_each_event_once() {
+        let Some(pool) = fresh_pool("automations_lib_concurrent", "sa_lib_auto_conc").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-conc");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let first = executor(&pool, backend.clone());
+        let second = first.clone();
+        insert_automation(
+            &pool,
+            &tenant,
+            "Concurrent send",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        let contact = insert_contact(&pool, &tenant, "race@example.com", &[]).await;
+        // The contacts trigger already emitted exactly one contact.created.
+        let _ = contact;
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM automation_trigger_events WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events, 1, "one trigger-emitted event, nothing else");
+
+        let (a, b) = tokio::join!(first.tick(), second.tick());
+        let a = a.expect("tick a");
+        let b = b.expect("tick b");
+        assert_eq!(
+            a.events_claimed + b.events_claimed,
+            1,
+            "exactly one worker may claim the event: {a:?} / {b:?}"
+        );
+        assert_eq!(a.actions_enqueued + b.actions_enqueued, 1);
+        assert_eq!(
+            message_count(&pool, &tenant).await,
+            1,
+            "two concurrent workers must never double-send"
+        );
+        assert_eq!(
+            queue_categories(&pool, &tenant).await,
+            vec![message_category::MARKETING.to_string()]
+        );
+        assert_eq!(backend.reserves(), 1, "one admission reservation");
+
+        // A third tick (event settled) is a no-op.
+        let third = first.tick().await.expect("third tick");
+        assert_eq!(third.events_claimed, 0, "{third:?}");
+        assert_eq!(message_count(&pool, &tenant).await, 1);
+    }
 }

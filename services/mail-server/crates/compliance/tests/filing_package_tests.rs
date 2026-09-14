@@ -1126,3 +1126,188 @@ where
     });
     (format!("http://127.0.0.1:{port}/tsa"), handle)
 }
+
+// ── Adversarial wave 2: submittable gate, byte-stable digests, named gaps ──
+
+/// The submission gate: a package with any named gap must never be
+/// submittable, and the refusal must name EVERY offending field — a gap
+/// silently dropped would let an incomplete return be filed.
+#[test]
+fn submittable_gate_refuses_named_gaps_and_names_every_field() {
+    // KMD without an explicit VAT number records the named gap.
+    let kmd = build_kmd_package(&sample_kmd()).expect("valid fields, named gap");
+    assert!(
+        !kmd.is_submittable(),
+        "a package carrying a named gap is not submittable"
+    );
+    let refusal = kmd.refusal_reason().expect("refusal reason");
+    assert!(
+        refusal.contains(KMD_VAT_NUMBER_GAP),
+        "the refusal names the VAT-number gap: {refusal}"
+    );
+    let summary = kmd.summary();
+    assert_eq!(summary["submittable"], false);
+    assert!(
+        summary["named_gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g == KMD_VAT_NUMBER_GAP),
+        "the summary surfaces the named gap"
+    );
+
+    // Supplying the number clears the gap and the package becomes submittable.
+    let with_number = build_kmd_package_with_vat_number(&sample_kmd(), Some("EE101234567"))
+        .expect("complete KMD package");
+    assert!(
+        with_number.is_submittable(),
+        "no problems and no gaps ⇒ submittable"
+    );
+    assert!(with_number.refusal_reason().is_none());
+
+    // The TSD and KMD INF builders carry their own named gaps.
+    let tsd = build_tsd_package(&sample_tsd()).expect("TSD package");
+    assert!(!tsd.is_submittable());
+    assert!(tsd.refusal_reason().unwrap().contains(TSD_PAYMENT_TYPE_GAP));
+    let inf = build_kmd_inf_package(&sample_annex()).expect("KMD INF package");
+    assert!(!inf.is_submittable());
+    assert!(inf
+        .refusal_reason()
+        .unwrap()
+        .contains(KMD_INF_DERIVATION_GAP));
+}
+
+/// Digests are byte-stable across rebuilds and unaffected by envelope
+/// warnings; any payload mutation breaks the match.
+#[test]
+fn package_digest_is_byte_stable_across_rebuilds() {
+    let declaration = sample_kmd();
+    let first =
+        build_kmd_package_with_vat_number(&declaration, Some("EE101234567")).expect("first");
+    let second =
+        build_kmd_package_with_vat_number(&declaration, Some("EE101234567")).expect("second");
+    assert_eq!(
+        first.canonical_payload_bytes(),
+        second.canonical_payload_bytes(),
+        "canonical bytes must not drift between rebuilds"
+    );
+    assert_eq!(first.payload_sha256, second.payload_sha256);
+    assert_eq!(first.payload_sha256, payload_digest(&first.payload));
+    assert!(first.digest_matches_payload());
+
+    // Warnings are envelope metadata: they never change the digest.
+    let mut warned = first.clone();
+    warned.push_warning("carrier envelope delay: 2h");
+    assert_eq!(warned.payload_sha256, first.payload_sha256);
+    assert!(warned.digest_matches_payload());
+
+    // A mutated payload is refused by the verify path.
+    let mut tampered = first.clone();
+    tampered.payload["domestic_sales"]["taxable_amount_cents"] = json!(999_999_999_i64);
+    assert!(!tampered.digest_matches_payload());
+    assert!(!payload_digest_matches(
+        &tampered.payload,
+        &first.payload_sha256
+    ));
+    // The recorded digest is compared case-insensitively and trimmed.
+    assert!(payload_digest_matches(
+        &first.payload,
+        &format!("  {}  ", first.payload_sha256.to_uppercase())
+    ));
+}
+
+/// Field-level validation: out-of-range rates and an impossible period are
+/// refused with the exact field names, and the PackageError lists them.
+#[test]
+fn validation_refuses_out_of_range_rates_and_an_impossible_period() {
+    let mut bad = sample_kmd();
+    bad.domestic_sales.vat_rate = 101;
+    bad.tax_month = 13;
+    let error = build_kmd_package(&bad).expect_err("out-of-range rate refused");
+    let fields = error.fields();
+    assert!(
+        fields.contains(&"domestic_sales.vat_rate"),
+        "rate field named, got {fields:?}"
+    );
+    assert!(
+        fields.contains(&"period"),
+        "impossible month named, got {fields:?}"
+    );
+    assert!(error.to_string().starts_with("kmd filing package refused"));
+
+    let mut negative = sample_kmd();
+    negative.exports.vat_rate = -1;
+    let error = build_kmd_package(&negative).expect_err("negative rate refused");
+    assert!(error.fields().contains(&"exports.vat_rate"));
+
+    // OSS: non-EUR currency, negative amounts, non-country codes.
+    let mut oss = sample_oss();
+    oss.entries[0].currency = "USD".into();
+    oss.entries[0].customer_country = "DEU".into();
+    oss.entries[0].vat_amount_cents = -5;
+    oss.totals.total_vat_cents = -5;
+    let error = build_oss_package(&oss).expect_err("bad OSS entry refused");
+    let fields = error.fields();
+    for expected in [
+        "entries[0].currency",
+        "entries[0].customer_country",
+        "entries[0].taxable_amount_cents",
+    ] {
+        assert!(
+            fields.contains(&expected),
+            "missing {expected} in {fields:?}"
+        );
+    }
+}
+
+/// The source declaration's own data-quality verdict is binding: not-ready
+/// source data is an INSUFFICIENT problem, and non-blocking notes stay
+/// warnings rather than refusals.
+#[test]
+fn data_quality_and_ready_for_filing_flags_are_binding() {
+    // Insufficient data with no named fields still refuses, naming the flag.
+    let mut k = sample_kmd();
+    k.data_quality.has_sufficient_data = false;
+    k.data_quality.note = "invoices not yet reconciled".into();
+    let error = build_kmd_package(&k).expect_err("insufficient source refused");
+    assert!(error.fields().contains(&"data_quality.has_sufficient_data"));
+
+    // Named missing fields are each carried into the report.
+    let mut k = sample_kmd();
+    k.data_quality.has_sufficient_data = false;
+    k.data_quality.missing_fields = vec!["invoice.customer_vat".into(), "vat_rate".into()];
+    let error = build_kmd_package(&k).expect_err("named gaps refused");
+    let fields = error.fields();
+    assert!(fields.contains(&"invoice.customer_vat"));
+    assert!(fields.contains(&"vat_rate"));
+
+    // A self-declared "not ready" is a hard refusal with the stated reasons.
+    let mut k = sample_kmd();
+    k.ready_for_filing = false;
+    k.incomplete_reasons = vec!["awaiting bank statement".into()];
+    let error = build_kmd_package(&k).expect_err("not ready refused");
+    assert!(error.fields().contains(&"ready_for_filing"));
+
+    // …and with no reasons at all it still refuses with a default detail.
+    let mut k = sample_kmd();
+    k.ready_for_filing = false;
+    let error = build_kmd_package(&k).expect_err("not ready refused");
+    let problem = error
+        .problems
+        .iter()
+        .find(|p| p.field == "ready_for_filing")
+        .expect("ready_for_filing problem");
+    assert!(problem.detail.contains("not ready for filing"));
+
+    // Sufficient data with soft notes is NOT a refusal: they are warnings.
+    let mut k = sample_kmd();
+    k.data_quality.missing_fields = vec!["optional.purchase_order".into()];
+    let package = build_kmd_package_with_vat_number(&k, Some("EE101234567"))
+        .expect("soft notes do not refuse");
+    assert_eq!(package.validation.outcome, ValidationOutcome::Valid);
+    assert!(package
+        .validation
+        .warnings
+        .iter()
+        .any(|w| w.contains("optional.purchase_order")));
+}

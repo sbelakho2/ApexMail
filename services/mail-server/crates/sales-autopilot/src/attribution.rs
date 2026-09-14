@@ -840,4 +840,528 @@ mod tests {
         let default = OutcomeRecord::new(OutcomeKind::Open);
         assert_eq!(default.value_eur, 0.0);
     }
+
+    // -----------------------------------------------------------------------
+    // Live-database proofs
+    // -----------------------------------------------------------------------
+
+    async fn live_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_test_pool(test_name).await
+    }
+
+    fn lazy_pool() -> PgPool {
+        // Never connects: exercises the pre-query validation paths.
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool")
+    }
+
+    /// The account/contact/step-execution chain an outcome needs.
+    struct OutcomeChain {
+        step_execution_id: Uuid,
+        account_id: Uuid,
+        contact_id: Uuid,
+    }
+
+    /// Seed the canonical sequence chain so a step execution (the outcome's
+    /// idempotency dimension) exists. The account is deliberately created
+    /// outside any test window so it does not perturb `discovered_accounts`.
+    async fn seed_step_execution_chain(
+        pool: &PgPool,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> OutcomeChain {
+        let sequence_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let step_id = Uuid::new_v4();
+        let enrollment_id = Uuid::new_v4();
+        let step_execution_id = Uuid::new_v4();
+        let account_id = Uuid::new_v4();
+        let contact_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts \
+                 (id, tenant_id, company, domain, created_at, icp_segment) \
+             VALUES ($1, $2, $3, $4, '2000-01-01T00:00:00Z', 'midmarket')",
+        )
+        .bind(account_id)
+        .bind(tenant_id)
+        .bind(format!("Attribution Chain {account_id}"))
+        .bind(format!("attr-chain-{account_id}.example"))
+        .execute(pool)
+        .await
+        .expect("seed chain account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name) \
+             VALUES ($1, $2, $3, 'Chain Contact')",
+        )
+        .bind(contact_id)
+        .bind(tenant_id)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("seed chain contact");
+        sqlx::query("INSERT INTO sales_sequences (id, tenant_id, name, status) VALUES ($1, $2, $3, 'active')")
+            .bind(sequence_id)
+            .bind(tenant_id)
+            .bind(sequence_name)
+            .execute(pool)
+            .await
+            .expect("seed sequence");
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions \
+                 (id, tenant_id, sequence_id, version, status, locale, approved_by, approved_at) \
+             VALUES ($1, $2, $3, 1, 'active', 'en', 'attribution-fixture', NOW())",
+        )
+        .bind(version_id)
+        .bind(tenant_id)
+        .bind(sequence_id)
+        .execute(pool)
+        .await
+        .expect("seed sequence version");
+        sqlx::query(
+            "INSERT INTO sales_sequence_steps \
+                 (id, tenant_id, version_id, step_index, kind, sender_pool) \
+             VALUES ($1, $2, $3, 0, 'email', 'sales_outbound')",
+        )
+        .bind(step_id)
+        .bind(tenant_id)
+        .bind(version_id)
+        .execute(pool)
+        .await
+        .expect("seed sequence step");
+        sqlx::query(
+            "INSERT INTO sales_enrollments \
+                 (id, tenant_id, sequence_version_id, account_id, contact_id, state, \
+                  current_step_index) \
+             VALUES ($1, $2, $3, $4, $5, 'active', 0)",
+        )
+        .bind(enrollment_id)
+        .bind(tenant_id)
+        .bind(version_id)
+        .bind(account_id)
+        .bind(contact_id)
+        .execute(pool)
+        .await
+        .expect("seed enrollment");
+        sqlx::query(
+            "INSERT INTO sales_step_executions \
+                 (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, step_index, \
+                  state, idempotency_key, executed_at) \
+             VALUES ($1, $2, $3, $4, $5, 0, 'sent', $6, NOW())",
+        )
+        .bind(step_execution_id)
+        .bind(tenant_id)
+        .bind(enrollment_id)
+        .bind(version_id)
+        .bind(step_id)
+        .bind(format!("attribution-fixture:{step_execution_id}"))
+        .execute(pool)
+        .await
+        .expect("seed step execution");
+        OutcomeChain {
+            step_execution_id,
+            account_id,
+            contact_id,
+        }
+    }
+
+    async fn cleanup_attribution_tenant(pool: &PgPool, tenant_id: &str) {
+        for statement in [
+            "DELETE FROM sales_outcomes WHERE tenant_id = $1",
+            "DELETE FROM sales_opportunities WHERE tenant_id = $1",
+            "DELETE FROM sales_provider_stats WHERE tenant_id = $1",
+            "DELETE FROM sales_enrichment_facts WHERE tenant_id = $1",
+            "DELETE FROM sales_meetings WHERE tenant_id = $1",
+            "DELETE FROM sales_step_executions WHERE tenant_id = $1",
+            "DELETE FROM sales_enrollments WHERE tenant_id = $1",
+            "DELETE FROM sales_sequence_steps WHERE tenant_id = $1",
+            "DELETE FROM sales_sequence_versions WHERE tenant_id = $1",
+            "DELETE FROM sales_sequences WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(tenant_id)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|error| panic!("cleanup `{statement}`: {error}"));
+        }
+    }
+
+    /// Invalid inputs are refused before any query (a non-finite value must
+    /// never reach a NUMERIC column, and a tenant-less write must not happen).
+    #[tokio::test]
+    async fn record_outcome_refuses_invalid_inputs_before_writing() {
+        let pool = lazy_pool();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let record = OutcomeRecord::new(OutcomeKind::Trial).with_value_eur(value);
+            let error = record_outcome(&pool, "tenant-a", &record)
+                .await
+                .expect_err("non-finite values must be refused");
+            assert!(matches!(error, SalesError::InvalidInput(_)));
+        }
+        let record = OutcomeRecord::new(OutcomeKind::Trial);
+        let error = record_outcome(&pool, "   ", &record)
+            .await
+            .expect_err("an empty tenant must be refused");
+        assert!(matches!(error, SalesError::InvalidInput(_)));
+    }
+
+    /// Replaying the same logical outcome (same tenant, outcome and step
+    /// execution) updates the existing row: it never adds revenue twice, and
+    /// the advertised id stability holds.
+    #[tokio::test]
+    async fn record_outcome_is_idempotent_and_tenant_scoped() {
+        let Some(pool) = live_pool("attribution_idempotency").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("attr-a");
+        let other = crate::test_db::unique_test_tenant("attr-b");
+        let chain = seed_step_execution_chain(&pool, &tenant, "Attribution Idempotency").await;
+        let step = chain.step_execution_id;
+        let other_chain = seed_step_execution_chain(&pool, &other, "Other Tenant Chain").await;
+        let other_step = other_chain.step_execution_id;
+
+        let mut first = OutcomeRecord::new(OutcomeKind::PaidSubscription);
+        first.step_execution_id = Some(step);
+        first.discovery_source = Some("first_party".into());
+        first.value_eur = 1_000.0;
+        let first_id = record_outcome(&pool, &tenant, &first)
+            .await
+            .expect("first write");
+
+        // A replay with a corrected value must update in place, not append.
+        let mut replay = first.clone();
+        replay.value_eur = 1_250.0;
+        let replay_id = record_outcome(&pool, &tenant, &replay)
+            .await
+            .expect("replay");
+        assert_eq!(replay_id, first_id, "the replay must return the same row");
+
+        let (rows, total): (i64, f64) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, COALESCE(SUM(value_eur), 0)::float8 FROM sales_outcomes \
+             WHERE tenant_id = $1 AND outcome = 'paid_subscription' AND step_execution_id = $2",
+        )
+        .bind(&tenant)
+        .bind(step)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "a replayed outcome must not be double-counted");
+        assert!(
+            (total - 1_250.0).abs() < 1e-6,
+            "the latest value wins: {total}"
+        );
+
+        // The same logical key under another tenant is that tenant's own row.
+        let mut foreign = OutcomeRecord::new(OutcomeKind::PaidSubscription);
+        foreign.step_execution_id = Some(other_step);
+        foreign.value_eur = 42.0;
+        let foreign_id = record_outcome(&pool, &other, &foreign)
+            .await
+            .expect("other tenant write");
+        assert_ne!(foreign_id, first_id);
+
+        // Reports are strictly tenant-scoped: tenant A's 1250 never appears
+        // in tenant B's report and vice versa.
+        let window = AttributionWindow::new(
+            Utc::now() - chrono::Duration::hours(1),
+            Utc::now() + chrono::Duration::hours(1),
+        );
+        let a_report = attribute_revenue(&pool, &tenant, window).await.unwrap();
+        assert_eq!(a_report.revenue_created_eur, Some(1_250.0));
+        let b_report = attribute_revenue(&pool, &other, window).await.unwrap();
+        assert_eq!(b_report.revenue_created_eur, Some(42.0));
+        assert_eq!(b_report.contacted_contacts, 1);
+        assert_eq!(a_report.contacted_contacts, 1);
+
+        // Revenue per 1000 uses each tenant's own denominators.
+        assert_eq!(a_report.revenue_per_1000_contacted_eur, Some(1_250_000.0));
+
+        // A negative correction on a fresh outcome kind moves the total down
+        // instead of being clamped away.
+        let mut correction = OutcomeRecord::new(OutcomeKind::Trial);
+        correction.step_execution_id = Some(step);
+        correction.value_eur = -100.0;
+        record_outcome(&pool, &tenant, &correction)
+            .await
+            .expect("negative corrections are legal");
+        let corrected = attribute_revenue(&pool, &tenant, window).await.unwrap();
+        assert_eq!(corrected.revenue_created_eur, Some(1_150.0));
+
+        cleanup_attribution_tenant(&pool, &tenant).await;
+        cleanup_attribution_tenant(&pool, &other).await;
+    }
+
+    /// The headline report walks the whole chain: funnel counts, revenue/MRR,
+    /// pipeline (lost excluded), costs, CAC and the per-source breakdown —
+    /// with half-open window boundaries.
+    #[tokio::test]
+    async fn attribute_revenue_reports_the_funnel_costs_and_breakdown() {
+        let Some(pool) = live_pool("attribution_report").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("attr-report");
+        let window_start = Utc::now() - chrono::Duration::hours(1);
+        let window_end = Utc::now() + chrono::Duration::hours(1);
+        let window = AttributionWindow::new(window_start, window_end);
+
+        let step = seed_step_execution_chain(&pool, &tenant, "Attribution Sequence").await;
+        let account_id = step.account_id;
+        let contact_id = step.contact_id;
+        let chain_step = step.step_execution_id;
+        // One account discovered exactly at the inclusive window start, and
+        // one at the exclusive window end (the latter must not be counted).
+        for (created_at, label) in [(window_start, "start"), (window_end, "end")] {
+            sqlx::query(
+                "INSERT INTO sales_accounts \
+                     (id, tenant_id, company, domain, created_at, icp_segment) \
+                 VALUES ($1, $2, $3, $4, $5, 'midmarket')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(format!("Attribution Boundary Co {label}"))
+            .bind(format!("attr-boundary-{label}-{}.example", Uuid::new_v4()))
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("insert boundary account");
+        }
+
+        // Outcomes: qualified reply, meeting, trial (revenue), MRR.
+        for (outcome, value) in [
+            ("positive_reply", 0.0_f64),
+            ("meeting_booked", 0.0),
+            ("trial", 200.0),
+            ("retained_mrr", 300.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_outcomes \
+                     (id, tenant_id, account_id, contact_id, enrollment_id, step_execution_id, \
+                      discovery_source, offer, outcome, value_eur, occurred_at) \
+                 VALUES ($1, $2, $3, $4, \
+                         (SELECT enrollment_id FROM sales_step_executions WHERE id = $5), $5, \
+                         'first_party', 'offer-a', $6, $7::float8::numeric, NOW())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account_id)
+            .bind(contact_id)
+            .bind(chain_step)
+            .bind(outcome)
+            .bind(value)
+            .execute(&pool)
+            .await
+            .expect("insert attribution outcome");
+        }
+        // A paid subscription attributed to the same chain (contact already
+        // counted, so paying customers stays 1) …
+        let mut paid = OutcomeRecord::new(OutcomeKind::PaidSubscription);
+        paid.account_id = Some(account_id);
+        paid.contact_id = Some(contact_id);
+        paid.step_execution_id = Some(chain_step);
+        paid.discovery_source = Some("first_party".into());
+        paid.offer = Some("offer-a".into());
+        paid.value_eur = 1_000.0;
+        record_outcome(&pool, &tenant, &paid).await.unwrap();
+        // … an excluded outcome beyond the window end …
+        let mut late = OutcomeRecord::new(OutcomeKind::Trial);
+        late.account_id = Some(account_id);
+        late.contact_id = Some(contact_id);
+        late.discovery_source = Some("late-source".into());
+        late.value_eur = 9_999.0;
+        late.occurred_at = Some(window_end + chrono::Duration::seconds(1));
+        record_outcome(&pool, &tenant, &late).await.unwrap();
+
+        // Meetings store of record, opportunity (open + lost), costs.
+        sqlx::query(
+            "INSERT INTO sales_meetings (id, tenant_id, start_at, end_at, created_at) \
+             VALUES ($1, $2, NOW(), NOW() + interval '30 minutes', NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert meeting");
+        for (stage, amount) in [("open", 5_000.0_f64), ("lost", 7_777.0)] {
+            sqlx::query(
+                "INSERT INTO sales_opportunities (id, tenant_id, account_id, stage, amount_eur) \
+                 VALUES ($1, $2, $3, $4, $5::float8::numeric)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account_id)
+            .bind(stage)
+            .bind(amount)
+            .execute(&pool)
+            .await
+            .expect("insert opportunity");
+        }
+        sqlx::query(
+            "INSERT INTO sales_enrichment_facts \
+                 (id, tenant_id, subject_type, subject_id, field, provider, confidence, \
+                  cost_eur, created_at) \
+             VALUES ($1, $2, 'account', $3, 'industry', 'mock', 0.8, 2.5::float8::numeric, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("insert enrichment fact");
+        sqlx::query(
+            "INSERT INTO sales_provider_stats \
+                 (id, tenant_id, provider, field, total_cost_eur, updated_at) \
+             VALUES ($1, $2, 'mock', 'industry', 1.5::float8::numeric, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("insert provider stats");
+
+        let report = attribute_revenue(&pool, &tenant, window).await.unwrap();
+        assert_eq!(report.discovered_accounts, 1, "half-open [start, end)");
+        assert_eq!(report.contacted_contacts, 1);
+        assert_eq!(report.qualified_reply_contacts, 1);
+        assert_eq!(report.meetings_booked, 1);
+        assert_eq!(report.trials, 1);
+        assert_eq!(report.paying_customers, 1);
+        // trial 200 + paid 1000 + MRR 300 = 1500 (the late trial is outside
+        // the window and must not count).
+        assert_eq!(report.revenue_created_eur, Some(1_500.0));
+        assert_eq!(report.mrr_created_eur, Some(300.0));
+        assert_eq!(report.pipeline_created_eur, Some(5_000.0), "lost excluded");
+        assert_eq!(report.meeting_conversion, Some(1.0));
+        assert_eq!(report.qualified_reply_rate, Some(1.0));
+        assert_eq!(report.revenue_per_1000_discovered_eur, Some(1_500_000.0));
+        assert_eq!(report.revenue_per_1000_contacted_eur, Some(1_500_000.0));
+        assert_eq!(report.enrichment_cost_eur, Some(2.5));
+        assert_eq!(report.provider_cost_eur, Some(1.5));
+        assert_eq!(report.total_cost_eur, Some(4.0));
+        assert_eq!(report.cac_eur, Some(4.0));
+        assert_eq!(report.gross_profit_acquired_eur, Some(1_496.0));
+
+        let breakdown = &report.by_discovery_source;
+        assert_eq!(breakdown.len(), 1, "one source in-window: {breakdown:?}");
+        let row = &breakdown[0];
+        assert_eq!(row.discovery_source.as_deref(), Some("first_party"));
+        assert_eq!(row.icp_segment.as_deref(), Some("midmarket"));
+        assert_eq!(row.offer.as_deref(), Some("offer-a"));
+        assert_eq!(row.sequence_name.as_deref(), Some("Attribution Sequence"));
+        assert_eq!(row.contacts, 1);
+        assert_eq!(row.meetings, 1);
+        assert_eq!(row.paying_customers, 1);
+        assert_eq!(row.revenue_eur, 1_500.0);
+
+        // Tenant isolation: an unseeded tenant sees nothing, not this data.
+        let stranger = crate::test_db::unique_test_tenant("attr-none");
+        let empty = attribute_revenue(&pool, &stranger, window).await.unwrap();
+        assert_eq!(empty.revenue_created_eur, None);
+        assert_eq!(empty.discovered_accounts, 0);
+        assert!(empty.by_discovery_source.is_empty());
+        assert_eq!(empty.contacted_contacts, 0);
+
+        // A zero-length window selects nothing and reports None, never 0/inf.
+        let zero = AttributionWindow::new(window_start, window_start);
+        let empty = attribute_revenue(&pool, &tenant, zero).await.unwrap();
+        assert_eq!(empty.discovered_accounts, 0);
+        assert_eq!(empty.revenue_created_eur, None);
+        assert_eq!(empty.mrr_created_eur, None);
+        assert_eq!(empty.pipeline_created_eur, None);
+        assert_eq!(empty.enrichment_cost_eur, None);
+        assert_eq!(empty.provider_cost_eur, None);
+        assert_eq!(empty.total_cost_eur, None);
+        assert_eq!(empty.cac_eur, None);
+        assert_eq!(empty.gross_profit_acquired_eur, None);
+        assert_eq!(empty.revenue_per_1000_discovered_eur, None);
+        assert_eq!(empty.meeting_conversion, None);
+        assert_eq!(empty.qualified_reply_rate, None);
+        assert!(empty.by_discovery_source.is_empty());
+
+        // An empty tenant is refused outright.
+        let error = attribute_revenue(&pool, " ", window)
+            .await
+            .expect_err("tenant-less reports must be refused");
+        assert!(matches!(error, SalesError::InvalidInput(_)));
+
+        cleanup_attribution_tenant(&pool, &tenant).await;
+    }
+
+    /// Opens/clicks are secondary diagnostics: distinct contacts, rates
+    /// `None` without delivered mail, and strictly window-scoped.
+    #[tokio::test]
+    async fn click_metrics_are_distinct_contacts_and_none_without_delivered() {
+        let Some(pool) = live_pool("attribution_click_metrics").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("attr-click");
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let end = Utc::now() + chrono::Duration::hours(1);
+        let window = AttributionWindow::new(start, end);
+
+        let contact_a = Uuid::new_v4();
+        let contact_b = Uuid::new_v4();
+        for contact in [contact_a, contact_b] {
+            sqlx::query(
+                "INSERT INTO sales_contacts (id, tenant_id, full_name) VALUES ($1, $2, 'Click Metric')",
+            )
+            .bind(contact)
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("insert click metric contact");
+        }
+        for (contact, outcome) in [
+            (contact_a, "delivered"),
+            (contact_a, "delivered"),
+            (contact_b, "delivered"),
+            (contact_a, "open"),
+            (contact_b, "click"),
+            (contact_a, "open"), // duplicate open: still one distinct contact
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_outcomes (id, tenant_id, contact_id, outcome, occurred_at) \
+                 VALUES ($1, $2, $3, $4, NOW())",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(contact)
+            .bind(outcome)
+            .execute(&pool)
+            .await
+            .expect("insert click metric outcome");
+        }
+        // Outside the window: never counted.
+        sqlx::query(
+            "INSERT INTO sales_outcomes (id, tenant_id, contact_id, outcome, occurred_at) \
+             VALUES ($1, $2, $3, 'delivered', $4)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(contact_a)
+        .bind(end + chrono::Duration::seconds(1))
+        .execute(&pool)
+        .await
+        .expect("insert out-of-window outcome");
+
+        let metrics = click_metrics(&pool, &tenant, window).await.unwrap();
+        assert_eq!(metrics.delivered, 2);
+        assert_eq!(metrics.opens, 1);
+        assert_eq!(metrics.clicks, 1);
+        assert_eq!(metrics.open_rate, Some(0.5));
+        assert_eq!(metrics.click_rate, Some(0.5));
+
+        // No delivered mail in a zero-length window: None, not 0 or NaN.
+        let none = click_metrics(&pool, &tenant, AttributionWindow::new(start, start))
+            .await
+            .unwrap();
+        assert_eq!(none.delivered, 0);
+        assert_eq!(none.open_rate, None);
+        assert_eq!(none.click_rate, None);
+
+        cleanup_attribution_tenant(&pool, &tenant).await;
+    }
 }

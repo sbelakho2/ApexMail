@@ -1241,11 +1241,22 @@ mod tests {
             "an expired lease must return the action to the queue"
         );
 
-        // …and worker B recovers it.
-        let recovered = queue_b
-            .claim_filtered(50, DEFAULT_LEASE_SECS, Some(&[action.id]))
-            .await
-            .unwrap();
+        // …and worker B recovers it. The claim may be skipped once by a
+        // concurrent test's deployment-global sweep still holding the row
+        // lock (`FOR UPDATE SKIP LOCKED`), so retry briefly — the property
+        // asserted (the survivor recovers the row, attempt incremented) is
+        // unchanged.
+        let mut recovered = Vec::new();
+        for _ in 0..20 {
+            recovered = queue_b
+                .claim_filtered(50, DEFAULT_LEASE_SECS, Some(&[action.id]))
+                .await
+                .unwrap();
+            if recovered.iter().any(|leased| leased.id() == action.id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let recovered_action = recovered
             .iter()
             .find(|leased| leased.id() == action.id)

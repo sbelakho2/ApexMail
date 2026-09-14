@@ -1869,9 +1869,7 @@ pub(crate) mod test_support {
         static INSTALL: std::sync::Once = std::sync::Once::new();
         INSTALL.call_once(|| {
             let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
-            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
-            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            crate::test_db::ensure_aws_test_env();
         });
         let redis = deadpool_redis::Config::from_url(redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -5510,5 +5508,566 @@ mod adversarial_tests {
             static_asset_cache_control("/v1/css/secret"),
             "no-store, no-cache, must-revalidate"
         );
+    }
+}
+
+// ─── Adversarial coverage of the app-level helpers ────────────────
+//
+// The module above exercises router composition end to end; this module
+// pins the small decision helpers and disabled-feature branches that the
+// composed router never reaches (grader/placement off, non-GET renders,
+// backpressure error mapping).
+
+#[cfg(test)]
+mod adversarial_helper_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request, StatusCode};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    fn error_json(response: Response) -> serde_json::Value {
+        let body =
+            futures::executor::block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+                .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn backpressure_errors_map_to_structured_503_responses() {
+        // Load-shed overload.
+        let overloaded = handle_backpressure_error(Box::new(Overloaded::new())).await;
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            error_json(overloaded)["error"]["code"],
+            "SERVICE_OVERLOADED"
+        );
+
+        // Timeouts (the tower error type renders as an elapsed message).
+        let timeout: BoxError = Box::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "request timeout elapsed",
+        ));
+        let timed_out = handle_backpressure_error(timeout).await;
+        assert_eq!(timed_out.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error_json(timed_out)["error"]["code"], "SERVICE_TIMEOUT");
+
+        // Anything else degrades to the generic busy response, never a raw
+        // error string.
+        let other: BoxError = Box::new(std::io::Error::other("surprise"));
+        let generic = handle_backpressure_error(other).await;
+        assert_eq!(generic.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = error_json(generic);
+        assert_eq!(body["error"]["code"], "SERVICE_OVERLOADED");
+        assert!(!body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("surprise"));
+    }
+
+    #[tokio::test]
+    async fn disabled_grader_and_placement_handlers_refuse_honestly() {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+
+        let check = grader_check_domain(
+            State(state.clone()),
+            ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))),
+            HeaderMap::new(),
+            Json(
+                serde_json::from_value(json!({ "domain": "example.com" }))
+                    .expect("domain check request"),
+            ),
+        )
+        .await;
+        assert_eq!(check.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(check.1["error"]["code"], "GRADER_DISABLED");
+
+        let user = crate::middleware::auth::AuthUser {
+            tenant_id: "tenant-adv".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec![],
+        };
+        let submit = grader_submit_email(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            HeaderMap::new(),
+            Json(
+                serde_json::from_value(json!({ "domain": "example.com" })).expect("submit request"),
+            ),
+        )
+        .await;
+        assert_eq!(submit.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(submit.1["error"]["code"], "GRADER_DISABLED");
+
+        let result = grader_get_result(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Path(uuid::Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(result.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let list = grader_list_results(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Query(serde_json::from_value(json!({})).expect("pagination params")),
+        )
+        .await;
+        assert_eq!(list.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let created = placement_create_test(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Json(
+                serde_json::from_value(json!({
+                    "from_email": "sender@example.com",
+                    "subject": "subject"
+                }))
+                .expect("placement request"),
+            ),
+        )
+        .await;
+        assert_eq!(created.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(created.1["error"]["code"], "PLACEMENT_DISABLED");
+
+        let listed = placement_list_tests(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Query(serde_json::from_value(json!({})).expect("list query")),
+        )
+        .await;
+        assert_eq!(listed.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let fetched = placement_get_test(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Path(uuid::Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(fetched.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let trends = placement_get_trends(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            Query(serde_json::from_value(json!({})).expect("trends query")),
+        )
+        .await;
+        assert_eq!(trends.0, StatusCode::SERVICE_UNAVAILABLE);
+
+        let providers = placement_list_providers(State(state)).await;
+        assert_eq!(providers.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(providers.1["error"]["code"], "PLACEMENT_DISABLED");
+    }
+
+    #[test]
+    fn auth_page_error_messages_are_operator_safe() {
+        use crate::error::ApiError;
+        assert_eq!(
+            auth_page_error_message(&ApiError::BadRequest("bad".into())),
+            "bad"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::Unauthorized("no".into())),
+            "no"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::Forbidden("stop".into())),
+            "stop"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::NotFound("gone".into())),
+            "gone"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::Conflict("dup".into())),
+            "dup"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::PayloadTooLarge("big".into())),
+            "big"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::ServiceUnavailable("down".into())),
+            "down"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::Validation(vec!["a".into(), "b".into()])),
+            "a b"
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::RateLimited),
+            "Too many verification attempts. Please wait and try again."
+        );
+        assert_eq!(
+            auth_page_error_message(&ApiError::RateLimitedMessage("slow down".into())),
+            "slow down"
+        );
+        assert!(auth_page_error_message(&ApiError::Timeout).contains("timed out"));
+        let internal = auth_page_error_message(&ApiError::Internal("secret db text".into()));
+        assert!(
+            !internal.contains("secret db text"),
+            "internal detail must never surface: {internal}"
+        );
+    }
+
+    #[test]
+    fn route_auth_manifest_and_cp_public_paths_are_exact() {
+        // Manifest hits.
+        assert!(ui_route_requires_auth("web", "/campaigns"));
+        assert!(!ui_route_requires_auth("marketing-zola", "/pricing"));
+        // Default-protected dynamic areas missing from the manifest.
+        assert!(ui_route_requires_auth("web", "/lists/abc"));
+        assert!(ui_route_requires_auth("web", "/lists"));
+        assert!(ui_route_requires_auth("web", "/templates/x/edit"));
+        assert!(ui_route_requires_auth("web", "/inbox-placement"));
+        assert!(ui_route_requires_auth("web", "/inbox-placement/trends"));
+        assert!(ui_route_requires_auth("control-plane", "/cp"));
+        assert!(ui_route_requires_auth("control-plane", "/cp/anything/new"));
+        // Unknown surfaces fail open only where documented.
+        assert!(!ui_route_requires_auth("marketing", "/anything"));
+
+        // Pattern matching is segment-exact and placeholder-aware.
+        assert!(ui_route_pattern_matches("/lists/[id]", "/lists/123"));
+        assert!(ui_route_pattern_matches("/a/[b]/c", "/a/x/c"));
+        assert!(!ui_route_pattern_matches("/lists/[id]", "/lists/123/edit"));
+        assert!(!ui_route_pattern_matches("/lists/[id]", "/other/123"));
+        assert!(!ui_route_pattern_matches("", "/x"));
+
+        // CP public paths.
+        for public in ["/login", "/login/", "/not-found"] {
+            assert!(is_cp_public_path(public), "{public}");
+        }
+        for private in ["/", "/dashboard", "/login/extra"] {
+            assert!(!is_cp_public_path(private), "{private}");
+        }
+    }
+
+    #[test]
+    fn cp_alert_rules_response_applies_the_verified_role() {
+        let anonymous = cp_alert_rules_not_implemented_response(None);
+        assert_eq!(anonymous.status(), StatusCode::NOT_IMPLEMENTED);
+        let owner = cp_alert_rules_not_implemented_response(Some("owner"));
+        assert_eq!(owner.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = futures::executor::block_on(axum::body::to_bytes(owner.into_body(), usize::MAX))
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Alert rules are not implemented"));
+    }
+
+    #[test]
+    fn render_cookies_are_appended_per_consumed_cookie() {
+        let config = crate::app::test_support::test_config();
+        let mut response = (StatusCode::OK, "page").into_response();
+        let minted = routes::web::FormCsrfToken {
+            token: "token-1".into(),
+            minted: true,
+        };
+        append_render_cookies(&mut response, &minted, true, true, &config);
+        let cookies: Vec<String> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cookies.len(), 3, "csrf + flash + fields: {cookies:?}");
+        assert!(cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("csrf_token=")));
+        assert!(cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("apexmail_flash=")));
+        assert!(cookies
+            .iter()
+            .any(|cookie| cookie.starts_with("apexmail_form_fields=")));
+
+        // A reused token with nothing to clear adds no cookie at all.
+        let mut response = (StatusCode::OK, "page").into_response();
+        let reused = routes::web::FormCsrfToken {
+            token: "token-2".into(),
+            minted: false,
+        };
+        append_render_cookies(&mut response, &reused, false, false, &config);
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .next()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn synchronous_render_refuses_non_get_methods_and_api_paths() {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+        let config = state.config.clone();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "app.apexmail.ee".parse().unwrap());
+
+        let post_uri: Uri = "/dashboard".parse().unwrap();
+        assert!(
+            render_ui_response(&config, &headers, &post_uri, &Method::POST).is_none(),
+            "a POST must never render a page"
+        );
+        assert!(
+            render_ui_response_with_state(&state, &headers, &post_uri, &Method::POST, None)
+                .await
+                .is_none()
+        );
+        assert!(
+            ui_auth_redirect_if_required(&state, &headers, &post_uri, &Method::POST)
+                .await
+                .is_none()
+        );
+
+        let api_uri: Uri = "/v1/messages".parse().unwrap();
+        assert!(render_ui_response(&config, &headers, &api_uri, &Method::GET).is_none());
+        assert!(
+            render_ui_response_with_state(&state, &headers, &api_uri, &Method::GET, None)
+                .await
+                .is_none()
+        );
+        assert!(
+            ui_auth_redirect_if_required(&state, &headers, &api_uri, &Method::GET)
+                .await
+                .is_none()
+        );
+
+        // An unknown host falls back to the configured default surface: the
+        // sync render serves the default web page, while an auth-required
+        // default-surface path still redirects to login.
+        let mut unknown = HeaderMap::new();
+        unknown.insert(HOST, "unknown.example.com".parse().unwrap());
+        let uri: Uri = "/dashboard".parse().unwrap();
+        assert!(render_ui_response(&config, &unknown, &uri, &Method::GET).is_some());
+        let redirect = ui_auth_redirect_if_required(&state, &unknown, &uri, &Method::GET)
+            .await
+            .expect("default-surface protected route");
+        assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
+        assert!(redirect
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("/login?next="));
+    }
+
+    #[tokio::test]
+    async fn verify_email_page_passes_forwarded_outcome_through_the_url() {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+        let app = build_app(state);
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, "app.apexmail.ee".parse().unwrap());
+
+        // A token-free request carrying a forwarded outcome renders the
+        // allowlisted status/message.
+        let long_message = "x".repeat(1000);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/verify-email?status=error&message={long_message}&email=user%40example.com"
+                    ))
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("referrer-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-referrer")
+        );
+
+        // An unlisted status is ignored (never reflected).
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/verify-email?status=hacked&message=hi")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // A host outside the configured web hosts is a branded 404.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/verify-email")
+                    .header(HOST, "unexpected.example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn fallback_serves_icon_and_image_requests_without_json_errors() {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+        let app = build_app(state);
+
+        for path in [
+            "/favicon-32.png",
+            "/apple-icon-180.png",
+            "/android-icon-192.png",
+            "/assets/img/tile.png",
+            "/opengraph.png",
+            "/some.ico",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header(HOST, "apexmail.ee")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path}");
+        }
+
+        // The site icon is served as a real file when the marketing build is
+        // present; either way it is never a JSON 404.
+        let icon = app
+            .oneshot(
+                Request::builder()
+                    .uri("/favicon.ico")
+                    .header(HOST, "apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(icon.status(), StatusCode::OK | StatusCode::NO_CONTENT),
+            "favicon: {}",
+            icon.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn branded_404_differs_by_surface_but_never_leaks_json() {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+        let app = build_app(state);
+        for (host, expect_marketing) in [("apexmail.ee", true), ("app.apexmail.ee", false)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/definitely-not-a-route")
+                        .header(HOST, host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(
+                response.headers().get(CONTENT_TYPE).unwrap(),
+                "text/html; charset=utf-8"
+            );
+            let body =
+                futures::executor::block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+                    .unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(
+                !body.contains("NOT_FOUND"),
+                "browser 404s are branded HTML, not JSON"
+            );
+            if expect_marketing {
+                assert!(body.contains("ApexMail"), "marketing 404 page: {body:.120}");
+            }
+        }
+
+        // API paths stay JSON.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/not-a-route")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_explicit_origins_enable_credentials_and_reject_unknown_origin() {
+        let mut config = crate::app::test_support::test_config();
+        config.cors_origins = vec!["https://app.example.com".into()];
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://x@127.0.0.1:1/x")
+            .unwrap();
+        let state = crate::app::test_support::test_state_over_with_config(db, config).await;
+        let app = build_app(state);
+
+        let preflight = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/auth/login")
+                    .header("origin", "https://app.example.com")
+                    .header("access-control-request-method", "POST")
+                    .header("access-control-request-headers", "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(preflight.status().is_success());
+        assert_eq!(
+            preflight
+                .headers()
+                .get("access-control-allow-origin")
+                .unwrap(),
+            "https://app.example.com"
+        );
+        assert_eq!(
+            preflight
+                .headers()
+                .get("access-control-allow-credentials")
+                .unwrap(),
+            "true"
+        );
+
+        // An origin outside the allow-list gets no CORS grant.
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/v1/auth/login")
+                    .header("origin", "https://evil.example.com")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(denied
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
     }
 }

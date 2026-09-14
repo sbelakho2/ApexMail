@@ -2541,3 +2541,1567 @@ mod tests {
         }
     }
 }
+
+// ─── Adversarial handler-level tests ──────────────────────────────
+//
+// The module above proves the production SQL contract; this module drives
+// the REAL router (auth extractor → scope gate → system-tenant gate →
+// handler → audit) over a canonical-schema pool and a loopback mock of the
+// sales-autopilot service.
+
+#[cfg(test)]
+mod adversarial_handler_tests {
+    use super::*;
+    use crate::app::test_support::{test_config, test_state_over_with_config};
+    use axum::body::Body;
+    use axum::http::{Method, Request};
+    use sqlx::PgPool;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+
+    const CP_KEY: &str = "test-cp-key";
+
+    async fn state_with_engine(
+        pool: PgPool,
+        engine_base: &str,
+        internal_token: Option<&str>,
+    ) -> AppState {
+        let mut config = test_config();
+        config.control_plane_api_key = Some(CP_KEY.into());
+        config.sales_autopilot_base_url = engine_base.to_string();
+        config.internal_service_token = internal_token.map(str::to_string);
+        test_state_over_with_config(pool, config).await
+    }
+
+    /// The production handlers at their production FULL paths. Routes are
+    /// registered directly rather than with `nest` because nesting strips the
+    /// URI prefix before the handler's `AuthUser` extractor runs, and the
+    /// control-plane static API key path guard inspects the full path.
+    fn sales_app(state: &AppState) -> Router {
+        Router::new()
+            .route("/v1/admin/sales/leads", get(list_leads))
+            .route("/v1/admin/sales/leads/update", patch(update_leads))
+            .route("/v1/admin/sales/leads/enrich", post(enrich_leads))
+            .route(
+                "/v1/admin/sales/campaigns",
+                get(list_campaigns).patch(update_campaign),
+            )
+            .route("/v1/admin/sales/discovery/run", post(run_discovery))
+            .route("/v1/admin/sales/outreach/start", post(start_outreach))
+            .route(
+                "/v1/admin/sales/settings",
+                get(get_settings).put(save_settings),
+            )
+            .with_state(state.clone())
+    }
+
+    fn cp_request(method: Method, uri: &str, body: Option<serde_json::Value>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "localhost")
+            .header("x-api-key", CP_KEY);
+        let body = match body {
+            Some(value) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(value.to_string())
+            }
+            None => Body::empty(),
+        };
+        builder.body(body).unwrap()
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn unique(prefix: &str) -> String {
+        format!(
+            "{prefix}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..18]
+        )
+    }
+
+    struct SeededLead {
+        contact_id: uuid::Uuid,
+        account_id: uuid::Uuid,
+        lead_id: String,
+        domain: String,
+    }
+
+    /// Seed one canonical account/contact/point mapped as a lead under
+    /// `tenant`, with the lead-only projection rendered by the derived view.
+    async fn seed_lead(
+        pool: &PgPool,
+        tenant: &str,
+        suffix: &str,
+        source: &str,
+        lifecycle: &str,
+    ) -> SeededLead {
+        let account_id = uuid::Uuid::new_v4();
+        let contact_id = uuid::Uuid::new_v4();
+        let point_id = uuid::Uuid::new_v4();
+        let lead_id = format!("lead_{suffix}");
+        let domain = format!("{suffix}.example");
+        let email = format!("{suffix}@example.com");
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, lifecycle) \
+             VALUES ($1, $2, $3, $4, 'discovered')",
+        )
+        .bind(account_id)
+        .bind(tenant)
+        .bind(format!("{suffix} Co"))
+        .bind(&domain)
+        .execute(pool)
+        .await
+        .expect("seed adversarial account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, lifecycle) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(contact_id)
+        .bind(tenant)
+        .bind(account_id)
+        .bind(format!("{suffix} Contact"))
+        .bind(lifecycle)
+        .execute(pool)
+        .await
+        .expect("seed adversarial contact");
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification, confidence) \
+             VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid', 0.9)",
+        )
+        .bind(point_id)
+        .bind(tenant)
+        .bind(contact_id)
+        .bind(&email)
+        .execute(pool)
+        .await
+        .expect("seed adversarial contact point");
+        sqlx::query(
+            "UPDATE sales_contacts SET legacy_lead_id = $1, legacy_lead_email = $2, \
+                    lead_source = $3, lead_score = 0, lead_created_at = NOW(), lead_updated_at = NOW() \
+              WHERE id = $4 AND tenant_id = $5",
+        )
+        .bind(&lead_id)
+        .bind(&email)
+        .bind(source)
+        .bind(contact_id)
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("map adversarial contact as a lead");
+        SeededLead {
+            contact_id,
+            account_id,
+            lead_id,
+            domain,
+        }
+    }
+
+    /// Remove ONLY the rows this test created (never a tenant-wide sweep:
+    /// other tests and agents share the `system` tenant id).
+    async fn cleanup_lead(pool: &PgPool, tenant: &str, lead: &SeededLead) {
+        sqlx::query("DELETE FROM sales_contact_points WHERE contact_id = $1")
+            .bind(lead.contact_id)
+            .execute(pool)
+            .await
+            .expect("cleanup contact point");
+        sqlx::query("DELETE FROM sales_contacts WHERE id = $1 AND tenant_id = $2")
+            .bind(lead.contact_id)
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup contact");
+        sqlx::query("DELETE FROM sales_accounts WHERE id = $1 AND tenant_id = $2")
+            .bind(lead.account_id)
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup account");
+    }
+
+    // ── Loopback mock of the sales-autopilot service ─────────────
+
+    #[derive(Debug, Clone)]
+    struct MockCall {
+        method: String,
+        path: String,
+        api_key: Option<String>,
+        tenant_header: Option<String>,
+        body: serde_json::Value,
+    }
+
+    type Calls = Arc<Mutex<Vec<MockCall>>>;
+
+    #[derive(Clone)]
+    struct MockEngine {
+        base_url: String,
+        calls: Calls,
+    }
+
+    impl MockEngine {
+        fn take_calls(&self) -> Vec<MockCall> {
+            std::mem::take(&mut *self.calls.lock().expect("mock calls lock"))
+        }
+    }
+
+    async fn mock_engine_handler(
+        State(calls): State<Calls>,
+        request: axum::extract::Request,
+    ) -> Response {
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let api_key = request
+            .headers()
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let tenant_header = request
+            .headers()
+            .get("x-tenant-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        calls.lock().expect("mock calls lock").push(MockCall {
+            method: method.clone(),
+            path: path.clone(),
+            api_key,
+            tenant_header,
+            body: body.clone(),
+        });
+
+        if path == "/enrich" {
+            if body
+                .get("email")
+                .and_then(|value| value.as_str())
+                .is_some_and(|email| email.contains("boom"))
+            {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "engine exploded").into_response();
+            }
+            return Json(json!({ "company": { "name": "Acme", "input": body } })).into_response();
+        }
+        match (method.as_str(), path.as_str()) {
+            ("GET", "/enrollments") => {
+                Json(json!({ "data": [{ "id": "enr_mock" }] })).into_response()
+            }
+            ("POST", "/discovery/jobs") => {
+                (StatusCode::CREATED, Json(json!({ "jobId": "job_mock" }))).into_response()
+            }
+            ("POST", "/enrollments") => {
+                Json(json!({ "enrollmentBatchId": "batch_mock" })).into_response()
+            }
+            ("POST", _) if path.starts_with("/enrollments/") => {
+                Json(json!({ "action": "applied" })).into_response()
+            }
+            _ => (StatusCode::NOT_FOUND, "unrouted mock path").into_response(),
+        }
+    }
+
+    async fn start_mock_engine() -> MockEngine {
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock engine");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .fallback(mock_engine_handler)
+            .with_state(calls.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        MockEngine { base_url, calls }
+    }
+
+    // ── Honest refusals with no database ─────────────────────────
+
+    /// A dead lazy pool: `table_exists` is false, every handler must degrade
+    /// honestly (never a fabricated success with rows).
+    async fn dead_pool_state() -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(300))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool");
+        state_with_engine(db, "", None).await
+    }
+
+    #[tokio::test]
+    async fn read_handlers_degrade_honestly_when_storage_is_unavailable() {
+        let state = dead_pool_state().await;
+        let app = sales_app(&state);
+
+        // No sales_leads table → an empty, explicitly zeroed response.
+        let response = app
+            .clone()
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/leads", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["leads"].as_array().unwrap().len(), 0);
+        assert_eq!(body["total"], 0);
+
+        // No enrollment read model → the canonical fallback is empty, not an
+        // error and not invented campaigns.
+        let response = app
+            .clone()
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/campaigns", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert!(body.as_array().unwrap().is_empty());
+
+        // Enrichment without a leads table reports the skip reason per id.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/leads/enrich",
+                Some(json!({ "leadIds": ["lead_missing_1", "lead_missing_2"] })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["enriched"], 0);
+        assert_eq!(body["skipped"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            body["skipped"][0]["reason"],
+            "sales leads table unavailable"
+        );
+
+        // Discovery without its tables says so explicitly instead of
+        // reporting a fabricated import count.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/discovery/run",
+                Some(json!({ "sources": ["mock"], "maxPages": 1 })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["status"], "unavailable");
+        assert_eq!(body["imported"], 0);
+        assert_eq!(body["mode"], "import_only");
+
+        // Settings are never silently faked: a storage failure propagates.
+        let response = app
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/settings", None))
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_server_error(),
+            "settings must not fabricate defaults on a storage outage, got {}",
+            response.status()
+        );
+    }
+
+    // ── Read path: tenant scoping, filters, pagination, stats ─────
+
+    #[tokio::test]
+    async fn list_leads_is_tenant_scoped_and_applies_filters_and_clamps() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_list_leads").await else {
+            return;
+        };
+        let marker = unique("srcmark");
+        let other_marker = unique("srcother");
+        let mine_a = seed_lead(&pool, "system", &unique("a"), &marker, "active").await;
+        let mine_b = seed_lead(&pool, "system", &unique("b"), &marker, "do_not_contact").await;
+        let other_tenant = unique("tother");
+        let other = seed_lead(&pool, &other_tenant, &unique("o"), &other_marker, "active").await;
+
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+
+        // Scoped read: only this tenant's two leads, with KPIs over the same
+        // canonical row set.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::GET,
+                &format!("/v1/admin/sales/leads?source={marker}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["total"], 2, "tenant-scoped total: {body}");
+        let ids: Vec<String> = body["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|lead| lead["id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(ids.contains(&mine_a.lead_id) && ids.contains(&mine_b.lead_id));
+        assert_eq!(body["statsBySource"][marker.as_str()], 2);
+        assert!(
+            body["statsByStatus"].is_object(),
+            "status KPIs are computed over the same canonical row set"
+        );
+
+        // The second tenant's lead is invisible, even when filtered for by
+        // its exact source value.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::GET,
+                &format!("/v1/admin/sales/leads?source={other_marker}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert_eq!(body["total"], 0, "cross-tenant lead leaked: {body}");
+        assert!(body["leads"].as_array().unwrap().is_empty());
+
+        // Status filter is applied on the canonical derivation.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::GET,
+                &format!("/v1/admin/sales/leads?source={marker}&status=lost"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["leads"][0]["id"], mine_b.lead_id);
+
+        // Pagination: limit=0 clamps up to 1, negative offset clamps to 0,
+        // and an over-limit is clamped to the 200-row ceiling (never a 500).
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::GET,
+                &format!("/v1/admin/sales/leads?source={marker}&limit=0&offset=-5"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["leads"].as_array().unwrap().len(), 1);
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::GET,
+                &format!("/v1/admin/sales/leads?source={marker}&limit=999999&offset=1"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await["leads"].as_array().unwrap().len(),
+            1
+        );
+
+        cleanup_lead(&pool, "system", &mine_a).await;
+        cleanup_lead(&pool, "system", &mine_b).await;
+        cleanup_lead(&pool, &other_tenant, &other).await;
+    }
+
+    /// A tenant-scoped API key with the wildcard scope (every customer
+    /// owner/admin) must be refused by the sales control plane.
+    #[tokio::test]
+    async fn customer_wildcard_key_is_forbidden_from_the_sales_control_plane() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_role_gate").await else {
+            return;
+        };
+        let (tenant, key) = crate::app::test_support::seed_api_tenant(&pool, &["*"]).await;
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+
+        for (method, path, body) in [
+            (Method::GET, "/v1/admin/sales/leads", None),
+            (
+                Method::PATCH,
+                "/v1/admin/sales/leads/update",
+                Some(json!({ "id": "x", "notes": "n" })),
+            ),
+            (Method::GET, "/v1/admin/sales/settings", None),
+        ] {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "localhost")
+                .header("x-api-key", key.as_str());
+            let request = match body {
+                Some(value) => {
+                    builder = builder.header("content-type", "application/json");
+                    builder.body(Body::from(value.to_string())).unwrap()
+                }
+                None => builder.body(Body::empty()).unwrap(),
+            };
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{path} must reject a customer wildcard key"
+            );
+        }
+
+        sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup api key");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    // ── Write path: atomicity, audit, tenant isolation ────────────
+
+    #[tokio::test]
+    async fn update_leads_handler_writes_projection_audit_and_refuses_cross_tenant() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_update_handler").await else {
+            return;
+        };
+        let mine = seed_lead(&pool, "system", &unique("upd"), &unique("s"), "active").await;
+        let other_tenant = unique("tother");
+        let other = seed_lead(&pool, &other_tenant, &unique("oth"), &unique("s"), "active").await;
+
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+
+        // Cross-tenant id: rejected as not-found with nothing written.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::PATCH,
+                "/v1/admin/sales/leads/update",
+                Some(json!({ "id": other.lead_id, "status": "lost" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let other_lifecycle: String = sqlx::query_scalar(
+            "SELECT lifecycle FROM sales_contacts WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(other.contact_id)
+        .bind(&other_tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            other_lifecycle, "active",
+            "cross-tenant write must not land"
+        );
+
+        // Successful projection update (notes/tags/dealValue) — the canonical
+        // contact columns the CP read renders.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::PATCH,
+                "/v1/admin/sales/leads/update",
+                Some(json!({
+                    "id": mine.lead_id,
+                    "notes": "operator note",
+                    "tags": ["vip", "beta"],
+                    "dealValue": 4242.5
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["success"], true);
+        assert_eq!(body["updated"], 1);
+
+        let row: (Option<String>, serde_json::Value, Option<f64>) = sqlx::query_as(
+            "SELECT lead_notes, COALESCE(lead_tags, '[]'::jsonb), lead_deal_value \
+             FROM sales_contacts WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(mine.contact_id)
+        .bind("system")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0.as_deref(), Some("operator note"));
+        assert_eq!(row.1, json!(["vip", "beta"]));
+        assert_eq!(row.2, Some(4242.5));
+
+        // The audit trail names the lead and the canonical effect.
+        let audit: (String, String, Option<String>, serde_json::Value) = sqlx::query_as(
+            "SELECT action, resource, resource_id, details FROM audit_logs \
+             WHERE tenant_id = 'system' AND resource_id = $1 \
+             ORDER BY timestamp DESC LIMIT 1",
+        )
+        .bind(&mine.lead_id)
+        .fetch_one(&pool)
+        .await
+        .expect("audit row for the lead update");
+        assert_eq!(audit.0, "control_plane.sales.leads_updated");
+        assert_eq!(audit.1, "sales_lead");
+        assert_eq!(audit.3["updated"], 1);
+
+        // Malformed / oversized / empty id sets are 4xx, never 5xx.
+        for body in [
+            json!({ "id": "", "status": "lost" }),
+            json!({ "id": "not-a-uuid-and-not-a-lead", "status": "lost" }),
+            json!({ "ids": [], "status": "lost" }),
+            json!({ "id": "x".repeat(100_000), "status": "lost" }),
+            json!({ "ids": (0..101).map(|i| format!("lead_{i}")).collect::<Vec<_>>(), "status": "lost" }),
+            json!({ "id": mine.lead_id }), // no fields
+            json!({ "id": mine.lead_id, "status": "engaged" }), // derived-only status
+            json!({ "ids": [mine.lead_id.clone(), "second"], "contactEmail": "a@b.example" }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(cp_request(
+                    Method::PATCH,
+                    "/v1/admin/sales/leads/update",
+                    Some(body.clone()),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_client_error(),
+                "expected 4xx for {body}, got {}",
+                response.status()
+            );
+        }
+
+        // The rejected requests wrote nothing.
+        let unchanged: (Option<String>, Option<f64>) = sqlx::query_as(
+            "SELECT lead_notes, lead_deal_value FROM sales_contacts WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(mine.contact_id)
+        .bind("system")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unchanged.0.as_deref(), Some("operator note"));
+        assert_eq!(unchanged.1, Some(4242.5));
+        let lifecycle: String = sqlx::query_scalar(
+            "SELECT lifecycle FROM sales_contacts WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(other.contact_id)
+        .bind(&other_tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(lifecycle, "active");
+
+        cleanup_lead(&pool, "system", &mine).await;
+        cleanup_lead(&pool, &other_tenant, &other).await;
+    }
+
+    /// The operator status decision through the handler must land on the
+    /// canonical lifecycle and be visible in the derived read, and an
+    /// illegal transition must change nothing.
+    #[tokio::test]
+    async fn update_leads_handler_applies_canonical_status_and_refuses_illegal_ones() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_status_handler").await else {
+            return;
+        };
+        let lead = seed_lead(&pool, "system", &unique("st"), &unique("s"), "active").await;
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::PATCH,
+                "/v1/admin/sales/leads/update",
+                Some(json!({ "id": lead.lead_id, "status": "prospect" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let account_lifecycle: String =
+            sqlx::query_scalar("SELECT lifecycle FROM sales_accounts WHERE id = $1")
+                .bind(lead.account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(account_lifecycle, "nurturing");
+        let rendered: String = sqlx::query_scalar(
+            "SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = 'system'",
+        )
+        .bind(&lead.lead_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rendered, "prospect");
+
+        // Illegal transition: refused and nothing changes.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::PATCH,
+                "/v1/admin/sales/leads/update",
+                Some(json!({ "ids": [lead.lead_id.clone()], "status": "demo_scheduled" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let after: String =
+            sqlx::query_scalar("SELECT lifecycle FROM sales_accounts WHERE id = $1")
+                .bind(lead.account_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after, "nurturing", "a refused status must change nothing");
+        let rendered: String = sqlx::query_scalar(
+            "SELECT status FROM sales_leads WHERE id = $1 AND tenant_id = 'system'",
+        )
+        .bind(&lead.lead_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rendered, "prospect");
+
+        // Pool-level wrapper (the SSR path) shares the decision.
+        let tx_lead = seed_lead(&pool, "system", &unique("st2"), &unique("s"), "active").await;
+        let (updated, rendered) = apply_lead_status_decision(
+            &pool,
+            "system",
+            std::slice::from_ref(&tx_lead.lead_id),
+            "qualified",
+        )
+        .await
+        .expect("canonical decision");
+        assert_eq!(updated, 1);
+        assert_eq!(rendered, "qualified");
+        let error = apply_lead_status_decision(
+            &pool,
+            "system",
+            std::slice::from_ref(&tx_lead.lead_id),
+            "nonsense",
+        )
+        .await
+        .expect_err("unsupported status must fail");
+        assert!(matches!(error, LeadStatusWriteError::Unsupported(_)));
+
+        cleanup_lead(&pool, "system", &lead).await;
+        cleanup_lead(&pool, "system", &tx_lead).await;
+    }
+
+    #[test]
+    fn status_write_errors_have_operator_safe_display() {
+        let unsupported = LeadStatusWriteError::Unsupported("banana".into());
+        assert!(unsupported.to_string().contains("`banana`"));
+        assert!(unsupported.to_string().contains("qualified"));
+        let missing = LeadStatusWriteError::LeadNotFound("lead_x".into());
+        assert!(missing.to_string().contains("lead_x"));
+        let dangling = LeadStatusWriteError::MissingCanonicalLink {
+            lead_id: "lead_y".into(),
+            link: "account",
+        };
+        assert!(dangling.to_string().contains("no live canonical account"));
+        let database = LeadStatusWriteError::Database(sqlx::Error::RowNotFound);
+        let display = database.to_string();
+        assert!(
+            !display.contains("no rows returned"),
+            "raw database text must never reach operators: {display}"
+        );
+        assert!(matches!(
+            lead_status_write_error(database),
+            ApiError::NotFound(_)
+        ));
+        assert!(matches!(
+            lead_status_write_error(LeadStatusWriteError::Unsupported("x".into())),
+            ApiError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn canonical_status_labels_and_destinations_are_total() {
+        for (requested, lifecycle, rendered, account) in [
+            ("qualified", "qualified", "qualified", true),
+            ("prospect", "nurturing", "prospect", true),
+            ("converted", "customer", "converted", false),
+            ("unqualified", "do_not_contact", "lost", false),
+            ("lost", "do_not_contact", "lost", false),
+        ] {
+            let status = canonical_lead_status(requested).expect("mapped vocabulary");
+            assert_eq!(status.lifecycle(), lifecycle);
+            assert_eq!(status.rendered_status(), rendered);
+            assert_eq!(status.writes_account(), account);
+        }
+        // A future value with no read derivation must not panic.
+        let unknown = CanonicalLeadStatus::AccountLifecycle("not-a-lifecycle");
+        assert_eq!(unknown.rendered_status(), "unknown");
+    }
+
+    // ── Enrichment proxy ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn enrich_leads_proxies_each_attributable_lead_and_reports_skips() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_enrich").await else {
+            return;
+        };
+        let engine = start_mock_engine().await;
+        let ok = seed_lead(&pool, "system", &unique("enr"), &unique("s"), "active").await;
+        let booming = seed_lead(&pool, "system", &unique("boom"), &unique("s"), "active").await;
+        // A lead with no reachable email: the canonical contact point and
+        // the legacy fallback are both cleared, so enrichment can only use
+        // the account domain.
+        let domain_only = seed_lead(&pool, "system", &unique("bare"), &unique("s"), "active").await;
+        sqlx::query("DELETE FROM sales_contact_points WHERE contact_id = $1")
+            .bind(domain_only.contact_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_contacts SET legacy_lead_email = NULL WHERE id = $1")
+            .bind(domain_only.contact_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = state_with_engine(pool.clone(), &engine.base_url, Some("internal-token")).await;
+        let app = sales_app(&state);
+
+        let response = app
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/leads/enrich",
+                Some(json!({
+                    "leadIds": [
+                        ok.lead_id,
+                        booming.lead_id,
+                        domain_only.lead_id,
+                        "lead_never_existed"
+                    ]
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["success"], true);
+        assert_eq!(body["enriched"], 2, "email and domain leads enrich: {body}");
+        let skipped = body["skipped"].as_array().unwrap();
+        let reasons: Vec<&str> = skipped
+            .iter()
+            .map(|skip| skip["reason"].as_str().unwrap())
+            .collect();
+        assert!(
+            reasons.iter().any(|r| r.contains("not found")),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("enrichment backend returned 500")),
+            "{reasons:?}"
+        );
+
+        // The engine saw the internal service token and the system tenant
+        // header; the email lead sent an email payload and the address-less
+        // lead fell back to its account domain.
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 3, "one call per attributable lead: {calls:?}");
+        assert!(calls
+            .iter()
+            .all(|call| call.api_key.as_deref() == Some("internal-token")));
+        assert!(calls
+            .iter()
+            .all(|call| call.tenant_header.as_deref() == Some("system")));
+        let ok_call = calls
+            .iter()
+            .find(|call| call.body.get("email").is_some())
+            .expect("email payload");
+        assert_eq!(
+            ok_call.body["email"],
+            format!("{}@example.com", ok.domain.trim_end_matches(".example"))
+        );
+        let domain_call = calls
+            .iter()
+            .find(|call| call.body.get("domain").is_some())
+            .expect("domain fallback payload");
+        assert_eq!(domain_call.body["domain"], domain_only.domain.as_str());
+
+        cleanup_lead(&pool, "system", &ok).await;
+        cleanup_lead(&pool, "system", &booming).await;
+        cleanup_lead(&pool, "system", &domain_only).await;
+    }
+
+    #[tokio::test]
+    async fn enrich_leads_fails_honestly_when_the_engine_is_unconfigured() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_enrich_down").await else {
+            return;
+        };
+        let lead = seed_lead(&pool, "system", &unique("down"), &unique("s"), "active").await;
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+        let response = app
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/leads/enrich",
+                Some(json!({ "leadIds": [lead.lead_id] })),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_server_error(),
+            "an unconfigured enrichment engine must fail, not fake success: {}",
+            response.status()
+        );
+        cleanup_lead(&pool, "system", &lead).await;
+    }
+
+    #[tokio::test]
+    async fn enrich_leads_validates_the_id_set_before_touching_the_engine() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_enrich_ids").await else {
+            return;
+        };
+        let engine = start_mock_engine().await;
+        let state = state_with_engine(pool.clone(), &engine.base_url, None).await;
+        let app = sales_app(&state);
+
+        for lead_ids in [
+            json!([]),
+            json!((0..51).map(|i| format!("lead_{i}")).collect::<Vec<_>>()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(cp_request(
+                    Method::POST,
+                    "/v1/admin/sales/leads/enrich",
+                    Some(json!({ "leadIds": lead_ids })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        assert!(engine.take_calls().is_empty());
+    }
+
+    // ── Campaigns ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn campaigns_proxy_verbatim_when_configured_and_fall_back_canonically_otherwise() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_campaigns").await else {
+            return;
+        };
+        // Canonical fallback fixture: one enrollment on a named sequence.
+        let tenant = unique("tenr");
+        let account_id = uuid::Uuid::new_v4();
+        let contact_id = uuid::Uuid::new_v4();
+        let sequence_id = uuid::Uuid::new_v4();
+        let version_id = uuid::Uuid::new_v4();
+        let enrollment_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain) VALUES ($1, $2, 'E Co', $3)",
+        )
+        .bind(account_id)
+        .bind(&tenant)
+        .bind(format!("{tenant}.example"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sales_contacts (id, tenant_id, account_id) VALUES ($1, $2, $3)")
+            .bind(contact_id)
+            .bind(&tenant)
+            .bind(account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name) VALUES ($1, $2, 'Onboarding Seq')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions (id, tenant_id, sequence_id, version) \
+             VALUES ($1, $2, $3, 1)",
+        )
+        .bind(version_id)
+        .bind(&tenant)
+        .bind(sequence_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sales_enrollments (id, tenant_id, sequence_version_id, contact_id, state) \
+             VALUES ($1, $2, $3, $4, 'active')",
+        )
+        .bind(enrollment_id)
+        .bind(&tenant)
+        .bind(version_id)
+        .bind(contact_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let canonical_state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&canonical_state);
+        let response = app
+            .clone()
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/campaigns", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let row = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|campaign| campaign["id"] == enrollment_id.to_string())
+            .expect("canonical enrollment listed");
+        assert_eq!(row["name"], "Onboarding Seq");
+        assert_eq!(row["status"], "active");
+        assert_eq!(row["campaignType"], "sequence");
+        assert_eq!(row["totalRecipients"], 1);
+        assert_eq!(row["sent"], 0);
+
+        // Configured engine: the CP forwards the answer verbatim (status,
+        // content type and body) instead of reading canonical rows.
+        let engine = start_mock_engine().await;
+        let proxied_state = state_with_engine(pool.clone(), &engine.base_url, None).await;
+        let proxied_app = sales_app(&proxied_state);
+        let response = proxied_app
+            .clone()
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/campaigns", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        assert_eq!(
+            json_body(response).await,
+            json!({ "data": [{ "id": "enr_mock" }] })
+        );
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "GET");
+        assert_eq!(calls[0].path, "/enrollments");
+
+        // Pause/resume/cancel forward to the enrollment command surface and
+        // are audited; archive is an alias for cancel.
+        for (action, downstream) in [
+            ("pause", "pause"),
+            ("resume", "resume"),
+            ("archive", "cancel"),
+            ("cancel", "cancel"),
+        ] {
+            let response = proxied_app
+                .clone()
+                .oneshot(cp_request(
+                    Method::PATCH,
+                    "/v1/admin/sales/campaigns",
+                    Some(json!({ "id": enrollment_id.to_string(), "action": action })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "action {action}");
+            let calls = engine.take_calls();
+            assert_eq!(
+                calls[0].path,
+                format!("/enrollments/{enrollment_id}/{downstream}")
+            );
+        }
+        // Invalid action: refused before the engine is even contacted.
+        let response = proxied_app
+            .clone()
+            .oneshot(cp_request(
+                Method::PATCH,
+                "/v1/admin/sales/campaigns",
+                Some(json!({ "id": enrollment_id.to_string(), "action": "delete-everything" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(engine.take_calls().is_empty());
+
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'control_plane.sales.campaign_updated' \
+             AND resource_id = $1",
+        )
+        .bind(enrollment_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audited, 4, "one audit row per accepted action");
+
+        // Engine unreachable: the mutation fails closed with the audit row
+        // still recording the attempt (upstreamStatus null).
+        let down_state = state_with_engine(pool.clone(), "http://127.0.0.1:1", None).await;
+        let down_app = sales_app(&down_state);
+        let response = down_app
+            .oneshot(cp_request(
+                Method::PATCH,
+                "/v1/admin/sales/campaigns",
+                Some(json!({ "id": enrollment_id.to_string(), "action": "pause" })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'control_plane.sales.campaign_updated' \
+             AND resource_id = $1",
+        )
+        .bind(enrollment_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 5, "the failed attempt is still audited");
+
+        for statement in [
+            "DELETE FROM sales_enrollments WHERE tenant_id = $1",
+            "DELETE FROM sales_sequences WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup campaign fixture");
+        }
+        sqlx::query("DELETE FROM audit_logs WHERE resource_id = $1")
+            .bind(enrollment_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("cleanup audit rows");
+    }
+
+    // ── Discovery ────────────────────────────────────────────────
+
+    async fn run_marker_discovery(app: Router, marker: &str) -> Response {
+        app.oneshot(cp_request(
+            Method::POST,
+            "/v1/admin/sales/discovery/run",
+            Some(json!({
+                "sources": ["mock-source"],
+                "categories": [marker],
+                "maxPages": 1
+            })),
+        ))
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn discovery_imports_filtered_enriched_companies_exactly_once() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_discovery").await else {
+            return;
+        };
+        let marker = unique("indmark");
+        let domain_a = format!("{}.example", unique("disca"));
+        let domain_b = format!("{}.example", unique("discb"));
+        let unrelated = format!("{}.example", unique("discu"));
+        for (domain, industry) in [
+            (domain_a.as_str(), Some(marker.as_str())),
+            (domain_b.as_str(), Some(marker.as_str())),
+            (unrelated.as_str(), Some("unrelated-industry")),
+        ] {
+            sqlx::query(
+                "INSERT INTO enriched_companies (id, tenant_id, domain, company_name, industry, description) \
+                 VALUES ($1, 'system', $2, $3, $4, 'a description')",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(domain)
+            .bind(format!("Company for {domain}"))
+            .bind(industry)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // A pre-existing lead for one of the domains: the dedupe check must
+        // skip it rather than duplicate.
+        let existing =
+            seed_lead(&pool, "system", &unique("preexist"), &unique("s"), "active").await;
+        sqlx::query("UPDATE sales_accounts SET domain = $1 WHERE id = $2")
+            .bind(&domain_a)
+            .bind(existing.account_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+
+        let response = run_marker_discovery(app.clone(), &marker).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["discovered"], 2,
+            "only the marker-matching rows: {body}"
+        );
+        assert_eq!(
+            body["imported"], 1,
+            "the pre-existing domain is deduped: {body}"
+        );
+        assert_eq!(body["source"], "mock-source");
+
+        // Replay: the import is idempotent.
+        let response = run_marker_discovery(app.clone(), &marker).await;
+        let body = json_body(response).await;
+        assert_eq!(
+            body["imported"], 0,
+            "replay must not duplicate leads: {body}"
+        );
+
+        // The imported lead is visible to the tenant-scoped read.
+        let response = app
+            .oneshot(cp_request(
+                Method::GET,
+                "/v1/admin/sales/leads?source=mock-source",
+                None,
+            ))
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert!(
+            body["leads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|lead| lead["domain"] == domain_b),
+            "the imported company must be listed: {body}"
+        );
+
+        // Cleanup: the imported companies' leads + the pre-existing lead.
+        sqlx::query(
+            "DELETE FROM sales_contacts WHERE tenant_id = 'system' AND account_id IN \
+             (SELECT id FROM sales_accounts WHERE domain = ANY($1))",
+        )
+        .bind(vec![&domain_a, &domain_b, &unrelated])
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM sales_accounts WHERE domain = ANY($1)")
+            .bind(vec![&domain_a, &domain_b, &unrelated])
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM enriched_companies WHERE domain = ANY($1)")
+            .bind(vec![&domain_a, &domain_b, &unrelated])
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup_lead(&pool, "system", &existing).await;
+    }
+
+    #[tokio::test]
+    async fn discovery_requires_sources_and_proxies_commands_when_configured() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_discovery_proxy").await else {
+            return;
+        };
+        let engine = start_mock_engine().await;
+        let state = state_with_engine(pool.clone(), &engine.base_url, None).await;
+        let app = sales_app(&state);
+
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/discovery/run",
+                Some(json!({ "sources": [] })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(engine.take_calls().is_empty());
+
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/discovery/run",
+                Some(json!({ "sources": ["crunchbase"], "categories": ["SaaS"], "maxPages": 2 })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+        assert_eq!(body["jobId"], "job_mock");
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/discovery/jobs");
+        assert_eq!(calls[0].body["sources"], json!(["crunchbase"]));
+        // The upstream job id is the audit resource id.
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'control_plane.sales.discovery_run' \
+             AND resource_id = 'job_mock'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(audited >= 1);
+        sqlx::query("DELETE FROM audit_logs WHERE resource_id = 'job_mock'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // ── Outreach ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn outreach_rate_limit_window_counts_and_blocks() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_outreach_limit").await else {
+            return;
+        };
+        let state = state_with_engine(pool.clone(), "http://127.0.0.1:1", None).await;
+        let Some(mut conn) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let tenant = unique("rate");
+        let key = build_outreach_rate_limit_key(&tenant);
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut *conn).await;
+
+        for attempt in 1..=OUTREACH_RATE_LIMIT {
+            assert!(
+                check_outreach_rate_limit(&state, &tenant).await.is_ok(),
+                "attempt {attempt} is inside the burst budget"
+            );
+        }
+        let error = check_outreach_rate_limit(&state, &tenant)
+            .await
+            .expect_err("the burst budget must close");
+        assert!(matches!(error, ApiError::RateLimited));
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut *conn).await;
+    }
+
+    #[tokio::test]
+    async fn outreach_proxies_the_enrollment_command_and_fails_closed_unconfigured() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_outreach").await else {
+            return;
+        };
+        let engine = start_mock_engine().await;
+        let state = state_with_engine(pool.clone(), &engine.base_url, Some("internal-token")).await;
+        let Some(mut conn) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let key = build_outreach_rate_limit_key("system");
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut *conn).await;
+
+        let app = sales_app(&state);
+        let payload = json!({
+            "sequenceId": "11111111-1111-1111-1111-111111111111",
+            "contactIds": ["22222222-2222-2222-2222-222222222222"],
+            "autonomyPolicyId": "33333333-3333-3333-3333-333333333333",
+        });
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/outreach/start",
+                Some(payload),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await,
+            json!({ "enrollmentBatchId": "batch_mock" })
+        );
+        let calls = engine.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/enrollments");
+        assert_eq!(calls[0].tenant_header.as_deref(), Some("system"));
+        assert_eq!(calls[0].api_key.as_deref(), Some("internal-token"));
+        assert_eq!(calls[0].body["contactIds"].as_array().unwrap().len(), 1);
+
+        // The batch id lands in the audit trail.
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'control_plane.sales.outreach_started' \
+             AND resource_id = 'batch_mock'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(audited >= 1);
+        sqlx::query("DELETE FROM audit_logs WHERE resource_id = 'batch_mock'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Unconfigured engine: fail closed after the burst guard admits it.
+        let unconfigured = state_with_engine(pool.clone(), "", None).await;
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(build_outreach_rate_limit_key("system"))
+            .query_async(&mut *conn)
+            .await;
+        let response = sales_app(&unconfigured)
+            .oneshot(cp_request(
+                Method::POST,
+                "/v1/admin/sales/outreach/start",
+                Some(json!({
+                    "sequenceId": "11111111-1111-1111-1111-111111111111",
+                    "contactIds": ["22222222-2222-2222-2222-222222222222"],
+                    "autonomyPolicyId": "33333333-3333-3333-3333-333333333333",
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ── Settings ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn settings_round_trip_through_the_control_plane() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_settings").await else {
+            return;
+        };
+        sqlx::query("DELETE FROM sales_settings WHERE tenant_id = 'system'")
+            .execute(&pool)
+            .await
+            .expect("clean the singleton settings row");
+        let state = state_with_engine(pool.clone(), "", None).await;
+        let app = sales_app(&state);
+
+        // First run: explicit empty defaults, never fabricated values.
+        let response = app
+            .clone()
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/settings", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(
+            body,
+            json!({ "scoringWeights": {}, "schedule": {}, "notifications": {} })
+        );
+
+        // Save then read back the exact values.
+        let response = app
+            .clone()
+            .oneshot(cp_request(
+                Method::PUT,
+                "/v1/admin/sales/settings",
+                Some(json!({
+                    "scoringWeights": { "reply": 5, "click": 2 },
+                    "schedule": { "timezone": "UTC" },
+                    "notifications": { "bounce": true }
+                })),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await, json!({ "success": true }));
+
+        let response = app
+            .oneshot(cp_request(Method::GET, "/v1/admin/sales/settings", None))
+            .await
+            .unwrap();
+        let body = json_body(response).await;
+        assert_eq!(body["scoringWeights"]["reply"], 5);
+        assert_eq!(body["schedule"]["timezone"], "UTC");
+        assert_eq!(body["notifications"]["bounce"], true);
+
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'control_plane.sales.settings_saved'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(audited >= 1);
+
+        sqlx::query("DELETE FROM sales_settings WHERE tenant_id = 'system'")
+            .execute(&pool)
+            .await
+            .expect("restore the empty settings state");
+        sqlx::query("DELETE FROM audit_logs WHERE action = 'control_plane.sales.settings_saved'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // ── Helpers / proxy primitives ───────────────────────────────
+
+    #[test]
+    fn base_url_and_payload_helpers_are_exact() {
+        assert_eq!(default_limit(), 50);
+        let empty = empty_leads_response();
+        assert_eq!(empty.total, 0);
+        assert!(empty.leads.is_empty());
+        assert_eq!(empty.stats_by_source, json!({}));
+    }
+
+    #[tokio::test]
+    async fn base_url_normalization_and_unconfigured_refusal() {
+        let Some(pool) = crate::test_db::optional_pg_pool("sales_adv_base_url_helpers").await
+        else {
+            return;
+        };
+        let state = state_with_engine(pool, "http://engine.example/", None).await;
+        assert_eq!(
+            sales_autopilot_base_url(&state),
+            "http://engine.example",
+            "trailing slashes are trimmed exactly once"
+        );
+        let unconfigured = state_with_engine(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://x@127.0.0.1:1/x")
+                .unwrap(),
+            "",
+            None,
+        )
+        .await;
+        assert!(matches!(
+            configured_sales_autopilot_base_url(&unconfigured),
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn upstream_response_forwards_status_and_content_type_verbatim() {
+        let response = UpstreamResponse {
+            status: StatusCode::IM_A_TEAPOT,
+            content_type: Some(HeaderValue::from_static("application/vnd.test+json")),
+            body: Bytes::from_static(br#"{"ok":true}"#),
+        };
+        assert_eq!(response.status_u16(), 418);
+        assert_eq!(response.body_json(), Some(json!({ "ok": true })));
+
+        let converted = response.into_axum_response();
+        assert_eq!(converted.status(), StatusCode::IM_A_TEAPOT);
+        assert_eq!(
+            converted.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/vnd.test+json"
+        );
+        let body = axum::body::to_bytes(converted.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"ok":true}"#);
+
+        // A non-JSON body yields no JSON (never a panic).
+        let plain = UpstreamResponse {
+            status: StatusCode::OK,
+            content_type: None,
+            body: Bytes::from_static(b"not json"),
+        };
+        assert_eq!(plain.body_json(), None);
+        assert!(plain
+            .into_axum_response()
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_none());
+    }
+}

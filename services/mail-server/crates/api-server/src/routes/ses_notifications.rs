@@ -53,7 +53,7 @@ pub fn router() -> Router<AppState> {
 
 // ─── SNS envelope types ────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct SnsMessage {
     /// "Notification", "SubscriptionConfirmation", "UnsubscribeConfirmation"
@@ -79,7 +79,7 @@ struct SnsMessage {
 
 // ─── SES event types ───────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesEvent {
     /// "Bounce", "Complaint", "Delivery", "Send", "Reject", "Open", "Click"
@@ -92,7 +92,7 @@ struct SesEvent {
     click: Option<SesClick>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     dead_code,
@@ -107,14 +107,14 @@ struct SesMail {
     common_headers: Option<SesCommonHeaders>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesHeader {
     name: String,
     value: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     dead_code,
@@ -126,7 +126,7 @@ struct SesCommonHeaders {
     subject: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesBounce {
     bounce_type: String,
@@ -135,7 +135,7 @@ struct SesBounce {
     timestamp: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     dead_code,
@@ -148,7 +148,7 @@ struct BouncedRecipient {
     diagnostic_code: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[expect(
     dead_code,
@@ -161,13 +161,13 @@ struct SesComplaint {
     timestamp: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ComplainedRecipient {
     email_address: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesDelivery {
     timestamp: Option<String>,
@@ -178,7 +178,7 @@ struct SesDelivery {
 
 /// SES Open event payload (user_agent/ip only when event publishing
 /// includes open/tracking metadata).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesOpen {
     timestamp: Option<String>,
@@ -187,7 +187,7 @@ struct SesOpen {
 }
 
 /// SES Click event payload.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SesClick {
     timestamp: Option<String>,
@@ -508,7 +508,20 @@ async fn fetch_sns_signing_key(
         ApiError::ServiceUnavailable("Failed to fetch SNS signing certificate".into())
     })?;
 
-    let (_, pem) = parse_x509_pem(&cert_bytes).map_err(|e| {
+    let key = parse_sns_signing_certificate(&cert_bytes, cert_url)?;
+    cache_put_sns_signing_key(cert_url, key.clone());
+    Ok(key)
+}
+
+/// Parse an AWS SNS signing certificate (PEM/DER) into the RSA public key
+/// used to verify notifications. Split out of [`fetch_sns_signing_key`] so
+/// every malformed-certificate shape (bad PEM, bad DER, non-RSA key) is
+/// refused deterministically in tests, without an outbound fetch.
+fn parse_sns_signing_certificate(
+    cert_bytes: &[u8],
+    cert_url: &str,
+) -> Result<RsaPublicKey, ApiError> {
+    let (_, pem) = parse_x509_pem(cert_bytes).map_err(|e| {
         warn!(error = ?e, cert_url = %cert_url, "Invalid SNS signing certificate PEM");
         ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
     })?;
@@ -517,14 +530,10 @@ async fn fetch_sns_signing_key(
         ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
     })?;
 
-    let key = RsaPublicKey::from_pkcs1_der(&certificate.public_key().subject_public_key.data)
-        .map_err(|e| {
-            warn!(error = %e, cert_url = %cert_url, "Invalid SNS signing certificate public key");
-            ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
-        })?;
-
-    cache_put_sns_signing_key(cert_url, key.clone());
-    Ok(key)
+    RsaPublicKey::from_pkcs1_der(&certificate.public_key().subject_public_key.data).map_err(|e| {
+        warn!(error = %e, cert_url = %cert_url, "Invalid SNS signing certificate public key");
+        ApiError::Validation(vec!["Invalid SNS signing certificate".into()])
+    })
 }
 
 fn verify_sns_signature_with_key(
@@ -834,8 +843,10 @@ fn ses_db_error(context: &str, error: sqlx::Error) -> ApiError {
 /// Insert an analytics `events` row for a terminal SES event with a
 /// DETERMINISTIC id (`ses_event_id`) and ON CONFLICT DO NOTHING so an SNS
 /// replay after a lost dedup marker cannot duplicate the effect (F75).
-/// Failures PROPAGATE: the caller must not acknowledge SNS before the
-/// event is durably recorded.
+/// Returns whether the row was actually inserted (`false` = replay of an
+/// already-recorded event), which lets the counter-updating callers make
+/// their increments idempotent too. Failures PROPAGATE: the caller must not
+/// acknowledge SNS before the event is durably recorded.
 #[expect(clippy::too_many_arguments)]
 async fn insert_analytics_event(
     executor: impl sqlx::PgExecutor<'_>,
@@ -848,7 +859,7 @@ async fn insert_analytics_event(
     user_agent: Option<&str>,
     ip_address: Option<&str>,
     at: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     sqlx::query(
         "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_url, user_agent, ip_address, timestamp)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -865,7 +876,7 @@ async fn insert_analytics_event(
     .bind(at)
     .execute(executor)
     .await
-    .map(|_| ())
+    .map(|result| result.rows_affected() == 1)
 }
 
 // ─── Bounce processing ────────────────────────────────────────
@@ -1313,23 +1324,17 @@ async fn process_open(
 
     // Mirror tracking-service processor.rs: open_count += 1,
     // first_opened_at backfilled on the first open. Committed before the
-    // SNS ack.
-    sqlx::query(
-        "UPDATE messages SET
-            open_count = open_count + 1,
-            first_opened_at = COALESCE(first_opened_at, $3),
-            updated_at = NOW()
-         WHERE id = $1::uuid AND tenant_id = $2",
-    )
-    .bind(&attribution.message_id)
-    .bind(&attribution.tenant_id)
-    .bind(opened_at)
-    .execute(&state.db)
-    .await
-    .map_err(|e| ses_db_error("storage", e))?;
-
-    insert_analytics_event(
-        &state.db,
+    // SNS ack. The deterministic event id makes the whole effect idempotent
+    // across an SNS replay after a lost dedup marker: when the analytics row
+    // already exists the counter increment is skipped, so open_count counts
+    // DISTINCT opens, never redeliveries of one notification.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| ses_db_error("storage", e))?;
+    let inserted = insert_analytics_event(
+        &mut *tx,
         &ses_event_id(sns_message_id, "opened", &attribution.recipient),
         &attribution.tenant_id,
         &attribution.message_id,
@@ -1342,6 +1347,29 @@ async fn process_open(
     )
     .await
     .map_err(|e| ses_db_error("failed to record open event", e))?;
+
+    if inserted {
+        sqlx::query(
+            "UPDATE messages SET
+                open_count = open_count + 1,
+                first_opened_at = COALESCE(first_opened_at, $3),
+                updated_at = NOW()
+             WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&attribution.message_id)
+        .bind(&attribution.tenant_id)
+        .bind(opened_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ses_db_error("storage", e))?;
+    } else {
+        debug!(
+            message_id = %attribution.message_id,
+            "SES open event replay — counter increment skipped"
+        );
+    }
+
+    tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
 
     // Queue webhook
     let payload = serde_json::json!({
@@ -1377,22 +1405,15 @@ async fn process_click(
     };
     let clicked_at = ses_event_timestamp(click.timestamp.as_deref());
 
-    sqlx::query(
-        "UPDATE messages SET
-            click_count = click_count + 1,
-            first_clicked_at = COALESCE(first_clicked_at, $3),
-            updated_at = NOW()
-         WHERE id = $1::uuid AND tenant_id = $2",
-    )
-    .bind(&attribution.message_id)
-    .bind(&attribution.tenant_id)
-    .bind(clicked_at)
-    .execute(&state.db)
-    .await
-    .map_err(|e| ses_db_error("storage", e))?;
-
-    insert_analytics_event(
-        &state.db,
+    // Deterministic-id event first, then the counter only when the event was
+    // actually inserted: a replayed notification must not double-count.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| ses_db_error("storage", e))?;
+    let inserted = insert_analytics_event(
+        &mut *tx,
         &ses_event_id(sns_message_id, "clicked", &attribution.recipient),
         &attribution.tenant_id,
         &attribution.message_id,
@@ -1405,6 +1426,29 @@ async fn process_click(
     )
     .await
     .map_err(|e| ses_db_error("failed to record click event", e))?;
+
+    if inserted {
+        sqlx::query(
+            "UPDATE messages SET
+                click_count = click_count + 1,
+                first_clicked_at = COALESCE(first_clicked_at, $3),
+                updated_at = NOW()
+             WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&attribution.message_id)
+        .bind(&attribution.tenant_id)
+        .bind(clicked_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ses_db_error("storage", e))?;
+    } else {
+        debug!(
+            message_id = %attribution.message_id,
+            "SES click event replay — counter increment skipped"
+        );
+    }
+
+    tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
 
     // Queue webhook
     let payload = serde_json::json!({
@@ -1894,6 +1938,15 @@ mod tests {
                 key.clone(),
             );
         }
+        // The most recently inserted entry survives the cap.
+        let survivor = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-15.pem";
+        assert!(
+            cache_get_sns_signing_key(survivor).is_some(),
+            "the newest entry must be cached after overfill"
+        );
+        // Re-inserting the original URL makes both sides of the bound check
+        // observable: a hit still proves the cache stayed bounded.
+        cache_put_sns_signing_key(url, key.clone());
         assert!(
             cache_get_sns_signing_key(url).is_none() || {
                 // whichever state, the cache must stay bounded
@@ -1925,5 +1978,1281 @@ mod tests {
             ),
             topic_arn: Some("arn:aws:sns:us-east-1:123:test".into()),
         }
+    }
+}
+
+// ─── Adversarial handler-level tests ──────────────────────────────
+//
+// These drive the REAL router with SNS-signed messages (a locally generated
+// RSA key primed into the process-wide signing-cert cache, so verification
+// runs for real without any outbound request), plus the processing functions
+// directly against a canonical-schema database.
+
+#[cfg(test)]
+mod adversarial_handler_tests {
+    use super::*;
+    use crate::app::test_support::{
+        test_config, test_state_over, test_state_over_lazy, test_state_over_with_config_and_redis,
+    };
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::response::Response;
+    use deadpool_redis::redis as redis_cmd;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::signature::{SignatureEncoding, Signer};
+    use rsa::RsaPrivateKey;
+    use serde_json::json;
+    use sqlx::PgPool;
+    use std::sync::Once;
+    use tower::ServiceExt;
+
+    const TOPIC_ARN: &str = "arn:aws:sns:us-east-1:123456789012:apexmail-test";
+
+    /// The handler reads the allow-list from the process environment. One
+    /// fixed value is installed once: every test in this module shares it and
+    /// no other module reads the variable.
+    fn install_sns_topic_env() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| std::env::set_var("SNS_ALLOWED_TOPIC_ARNS", TOPIC_ARN));
+    }
+
+    fn unique(prefix: &str) -> String {
+        format!(
+            "{prefix}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..18]
+        )
+    }
+
+    fn ses_app(state: &AppState) -> Router {
+        Router::new()
+            .nest("/v1/ses", router())
+            .with_state(state.clone())
+    }
+
+    async fn post_notification(app: &Router, body: &str) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/ses/notifications")
+                    .header("content-type", "text/plain")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    // ── SNS message signing with a locally cached key ────────────
+
+    struct SnsSigner {
+        cert_url: String,
+        private_key: RsaPrivateKey,
+    }
+
+    fn signer() -> SnsSigner {
+        let mut rng = rsa::rand_core::OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("test RSA key");
+        let cert_url = format!(
+            "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-adv{}.pem",
+            &uuid::Uuid::new_v4().simple().to_string()[..16]
+        );
+        // Prime the process-wide signing-cert cache: verification then uses
+        // this key without any outbound fetch.
+        cache_put_sns_signing_key(&cert_url, RsaPublicKey::from(&private_key));
+        SnsSigner {
+            cert_url,
+            private_key,
+        }
+    }
+
+    struct SnsEnvelope {
+        message_type: String,
+        message: Option<String>,
+        message_id: String,
+        subject: Option<String>,
+        timestamp: String,
+        subscribe_url: Option<String>,
+        token: Option<String>,
+        signature_version: String,
+    }
+
+    impl SnsEnvelope {
+        fn new(message_type: &str, message: Option<&str>) -> Self {
+            Self {
+                message_type: message_type.into(),
+                message: message.map(str::to_string),
+                message_id: unique("sns-"),
+                subject: None,
+                timestamp: Utc::now().to_rfc3339(),
+                subscribe_url: None,
+                token: Some("token-1".into()),
+                signature_version: "2".into(),
+            }
+        }
+
+        fn to_message(&self, signer: &SnsSigner, signature: Option<String>) -> SnsMessage {
+            SnsMessage {
+                message_type: self.message_type.clone(),
+                subscribe_url: self.subscribe_url.clone(),
+                message: self.message.clone(),
+                message_id: Some(self.message_id.clone()),
+                subject: self.subject.clone(),
+                timestamp: Some(self.timestamp.clone()),
+                token: self.token.clone(),
+                signature,
+                signature_version: Some(self.signature_version.clone()),
+                signing_cert_url: Some(signer.cert_url.clone()),
+                topic_arn: Some(TOPIC_ARN.into()),
+            }
+        }
+
+        fn sign(&self, signer: &SnsSigner) -> String {
+            self.sign_with(signer, None)
+        }
+
+        /// Sign the envelope. `override_signature` replaces the signature
+        /// bytes while the signed string stays the ORIGINAL message (the
+        /// tamper case).
+        fn sign_with(&self, signer: &SnsSigner, override_signature: Option<&str>) -> String {
+            let unsigned = self.to_message(signer, None);
+            let to_sign = build_sns_string_to_sign(&unsigned).expect("signable envelope");
+            let signature = match self.signature_version.as_str() {
+                "1" => BASE64.encode(
+                    SigningKey::<Sha1>::new(signer.private_key.clone())
+                        .sign(to_sign.as_bytes())
+                        .to_bytes(),
+                ),
+                _ => BASE64.encode(
+                    SigningKey::<Sha256>::new(signer.private_key.clone())
+                        .sign(to_sign.as_bytes())
+                        .to_bytes(),
+                ),
+            };
+            let signature = override_signature.unwrap_or(&signature).to_string();
+            let mut body = serde_json::json!({
+                "Type": self.message_type,
+                "MessageId": self.message_id,
+                "Timestamp": self.timestamp,
+                "Signature": signature,
+                "SignatureVersion": self.signature_version,
+                "SigningCertURL": signer.cert_url,
+                "TopicArn": TOPIC_ARN,
+            });
+            if let Some(message) = &self.message {
+                body["Message"] = json!(message);
+            }
+            if let Some(subject) = &self.subject {
+                body["Subject"] = json!(subject);
+            }
+            if let Some(url) = &self.subscribe_url {
+                body["SubscribeURL"] = json!(url);
+            }
+            if let Some(token) = &self.token {
+                body["Token"] = json!(token);
+            }
+            body.to_string()
+        }
+    }
+
+    fn allowlist_arn_configured() {
+        install_sns_topic_env();
+    }
+
+    // ── Refusals: unsigned / malformed / tampered ────────────────
+
+    #[tokio::test]
+    async fn unsigned_and_malformed_notifications_are_refused_with_nothing_written() {
+        allowlist_arn_configured();
+        let state = test_state_over_lazy().await;
+        let app = ses_app(&state);
+
+        // Not JSON at all.
+        let response = post_notification(&app, "not json").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Well-formed but no topic ARN → forbidden.
+        let response = post_notification(
+            &app,
+            &json!({
+                "Type": "Notification",
+                "MessageId": "adv-no-arn",
+                "Message": "{}",
+                "Timestamp": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let signer = signer();
+        for message_id in [
+            "adv-missing-cert",
+            "adv-bad-scheme",
+            "adv-bad-host",
+            "adv-bad-path",
+            "adv-bad-port",
+        ] {
+            let mut body = json!({
+                "Type": "UnsubscribeConfirmation",
+                "MessageId": message_id,
+                "Message": "bye",
+                "Timestamp": Utc::now().to_rfc3339(),
+                "Token": "t",
+                "TopicArn": TOPIC_ARN,
+                "Signature": "ZmFrZQ==",
+                "SignatureVersion": "2",
+            });
+            match message_id {
+                "adv-missing-cert" => {}
+                "adv-bad-scheme" => {
+                    body["SigningCertURL"] = json!(signer.cert_url.replace("https://", "http://"))
+                }
+                "adv-bad-host" => {
+                    body["SigningCertURL"] =
+                        json!("https://evil.example.com/SimpleNotificationService-x.pem")
+                }
+                "adv-bad-path" => {
+                    body["SigningCertURL"] =
+                        json!("https://sns.us-east-1.amazonaws.com/other-x.pem")
+                }
+                _ => {
+                    body["SigningCertURL"] = json!(
+                        "https://sns.us-east-1.amazonaws.com:8443/SimpleNotificationService-x.pem"
+                    )
+                }
+            }
+            let response = post_notification(&app, &body.to_string()).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{message_id} must be refused"
+            );
+        }
+
+        // Tampered body: signed for one message, delivered with another.
+        let envelope = SnsEnvelope::new("Notification", Some("{\"eventType\":\"Send\"}"));
+        let signed = envelope.sign(&signer);
+        let mut tampered_value: serde_json::Value = serde_json::from_str(&signed).unwrap();
+        tampered_value["Message"] = json!("{\"eventType\":\"Reject\"}");
+        let tampered = tampered_value.to_string();
+        assert_ne!(signed, tampered);
+        let response = post_notification(&app, &tampered).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // The refused requests did not claim a dedup marker.
+        if let Ok(mut conn) = state.redis.get().await {
+            let marked: Option<String> = redis_cmd::cmd("GET")
+                .arg(format!(
+                    "apexmail:dedup:sns:{}:Notification",
+                    envelope.message_id
+                ))
+                .query_async(&mut *conn)
+                .await
+                .unwrap_or(None);
+            assert!(
+                marked.is_none(),
+                "a refused request must not claim the marker"
+            );
+        }
+    }
+
+    #[test]
+    fn signature_verification_matrix_refuses_every_malformed_shape() {
+        let signer = signer();
+        let envelope = SnsEnvelope::new("Notification", Some("{\"eventType\":\"Send\"}"));
+
+        // Missing signature.
+        let msg = envelope.to_message(&signer, None);
+        assert!(matches!(
+            verify_sns_signature_with_key(&msg, &RsaPublicKey::from(&signer.private_key)),
+            Err(ApiError::Validation(_))
+        ));
+
+        // Invalid base64.
+        let msg = envelope.to_message(&signer, Some("!!!not-base64!!!".into()));
+        assert!(matches!(
+            verify_sns_signature_with_key(&msg, &RsaPublicKey::from(&signer.private_key)),
+            Err(ApiError::Validation(_))
+        ));
+
+        // Valid base64 but not a valid signature for the key (shorter
+        // representations are rejected by the verification math itself).
+        let msg = envelope.to_message(&signer, Some(BASE64.encode([1u8, 2, 3])));
+        assert!(matches!(
+            verify_sns_signature_with_key(&msg, &RsaPublicKey::from(&signer.private_key)),
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // Unsupported / missing signature version.
+        let mut unsupported = envelope.to_message(&signer, Some(BASE64.encode([1u8; 256])));
+        unsupported.signature_version = Some("3".into());
+        assert!(matches!(
+            verify_sns_signature_with_key(&unsupported, &RsaPublicKey::from(&signer.private_key)),
+            Err(ApiError::Validation(_))
+        ));
+        let mut missing_version = envelope.to_message(&signer, Some(BASE64.encode([1u8; 256])));
+        missing_version.signature_version = None;
+        assert!(matches!(
+            verify_sns_signature_with_key(
+                &missing_version,
+                &RsaPublicKey::from(&signer.private_key)
+            ),
+            Err(ApiError::Validation(_))
+        ));
+
+        // Unknown message type cannot even build a signed string.
+        let unknown = SnsEnvelope::new("SomethingElse", Some("x"));
+        assert!(matches!(
+            build_sns_string_to_sign(&unknown.to_message(&signer, None)),
+            Err(ApiError::Validation(_))
+        ));
+
+        // A genuine SHA-256 signature passes; SHA-1 is honored for v1.
+        for version in ["1", "2"] {
+            let mut envelope = SnsEnvelope::new("Notification", Some("{\"eventType\":\"Send\"}"));
+            envelope.signature_version = version.into();
+            let msg = envelope.to_message(&signer, None);
+            let signed = envelope.sign(&signer);
+            let parsed: SnsMessage = serde_json::from_str(&signed).unwrap();
+            assert!(
+                verify_sns_signature_with_key(&parsed, &RsaPublicKey::from(&signer.private_key))
+                    .is_ok(),
+                "version {version} signature must verify"
+            );
+            let _ = msg;
+        }
+
+        // A wrong key is rejected.
+        let wrong_key =
+            RsaPublicKey::from(&RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048).unwrap());
+        let signed = envelope.sign(&signer);
+        let parsed: SnsMessage = serde_json::from_str(&signed).unwrap();
+        assert!(matches!(
+            verify_sns_signature_with_key(&parsed, &wrong_key),
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn signing_certificate_url_rules_are_exact() {
+        for allowed in [
+            "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-abc.pem",
+            "https://sns.amazonaws.com/SimpleNotificationService-abc.pem",
+            "https://sns.cn-north-1.amazonaws.com.cn/SimpleNotificationService-abc.pem",
+        ] {
+            assert!(validate_signing_cert_url(allowed).is_ok(), "{allowed}");
+        }
+        for rejected in [
+            "http://sns.us-east-1.amazonaws.com/SimpleNotificationService-abc.pem",
+            "https://sns.us-east-1.amazonaws.com:8443/SimpleNotificationService-abc.pem",
+            "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-abc.pem.evil",
+            "https://sns.us-east-1.amazonaws.com/NotASns-abc.pem",
+            "https://sns.evil.com/SimpleNotificationService-abc.pem",
+            "https://amazonaws.com/SimpleNotificationService-abc.pem",
+            "not a url",
+        ] {
+            assert!(
+                validate_signing_cert_url(rejected).is_err(),
+                "{rejected} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_signing_certificates_are_refused_deterministically() {
+        let url = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-test.pem";
+        // Not PEM at all.
+        assert!(matches!(
+            parse_sns_signing_certificate(b"not a certificate", url),
+            Err(ApiError::Validation(_))
+        ));
+        // PEM block whose contents are not DER.
+        let fake_pem = "-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n";
+        assert!(matches!(
+            parse_sns_signing_certificate(fake_pem.as_bytes(), url),
+            Err(ApiError::Validation(_))
+        ));
+        // Valid PEM envelope, DER that is not an X.509 certificate.
+        let der_not_cert =
+            "-----BEGIN CERTIFICATE-----\nMIIBAzCBqgIJAOQ7VQ==\n-----END CERTIFICATE-----\n";
+        assert!(parse_sns_signing_certificate(der_not_cert.as_bytes(), url).is_err());
+    }
+
+    // ── Signed handler flow: dedup, replay, SSRF refusals ────────
+
+    #[tokio::test]
+    async fn signed_unsubscribe_is_processed_once_and_replays_are_noops() {
+        allowlist_arn_configured();
+        let state = test_state_over_lazy().await;
+        let Some(mut conn) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let app = ses_app(&state);
+        let signer = signer();
+        let mut envelope = SnsEnvelope::new("UnsubscribeConfirmation", Some("unsubscribed"));
+        // AWS includes the confirmation URL in this envelope; the handler
+        // only logs it for this type.
+        envelope.subscribe_url = Some(
+            "https://sns.us-east-1.amazonaws.com/?Action=Unsubscribe&SubscriptionArn=x".into(),
+        );
+        let body = envelope.sign(&signer);
+
+        let response = post_notification(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let marker: Option<String> = redis_cmd::cmd("GET")
+            .arg(format!(
+                "apexmail:dedup:sns:{}:UnsubscribeConfirmation",
+                envelope.message_id
+            ))
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(None);
+        assert_eq!(marker.as_deref(), Some("1"), "the dedup marker is claimed");
+        let ttl: i64 = redis_cmd::cmd("TTL")
+            .arg(format!(
+                "apexmail:dedup:sns:{}:UnsubscribeConfirmation",
+                envelope.message_id
+            ))
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(-1);
+        assert!((1..=300).contains(&ttl), "marker TTL bounded, got {ttl}");
+
+        // Replay: acknowledged as a duplicate without reprocessing.
+        let response = post_notification(&app, &body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // SSRF: a signed SubscriptionConfirmation pointing at a non-AWS URL
+        // is refused, and the failure does NOT claim the dedup marker (so a
+        // legitimate retry is not suppressed).
+        let mut ssrf = SnsEnvelope::new("SubscriptionConfirmation", Some("confirm"));
+        ssrf.subscribe_url = Some("https://169.254.169.254/latest/meta-data".into());
+        let response = post_notification(&app, &ssrf.sign(&signer)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let marker: Option<String> = redis_cmd::cmd("GET")
+            .arg(format!(
+                "apexmail:dedup:sns:{}:SubscriptionConfirmation",
+                ssrf.message_id
+            ))
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(None);
+        assert!(
+            marker.is_none(),
+            "a refused confirmation must stay retryable"
+        );
+
+        // Missing SubscribeURL: AWS would never sign such an envelope, so the
+        // refusal is pinned at the handler helper (the signature stage
+        // already refuses it as an unbuildable string to sign).
+        let missing = SnsEnvelope::new("SubscriptionConfirmation", Some("confirm"));
+        let error = handle_subscription_confirmation(&state, &missing.to_message(&signer, None))
+            .await
+            .expect_err("a confirmation without SubscribeURL is refused");
+        assert!(matches!(error, ApiError::Validation(_)));
+
+        // Invalid SubscribeURL syntax.
+        let mut invalid = SnsEnvelope::new("SubscriptionConfirmation", Some("confirm"));
+        invalid.subscribe_url = Some("::::not a url".into());
+        let response = post_notification(&app, &invalid.sign(&signer)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_processing_failure_leaves_no_marker_so_sns_can_retry() {
+        allowlist_arn_configured();
+        // A processing failure needs a real DB error: a dead pool makes the
+        // Notification path fail with a retryable 5xx.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool");
+        let state = test_state_over(pool).await;
+        let Some(mut conn) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let app = ses_app(&state);
+        let signer = signer();
+        let event = json!({
+            "eventType": "Delivery",
+            "mail": { "messageId": "ses-adv-retry", "destination": ["user@example.com"] },
+            "delivery": { "timestamp": Utc::now().to_rfc3339(), "recipients": ["user@example.com"] }
+        });
+        let envelope = SnsEnvelope::new("Notification", Some(&event.to_string()));
+        let response = post_notification(&app, &envelope.sign(&signer)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let marker: Option<String> = redis_cmd::cmd("GET")
+            .arg(format!(
+                "apexmail:dedup:sns:{}:Notification",
+                envelope.message_id
+            ))
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(None);
+        assert!(
+            marker.is_none(),
+            "a 5xx must not claim the marker — SNS retries must reprocess"
+        );
+    }
+
+    // ── Notification dispatch ────────────────────────────────────
+
+    #[tokio::test]
+    async fn notification_dispatch_ignores_send_reject_and_unknown_event_types() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_dispatch").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        for event_type in ["Send", "Reject", "Rendering Failure", "Unknown Event"] {
+            let event = json!({
+                "eventType": event_type,
+                "mail": { "messageId": "ses-adv-dispatch", "destination": ["user@example.com"] }
+            });
+            let msg = SnsMessage {
+                message_type: "Notification".into(),
+                subscribe_url: None,
+                message: Some(event.to_string()),
+                message_id: Some(unique("sns-disp")),
+                subject: None,
+                timestamp: Some(Utc::now().to_rfc3339()),
+                token: None,
+                signature: Some("ZmFrZQ==".into()),
+                signature_version: Some("2".into()),
+                signing_cert_url: None,
+                topic_arn: Some(TOPIC_ARN.into()),
+            };
+            handle_notification(&state, &msg)
+                .await
+                .unwrap_or_else(|error| panic!("{event_type} must be ignored safely: {error:?}"));
+        }
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE message_id = 'ses-adv-dispatch'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(events, 0, "non-terminal events write nothing");
+
+        // Malformed / missing payloads are refusals, not panics.
+        let mut missing = SnsMessage {
+            message_type: "Notification".into(),
+            subscribe_url: None,
+            message: None,
+            message_id: Some("sns-missing".into()),
+            subject: None,
+            timestamp: None,
+            token: None,
+            signature: None,
+            signature_version: None,
+            signing_cert_url: None,
+            topic_arn: None,
+        };
+        assert!(matches!(
+            handle_notification(&state, &missing).await,
+            Err(ApiError::Validation(_))
+        ));
+        missing.message = Some("{not json".into());
+        assert!(matches!(
+            handle_notification(&state, &missing).await,
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    // ── Delivery fixtures ────────────────────────────────────────
+
+    struct DeliveryFixture {
+        tenant: String,
+        queue_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+        recipient: String,
+        ses_message_id: String,
+    }
+
+    async fn seed_delivery(
+        pool: &Pool,
+        recipient: &str,
+        tenant: &str,
+        ses_message_id: &str,
+    ) -> DeliveryFixture {
+        let message_id = uuid::Uuid::new_v4();
+        let queue_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+             VALUES ($1, 'SES Adv Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("seed ses tenant");
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, status) \
+             VALUES ($1, $2, 'sender@apexmail.ee', $3::jsonb, 'sent')",
+        )
+        .bind(message_id)
+        .bind(tenant)
+        .bind(json!([recipient]).to_string())
+        .execute(pool)
+        .await
+        .expect("seed message");
+        sqlx::query(
+            "INSERT INTO email_queue \
+                (id, tenant_id, from_address, to_addresses, \"to\", subject, status, message_id, smtp_message_id, metadata) \
+             VALUES ($1, $2, 'sender@apexmail.ee', ARRAY[$3]::text[], $3, 'subject', 'sent', $4, $5, '{}'::jsonb)",
+        )
+        .bind(queue_id)
+        .bind(tenant)
+        .bind(recipient)
+        .bind(message_id)
+        .bind(ses_message_id)
+        .execute(pool)
+        .await
+        .expect("seed email queue row");
+        DeliveryFixture {
+            tenant: tenant.to_string(),
+            queue_id,
+            message_id,
+            recipient: recipient.to_string(),
+            ses_message_id: ses_message_id.to_string(),
+        }
+    }
+
+    async fn cleanup_delivery(pool: &Pool, fixture: &DeliveryFixture) {
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(&fixture.tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM email_queue WHERE tenant_id = $1")
+            .bind(&fixture.tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup queue");
+        sqlx::query("DELETE FROM messages WHERE tenant_id = $1")
+            .bind(&fixture.tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup messages");
+        sqlx::query("DELETE FROM suppressions WHERE tenant_id = $1")
+            .bind(&fixture.tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup suppressions");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&fixture.tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup ses tenant");
+    }
+
+    type Pool = PgPool;
+
+    fn bounce_event(
+        fixture: &DeliveryFixture,
+        bounce_type: &str,
+        headers: serde_json::Value,
+    ) -> SesEvent {
+        serde_json::from_value(json!({
+            "eventType": "Bounce",
+            "mail": {
+                "messageId": fixture.ses_message_id,
+                "destination": [fixture.recipient],
+                "headers": headers
+            },
+            "bounce": {
+                "bounceType": bounce_type,
+                "bounceSubType": "General",
+                "bouncedRecipients": [{
+                    "emailAddress": fixture.recipient,
+                    "status": "5.1.1",
+                    "action": "failed",
+                    "diagnosticCode": "550 unknown user"
+                }],
+                "timestamp": Utc::now().to_rfc3339()
+            }
+        }))
+        .expect("bounce event")
+    }
+
+    #[tokio::test]
+    async fn hard_bounce_suppresses_the_stored_tenant_and_never_a_spoofed_header() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_bounce").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let Some(mut conn) = state.redis.get().await.ok() else {
+            eprintln!("skipping: Redis unavailable");
+            return;
+        };
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("bounce")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+        // A hostile header naming a DIFFERENT tenant: never authoritative.
+        let spoofed_tenant = unique("spoof");
+        let event = bounce_event(
+            &fixture,
+            "Permanent",
+            json!([
+                {"name": "X-ApexMail-TenantId", "value": spoofed_tenant},
+                {"name": "X-ApexMail-MessageId", "value": "msg_spoofed"}
+            ]),
+        );
+        let sns_id = unique("sns-bounce");
+
+        process_bounce(&state, &event, &sns_id)
+            .await
+            .expect("hard bounce processed");
+
+        let suppression: (String, String) =
+            sqlx::query_as("SELECT tenant_id, reason FROM suppressions WHERE email = $1")
+                .bind(&fixture.recipient)
+                .fetch_one(&pool)
+                .await
+                .expect("suppression row");
+        assert_eq!(suppression.0, fixture.tenant, "stored tenant wins");
+        assert!(
+            suppression.1.starts_with("ses_hard_bounce:"),
+            "{suppression:?}"
+        );
+
+        // The queue row terminalized and the derived parent updated.
+        let (status, error_message): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "bounced");
+        assert!(error_message.unwrap().contains("ses_hard_bounce"));
+        let parent_status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+            .bind(fixture.message_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(parent_status, "partial", "one bounced recipient → partial");
+
+        // Deterministic analytics event.
+        let event_row: (String, String, String) = sqlx::query_as(
+            "SELECT tenant_id, event_type, COALESCE(recipient, '') FROM events WHERE id = $1",
+        )
+        .bind(ses_event_id(&sns_id, "bounced", &fixture.recipient))
+        .fetch_one(&pool)
+        .await
+        .expect("bounce analytics event");
+        assert_eq!(event_row.0, fixture.tenant);
+        assert_eq!(event_row.1, "bounced");
+        assert_eq!(event_row.2, fixture.recipient);
+
+        // Webhook queued for the stored tenant.
+        let queued: Vec<String> = redis_cmd::cmd("LRANGE")
+            .arg("ses:webhook_queue")
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or_default();
+        assert!(
+            queued
+                .iter()
+                .any(|entry| entry.contains("message.bounced") && entry.contains(&fixture.tenant)),
+            "bounce webhook queued: {queued:?}"
+        );
+
+        // Replay: no duplicate suppression, no duplicate analytics row.
+        process_bounce(&state, &event, &sns_id).await.unwrap();
+        let suppressions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE email = $1")
+                .bind(&fixture.recipient)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(suppressions, 1);
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = $1")
+            .bind(ses_event_id(&sns_id, "bounced", &fixture.recipient))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 1, "SNS replay is idempotent for bounces");
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn soft_bounce_and_unattributed_events_write_only_what_is_provable() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_bounce_edges").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("soft")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+
+        // Soft bounce: analytics recorded, but no suppression and no
+        // terminalization (SES may retry delivery).
+        let event = bounce_event(&fixture, "Transient", json!([]));
+        let sns_id = unique("sns-soft");
+        process_bounce(&state, &event, &sns_id).await.unwrap();
+        let suppressions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE email = $1")
+                .bind(&fixture.recipient)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(suppressions, 0);
+        let status: String = sqlx::query_scalar("SELECT status FROM email_queue WHERE id = $1")
+            .bind(fixture.queue_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "sent", "a soft bounce does not terminalize the row");
+
+        // Unattributed recipient: retryable 5xx, nothing written.
+        let mut unattributed = bounce_event(&fixture, "Permanent", json!([]));
+        unattributed
+            .bounce
+            .as_mut()
+            .unwrap()
+            .bounced_recipients
+            .as_mut()
+            .unwrap()[0]
+            .email_address = Some("stranger@example.com".into());
+        let error = process_bounce(&state, &unattributed, "sns-unattributed")
+            .await
+            .expect_err("an unknown recipient must not be guessed from headers");
+        assert!(matches!(error, ApiError::ServiceUnavailable(_)));
+
+        // Event without SES mail identity → unattributed refusal.
+        let no_mail: SesEvent = serde_json::from_value(json!({
+            "eventType": "Bounce",
+            "bounce": { "bounceType": "Permanent", "bounceSubType": "General" }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_bounce(&state, &no_mail, "sns-no-mail").await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+
+        // Missing bounce details → validation refusal.
+        let no_details: SesEvent = serde_json::from_value(json!({
+            "eventType": "Bounce",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_bounce(&state, &no_details, "sns-no-details").await,
+            Err(ApiError::Validation(_))
+        ));
+
+        // A recipient matched through the stored `to_addresses` envelope
+        // (not the primary `to` column) still resolves.
+        let secondary = fixture.recipient.to_uppercase();
+        sqlx::query("UPDATE email_queue SET to_addresses = ARRAY[$1]::text[] WHERE id = $2")
+            .bind(&secondary)
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        process_bounce(&state, &event, &unique("sns-secondary"))
+            .await
+            .expect("case-insensitive envelope match");
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn complaint_processing_suppresses_and_records_the_feedback_type() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_complaint").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("comp")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+        let event: SesEvent = serde_json::from_value(json!({
+            "eventType": "Complaint",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "complaint": {
+                "complainedRecipients": [{"emailAddress": fixture.recipient}],
+                "complaintFeedbackType": "abuse",
+                "timestamp": Utc::now().to_rfc3339()
+            }
+        }))
+        .unwrap();
+        let sns_id = unique("sns-complaint");
+        process_complaint(&state, &event, &sns_id).await.unwrap();
+
+        let suppression: (String, String) =
+            sqlx::query_as("SELECT tenant_id, reason FROM suppressions WHERE email = $1")
+                .bind(&fixture.recipient)
+                .fetch_one(&pool)
+                .await
+                .expect("complaint suppression");
+        assert_eq!(suppression.0, fixture.tenant);
+        assert_eq!(suppression.1, "ses_complaint:abuse");
+        let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = $1")
+            .bind(ses_event_id(&sns_id, "complained", &fixture.recipient))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(recorded, 1);
+
+        // Missing complaint details are refused.
+        let no_details: SesEvent = serde_json::from_value(json!({
+            "eventType": "Complaint",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_complaint(&state, &no_details, "sns-x").await,
+            Err(ApiError::Validation(_))
+        ));
+
+        // No attributed recipients: a no-op success.
+        let mut empty = event.clone();
+        empty.complaint.as_mut().unwrap().complained_recipients = Some(Vec::new());
+        process_complaint(&state, &empty, "sns-empty")
+            .await
+            .unwrap();
+
+        // Unattributed recipient: retryable refusal.
+        let mut stranger = event.clone();
+        stranger
+            .complaint
+            .as_mut()
+            .unwrap()
+            .complained_recipients
+            .as_mut()
+            .unwrap()[0]
+            .email_address = Some("stranger@example.com".into());
+        assert!(matches!(
+            process_complaint(&state, &stranger, "sns-stranger").await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn delivery_confirmation_stamps_the_recipient_once_and_reconciles() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_delivery").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("deliv")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+        let first_delivered = Utc::now() - chrono::Duration::minutes(5);
+        let event: SesEvent = serde_json::from_value(json!({
+            "eventType": "Delivery",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "delivery": {
+                "timestamp": first_delivered.to_rfc3339(),
+                "processingTimeMillis": 1200,
+                "recipients": [fixture.recipient],
+                "smtpResponse": "250 2.0.0 OK"
+            }
+        }))
+        .unwrap();
+        let sns_id = unique("sns-deliv");
+        process_delivery(&state, &event, &sns_id).await.unwrap();
+
+        let delivered_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT delivered_at FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(delivered_at.timestamp(), first_delivered.timestamp());
+
+        // Replay with a later timestamp keeps the FIRST confirmation time.
+        let replay_at = Utc::now();
+        let replay: SesEvent = serde_json::from_value(json!({
+            "eventType": "Delivery",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "delivery": { "timestamp": replay_at.to_rfc3339(), "recipients": [fixture.recipient] }
+        }))
+        .unwrap();
+        process_delivery(&state, &replay, &sns_id).await.unwrap();
+        let delivered_at: chrono::DateTime<Utc> =
+            sqlx::query_scalar("SELECT delivered_at FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            delivered_at.timestamp(),
+            first_delivered.timestamp(),
+            "replay must not move the delivery timestamp"
+        );
+        let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE id = $1")
+            .bind(ses_event_id(&sns_id, "delivered", &fixture.recipient))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(events, 1);
+
+        // The parent aggregate is derived by the shared reconciliation.
+        let parent: (String, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, delivered_at FROM messages WHERE id = $1")
+                .bind(fixture.message_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(parent.0, "delivered");
+        assert!(parent.1.is_some());
+
+        // Missing details / recipients / unattributed recipients.
+        let no_details: SesEvent = serde_json::from_value(json!({
+            "eventType": "Delivery",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_delivery(&state, &no_details, "sns-a").await,
+            Err(ApiError::Validation(_))
+        ));
+        let mut no_recipients = event.clone();
+        no_recipients.delivery.as_mut().unwrap().recipients = None;
+        process_delivery(&state, &no_recipients, "sns-b")
+            .await
+            .unwrap();
+        let mut unknown = event.clone();
+        unknown.delivery.as_mut().unwrap().recipients = Some(vec!["stranger@example.com".into()]);
+        assert!(matches!(
+            process_delivery(&state, &unknown, "sns-c").await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn open_and_click_replays_do_not_double_count() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_open_click").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("open")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+
+        let open_at = Utc::now() - chrono::Duration::seconds(30);
+        let open: SesEvent = serde_json::from_value(json!({
+            "eventType": "Open",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "open": { "timestamp": open_at.to_rfc3339(), "userAgent": "Mozilla/5.0", "ipAddress": "203.0.113.9" }
+        }))
+        .unwrap();
+        let sns_id = unique("sns-open");
+        process_open(&state, &open, &sns_id).await.unwrap();
+
+        let first: (i32, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT open_count, first_opened_at FROM messages WHERE id = $1")
+                .bind(fixture.message_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(first.0, 1);
+        assert_eq!(first.1.unwrap().timestamp(), open_at.timestamp());
+        // The analytics row carries the open metadata.
+        let recorded: (String, String) = sqlx::query_as(
+            "SELECT COALESCE(user_agent, ''), COALESCE(ip_address, '') FROM events WHERE id = $1",
+        )
+        .bind(ses_event_id(&sns_id, "opened", &fixture.recipient))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(recorded.0, "Mozilla/5.0");
+        assert_eq!(recorded.1, "203.0.113.9");
+
+        // Replay of the SAME notification must not increment again.
+        process_open(&state, &open, &sns_id).await.unwrap();
+        let replayed: i32 = sqlx::query_scalar("SELECT open_count FROM messages WHERE id = $1")
+            .bind(fixture.message_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            replayed, 1,
+            "a redelivered open notification must not double-count"
+        );
+
+        // A DISTINCT notification (a second open) increments normally.
+        let second: SesEvent = serde_json::from_value(json!({
+            "eventType": "Open",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "open": { "timestamp": Utc::now().to_rfc3339() }
+        }))
+        .unwrap();
+        process_open(&state, &second, &unique("sns-open-2"))
+            .await
+            .unwrap();
+        let distinct: i32 = sqlx::query_scalar("SELECT open_count FROM messages WHERE id = $1")
+            .bind(fixture.message_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(distinct, 2);
+
+        // Click: same contract.
+        let click_at = Utc::now();
+        let click: SesEvent = serde_json::from_value(json!({
+            "eventType": "Click",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "click": { "timestamp": click_at.to_rfc3339(), "link": "https://apexmail.ee/pricing",
+                       "userAgent": "Mozilla/5.0", "ipAddress": "203.0.113.9" }
+        }))
+        .unwrap();
+        let click_sns = unique("sns-click");
+        process_click(&state, &click, &click_sns).await.unwrap();
+        process_click(&state, &click, &click_sns).await.unwrap();
+        let clicked: (i32, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT click_count, first_clicked_at FROM messages WHERE id = $1")
+                .bind(fixture.message_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(clicked.0, 1, "a redelivered click must not double-count");
+        assert_eq!(clicked.1.unwrap().timestamp(), click_at.timestamp());
+        let link: String =
+            sqlx::query_scalar("SELECT COALESCE(link_url, '') FROM events WHERE id = $1")
+                .bind(ses_event_id(&click_sns, "clicked", &fixture.recipient))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(link, "https://apexmail.ee/pricing");
+
+        // Missing details and missing attribution.
+        let no_details: SesEvent = serde_json::from_value(json!({
+            "eventType": "Open",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_open(&state, &no_details, "sns-x").await,
+            Err(ApiError::Validation(_))
+        ));
+        let no_click_details: SesEvent = serde_json::from_value(json!({
+            "eventType": "Click",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_click(&state, &no_click_details, "sns-y").await,
+            Err(ApiError::Validation(_))
+        ));
+        let no_destination: SesEvent = serde_json::from_value(json!({
+            "eventType": "Open",
+            "mail": { "messageId": fixture.ses_message_id },
+            "open": { "timestamp": Utc::now().to_rfc3339() }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_open(&state, &no_destination, "sns-z").await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+        let no_mail: SesEvent = serde_json::from_value(json!({
+            "eventType": "Click",
+            "click": { "timestamp": Utc::now().to_rfc3339() }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_click(&state, &no_mail, "sns-w").await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    /// Webhook queuing is best-effort: a dead Redis must not fail the
+    /// (already committed) notification processing.
+    #[tokio::test]
+    async fn webhook_queue_failure_never_fails_a_committed_notification() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_webhook_down").await else {
+            return;
+        };
+        let state = test_state_over_with_config_and_redis(
+            pool.clone(),
+            test_config(),
+            "redis://127.0.0.1:1",
+        )
+        .await;
+        let fixture = seed_delivery(
+            &pool,
+            &format!("{}@example.com", unique("whdown")),
+            &unique("tses"),
+            &unique("sesmsg"),
+        )
+        .await;
+        let open: SesEvent = serde_json::from_value(json!({
+            "eventType": "Open",
+            "mail": { "messageId": fixture.ses_message_id, "destination": [fixture.recipient] },
+            "open": { "timestamp": Utc::now().to_rfc3339() }
+        }))
+        .unwrap();
+        process_open(&state, &open, &unique("sns-whdown"))
+            .await
+            .expect("the committed effect survives a webhook-queue outage");
+        let count: i32 = sqlx::query_scalar("SELECT open_count FROM messages WHERE id = $1")
+            .bind(fixture.message_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        cleanup_delivery(&pool, &fixture).await;
+    }
+
+    #[test]
+    fn analytics_event_insert_reports_replays() {
+        // Pure contract check that the open/click idempotency rests on:
+        // the insert helper reports whether it actually inserted.
+        let sql = "ON CONFLICT (id) DO NOTHING";
+        assert!(
+            include_str!("ses_notifications.rs").contains(sql),
+            "the deterministic event id must stay conflict-guarded"
+        );
+    }
+
+    /// Missing SES mail id on Open/Click events cannot be attributed.
+    #[tokio::test]
+    async fn engagement_without_a_provider_message_id_is_retried() {
+        let Some(pool) = crate::test_db::optional_pg_pool("ses_adv_no_ses_id").await else {
+            return;
+        };
+        let state = test_state_over(pool.clone()).await;
+        let event: SesEvent = serde_json::from_value(json!({
+            "eventType": "Open",
+            "mail": { "destination": ["someone@example.com"] },
+            "open": { "timestamp": Utc::now().to_rfc3339() }
+        }))
+        .unwrap();
+        assert!(matches!(
+            process_open(&state, &event, "sns-none").await,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
     }
 }

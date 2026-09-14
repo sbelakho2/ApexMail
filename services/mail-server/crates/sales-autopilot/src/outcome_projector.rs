@@ -1132,7 +1132,31 @@ mod tests {
         assert_eq!(first, second, "the unique key must collapse the replay");
 
         let projector = OutcomeProjector::new(pool.clone(), "test-worker-replay");
-        drain(&projector, 3).await;
+        // The projector claims GLOBALLY over a shared database, so a fixed
+        // tick count can be consumed by parallel tests' rows; tick until THIS
+        // test's health aggregate shows the projected complaint (the probe
+        // tolerates the row not existing yet, unlike `health_counters`).
+        let probe_pool = pool.clone();
+        let probe_tenant = tenant.clone();
+        drain_until(&projector, 60, move || {
+            let pool = probe_pool.clone();
+            let tenant = probe_tenant.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT complaints FROM sales_sender_health \
+                     WHERE tenant_id = $1 AND sender_identity_id = $2",
+                )
+                .bind(&tenant)
+                .bind(sender)
+                .fetch_optional(&pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+                    >= 1
+            }
+        })
+        .await;
 
         let (_, _, _, complaints, unsubscribes, _, _, _) =
             health_counters(&pool, &tenant, sender).await;

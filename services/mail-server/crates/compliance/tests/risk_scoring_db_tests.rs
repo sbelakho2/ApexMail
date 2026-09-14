@@ -1,10 +1,12 @@
 //! DB-backed tests for the risk-scoring canonical event metrics adapter (F57).
 //!
 //! Gated on `TEST_DATABASE_URL` (same convention as
-//! `gdpr_compliance_db_tests.rs`): a dedicated database is derived from the
-//! URL, dropped/recreated per test, and the minimal canonical `events`
-//! shape (migration 075) is created. When the variable is unset every test
-//! skips.
+//! `gdpr_compliance_db_tests.rs`): each test provisions its OWN throwaway
+//! database carrying the REAL production migration chain
+//! (`migrator::test_support::fresh_canonical_pool`, audits F01/F76/F77), so
+//! the adapter runs against the canonical `events` shape (migration 075).
+//! When the variable is unset every test skips; a configured provisioning
+//! failure panics.
 //!
 //! Coverage:
 //! - seeded canonical events (complained/unsubscribed/opened/clicked/
@@ -18,79 +20,21 @@ use compliance::risk_scoring::{
     canonical_event_counts, CanonicalEventCounts, EVENT_METRIC_WINDOW_DAYS,
 };
 use sqlx::PgPool;
-use std::time::Duration;
 
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 
-/// Minimal canonical `events` shape (columns the adapter reads; mirrors
-/// migration 075).
-const EVENTS_SCHEMA: &str = r#"
-CREATE TABLE events (
-    id              VARCHAR(64) PRIMARY KEY,
-    tenant_id       VARCHAR(26) NOT NULL,
-    message_id      VARCHAR(64),
-    event_type      VARCHAR(50) NOT NULL,
-    recipient       VARCHAR(255),
-    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX idx_events_tenant ON events(tenant_id);
-"#;
-
-/// Empty schema — used to prove required-source failures propagate.
-const EMPTY_SCHEMA: &str = "SELECT 1;";
-
-async fn isolated_pool(db_suffix: &str, schema: &str) -> Option<PgPool> {
-    let database_url = match std::env::var("TEST_DATABASE_URL") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => {
-            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed compliance tests");
-            return None;
-        }
-    };
-    let (server_part, db_part) = database_url.rsplit_once('/')?;
-    let db_only = db_part.split('?').next().unwrap_or(db_part);
-    let isolated = format!("{db_only}_{db_suffix}");
-    let isolated_url = format!("{server_part}/{isolated}");
-    let admin_url = format!("{server_part}/postgres");
-
-    let admin = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&admin_url)
-        .await
-        .ok()?;
-
-    let _ = sqlx::query(&format!(
-        r#"DROP DATABASE IF EXISTS "{isolated}" WITH (FORCE)"#
-    ))
-    .execute(&admin)
-    .await;
-    if sqlx::query(&format!(r#"CREATE DATABASE "{isolated}""#))
-        .execute(&admin)
-        .await
-        .is_err()
+/// Each test gets its OWN canonical database clone. `TEST_DATABASE_URL`
+/// unset ⇒ soft skip (`None`); a configured provisioning failure panics.
+async fn test_pool(test_name: &str) -> Option<PgPool> {
+    match migrator::test_support::fresh_canonical_pool(
+        &format!("compliance_{test_name}"),
+        &format!("compliance_{test_name}"),
+    )
+    .await
     {
-        eprintln!("skipping: could not create isolated test database {isolated}");
-        return None;
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
     }
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&isolated_url)
-        .await
-        .ok()?;
-
-    sqlx::raw_sql(schema)
-        .execute(&pool)
-        .await
-        .expect("failed to create test schema");
-
-    Some(pool)
-}
-
-async fn test_pool(test_name: &str, schema: &str) -> Option<PgPool> {
-    isolated_pool(&format!("compliance_{test_name}"), schema).await
 }
 
 async fn seed_event(pool: &PgPool, id: &str, tenant: &str, event_type: &str, age_days: i64) {
@@ -111,7 +55,7 @@ async fn seed_event(pool: &PgPool, id: &str, tenant: &str, event_type: &str, age
 
 #[tokio::test]
 async fn canonical_event_counts_maps_seeded_events() {
-    let Some(pool) = test_pool("risk_events_mapping", EVENTS_SCHEMA).await else {
+    let Some(pool) = test_pool("risk_events_mapping").await else {
         return;
     };
     let tenant = "tenant_events_map";
@@ -150,7 +94,7 @@ async fn canonical_event_counts_maps_seeded_events() {
 
 #[tokio::test]
 async fn canonical_event_counts_window_excludes_stale_events() {
-    let Some(pool) = test_pool("risk_events_window", EVENTS_SCHEMA).await else {
+    let Some(pool) = test_pool("risk_events_window").await else {
         return;
     };
     let tenant = "tenant_events_window";
@@ -183,7 +127,7 @@ async fn canonical_event_counts_window_excludes_stale_events() {
 
 #[tokio::test]
 async fn canonical_event_counts_is_tenant_scoped() {
-    let Some(pool) = test_pool("risk_events_scope", EVENTS_SCHEMA).await else {
+    let Some(pool) = test_pool("risk_events_scope").await else {
         return;
     };
     let tenant = "tenant_events_scope";
@@ -203,10 +147,15 @@ async fn canonical_event_counts_is_tenant_scoped() {
 #[tokio::test]
 async fn canonical_event_counts_requires_the_events_source() {
     // No `events` table: the complaint/unsubscribe source is REQUIRED —
-    // the failure must stay visible instead of reporting zeros.
-    let Some(pool) = test_pool("risk_events_missing", EMPTY_SCHEMA).await else {
+    // the failure must stay visible instead of reporting zeros. The canonical
+    // table is renamed away (a DROP would have to chase inbound references).
+    let Some(pool) = test_pool("risk_events_missing").await else {
         return;
     };
+    sqlx::query("ALTER TABLE events RENAME TO events_hidden")
+        .execute(&pool)
+        .await
+        .expect("hide canonical events store");
     let err = canonical_event_counts(&pool, "tenant_events_missing")
         .await
         .expect_err("adapter must fail when the canonical events source is missing");

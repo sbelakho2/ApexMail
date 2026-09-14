@@ -3161,4 +3161,210 @@ mod tests {
             "expected InvalidInput, got {error:?}"
         );
     }
+
+    /// Every hard-gate refusal at decision time: no autonomy row, a missing
+    /// contact point, a non-email channel, an unsendable verification, a
+    /// suppressed point, a suppressed address and a human reply. Each is
+    /// DENIED with the gate named — and not one of them writes a message or a
+    /// queue row (the decision packet is the only durable record).
+    #[tokio::test]
+    async fn every_decision_gate_refuses_and_writes_no_external_effect() {
+        let Some(pool) = live_pool("decision_engine::tests::refusal_matrix").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-refuse");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let baseline = send_context(&fixture, fixture.policy_input());
+
+        // 1. No autonomy row at all: fail closed to disabled, not permissive.
+        sqlx::query("DELETE FROM sales_autonomy_state WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = decide(&pool, baseline.clone()).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("autonomy_disabled:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+        // …and the decision packet carries the reason.
+        let (enforcement, blocked, reasons, _, _) =
+            decision_packet(&pool, outcome.decision_id).await;
+        assert_eq!(enforcement, "denied");
+        assert!(blocked);
+        assert!(reasons.to_string().contains("autonomy_disabled"));
+        sqlx::query(
+            "INSERT INTO sales_autonomy_state (tenant_id, mode, kill_switch) \
+             VALUES ($1, 'autonomous_guarded', FALSE)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 2. A contact point that does not exist for this tenant.
+        let mut missing_point = baseline.clone();
+        missing_point.contact_point_id = Some(Uuid::new_v4());
+        let outcome = decide(&pool, missing_point).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("contact_point_not_found:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+
+        // 3. A non-email channel (a phone number may never be "emailed").
+        let phone_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification) \
+             VALUES ($1, $2, $3, 'phone', '+372555', '+372555', 'valid')",
+        )
+        .bind(phone_id)
+        .bind(&tenant)
+        .bind(fixture.contact_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut phone = baseline.clone();
+        phone.contact_point_id = Some(phone_id);
+        let outcome = decide(&pool, phone).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("contact_point_channel_not_email:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+
+        // 4. Unsendable verification.
+        sqlx::query("UPDATE sales_contact_points SET verification = 'unverified' WHERE id = $1")
+            .bind(fixture.contact_point_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = decide(&pool, baseline.clone()).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("contact_point_not_sendable:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+
+        // 5. The point itself was suppressed after verification.
+        sqlx::query(
+            "UPDATE sales_contact_points SET verification = 'valid', suppressed_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(fixture.contact_point_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let outcome = decide(&pool, baseline.clone()).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("contact_point_suppressed:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+
+        // 6. The address is on the tenant's unsubscribe list.
+        sqlx::query("UPDATE sales_contact_points SET suppressed_at = NULL WHERE id = $1")
+            .bind(fixture.contact_point_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = decide(&pool, baseline.clone()).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("suppressed:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+        sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 7. A human reply already arrived on the enrollment.
+        sqlx::query("UPDATE sales_enrollments SET has_human_reply = TRUE WHERE id = $1")
+            .bind(fixture.enrollment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut replied = baseline.clone();
+        replied.enrollment_id = Some(fixture.enrollment_id);
+        let outcome = decide(&pool, replied).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("human_reply:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+
+        // The clean context still executes — the refusals above are not a
+        // permanently broken fixture.
+        let clean = decide(&pool, baseline).await.unwrap();
+        assert_eq!(
+            clean.enforcement,
+            Enforcement::Execute,
+            "refusals must be per-condition, not sticky: {:?}",
+            clean.block_reasons
+        );
+
+        // Every refusal produced a decision packet and NOTHING external.
+        let decisions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_decisions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            decisions, 8,
+            "one packet per decide call, refusals included"
+        );
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_queue WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 0, "a refusal must write no message");
+        assert_eq!(queued, 0, "a refusal must enqueue nothing");
+    }
 }

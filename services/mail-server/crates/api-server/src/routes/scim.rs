@@ -1109,12 +1109,24 @@ async fn create_user(
     ))
 }
 
+/// Validate a SCIM user path id before any `$1::uuid` bind: `users.id` is
+/// UUID, so a malformed id can never name a resource and must be the SCIM
+/// 404 (RFC 7644 §3.12) — not a database 500 from an invalid-input-syntax
+/// cast.
+fn require_scim_user_id(id: &str) -> Result<(), ScimError> {
+    if Uuid::parse_str(id).is_err() {
+        return Err(ScimError::not_found("user not found"));
+    }
+    Ok(())
+}
+
 async fn get_user(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ScimUser>, ScimError> {
     require_scopes(&auth, &["scim:read"])?;
+    require_scim_user_id(&id)?;
 
     let row = sqlx::query_as::<_, UserScimRow>(
         "SELECT id::text, email, name, status FROM users WHERE id = $1::uuid AND tenant_id = $2",
@@ -1140,6 +1152,7 @@ async fn update_user(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<ScimUser>, ScimError> {
     require_scopes(&auth, &["scim:write"])?;
+    require_scim_user_id(&id)?;
     let request: UserUpsertRequest = parse_json_body(body, "User")?;
     validate_user_upsert(&request)?;
 
@@ -1219,6 +1232,7 @@ async fn patch_user(
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<ScimUser>, ScimError> {
     require_scopes(&auth, &["scim:write"])?;
+    require_scim_user_id(&id)?;
     // F42: shared PATCH DTO parsing + RFC 7644 §3.5.2 schemas validation.
     let request: ScimPatchRequest = parse_patch_body(body, "User PATCH")?;
 
@@ -1297,6 +1311,7 @@ async fn delete_user(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ScimError> {
     require_scopes(&auth, &["scim:write"])?;
+    require_scim_user_id(&id)?;
 
     let result = sqlx::query(
         "UPDATE users SET status = 'deactivated', updated_at = NOW() WHERE id = $1::uuid AND tenant_id = $2",
@@ -1419,10 +1434,13 @@ async fn create_group(
     validate_group_upsert(&request)?;
     let display_name = request.display_name.clone().unwrap_or_default();
 
-    // F40: the SCIM-visible id is server-generated (UUID); a client-supplied
-    // id in the body is ignored by the request DTO.
-    let id = Uuid::new_v4();
-    let scim_id = id.to_string();
+    // F40: the SCIM-visible id is server-generated (UUID) and opaque
+    // (RFC 7643 §3.1) — it lives in the 255-char `scim_id` column. The row's
+    // PRIMARY KEY `scim_groups.id` is VARCHAR(26) (migration 093, the same
+    // 26-char text-id convention as tenants): binding a 36-char UUID there
+    // overflowed the column and made every group create fail with a 500.
+    let scim_id = Uuid::new_v4().to_string();
+    let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
 
     // Audit C: verify every member belongs to the caller's tenant BEFORE the
@@ -1445,7 +1463,7 @@ async fn create_group(
         "INSERT INTO scim_groups (id, tenant_id, display_name, scim_id, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $5)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(auth.tenant_id.to_string())
     .bind(&display_name)
     .bind(&scim_id)
@@ -1460,7 +1478,7 @@ async fn create_group(
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (group_id, user_id) DO NOTHING",
         )
-        .bind(id)
+        .bind(&id)
         .bind(user_id)
         .bind(auth.tenant_id.to_string())
         .bind(&member.display)
@@ -1904,7 +1922,11 @@ struct GroupScimRow {
 
 #[derive(sqlx::FromRow)]
 struct GroupMemberRow {
-    user_id: String,
+    /// `scim_group_members.user_id` is UUID on the canonical schema — a
+    /// String field makes sqlx reject the row (`mismatched types; Rust type
+    /// String is not compatible with SQL type UUID`) and turned every
+    /// GET/list of a group WITH members into a 500.
+    user_id: Uuid,
     display: Option<String>,
     email: Option<String>,
 }
@@ -1912,7 +1934,7 @@ struct GroupMemberRow {
 #[derive(sqlx::FromRow)]
 struct GroupMemberWithGroupRow {
     group_id: String,
-    user_id: String,
+    user_id: Uuid,
     display: Option<String>,
     email: Option<String>,
 }
@@ -3261,5 +3283,1113 @@ mod tests {
 
         let _ = pool.close().await;
         drop_test_database(&server_part, &db_name).await;
+    }
+
+    // ── Router-level SCIM 2.0 conformance tests ─────────────────────
+    //
+    // These drive the real `/v1/scim` routes through `build_app` with
+    // tenant-scoped machine keys, asserting the wire contract (status,
+    // SCIM error envelopes, response resources) and the stored state.
+
+    use axum::body::Body;
+    use axum::http::{HeaderMap, Method};
+
+    struct ScimFixture {
+        app: axum::Router,
+        pool: sqlx::PgPool,
+        tenant_a: String,
+        tenant_b: String,
+        key_a: String,
+        read_key: String,
+    }
+
+    impl ScimFixture {
+        async fn cleanup(&self) {
+            for tenant in [&self.tenant_a, &self.tenant_b] {
+                let _ = sqlx::query("DELETE FROM scim_group_members WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM scim_groups WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+                let _ = sqlx::query("DELETE FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .execute(&self.pool)
+                    .await;
+            }
+            let _ = self.pool.close().await;
+        }
+    }
+
+    async fn scim_fixture(test_name: &str) -> Option<ScimFixture> {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            // Surface handler tracing::error! output (opt-in via RUST_LOG).
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+                )
+                .with_test_writer()
+                .try_init();
+        });
+        let pool = crate::test_db::optional_pg_pool(test_name).await?;
+        // tenants.id is VARCHAR(26); `ten_scmr_` (9) + 17 chars = 26.
+        let tenant_a = format!("ten_scmr_{}", &Uuid::new_v4().simple().to_string()[..17]);
+        let tenant_b = format!("ten_scms_{}", &Uuid::new_v4().simple().to_string()[..17]);
+        for tenant in [&tenant_a, &tenant_b] {
+            insert_test_tenant(&pool, tenant).await;
+        }
+        let key_a = crate::app::test_support::seed_api_key_for(
+            &pool,
+            &tenant_a,
+            &["scim:read", "scim:write"],
+        )
+        .await;
+        let read_key =
+            crate::app::test_support::seed_api_key_for(&pool, &tenant_a, &["scim:read"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let app = crate::app::build_app(state);
+        Some(ScimFixture {
+            app,
+            pool,
+            tenant_a,
+            tenant_b,
+            key_a,
+            read_key,
+        })
+    }
+
+    async fn scim_call(
+        app: &axum::Router,
+        key: &str,
+        method: Method,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, HeaderMap, serde_json::Value) {
+        scim_call_raw(
+            app,
+            key,
+            method,
+            uri,
+            body.map(|value| value.to_string()),
+            "application/json",
+        )
+        .await
+    }
+
+    async fn scim_call_raw(
+        app: &axum::Router,
+        key: &str,
+        method: Method,
+        uri: &str,
+        body: Option<String>,
+        content_type: &str,
+    ) -> (StatusCode, HeaderMap, serde_json::Value) {
+        let mut builder = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-api-key", key);
+        let body = match body {
+            Some(raw) => {
+                builder = builder.header("content-type", content_type);
+                Body::from(raw)
+            }
+            None => Body::empty(),
+        };
+        let response = tower::ServiceExt::oneshot(app.clone(), builder.body(body).unwrap())
+            .await
+            .expect("SCIM request must dispatch");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, headers, json)
+    }
+
+    async fn seed_router_user(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        email: &str,
+        name: Option<&str>,
+        role: &str,
+        status: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, '!scim:disabled', $5, $6, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(email)
+        .bind(name)
+        .bind(role)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed router user");
+        id
+    }
+
+    fn scim_user_payload(user_name: &str, given: &str, active: bool) -> serde_json::Value {
+        json!({
+            "schemas": [SCIM_USER_SCHEMA],
+            "userName": user_name,
+            "name": { "givenName": given, "familyName": "Family" },
+            "emails": [{ "value": user_name, "primary": true }],
+            "active": active,
+        })
+    }
+
+    /// Full lifecycle over the wire: create (inactive) → get → replace
+    /// (active + rename) → patch (name only) → delete (deactivate).
+    #[tokio::test]
+    async fn scim_user_lifecycle_roundtrip_through_the_router() {
+        let Some(fixture) = scim_fixture("scim_user_router_lifecycle").await else {
+            return;
+        };
+        let ScimFixture {
+            app, pool, key_a, ..
+        } = &fixture;
+        let email = format!("router-life-{}@example.com", Uuid::new_v4().simple());
+
+        // A client-supplied id is not part of the DTO: it must be IGNORED and
+        // the server must assign its own id.
+        let mut payload = scim_user_payload(&email, "Lifecycle", false);
+        payload["id"] = json!("99999999-9999-4999-8999-999999999999");
+        let (status, headers, body) =
+            scim_call(app, key_a, Method::POST, "/v1/scim/Users", Some(payload)).await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+        let user_id = body["id"].as_str().expect("server id").to_string();
+        assert_ne!(
+            user_id, "99999999-9999-4999-8999-999999999999",
+            "client-supplied id must be ignored"
+        );
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+            format!("/v1/scim/Users/{user_id}")
+        );
+        assert_eq!(body["schemas"][0], SCIM_USER_SCHEMA);
+        assert_eq!(body["userName"], email);
+        assert_eq!(body["active"], false);
+        assert_eq!(body["name"]["givenName"], "Lifecycle");
+
+        // Stored state: deactivated, member, unusable password hash.
+        let (stored_email, stored_status, stored_role, stored_hash): (
+            String,
+            String,
+            String,
+            String,
+        ) = sqlx::query_as(
+            "SELECT email, status, role, password_hash FROM users WHERE id = $1::uuid AND tenant_id = $2",
+        )
+        .bind(&user_id)
+        .bind(&fixture.tenant_a)
+        .fetch_one(pool)
+        .await
+        .expect("stored SCIM user");
+        assert_eq!(stored_email, email.to_lowercase());
+        assert_eq!(stored_status, "deactivated");
+        assert_eq!(stored_role, "member");
+        assert_eq!(stored_hash, SCIM_DISABLED_HASH);
+
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            &format!("/v1/scim/Users/{user_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["id"], user_id);
+        assert_eq!(body["active"], false);
+
+        // PUT is replace semantics: name + active + email all written.
+        let renamed = format!("router-renamed-{}@example.com", Uuid::new_v4().simple());
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PUT,
+            &format!("/v1/scim/Users/{user_id}"),
+            Some(json!({
+                "schemas": [SCIM_USER_SCHEMA],
+                "userName": renamed,
+                "name": { "givenName": "Renamed" },
+                "active": true,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["userName"], renamed.to_lowercase());
+        assert_eq!(body["active"], true);
+        // emails[0] absent on PUT → userName is the stored address.
+        assert_eq!(body["emails"][0]["value"], renamed.to_lowercase());
+
+        // PATCH a single attribute; omitted fields must survive.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Users/{user_id}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [
+                    { "op": "replace", "path": "name.givenName", "value": "Patched" }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["name"]["givenName"], "Patched");
+        assert_eq!(body["active"], true, "PATCH must not touch omitted fields");
+        assert_eq!(body["userName"], renamed.to_lowercase());
+
+        // DELETE is a soft deactivation.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::DELETE,
+            &format!("/v1/scim/Users/{user_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "body: {body}");
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            &format!("/v1/scim/Users/{user_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["active"], false,
+            "delete deactivates, never row-deletes"
+        );
+
+        fixture.cleanup().await;
+    }
+
+    /// Every validation/error path a SCIM IdP can hit, with the RFC 7644
+    /// §3.12 error envelope and no state written on refusal.
+    #[tokio::test]
+    async fn scim_user_protocol_errors_are_scim_envelopes_and_write_nothing() {
+        let Some(fixture) = scim_fixture("scim_user_router_errors").await else {
+            return;
+        };
+        let ScimFixture {
+            app,
+            pool,
+            tenant_a,
+            key_a,
+            ..
+        } = &fixture;
+
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
+            .bind(tenant_a)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+
+        // Malformed JSON body.
+        let (status, headers, body) = scim_call_raw(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some("{not json".into()),
+            "application/json",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "application/scim+json"
+        );
+        assert_eq!(body["schemas"][0], SCIM_ERROR_SCHEMA);
+        assert_eq!(body["status"], "400");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("malformed User request body"));
+
+        // Missing userName.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(json!({ "schemas": [SCIM_USER_SCHEMA], "emails": [] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("userName is required"));
+
+        // Wrong declared schema.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(json!({ "schemas": ["urn:example:NotScim"], "userName": "x@example.com" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("schemas must contain"));
+
+        // Implausible address (no dot in the domain).
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(json!({ "schemas": [SCIM_USER_SCHEMA], "userName": "not-an-email" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"].as_str().unwrap().contains("valid address"));
+
+        // Duplicate email → 409.
+        let email = format!("dup-{}@example.com", Uuid::new_v4().simple());
+        seed_router_user(pool, tenant_a, &email, Some("First"), "member", "active").await;
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(scim_user_payload(&email, "Second", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("user already exists"));
+
+        // Unknown resource id → 404 SCIM envelope.
+        let missing = Uuid::new_v4();
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            &format!("/v1/scim/Users/{missing}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["schemas"][0], SCIM_ERROR_SCHEMA);
+        assert_eq!(body["detail"], "user not found");
+
+        // A path id that is not a UUID can never name a user: every method
+        // answers the SCIM 404 envelope, never a database 500 from the
+        // `$1::uuid` cast.
+        for (method, payload) in [
+            (Method::GET, None),
+            (
+                Method::PUT,
+                Some(scim_user_payload("x@example.com", "X", true)),
+            ),
+            (
+                Method::PATCH,
+                Some(json!({ "schemas": [SCIM_PATCH_OP_SCHEMA], "Operations": [] })),
+            ),
+            (Method::DELETE, None),
+        ] {
+            let (status, _, body) =
+                scim_call(app, key_a, method, "/v1/scim/Users/not-a-uuid", payload).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+            assert_eq!(body["schemas"][0], SCIM_ERROR_SCHEMA, "body: {body}");
+            assert_eq!(body["detail"], "user not found");
+        }
+
+        // PATCH: an invalid operation is rejected ATOMICALLY — nothing in
+        // the request may be applied.
+        let target = seed_router_user(
+            pool,
+            tenant_a,
+            &format!("atomic-{}@example.com", Uuid::new_v4().simple()),
+            Some("Untouched"),
+            "member",
+            "active",
+        )
+        .await;
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Users/{target}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [
+                    { "op": "replace", "path": "name.givenName", "value": "Should Not Apply" },
+                    { "op": "remove", "path": "userName" }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot remove required attribute"));
+        let (name, status_col): (Option<String>, String) =
+            sqlx::query_as("SELECT name, status FROM users WHERE id = $1::uuid AND tenant_id = $2")
+                .bind(target)
+                .bind(tenant_a)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            name.as_deref(),
+            Some("Untouched"),
+            "no partial PATCH applied"
+        );
+        assert_eq!(status_col, "active");
+
+        // PATCH with wrong value TYPE for active.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Users/{target}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [{ "op": "replace", "path": "active", "value": "false" }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("requires a boolean value"));
+
+        // PATCH with a foreign PatchOp schema URN.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Users/{target}"),
+            Some(json!({
+                "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+                "Operations": []
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains(SCIM_PATCH_OP_SCHEMA));
+
+        // Nothing was created by any of the refusals.
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
+            .bind(tenant_a)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before + 2, "only the two explicit seeds were added");
+
+        fixture.cleanup().await;
+    }
+
+    /// An admin/owner's identity must not be movable by a SCIM write — for
+    /// PUT and PATCH alike, and the row must be unchanged after the refusal.
+    #[tokio::test]
+    async fn scim_privileged_email_change_is_refused_and_row_is_untouched() {
+        let Some(fixture) = scim_fixture("scim_privileged_email").await else {
+            return;
+        };
+        let ScimFixture {
+            app,
+            pool,
+            tenant_a,
+            key_a,
+            ..
+        } = &fixture;
+
+        let owner_email = format!("owner-{}@example.com", Uuid::new_v4().simple());
+        let owner = seed_router_user(
+            pool,
+            tenant_a,
+            &owner_email,
+            Some("Owner"),
+            "owner",
+            "active",
+        )
+        .await;
+
+        // PUT with a different email.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PUT,
+            &format!("/v1/scim/Users/{owner}"),
+            Some(scim_user_payload(
+                &format!("takeover-{}@example.com", Uuid::new_v4().simple()),
+                "Takeover",
+                true,
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot change the email of an admin or owner"));
+
+        // PATCH userName on the same owner.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Users/{owner}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [{ "op": "replace", "path": "userName", "value": "takeover2@example.com" }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+
+        // PUT that does NOT change the email is allowed (it is a rename).
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PUT,
+            &format!("/v1/scim/Users/{owner}"),
+            Some(scim_user_payload(&owner_email, "Still Owner", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let (email, name): (String, Option<String>) =
+            sqlx::query_as("SELECT email, name FROM users WHERE id = $1::uuid AND tenant_id = $2")
+                .bind(owner)
+                .bind(tenant_a)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(email, owner_email.to_lowercase());
+        assert_eq!(name.as_deref(), Some("Still Owner"));
+
+        fixture.cleanup().await;
+    }
+
+    /// Filter, pagination and tenant-isolation semantics of the Users list.
+    #[tokio::test]
+    async fn scim_user_list_filters_pagination_and_tenant_isolation() {
+        let Some(fixture) = scim_fixture("scim_user_router_list").await else {
+            return;
+        };
+        let ScimFixture {
+            app,
+            pool,
+            tenant_a,
+            tenant_b,
+            key_a,
+            ..
+        } = &fixture;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let alice = format!("alice-{suffix}@example.com");
+        let bob = format!("bob-{suffix}@example.com");
+        seed_router_user(pool, tenant_a, &alice, Some("Alice"), "member", "active").await;
+        seed_router_user(pool, tenant_a, &bob, Some("Bob"), "member", "deactivated").await;
+        let foreign = format!("foreign-{suffix}@example.com");
+        seed_router_user(
+            pool,
+            tenant_b,
+            &foreign,
+            Some("Foreign"),
+            "member",
+            "active",
+        )
+        .await;
+
+        // Filter by userName, case-insensitively.
+        let uri = format!(
+            "/v1/scim/Users?filter={}",
+            urlencoding::encode(&format!("userName eq \"{}\"", alice.to_uppercase()))
+        );
+        let (status, _, body) = scim_call(app, key_a, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["totalResults"], 1, "body: {body}");
+        assert_eq!(body["Resources"][0]["userName"], alice);
+        assert_eq!(body["Resources"][0]["active"], true);
+
+        // Filter by emails.value maps to the same stored column.
+        let uri = format!(
+            "/v1/scim/Users?filter={}",
+            urlencoding::encode(&format!("emails.value eq \"{bob}\""))
+        );
+        let (status, _, body) = scim_call(app, key_a, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["totalResults"], 1);
+        assert_eq!(body["Resources"][0]["active"], false);
+
+        // externalId is syntactically supported but never matches.
+        let uri = format!(
+            "/v1/scim/Users?filter={}",
+            urlencoding::encode("externalId eq \"whatever\"")
+        );
+        let (status, _, body) = scim_call(app, key_a, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["totalResults"], 0);
+        assert!(body["Resources"].as_array().unwrap().is_empty());
+
+        // A filter naming another tenant's user matches nothing here.
+        let uri = format!(
+            "/v1/scim/Users?filter={}",
+            urlencoding::encode(&format!("userName eq \"{foreign}\""))
+        );
+        let (status, _, body) = scim_call(app, key_a, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["totalResults"], 0, "no cross-tenant leak: {body}");
+
+        // Unfiltered list: startIndex normalisation + count clamping.
+        let (status, _, full) = scim_call(app, key_a, Method::GET, "/v1/scim/Users", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(full["startIndex"], 1);
+        assert!(full["totalResults"].as_i64().unwrap() >= 2);
+        assert_eq!(
+            full["itemsPerPage"],
+            full["Resources"].as_array().unwrap().len() as i64
+        );
+
+        let (status, _, page) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            "/v1/scim/Users?startIndex=0&count=1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["startIndex"], 1, "startIndex 0 normalizes to 1");
+        assert_eq!(page["itemsPerPage"], 1);
+        assert_eq!(page["Resources"].as_array().unwrap().len(), 1);
+
+        let (status, _, page) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            "/v1/scim/Users?startIndex=-999999&count=-5",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["startIndex"], 1);
+        assert_eq!(page["itemsPerPage"], 0, "negative count clamps to 0");
+        assert!(page["Resources"].as_array().unwrap().is_empty());
+        assert!(
+            page["totalResults"].as_i64().unwrap() >= 2,
+            "totals still reported"
+        );
+
+        let (status, _, page) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            "/v1/scim/Users?count=999999999",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page["itemsPerPage"].as_i64().unwrap() <= MAX_SCIM_COUNT);
+
+        // Filter grammar violations: every one is a 400 with an explanation,
+        // never a silent full-list response.
+        for bad in [
+            "userName ne \"x\"",
+            "userName co \"x\"",
+            "userName",
+            "userName eq x",
+            "userName eq \"unterminated",
+            "userName eq \"a\" and active eq \"true\"",
+            "unknownAttr eq \"x\"",
+            "  ",
+        ] {
+            let uri = format!("/v1/scim/Users?filter={}", urlencoding::encode(bad));
+            let (status, _, body) = scim_call(app, key_a, Method::GET, &uri, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "filter {bad:?}: {body}");
+            assert_eq!(body["schemas"][0], SCIM_ERROR_SCHEMA, "filter {bad:?}");
+        }
+        let long_filter = format!("userName eq \"{}\"", "x".repeat(MAX_SCIM_FILTER_LEN));
+        let uri = format!(
+            "/v1/scim/Users?filter={}",
+            urlencoding::encode(&long_filter)
+        );
+        let (status, _, body) = scim_call(app, key_a, Method::GET, &uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["detail"].as_str().unwrap().contains("character limit"));
+
+        fixture.cleanup().await;
+    }
+
+    /// Groups: full lifecycle, member scoping across tenants, and the
+    /// group-specific error contract.
+    #[tokio::test]
+    async fn scim_group_lifecycle_members_and_cross_tenant_isolation() {
+        let Some(fixture) = scim_fixture("scim_group_router").await else {
+            return;
+        };
+        let ScimFixture {
+            app,
+            pool,
+            tenant_a,
+            tenant_b,
+            key_a,
+            ..
+        } = &fixture;
+
+        let member = seed_router_user(
+            pool,
+            tenant_a,
+            &format!("member-{}@example.com", Uuid::new_v4().simple()),
+            Some("Member One"),
+            "member",
+            "active",
+        )
+        .await;
+        let outsider = seed_router_user(
+            pool,
+            tenant_b,
+            &format!("outsider-{}@example.com", Uuid::new_v4().simple()),
+            Some("Outsider"),
+            "member",
+            "active",
+        )
+        .await;
+
+        // A foreign-tenant member is refused and NO group row is written.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Groups",
+            Some(json!({
+                "schemas": [SCIM_GROUP_SCHEMA],
+                "displayName": "Foreign Members",
+                "members": [{ "value": outsider.to_string() }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("do not exist in this tenant"));
+        let groups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1")
+                .bind(tenant_a)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(groups, 0, "a rejected create writes no group row");
+
+        // displayName is required.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Groups",
+            Some(json!({ "schemas": [SCIM_GROUP_SCHEMA] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("displayName is required"));
+
+        // Happy path with one member.
+        let (status, headers, body) = scim_call(
+            app,
+            key_a,
+            Method::POST,
+            "/v1/scim/Groups",
+            Some(json!({
+                "schemas": [SCIM_GROUP_SCHEMA],
+                "displayName": "Engineering",
+                "members": [{ "value": member.to_string(), "display": "Member One" }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+        let group_id = body["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+            format!("/v1/scim/Groups/{group_id}")
+        );
+        assert_eq!(body["members"][0]["value"], member.to_string());
+
+        // GET reflects stored members.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            &format!("/v1/scim/Groups/{group_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["displayName"], "Engineering");
+        assert_eq!(body["members"][0]["value"], member.to_string());
+        assert_eq!(body["members"][0]["display"], "Member One");
+
+        // List reports the group and honours count=0.
+        let (status, _, list) = scim_call(app, key_a, Method::GET, "/v1/scim/Groups", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(list["totalResults"].as_i64().unwrap() >= 1);
+        assert!(list["Resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == group_id));
+        let (status, _, empty) =
+            scim_call(app, key_a, Method::GET, "/v1/scim/Groups?count=0", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(empty["Resources"].as_array().unwrap().is_empty());
+        assert!(empty["totalResults"].as_i64().unwrap() >= 1);
+
+        // Group filters are explicitly unsupported (not silently ignored).
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::GET,
+            "/v1/scim/Groups?filter=displayName%20eq%20%22Engineering%22",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("filter is only supported for Users"));
+
+        // PATCH: rename + add a member, then remove it by value filter.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Groups/{group_id}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [
+                    { "op": "replace", "path": "displayName", "value": "Engineering Renamed" },
+                    { "op": "add", "path": "members", "value": [{ "value": member.to_string() }] }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["displayName"], "Engineering Renamed");
+        assert_eq!(
+            body["members"].as_array().unwrap().len(),
+            1,
+            "no duplicate member"
+        );
+
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Groups/{group_id}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [
+                    { "op": "remove", "path": format!("members[value eq \"{member}\"]") }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert!(body["members"].as_array().unwrap().is_empty());
+
+        // A PATCH that adds a foreign member is refused before any write.
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PATCH,
+            &format!("/v1/scim/Groups/{group_id}"),
+            Some(json!({
+                "schemas": [SCIM_PATCH_OP_SCHEMA],
+                "Operations": [
+                    { "op": "add", "path": "members", "value": [{ "value": outsider.to_string() }] }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM scim_group_members m
+                 JOIN scim_groups g ON g.id = m.group_id
+                 WHERE g.scim_id = $1 AND m.tenant_id = $2"
+            )
+            .bind(&group_id)
+            .bind(tenant_a)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            0,
+            "the foreign member must not be enrolled"
+        );
+
+        // PUT replaces the whole member list.
+        let replacement = seed_router_user(
+            pool,
+            tenant_a,
+            &format!("replacement-{}@example.com", Uuid::new_v4().simple()),
+            Some("Replacement"),
+            "member",
+            "active",
+        )
+        .await;
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::PUT,
+            &format!("/v1/scim/Groups/{group_id}"),
+            Some(json!({
+                "schemas": [SCIM_GROUP_SCHEMA],
+                "displayName": "Engineering Final",
+                "members": [{ "value": replacement.to_string() }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["displayName"], "Engineering Final");
+        assert_eq!(body["members"].as_array().unwrap().len(), 1);
+        assert_eq!(body["members"][0]["value"], replacement.to_string());
+
+        // Cross-tenant reads/writes are 404, never another tenant's group.
+        let tenant_b_key = crate::app::test_support::seed_api_key_for(
+            pool,
+            tenant_b,
+            &["scim:read", "scim:write"],
+        )
+        .await;
+        for (method, payload) in [
+            (Method::GET, None),
+            (
+                Method::PATCH,
+                Some(json!({ "schemas": [SCIM_PATCH_OP_SCHEMA], "Operations": [] })),
+            ),
+            (Method::DELETE, None),
+        ] {
+            let (status, _, body) = scim_call(
+                app,
+                &tenant_b_key,
+                method,
+                &format!("/v1/scim/Groups/{group_id}"),
+                payload,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+        }
+
+        // DELETE removes the group; a second delete is 404.
+        let (status, _, _) = scim_call(
+            app,
+            key_a,
+            Method::DELETE,
+            &format!("/v1/scim/Groups/{group_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _, body) = scim_call(
+            app,
+            key_a,
+            Method::DELETE,
+            &format!("/v1/scim/Groups/{group_id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "body: {body}");
+
+        fixture.cleanup().await;
+    }
+
+    /// Scope gates and the ServiceProviderConfig document.
+    #[tokio::test]
+    async fn scim_scope_gates_and_service_provider_config() {
+        let Some(fixture) = scim_fixture("scim_scope_spc").await else {
+            return;
+        };
+        let ScimFixture {
+            app,
+            pool,
+            tenant_a,
+            key_a,
+            read_key,
+            ..
+        } = &fixture;
+
+        // A read-only key cannot write.
+        let (status, _, body) = scim_call(
+            app,
+            read_key,
+            Method::POST,
+            "/v1/scim/Users",
+            Some(scim_user_payload("readonly@example.com", "Readonly", true)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+        assert!(body["detail"].as_str().unwrap().contains("scim:write"));
+
+        // A write-only key cannot read.
+        let write_only =
+            crate::app::test_support::seed_api_key_for(pool, tenant_a, &["scim:write"]).await;
+        let (status, _, body) =
+            scim_call(app, &write_only, Method::GET, "/v1/scim/Users", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+        assert!(body["detail"].as_str().unwrap().contains("scim:read"));
+
+        // ServiceProviderConfig advertises exactly what is implemented.
+        let (status, _, body) = scim_call(
+            app,
+            read_key,
+            Method::GET,
+            "/v1/scim/ServiceProviderConfig",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        assert_eq!(body["schemas"][0], SCIM_SPC_SCHEMA);
+        assert_eq!(body["patch"]["supported"], true);
+        assert_eq!(body["bulk"]["supported"], false);
+        assert_eq!(body["filter"]["maxResults"], MAX_SCIM_COUNT);
+        assert_eq!(body["changePassword"]["supported"], false);
+        assert_eq!(body["sort"]["supported"], false);
+        assert_eq!(body["etag"]["supported"], false);
+
+        // The scoped write+read key is admitted on the read path.
+        let (status, _, body) = scim_call(app, key_a, Method::GET, "/v1/scim/Users", None).await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+
+        fixture.cleanup().await;
     }
 }

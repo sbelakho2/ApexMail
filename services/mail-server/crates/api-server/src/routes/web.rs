@@ -1273,10 +1273,12 @@ pub(crate) fn parse_contact_csv(text: &str) -> ContactCsvParse {
 
     for (index, record) in records.enumerate() {
         let line_no = index + if out.had_header { 2 } else { 1 };
+        // A blank line is not a row: skip it before column projection, or a
+        // `[""]` record would surface as "invalid email: " noise.
+        if record.iter().all(|cell| cell.trim().is_empty()) {
+            continue; // blank line
+        }
         let Some(email) = record.get(email_col).map(|cell| cell.trim().to_lowercase()) else {
-            if record.iter().all(|cell| cell.trim().is_empty()) {
-                continue; // blank line
-            }
             out.invalid
                 .push((line_no, "row has no email column".to_string()));
             continue;
@@ -1728,7 +1730,10 @@ fn verify_password(hash: &str, password: &str) -> bool {
     if hash.starts_with("$2b$") || hash.starts_with("$2a$") || hash.starts_with("$2y$") {
         bcrypt::verify(password, hash).unwrap_or(false)
     } else if hash.starts_with("$argon2") {
-        apexmail_lib::verify_password(password, hash).is_ok()
+        // `apexmail_lib::verify_password` reports a MISMATCH as `Ok(false)`;
+        // only an explicit `Ok(true)` authenticates. Treating `is_ok()` as
+        // success authenticated ANY password against any valid Argon2 hash.
+        matches!(apexmail_lib::verify_password(password, hash), Ok(true))
     } else {
         false
     }
@@ -14007,5 +14012,883 @@ mod coverage_detail_session_tests {
         .await;
         assert_eq!(location(&response), "/domains");
         let _ = set_cookies(&response);
+    }
+}
+
+// ─── Adversarial coverage of web helpers and outage branches ──────
+//
+// The form handlers must degrade to a friendly PRG flash when storage is
+// unavailable — never a raw 500 or a silent success. These tests drive the
+// real handlers against a dead pool so every "could not …" branch is
+// exercised, and pin the pure parsing/authorization helpers directly.
+
+#[cfg(test)]
+mod adversarial_outage_tests {
+    use super::*;
+    use crate::app::test_support::test_state_over;
+    use axum::body::Bytes;
+    use axum::Extension;
+
+    async fn dead_state() -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool");
+        test_state_over(db).await
+    }
+
+    fn caller() -> AuthUser {
+        AuthUser {
+            tenant_id: "toverflow0000000000000000".into(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// A CSRF-valid urlencoded form + matching cookie headers.
+    fn signed_form(
+        state: &AppState,
+        pairs: &[(&str, &str)],
+    ) -> (HeaderMap, HashMap<String, String>) {
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={}", csrf.token).parse().unwrap(),
+        );
+        let mut form: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        form.insert("_csrf".into(), csrf.token);
+        (headers, form)
+    }
+
+    fn signed_body(state: &AppState, pairs: &[(&str, &str)]) -> (HeaderMap, Bytes) {
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={}", csrf.token).parse().unwrap(),
+        );
+        let mut body = pairs
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        body.push_str(&format!("&_csrf={}", csrf.token));
+        (headers, Bytes::from(body))
+    }
+
+    fn flash_of(response: &Response, config: &Config) -> Vec<FlashMessage> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter(|cookie| cookie.starts_with("apexmail_flash="))
+            .flat_map(|cookie| decode_flash_from_cookie_header(cookie, &config.csrf_secret))
+            .collect()
+    }
+
+    fn assert_graceful_error(response: &Response, config: &Config, context: &str) {
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{context}");
+        let flash = flash_of(response, config);
+        assert!(
+            flash
+                .iter()
+                .any(|message| message.kind == ui_foundation::flash::FlashKind::Error),
+            "{context} must flash a friendly error, got {flash:?}"
+        );
+        assert!(
+            response.headers().get(header::LOCATION).is_some(),
+            "{context} must redirect (PRG)"
+        );
+    }
+
+    #[test]
+    fn role_scope_sets_are_exact() {
+        assert_eq!(scopes_for_role("owner"), vec!["*".to_string()]);
+        assert_eq!(scopes_for_role("admin"), vec!["*".to_string()]);
+        let developer = scopes_for_role("developer");
+        assert!(developer.contains(&"messages:send".to_string()));
+        assert!(developer.contains(&"logs:read".to_string()));
+        assert!(!developer.contains(&"*".to_string()));
+        let unknown = scopes_for_role("mystery-role");
+        assert!(unknown.contains(&"messages:send".to_string()));
+        assert!(
+            !unknown.contains(&"logs:read".to_string()),
+            "unknown roles get the read-leaning baseline, never developer extras"
+        );
+    }
+
+    #[test]
+    fn password_hash_verification_supports_bcrypt_argon2_and_rejects_unknown() {
+        let bcrypt_hash = bcrypt::hash("Sup3r#Pass", 4).unwrap();
+        assert!(verify_password(&bcrypt_hash, "Sup3r#Pass"));
+        assert!(!verify_password(&bcrypt_hash, "wrong"));
+        assert!(!verify_password("$sso$google$no-password", "anything"));
+        assert!(!verify_password("", "anything"));
+        assert!(!verify_password("plaintext", "plaintext"));
+
+        // An argon2id hash produced by the canonical hasher verifies.
+        let argon2_hash = apexmail_lib::hash_password("Argon2#Pass").expect("argon2 hash");
+        assert!(verify_password(&argon2_hash, "Argon2#Pass"));
+        assert!(!verify_password(&argon2_hash, "not-it"));
+    }
+
+    #[tokio::test]
+    async fn unique_violation_detection_is_sqlstate_based() {
+        assert!(!is_unique_violation(&sqlx::Error::RowNotFound));
+        let Some(pool) = crate::test_db::optional_pg_pool("web_adv_unique_violation").await else {
+            return;
+        };
+        let slug = format!(
+            "adv-dup-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        for id in 0..2 {
+            let result = sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+                 VALUES ($1, 'Dup Co', $2, 'free', 'active', NOW(), NOW())",
+            )
+            .bind(format!(
+                "tdup{}{id}",
+                &uuid::Uuid::new_v4().simple().to_string()[..19]
+            ))
+            .bind(&slug)
+            .execute(&pool)
+            .await;
+            if let Err(error) = result {
+                assert!(
+                    is_unique_violation(&error),
+                    "the second insert must be recognized as 23505: {error}"
+                );
+                sqlx::query("DELETE FROM tenants WHERE slug = $1")
+                    .bind(&slug)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                return;
+            }
+        }
+        panic!("the duplicate slug insert unexpectedly succeeded");
+    }
+
+    #[test]
+    fn stub_flash_banner_escapes_and_labels_every_kind() {
+        assert_eq!(stub_flash_banner(&[]), "");
+        let banner = stub_flash_banner(&[
+            FlashMessage::success("Saved <ok>"),
+            FlashMessage::error("Broke <bad>"),
+            FlashMessage::info("Heads up"),
+        ]);
+        assert!(banner.contains("Success:"));
+        assert!(banner.contains("Error:"));
+        assert!(banner.contains("Notice:"));
+        assert!(banner.contains("Saved &lt;ok&gt;"), "{banner}");
+        assert!(!banner.contains("<ok>"));
+    }
+
+    #[test]
+    fn urlencoded_and_multipart_parsers_survive_malformed_input() {
+        // A part without '=' keeps the key and an empty value.
+        let parsed = parse_urlencoded("lonely&a=b");
+        assert_eq!(parsed[0], ("lonely".to_string(), String::new()));
+        assert_eq!(parsed[1], ("a".to_string(), "b".to_string()));
+        // Invalid percent escapes stay literal; '+' becomes space.
+        assert_eq!(urlencoded_component("%ZZ"), "%ZZ");
+        assert_eq!(urlencoded_component("%4"), "%4");
+        assert_eq!(urlencoded_component("a+b"), "a b");
+        assert_eq!(urlencoded_component("%41%42"), "AB");
+        // Invalid UTF-8 is replaced, never a panic.
+        assert_eq!(urlencoded_component("%FF"), "\u{fffd}");
+
+        // No boundary → refused.
+        assert!(parse_multipart(b"whatever", "multipart/form-data").is_none());
+        assert!(parse_multipart(b"whatever", "multipart/form-data; boundary=").is_none());
+        // A part without the header/content separator is skipped.
+        let malformed =
+            b"--x\r\nContent-Disposition: form-data; name=\"a\"\r\nno-separator\r\n--x--\r\n";
+        let form = parse_multipart(malformed, "multipart/form-data; boundary=x").unwrap();
+        assert!(form.pairs.is_empty());
+        // A proper field and file part parse.
+        let good = b"--x\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n--x\r\nContent-Disposition: form-data; name=\"f\"; filename=\"c.csv\"\r\n\r\nemail\n--x--\r\n";
+        let form = parse_multipart(good, "multipart/form-data; boundary=x").unwrap();
+        assert_eq!(form.pairs, vec![("a".to_string(), "1".to_string())]);
+        assert_eq!(form.files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_and_unsupported_bodies_are_refused_without_parsing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let oversized = Bytes::from(vec![b'a'; 10 * 1024 * 1024 + 1]);
+        assert!(parse_form_body(&headers, oversized).await.is_err());
+
+        // Anything that is not multipart is parsed as urlencoded (the
+        // documented "regardless of encoding" contract), never rejected.
+        let mut other_type = HeaderMap::new();
+        other_type.insert(header::CONTENT_TYPE, "application/xml".parse().unwrap());
+        assert!(parse_form_body(&other_type, Bytes::from_static(b"<x/>"))
+            .await
+            .is_ok());
+
+        // A urlencoded body parses; a UTF-8-lossy multipart does too.
+        let form = parse_form_body(&headers, Bytes::from_static(b"a=1&b=2"))
+            .await
+            .expect("urlencoded");
+        assert_eq!(form.pairs.len(), 2);
+    }
+
+    #[test]
+    fn contact_csv_parser_marks_missing_email_and_blank_rows() {
+        let parsed = parse_contact_csv(
+            "email,name\n\
+             \n\
+             ,No Email\n\
+             good@example.com,Good\n",
+        );
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].email, "good@example.com");
+        assert_eq!(
+            parsed.invalid.len(),
+            1,
+            "the blank line is skipped; only the empty email is invalid: {:?}",
+            parsed.invalid
+        );
+        assert!(
+            parsed.invalid[0].1.contains("invalid email"),
+            "{:?}",
+            parsed.invalid
+        );
+
+        // A quoted field containing the delimiter and a newline survives.
+        let parsed = parse_contact_csv("email,name\n\"quoted@example.com\",\"Doe, Jane\nJr\"\n");
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.rows[0].name.as_deref(), Some("Doe, Jane\nJr"));
+    }
+
+    // ── Dead-pool handler outage branches ────────────────────────
+
+    #[tokio::test]
+    async fn list_forms_degrade_to_error_flashes_when_storage_is_down() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let (headers, form) = signed_form(&state, &[("name", "Ops List")]);
+        let response = form_list_create(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "list create");
+
+        let (headers, form) = signed_form(&state, &[("id", "list-1"), ("name", "Renamed")]);
+        let response = form_list_update(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "list update");
+    }
+
+    #[tokio::test]
+    async fn content_forms_degrade_to_error_flashes_when_storage_is_down() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("name", "Tpl"),
+                ("subject", "Hi"),
+                ("html_body", "<p>hi</p>"),
+            ],
+        );
+        let response = form_template_create(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "template create");
+
+        let (headers, form) = signed_form(
+            &state,
+            &[("name", "Camp"), ("subject", "Subj"), ("scheduled_at", "")],
+        );
+        let response = form_campaign_create(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "campaign create");
+
+        let (headers, form) = signed_form(
+            &state,
+            &[("id", "camp-1"), ("name", "Camp"), ("subject", "Subj")],
+        );
+        let response = form_campaign_update(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "campaign update");
+
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("name", "IP Request"),
+                ("provider", "hetzner"),
+                ("region", "eu"),
+                ("purpose", "warmup"),
+            ],
+        );
+        let response = form_dedicated_ip_request(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "dedicated ip request");
+
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("from_email", "sender@example.com"),
+                ("subject", "Placement"),
+                ("body_text", "hello"),
+            ],
+        );
+        let response = form_placement_create(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "placement create");
+    }
+
+    #[tokio::test]
+    async fn account_forms_degrade_to_error_flashes_when_storage_is_down() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let (headers, form) = signed_form(&state, &[("name", "New Name")]);
+        let response = form_profile_update(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "profile update");
+
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("current_password", "Old#Pass123"),
+                ("new_password", "New#Pass123"),
+                ("confirm_password", "New#Pass123"),
+            ],
+        );
+        let response = form_change_password(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "change password");
+
+        let (headers, form) = signed_form(&state, &[("return_to", "/cp/security")]);
+        let response = form_mfa_setup(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "mfa setup");
+
+        let (headers, form) =
+            signed_form(&state, &[("code", "123456"), ("return_to", "/cp/security")]);
+        let response = form_mfa_confirm(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "mfa confirm");
+    }
+
+    #[tokio::test]
+    async fn credential_forms_degrade_to_error_flashes_when_storage_is_down() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let (headers, body) = signed_body(&state, &[("name", "Ops Key")]);
+        let response =
+            form_api_key_create(State(state.clone()), Extension(caller()), headers, body).await;
+        assert_graceful_error(&response, &config, "api key create");
+
+        let (headers, body) = signed_body(
+            &state,
+            &[
+                ("url", "https://hooks.example.com/inbound"),
+                ("events", "message.delivered"),
+            ],
+        );
+        let response =
+            form_webhook_create(State(state.clone()), Extension(caller()), headers, body).await;
+        assert_graceful_error(&response, &config, "webhook create");
+
+        let (headers, form) = signed_form(
+            &state,
+            &[("email", "teammate@example.com"), ("role", "viewer")],
+        );
+        let response = form_team_invite(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "team invite");
+    }
+
+    #[tokio::test]
+    async fn export_and_domain_forms_fail_closed_when_storage_is_down() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let response = form_contacts_export(State(state.clone()), Extension(caller())).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let response = form_audit_export(
+            State(state.clone()),
+            Extension(caller()),
+            Query(HashMap::new()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let (headers, form) = signed_form(
+            &state,
+            &[("name", "sender.example"), ("return_to", "/domains/new")],
+        );
+        let response = form_domain_create(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "domain create");
+
+        let (headers, form) = signed_form(&state, &[("id", "camp-1"), ("return_to", "/campaigns")]);
+        let response = form_campaign_start(
+            State(state.clone()),
+            Extension(caller()),
+            Path("camp-1".to_string()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_graceful_error(&response, &config, "campaign start");
+    }
+
+    #[tokio::test]
+    async fn billing_forms_fail_closed_without_reaching_a_provider() {
+        let state = dead_state().await;
+        let (headers, form) = signed_form(&state, &[("plan", "pro")]);
+        let response = form_billing_checkout(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+        let (headers, form) = signed_form(&state, &[]);
+        let response = form_billing_portal(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn contacts_import_rejects_an_unusable_upload_without_storage() {
+        let state = dead_state().await;
+        let (headers, body) = signed_body(
+            &state,
+            &[("return_to", "/contacts/import"), ("list_id", "")],
+        );
+        let response =
+            form_contacts_import(State(state.clone()), Extension(caller()), headers, body).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        // No file part: a friendly field error, not a panic or 500.
+        let flash = flash_of(&response, &state.config);
+        assert!(!flash.is_empty(), "the import must explain the failure");
+    }
+
+    #[tokio::test]
+    async fn destructive_confirm_refuses_a_missing_or_tampered_signature() {
+        let state = dead_state().await;
+        let (headers, form) = signed_form(&state, &[("intent", "delete-contacts"), ("ids", "a")]);
+        let response = form_confirm_destructive(
+            State(state.clone()),
+            Extension(caller()),
+            headers,
+            Form(form),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+}
+
+// ─── Adversarial: login/signup recovery branches ──────────────────
+
+#[cfg(test)]
+mod adversarial_auth_outage_tests {
+    use super::*;
+    use crate::app::test_support::{test_config, test_state_over, test_state_over_with_config};
+    use axum::Extension;
+
+    async fn dead_state() -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy dead pool");
+        test_state_over(db).await
+    }
+
+    fn signed_form(
+        state: &AppState,
+        pairs: &[(&str, &str)],
+    ) -> (HeaderMap, HashMap<String, String>) {
+        let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={}", csrf.token).parse().unwrap(),
+        );
+        let mut form: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        form.insert("_csrf".into(), csrf.token);
+        (headers, form)
+    }
+
+    fn flash_of(response: &Response, config: &Config) -> Vec<FlashMessage> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter(|cookie| cookie.starts_with("apexmail_flash="))
+            .flat_map(|cookie| decode_flash_from_cookie_header(cookie, &config.csrf_secret))
+            .collect()
+    }
+
+    #[test]
+    fn captcha_failure_messages_never_leak_internals() {
+        use crate::error::ApiError;
+        assert_eq!(
+            kiwi_failure_message(&ApiError::Validation(vec!["solve the puzzle".into()])),
+            "solve the puzzle"
+        );
+        assert_eq!(
+            kiwi_failure_message(&ApiError::Validation(vec![])),
+            "CAPTCHA verification failed — please retry."
+        );
+        assert_eq!(
+            kiwi_failure_message(&ApiError::ServiceUnavailable("down".into())),
+            "down"
+        );
+        assert_eq!(
+            kiwi_failure_message(&ApiError::RateLimitedMessage("slow".into())),
+            "slow"
+        );
+        assert!(kiwi_failure_message(&ApiError::RateLimited).contains("Too many"));
+        let internal = kiwi_failure_message(&ApiError::Internal("db creds leak".into()));
+        assert!(!internal.contains("db creds leak"));
+        assert_eq!(internal, "CAPTCHA verification failed — please retry.");
+    }
+
+    #[tokio::test]
+    async fn login_forms_degrade_to_friendly_flashes_without_storage() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let (headers, form) = signed_form(
+            &state,
+            &[("email", "user@example.com"), ("password", "Sup3r#Pass")],
+        );
+        let response = form_login(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_of(&response, &config);
+        assert!(
+            !flash.is_empty(),
+            "an unreachable database must still explain the login failure"
+        );
+
+        // Missing credentials: field-level PRG with a populated email field.
+        let (headers, form) = signed_form(&state, &[("email", "user@example.com")]);
+        let response = form_login(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|value| value.to_str().unwrap().starts_with("apexmail_form_fields=")));
+
+        // Operator login (non-system identity) still fails closed without a DB.
+        let (headers, form) = signed_form(
+            &state,
+            &[("email", "ops@example.com"), ("password", "Sup3r#Pass")],
+        );
+        let response = form_cp_login(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("apexmail_cp_session=")));
+
+        let (headers, form) = signed_form(&state, &[("email", "ops@example.com")]);
+        let response = form_cp_login(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn signup_and_recovery_forms_degrade_without_storage() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("name", "New User"),
+                ("company_name", "New Co"),
+                ("email", "new@example.com"),
+                ("password", "Sup3r#SecurePass"),
+                ("plan", "free"),
+            ],
+        );
+        let response = form_signup(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(!flash_of(&response, &config).is_empty());
+
+        let (headers, form) = signed_form(&state, &[("email", "user@example.com")]);
+        let response = form_forgot_password(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            !flash_of(&response, &config).is_empty(),
+            "the reset flow always answers (never enumerates accounts)"
+        );
+
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("email", "user@example.com"),
+                ("token", "some-token"),
+                ("password", "Sup3r#SecurePass"),
+                ("confirmPassword", "Sup3r#SecurePass"),
+            ],
+        );
+        let response = form_reset_password(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(!flash_of(&response, &config).is_empty());
+
+        // Mismatched confirmation is refused before touching storage.
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("email", "user@example.com"),
+                ("token", "some-token"),
+                ("password", "Sup3r#SecurePass"),
+                ("confirmPassword", "Different#SecurePass"),
+            ],
+        );
+        let response = form_reset_password(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[tokio::test]
+    async fn mfa_verify_without_storage_never_issues_a_session() {
+        let state = dead_state().await;
+        let config = state.config.clone();
+        let (headers, form) =
+            signed_form(&state, &[("email", "user@example.com"), ("code", "123456")]);
+        let response = form_mfa_verify(State(state.clone()), headers, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(!flash_of(&response, &config).is_empty());
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("am_session=")));
+    }
+
+    /// A verified user whose signing key is broken must get the honest
+    /// "temporarily unavailable" flash, never a session cookie.
+    #[tokio::test]
+    async fn password_login_reports_signing_failure_instead_of_a_broken_session() {
+        let Some(pool) = crate::test_db::optional_pg_pool("web_adv_login_signing").await else {
+            return;
+        };
+        let tenant = format!("tlog{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at) \
+             VALUES ($1, 'Login Adv', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let email = format!("{}@example.com", unique_email());
+        let password_hash = bcrypt::hash("Sup3r#Pass", 4).unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, \
+                    email_verified, mfa_enabled, metadata, created_at, updated_at) \
+             VALUES ($1, $2, $3, 'Login Adv', $4, 'developer', 'active', true, false, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&email)
+        .bind(&password_hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The default test config's JWT PEM is a placeholder: signing fails.
+        let state = test_state_over_with_config(pool.clone(), test_config()).await;
+        let (headers, form) = signed_form(&state, &[("email", &email), ("password", "Sup3r#Pass")]);
+        let response = form_login(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_of(&response, &state.config);
+        assert!(
+            flash
+                .iter()
+                .any(|message| message.text.contains("temporarily unavailable")),
+            "expected the honest outage message, got {flash:?}"
+        );
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|value| !value.to_str().unwrap().starts_with("am_session=")));
+
+        sqlx::query("DELETE FROM users WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    fn unique_email() -> String {
+        format!("adv{}", &uuid::Uuid::new_v4().simple().to_string()[..16])
+    }
+
+    /// A dead database maps signup failures onto the honest "unavailable"
+    /// flash rather than a false success.
+    #[tokio::test]
+    async fn signup_never_claims_success_without_storage() {
+        let state = dead_state().await;
+        let (headers, form) = signed_form(
+            &state,
+            &[
+                ("name", "New User"),
+                ("company_name", "New Co"),
+                ("email", "another@example.com"),
+                ("password", "Sup3r#SecurePass"),
+                ("plan", "free"),
+            ],
+        );
+        let response = form_signup(State(state.clone()), headers, None, Form(form)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let flash = flash_of(&response, &state.config);
+        assert!(
+            flash
+                .iter()
+                .any(|message| message.kind == ui_foundation::flash::FlashKind::Error),
+            "signup must fail closed, got {flash:?}"
+        );
+    }
+
+    /// `find_user_by_email` treats a database outage as "no such user" so
+    /// the caller's enumeration-resistant messaging stays intact.
+    #[tokio::test]
+    async fn find_user_by_email_hides_storage_errors() {
+        let state = dead_state().await;
+        assert!(find_user_by_email(&state, "user@example.com")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn webhook_form_rejects_ssrf_targets_even_without_storage() {
+        let state = dead_state().await;
+        let (headers, body) = {
+            let csrf = form_csrf_for_render(&HeaderMap::new(), &state.config);
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded".parse().unwrap(),
+            );
+            headers.insert(
+                header::COOKIE,
+                format!("csrf_token={}", csrf.token).parse().unwrap(),
+            );
+            let body = format!(
+                "url=http%3A%2F%2F169.254.169.254%2Flatest&events=message.accepted&_csrf={}",
+                csrf.token
+            );
+            (headers, axum::body::Bytes::from(body))
+        };
+        let user = AuthUser {
+            tenant_id: "toverflow0000000000000000".into(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let response = form_webhook_create(State(state), Extension(user), headers, body).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
 }

@@ -849,13 +849,22 @@ impl AuditLogger {
             .await
             .map_err(|e| format!("DB error: {e}"))?;
 
+        // F76: the canonical `audit_logs_archive` has NO unique constraint on
+        // `id`, so `ON CONFLICT DO NOTHING` alone never sees a duplicate. The
+        // explicit NOT EXISTS makes the copy skip ids already present in the
+        // archive (matching or CONFLICTING), so a pre-existing conflicting row
+        // cannot be shadowed by a second copy of the same id.
         let copy_sql = format!(
             "INSERT INTO audit_logs_archive
                  (id, tenant_id, user_id, session_id, action, resource, resource_id,
                   details, ip_address, user_agent, outcome, error_message,
                   timestamp, hash, previous_hash, signature)
              SELECT {AUDIT_ENTRY_COLUMNS}
-             FROM audit_logs a WHERE a.timestamp < $1{not_held}
+             FROM audit_logs a
+             WHERE a.timestamp < $1{not_held}
+               AND NOT EXISTS (
+                 SELECT 1 FROM audit_logs_archive b WHERE b.id = a.id
+               )
              ON CONFLICT DO NOTHING"
         );
         let mut copy = sqlx::query(&copy_sql).bind(older_than);
@@ -870,15 +879,22 @@ impl AuditLogger {
         let archived = result.rows_affected() as i64;
 
         // Delete only rows that verifiably landed in the archive: same id AND
-        // same chain hash. A pre-existing conflicting archive row (different
-        // content) means the copy did NOT verifiably happen for that row —
-        // the live original is preserved.
+        // same chain hash, AND no conflicting archive row for the same id
+        // (different content). A pre-existing conflicting archive row means
+        // the copy did NOT verifiably happen for that row — the live original
+        // is preserved. The second NOT EXISTS is what enforces that on the
+        // canonical archive, which has no unique id constraint for
+        // `ON CONFLICT` to fire on.
         let delete_sql = format!(
             "DELETE FROM audit_logs a
              WHERE a.timestamp < $1{not_held}
                AND EXISTS (
                  SELECT 1 FROM audit_logs_archive b
                  WHERE b.id = a.id AND b.hash = a.hash
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM audit_logs_archive b2
+                 WHERE b2.id = a.id AND b2.hash <> a.hash
                )"
         );
         let mut delete = sqlx::query(&delete_sql).bind(older_than);

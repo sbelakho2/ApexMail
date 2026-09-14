@@ -403,4 +403,208 @@ mod tests {
             other => panic!("expected outage, got {other:?}"),
         }
     }
+    // ── Adversarial: hostile XML, offline transport, evidence persistence ──
+
+    #[test]
+    fn fault_classification_defaults_to_unknown_and_never_valid() {
+        for blank in ["", "   "] {
+            match ViesOutcome::classify_fault(blank) {
+                ViesOutcome::Outage { fault } => assert_eq!(fault, "UNKNOWN"),
+                other => panic!("blank fault must be an unknown outage, got {other:?}"),
+            }
+        }
+        match ViesOutcome::classify_fault("A_FAULT_WE_HAVE_NEVER_SEEN") {
+            ViesOutcome::Outage { fault } => {
+                assert_eq!(fault, "A_FAULT_WE_HAVE_NEVER_SEEN");
+            }
+            other => panic!("unclassified fault must stay an outage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hostile_xml_is_still_parsed_strictly() {
+        // Attributes on the element and an upper-case value.
+        let xml = r#"<r><valid source="vies">TRUE</valid><name>A &amp; B</name></r>"#;
+        match parse_check_vat_response(xml).expect("attributes tolerated") {
+            ViesOutcome::Valid { name, address } => {
+                assert_eq!(name.as_deref(), Some("A &amp; B"));
+                assert!(address.is_none(), "missing address stays None");
+            }
+            other => panic!("expected valid, got {other:?}"),
+        }
+        // An unparseable <valid> value is a malformed response, never an
+        // implicit validity.
+        let error = parse_check_vat_response("<valid>maybe</valid>").expect_err("refused");
+        assert!(matches!(error, ViesError::Malformed(_)));
+        // An unclosed element yields neither <valid> nor <faultstring>.
+        assert!(parse_check_vat_response("<valid>true").is_err());
+        // An empty faultstring classifies as UNKNOWN, not valid.
+        match parse_check_vat_response("<soap:Fault><faultstring></faultstring></soap:Fault>")
+            .expect("fault parsed")
+        {
+            ViesOutcome::Outage { fault } => assert_eq!(fault, "UNKNOWN"),
+            other => panic!("expected outage, got {other:?}"),
+        }
+        // Whitespace answer values are trimmed, an all-whitespace name is
+        // treated as absent.
+        match parse_check_vat_response("<valid> false </valid>").expect("parse") {
+            ViesOutcome::Invalid => {}
+            other => panic!("expected invalid, got {other:?}"),
+        }
+        match parse_check_vat_response("<valid>true</valid><name>   </name>").expect("parse") {
+            ViesOutcome::Valid { name, .. } => assert!(name.is_none()),
+            other => panic!("expected valid, got {other:?}"),
+        }
+    }
+
+    /// Drive the real SOAP path against a loopback server (no external
+    /// network): success, HTTP outage and malformed body classification,
+    /// request normalisation, then persistence of the evidence rows.
+    #[tokio::test]
+    async fn vies_transport_classifies_and_persists_offline() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Some(pool) = crate::test_support::canonical_pool("vies_transport", "vies").await else {
+            return;
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let responses = [
+                (200u16, VALID_RESPONSE),
+                (503, "service unavailable"),
+                (200, "<html>not a SOAP response</html>"),
+                (200, VALID_RESPONSE),
+            ];
+            let mut captured = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut buf = vec![0u8; 16 * 1024];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                captured.push(String::from_utf8_lossy(&buf[..read]).to_string());
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+            captured
+        });
+
+        std::env::set_var("VIES_API_URL", format!("http://{addr}/checkVatService"));
+        let client = reqwest::Client::new();
+
+        // 1. Authoritative valid answer.
+        let (outcome, body) = validate_vat_number_vies(&client, " de ", "123 456 789")
+            .await
+            .expect("valid consultation");
+        assert!(outcome.is_valid());
+        assert_eq!(body, VALID_RESPONSE);
+
+        // 2. A 5xx is an outage, never valid.
+        let (outage, _) = validate_vat_number_vies(&client, "DE", "1")
+            .await
+            .expect("http consultation");
+        match outage {
+            ViesOutcome::Outage { fault } => assert_eq!(fault, "HTTP_503"),
+            other => panic!("5xx must be an outage, got {other:?}"),
+        }
+
+        // 3. A malformed 200 body is refused, not treated as valid.
+        let error = validate_vat_number_vies(&client, "DE", "1")
+            .await
+            .expect_err("malformed body refused");
+        assert!(matches!(error, ViesError::Malformed(_)));
+
+        // 4. validate_and_record persists the consultation.
+        let (outcome, recorded) = validate_and_record(
+            &pool,
+            &client,
+            Some("tenant-1"),
+            Some("cust-1"),
+            "de",
+            "123 456 789",
+        )
+        .await
+        .expect("recorded consultation");
+        assert!(outcome.is_valid() && recorded.valid);
+
+        let requests = server.await.expect("server task");
+        let envelope = &requests[0];
+        assert!(envelope.contains("<urn:countryCode>DE</urn:countryCode>"));
+        assert!(
+            envelope.contains("<urn:vatNumber>123456789</urn:vatNumber>"),
+            "spaces are stripped and the country upper-cased"
+        );
+
+        let (valid, vat_number, country, outage_state, hash): (
+            bool,
+            String,
+            String,
+            Option<String>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT valid, vat_number, country, outage_state, response_hash \
+             FROM vat_validation_evidence WHERE id = $1",
+        )
+        .bind(recorded.id)
+        .fetch_one(&pool)
+        .await
+        .expect("evidence row");
+        assert!(valid);
+        assert_eq!(vat_number, "123456789");
+        assert_eq!(country, "DE");
+        assert!(outage_state.is_none());
+        assert_eq!(hash, hex::encode(Sha256::digest(VALID_RESPONSE.as_bytes())));
+
+        // Direct persistence of an invalid answer and of an outage: both
+        // invalid, the outage carrying its marker (the schema CHECK forbids
+        // an outage row that is valid).
+        let requested_at = Utc::now();
+        let invalid = record_vat_validation_evidence(
+            &pool,
+            Some("tenant-1"),
+            None,
+            "de",
+            "000000000",
+            requested_at,
+            &ViesOutcome::Invalid,
+            Some("authority-req-1"),
+            "invalid-body",
+        )
+        .await
+        .expect("invalid evidence");
+        assert!(!invalid.valid && invalid.outage_state.is_none());
+
+        let outage = record_vat_validation_evidence(
+            &pool,
+            Some("tenant-1"),
+            None,
+            "de",
+            "000000001",
+            requested_at,
+            &ViesOutcome::Outage {
+                fault: "MS_UNAVAILABLE".into(),
+            },
+            None,
+            "outage-body",
+        )
+        .await
+        .expect("outage evidence");
+        assert!(!outage.valid);
+        assert_eq!(outage.outage_state.as_deref(), Some("MS_UNAVAILABLE"));
+        let stored_outage: (bool, Option<String>) =
+            sqlx::query_as("SELECT valid, outage_state FROM vat_validation_evidence WHERE id = $1")
+                .bind(outage.id)
+                .fetch_one(&pool)
+                .await
+                .expect("outage row");
+        assert_eq!(stored_outage, (false, Some("MS_UNAVAILABLE".into())));
+
+        std::env::remove_var("VIES_API_URL");
+    }
 }

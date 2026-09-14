@@ -255,6 +255,18 @@ fn classify_risk(days: i64, has_sub: bool, bounce_rate: f64) -> String {
     }
 }
 
+/// Severity of the "Inactive >30 days" risk signal. Shared by the aggregate
+/// and `/churn` endpoints so the SAME at-risk list cannot report different
+/// severities depending on which endpoint a client calls (the dedicated
+/// endpoint previously hardcoded "high").
+fn inactive_signal_severity(affected_tenants: usize) -> &'static str {
+    if affected_tenants > 10 {
+        "high"
+    } else {
+        "medium"
+    }
+}
+
 // ── Successful-send volume helpers (event occurrence, DISTINCT messages) ──
 
 /// DISTINCT messages with a successful `sent` event today.
@@ -583,13 +595,10 @@ async fn get_predictive_analytics(
                     signal: "Inactive >30 days".into(),
                     affected_tenants: at_risk_list.iter().filter(|t| t.days_inactive > 30).count()
                         as i64,
-                    severity:
-                        if at_risk_list.iter().filter(|t| t.days_inactive > 30).count() > 10 {
-                            "high"
-                        } else {
-                            "medium"
-                        }
-                        .into(),
+                    severity: inactive_signal_severity(
+                        at_risk_list.iter().filter(|t| t.days_inactive > 30).count(),
+                    )
+                    .into(),
                 },
                 RiskSignal {
                     signal: "High bounce rate (>5%)".into(),
@@ -712,7 +721,10 @@ async fn get_churn_risk(
                 signal: "Inactive >30 days".into(),
                 affected_tenants: at_risk_list.iter().filter(|t| t.days_inactive > 30).count()
                     as i64,
-                severity: "high".into(),
+                severity: inactive_signal_severity(
+                    at_risk_list.iter().filter(|t| t.days_inactive > 30).count(),
+                )
+                .into(),
             },
             RiskSignal {
                 signal: "High bounce rate (>5%)".into(),
@@ -908,6 +920,7 @@ async fn get_anomalies(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     #[test]
     fn classify_risk_critical_for_long_inactive_with_subscription() {
@@ -1105,5 +1118,581 @@ mod tests {
         assert_eq!(baseline, 0.0);
 
         pool.close().await;
+    }
+
+    // ── Adversarial endpoint tests (real router, real canonical schema) ──
+    //
+    // These drive the HTTP handlers through `build_app` (system-tenant
+    // machine key) against a per-test canonical database, so every assertion
+    // is about the JSON a client receives — not a helper's return value.
+
+    const PREDICTIVE_PATH: &str = "/v1/admin/analytics/predictive";
+
+    /// Serialises tests that mutate the process-global `EMAIL_MAX_BACKLOG`
+    /// env var (only this module reads it; the only other mutator is the
+    /// pre-existing default test, which merely removes it).
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The canonical migration chain seeds the system tenant (`slug =
+    /// 'system'`); control-plane machine keys authenticate as the literal
+    /// `system` tenant (the CP machine-credential path).
+    const SYSTEM_TENANT_ID: &str = "system";
+
+    async fn predictive_app(test_name: &str) -> Option<(axum::Router, sqlx::PgPool, String)> {
+        let pool = crate::test_db::canonical_pool(test_name).await?;
+        // The CP machine-credential path passes only the literal `system`
+        // tenant (`middleware::cp_auth`); the canonical chain already seeds a
+        // different system tenant with slug 'system', so add the literal id
+        // under a distinct slug to satisfy the FK without colliding.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ('system', 'ApexMail System', 'system-machines', 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed system machine tenant");
+        // Neutralise migration-seeded tenants so counts are deterministic:
+        // the other system tenant is suspended (invisible to every active-
+        // tenant query), and the machine tenant gets one recent message so it
+        // is not itself reported as inactive.
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id <> 'system'")
+            .execute(&pool)
+            .await
+            .expect("suspend seeded tenants");
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), 'system', 'ops@apexmail.ee', '[\"ops@apexmail.ee\"]'::jsonb, 'system', 'sent', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed machine tenant activity");
+        let key = crate::app::test_support::seed_api_key_for(&pool, SYSTEM_TENANT_ID, &["*"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((crate::app::build_app(state), pool, key))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'free', $4, '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(format!("Tenant {id}"))
+        .bind(format!("slug-{id}"))
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_message(
+        pool: &sqlx::PgPool,
+        tenant_id: &str,
+        status: &str,
+        days_ago: i32,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at, updated_at)
+             VALUES ($1, $2, 'sender@example.com', '[\"to@example.com\"]'::jsonb, 'subject', $3,
+                     NOW() - make_interval(days => $4::int), NOW() - make_interval(days => $4::int))",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(status)
+        .bind(days_ago)
+        .execute(pool)
+        .await
+        .expect("seed message");
+        id
+    }
+
+    async fn seed_event(
+        pool: &sqlx::PgPool,
+        tenant_id: &str,
+        message_id: &str,
+        event: &str,
+        days_ago: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp)
+             VALUES ($1, $2, $3, $4, NOW() - make_interval(days => $5::int))",
+        )
+        .bind(format!("evt-{}", uuid::Uuid::new_v4().simple()))
+        .bind(tenant_id)
+        .bind(message_id)
+        .bind(event)
+        .bind(days_ago)
+        .execute(pool)
+        .await
+        .expect("seed event");
+    }
+
+    async fn seed_active_subscription(pool: &sqlx::PgPool, tenant_id: &str) {
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status)
+             VALUES ($1, $2, 'pro', 'active')",
+        )
+        .bind(tenant_id)
+        .bind(format!("sub_{}", uuid::Uuid::new_v4().simple()))
+        .execute(pool)
+        .await
+        .expect("seed subscription");
+    }
+
+    async fn get_json(
+        app: &axum::Router,
+        path: &str,
+        key: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = tower::ServiceExt::oneshot(
+            app.clone(),
+            axum::http::Request::builder()
+                .method(axum::http::Method::GET)
+                .uri(path)
+                .header("x-api-key", key)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("predictive request must dispatch");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    /// Every endpoint reports honest zero/empty states on an empty database:
+    /// no fabricated projections, no invented variability band, no anomaly.
+    #[tokio::test]
+    async fn predictive_endpoints_are_honest_on_an_empty_database() {
+        let Some((app, pool, key)) = predictive_app("predictive_empty").await else {
+            eprintln!("skipping predictive_endpoints_are_honest_on_an_empty_database: no TEST_DATABASE_URL");
+            return;
+        };
+
+        let (status, agg) = get_json(&app, PREDICTIVE_PATH, &key).await;
+        assert_eq!(status, StatusCode::OK, "body: {agg}");
+        assert_eq!(agg["churnRisk"]["atRiskTenants"], 0);
+        assert_eq!(agg["churnRisk"]["highRiskCount"], 0);
+        assert_eq!(agg["churnRisk"]["heuristicChurnRiskShare"], 0.0);
+        assert_eq!(agg["capacity"]["currentDailyVolume"], 0);
+        assert_eq!(agg["capacity"]["currentMonthlyVolume"], 0);
+        assert_eq!(agg["capacity"]["heuristicProjected30dVolume"], 0);
+        assert_eq!(agg["capacity"]["heuristicProjected90dVolume"], 0);
+        assert_eq!(agg["capacity"]["capacityUtilization"], 0.0);
+        assert!(
+            agg["capacity"]["volumeTrend30d"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "empty database has an empty trend: {agg}"
+        );
+        assert!(agg["capacity"]["daysUntilCapacityLimit"].is_null());
+        assert!(agg["anomalies"].as_array().unwrap().is_empty());
+        assert_eq!(agg["forecast"]["currentVolume"], 0);
+        assert_eq!(agg["forecast"]["heuristicNextWeek"], 0);
+        assert_eq!(
+            agg["forecast"]["variabilityBand"], "unestimated (insufficient daily-volume history)",
+            "with no history the band must be honestly unestimated: {agg}"
+        );
+        assert!(agg["method"].as_str().unwrap().contains("no trained model"));
+        assert!(agg["fixedHorizons"]
+            .as_str()
+            .unwrap()
+            .contains("no window parameter"));
+        assert!(
+            agg.get("window").is_none(),
+            "there is no client-selectable window field: {agg}"
+        );
+        assert!(agg["generatedAt"].as_str().unwrap().contains('T'));
+
+        for path in ["churn", "capacity", "anomalies"] {
+            let (status, body) = get_json(&app, &format!("{PREDICTIVE_PATH}/{path}"), &key).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            if path == "anomalies" {
+                assert!(body.as_array().unwrap().is_empty(), "{body}");
+            } else {
+                assert_eq!(body["daysUntilCapacityLimit"], serde_json::Value::Null);
+            }
+        }
+
+        pool.close().await;
+    }
+
+    /// The aggregate/churn/capacity numbers are derived from DISTINCT
+    /// successful-send events with exact, deterministic arithmetic.
+    #[tokio::test]
+    async fn predictive_volume_projection_and_churn_are_deterministic() {
+        let Some((app, pool, key)) = predictive_app("predictive_volume").await else {
+            eprintln!(
+                "skipping predictive_volume_projection_and_churn_are_deterministic: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+
+        // Three ACTIVE tenants: A active 40d ago, B active 90d ago with a
+        // 100% bounce rate, C never sent anything (365d inactive).
+        let active = "ten_predictive_active_01";
+        let bounced = "ten_predictive_bounce_01";
+        let silent = "ten_predictive_silent_01";
+        for id in [active, bounced, silent] {
+            seed_tenant(&pool, id, "active").await;
+        }
+        // A suspended tenant must never appear in churn or total-active.
+        seed_tenant(&pool, "ten_predictive_susp_01", "suspended").await;
+
+        let a_msg = seed_message(&pool, active, "sent", 40).await;
+        seed_event(&pool, active, &a_msg.to_string(), "sent", 40).await;
+        let b_msg = seed_message(&pool, bounced, "bounced", 90).await;
+        seed_event(&pool, bounced, &b_msg.to_string(), "bounced", 90).await;
+
+        // Volume fixtures: two distinct messages today (one with two `sent`
+        // events — distinct-message counting must ignore the duplicate), one
+        // 10 days ago, one 20 days ago.
+        let today_a = uuid::Uuid::new_v4().to_string();
+        let today_b = uuid::Uuid::new_v4().to_string();
+        seed_event(&pool, silent, &today_a, "sent", 0).await;
+        seed_event(&pool, silent, &today_a, "sent", 0).await;
+        seed_event(&pool, silent, &today_b, "sent", 0).await;
+        seed_event(&pool, silent, &uuid::Uuid::new_v4().to_string(), "sent", 10).await;
+        seed_event(&pool, silent, &uuid::Uuid::new_v4().to_string(), "sent", 20).await;
+
+        let (status, agg) = get_json(&app, PREDICTIVE_PATH, &key).await;
+        assert_eq!(status, StatusCode::OK, "body: {agg}");
+
+        // Volume: 2 today, 4 in the last 30 days.
+        assert_eq!(agg["capacity"]["currentDailyVolume"], 2);
+        assert_eq!(agg["capacity"]["currentMonthlyVolume"], 4);
+        let trend = agg["capacity"]["volumeTrend30d"].as_array().unwrap();
+        assert_eq!(trend.len(), 3, "three distinct send days: {trend:?}");
+        assert!(trend.iter().all(|p| p["projected"] == false));
+        let trend_volume: i64 = trend.iter().map(|p| p["volume"].as_i64().unwrap()).sum();
+        assert_eq!(trend_volume, 4, "distinct messages, not send events");
+        assert_eq!(
+            agg["capacity"]["volumeTrend90d"].as_array().unwrap().len(),
+            4
+        );
+
+        // Weekly growth: last 7d = 2 distinct messages, prior 7d = 1 → 1.0.
+        assert_eq!(agg["capacity"]["weeklyGrowthRate"], 1.0);
+        // avg daily = 4/3 → projection = 4/3*30*2 = 80 and *90*2 = 240.
+        assert_eq!(agg["capacity"]["heuristicProjected30dVolume"], 80);
+        assert_eq!(agg["capacity"]["heuristicProjected90dVolume"], 240);
+        assert_eq!(agg["forecast"]["currentVolume"], 4);
+        assert_eq!(agg["forecast"]["heuristicNextWeek"], 28);
+        assert_eq!(agg["forecast"]["heuristicNextMonth"], 80);
+        assert_eq!(agg["forecast"]["heuristicNextQuarter"], 240);
+        assert!(
+            agg["forecast"]["variabilityBand"]
+                .as_str()
+                .unwrap()
+                .starts_with("±35%"),
+            "observed CV of [2,1,1] is ±35%: {agg}"
+        );
+
+        // Churn: C (365d) first, then B (90d), then A (40d).
+        let list = agg["churnRisk"]["atRiskTenantsList"].as_array().unwrap();
+        assert_eq!(list.len(), 3, "{list:?}");
+        assert_eq!(list[0]["tenantId"], silent);
+        assert_eq!(list[0]["daysInactive"], 365);
+        assert_eq!(list[0]["riskLevel"], "medium");
+        assert_eq!(list[0]["emailVolumeDeclinePct"], 100.0);
+        assert_eq!(list[1]["tenantId"], bounced);
+        assert_eq!(list[1]["daysInactive"], 90);
+        assert_eq!(list[1]["riskLevel"], "high", "90d + >10% bounces");
+        assert_eq!(list[1]["bounceRate30d"], 1.0);
+        assert_eq!(list[2]["tenantId"], active);
+        assert_eq!(list[2]["riskLevel"], "medium");
+        assert_eq!(agg["churnRisk"]["highRiskCount"], 1);
+        assert_eq!(agg["churnRisk"]["mediumRiskCount"], 2);
+        assert!(
+            (agg["churnRisk"]["heuristicChurnRiskShare"]
+                .as_f64()
+                .unwrap()
+                - 0.25)
+                .abs()
+                < 1e-9,
+            "one high-risk tenant out of 4 active (3 fixtures + the machine tenant): {agg}"
+        );
+        let signals = agg["churnRisk"]["topRiskSignals"].as_array().unwrap();
+        assert_eq!(
+            signals[0]["affectedTenants"], 3,
+            "A (40d), B (90d) and C (365d) are all >30d inactive"
+        );
+        assert_eq!(signals[1]["affectedTenants"], 1, "only B bounces");
+
+        // The dedicated endpoints agree with the aggregate — same SQL, same
+        // numbers (deterministic across calls).
+        let (status, churn) = get_json(&app, &format!("{PREDICTIVE_PATH}/churn"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(churn, agg["churnRisk"]);
+        let (status, cap) = get_json(&app, &format!("{PREDICTIVE_PATH}/capacity"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cap, agg["capacity"]);
+        let (status, anomalies) =
+            get_json(&app, &format!("{PREDICTIVE_PATH}/anomalies"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            anomalies, agg["anomalies"],
+            "with no spike and no paid inactivity there is no anomaly to fabricate"
+        );
+
+        pool.close().await;
+    }
+
+    /// Anomalies fire on their exact heuristic thresholds, against the real
+    /// queue/event/subscription tables.
+    #[tokio::test]
+    async fn predictive_anomalies_fire_on_real_thresholds() {
+        let Some((app, pool, key)) = predictive_app("predictive_anomalies").await else {
+            eprintln!(
+                "skipping predictive_anomalies_fire_on_real_thresholds: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+
+        let tenant = "ten_predictive_anom_01";
+        seed_tenant(&pool, tenant, "active").await;
+        // A separate paid tenant that never sent anything → paid_no_activity.
+        seed_tenant(&pool, "ten_predict_paid_01", "active").await;
+        seed_active_subscription(&pool, "ten_predict_paid_01").await;
+
+        // Bounce baseline: 4 distinct sent, 1 bounced 10 days ago → 0.25.
+        // Today: 4 distinct sent, 3 bounced → 0.75 > 2 × 0.25 → spike.
+        for i in 0..4 {
+            let msg = uuid::Uuid::new_v4().to_string();
+            seed_event(&pool, tenant, &msg, "sent", 10).await;
+            if i == 0 {
+                seed_event(&pool, tenant, &msg, "bounced", 10).await;
+            }
+        }
+        for i in 0..4 {
+            let msg = uuid::Uuid::new_v4().to_string();
+            seed_event(&pool, tenant, &msg, "sent", 0).await;
+            if i < 3 {
+                seed_event(&pool, tenant, &msg, "bounced", 0).await;
+            }
+        }
+
+        // Delivery-failure spike: baseline average 1 failure/day, 4 today
+        // (> 3×) — warning severity in the dedicated endpoint.
+        sqlx::query(
+            "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, 'sender@example.com', ARRAY['to@example.com'], 'failed', 'failed', NOW() - INTERVAL '3 days', NOW() - INTERVAL '3 days')",
+        )
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .expect("seed baseline failure");
+        for _ in 0..4 {
+            sqlx::query(
+                "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, 'sender@example.com', ARRAY['to@example.com'], 'failed', 'failed', NOW(), NOW())",
+            )
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .expect("seed today failure");
+        }
+
+        let (status, anomalies) =
+            get_json(&app, &format!("{PREDICTIVE_PATH}/anomalies"), &key).await;
+        assert_eq!(status, StatusCode::OK, "body: {anomalies}");
+        let types: Vec<&str> = anomalies
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["anomalyType"].as_str().unwrap())
+            .collect();
+        assert!(types.contains(&"bounce_spike"), "{anomalies}");
+        assert!(types.contains(&"delivery_failure_spike"), "{anomalies}");
+        assert_eq!(
+            types.len(),
+            2,
+            "no other anomaly may be fabricated by the dedicated endpoint: {anomalies}"
+        );
+
+        let spike = anomalies
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["anomalyType"] == "bounce_spike")
+            .unwrap();
+        assert_eq!(spike["severity"], "critical", "75% today is > 10%");
+        assert_eq!(spike["detectedValue"], "75.00%");
+        assert_eq!(spike["expectedRange"], "< 50.00%");
+        assert!(spike["method"]
+            .as_str()
+            .unwrap()
+            .contains("no trained model"));
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(spike["detectedAt"].as_str().unwrap()).is_ok()
+        );
+
+        // The aggregate endpoint additionally reports paid-but-silent tenants.
+        let (status, agg) = get_json(&app, PREDICTIVE_PATH, &key).await;
+        assert_eq!(status, StatusCode::OK, "body: {agg}");
+        let agg_types: Vec<&str> = agg["anomalies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["anomalyType"].as_str().unwrap())
+            .collect();
+        assert!(agg_types.contains(&"bounce_spike"), "{agg}");
+        assert!(agg_types.contains(&"paid_no_activity"), "{agg}");
+        assert!(
+            !agg_types.contains(&"delivery_failure_spike"),
+            "the aggregate does not compute the failed-delivery spike — it must not fabricate one: {agg}"
+        );
+        let paid = agg["anomalies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["anomalyType"] == "paid_no_activity")
+            .unwrap();
+        assert_eq!(paid["severity"], "info", "one tenant is not a spike");
+        assert_eq!(paid["detectedValue"], "1 tenants");
+        assert_eq!(paid["expectedRange"], "0 tenants");
+
+        let failed = anomalies
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["anomalyType"] == "delivery_failure_spike")
+            .unwrap();
+        assert_eq!(failed["severity"], "warning");
+        assert_eq!(failed["detectedValue"], "4 failures");
+
+        pool.close().await;
+    }
+
+    /// Queue backlog vs the worker's configured capacity: at 1× the default
+    /// threshold the anomaly is a warning, at 2× it is critical — and the
+    /// capacity endpoint reports utilization above 1.0 with an honest
+    /// `daysUntilCapacityLimit = 0`.
+    #[tokio::test]
+    async fn predictive_queue_backlog_thresholds_use_the_configured_capacity() {
+        let Some((app, pool, key)) = predictive_app("predictive_queue_backlog").await else {
+            eprintln!(
+                "skipping predictive_queue_backlog_thresholds_use_the_configured_capacity: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+
+        // Exactly the default capacity (EMAIL_MAX_BACKLOG default = 10000).
+        sqlx::query(
+            "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+             SELECT gen_random_uuid(), 'system', 'sender@example.com', ARRAY['to@example.com'], 'backlog', 'pending', NOW(), NOW()
+             FROM generate_series(1, 10000)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed capacity backlog");
+
+        let (status, body) = get_json(&app, &format!("{PREDICTIVE_PATH}/anomalies"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        let backlog = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["anomalyType"] == "queue_backlog_over_capacity")
+            .expect("at capacity the backlog anomaly must fire");
+        assert_eq!(backlog["severity"], "warning");
+        assert_eq!(backlog["detectedValue"], "10000 items");
+        assert_eq!(backlog["expectedRange"], "< 10000 items");
+
+        let (status, cap) = get_json(&app, &format!("{PREDICTIVE_PATH}/capacity"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cap["capacityUtilization"], 1.0);
+        assert_eq!(cap["daysUntilCapacityLimit"], 0);
+
+        // Double the capacity → critical.
+        sqlx::query(
+            "INSERT INTO email_queue (id, tenant_id, from_address, to_addresses, subject, status, created_at, updated_at)
+             SELECT gen_random_uuid(), 'system', 'sender@example.com', ARRAY['to@example.com'], 'backlog', 'processing', NOW(), NOW()
+             FROM generate_series(1, 10000)",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed double backlog");
+
+        let (status, body) = get_json(&app, &format!("{PREDICTIVE_PATH}/anomalies"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        let backlog = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["anomalyType"] == "queue_backlog_over_capacity")
+            .unwrap();
+        assert_eq!(backlog["severity"], "critical");
+        assert_eq!(backlog["detectedValue"], "20000 items");
+
+        let (status, cap) = get_json(&app, &format!("{PREDICTIVE_PATH}/capacity"), &key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(cap["capacityUtilization"].as_f64().unwrap() > 1.0);
+
+        pool.close().await;
+    }
+
+    /// A machine key without the wildcard scope is refused at the handler
+    /// gate; no analytics payload may leak in the refusal.
+    #[tokio::test]
+    async fn predictive_endpoints_refuse_a_non_wildcard_key() {
+        let Some((app, pool, key)) = predictive_app("predictive_scope").await else {
+            eprintln!(
+                "skipping predictive_endpoints_refuse_a_non_wildcard_key: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let read_key = crate::app::test_support::seed_api_key_for(
+            &pool,
+            SYSTEM_TENANT_ID,
+            &["analytics:read"],
+        )
+        .await;
+
+        for path in ["", "/churn", "/capacity", "/anomalies"] {
+            let (status, body) =
+                get_json(&app, &format!("{PREDICTIVE_PATH}{path}"), &read_key).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {body}");
+            assert_eq!(body["error"]["code"], "FORBIDDEN", "{path}: {body}");
+            let text = body.to_string();
+            for leaked in ["atRiskTenants", "currentDailyVolume", "variabilityBand"] {
+                assert!(!text.contains(leaked), "{path} leaked {leaked}: {body}");
+            }
+        }
+
+        // The wildcard key on the same router is admitted (proving the
+        // refusal above is the scope gate, not a broken route).
+        let (status, _) = get_json(&app, PREDICTIVE_PATH, &key).await;
+        assert_eq!(status, StatusCode::OK);
+
+        pool.close().await;
+    }
+
+    /// Env boundary handling for the capacity knob: garbage, zero and
+    /// negative values fall back to the worker's documented default.
+    #[test]
+    fn configured_queue_capacity_rejects_unusable_env_values() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("EMAIL_MAX_BACKLOG").ok();
+        for value in ["", "   ", "abc", "0", "-1", "1.5", "999999999999999999999"] {
+            std::env::set_var("EMAIL_MAX_BACKLOG", value);
+            assert_eq!(
+                configured_queue_capacity(),
+                DEFAULT_EMAIL_MAX_BACKLOG,
+                "unusable value {value:?} must fall back to the default"
+            );
+        }
+        std::env::set_var("EMAIL_MAX_BACKLOG", "2500");
+        assert_eq!(configured_queue_capacity(), 2500);
+        match previous {
+            Some(value) => std::env::set_var("EMAIL_MAX_BACKLOG", value),
+            None => std::env::remove_var("EMAIL_MAX_BACKLOG"),
+        }
     }
 }

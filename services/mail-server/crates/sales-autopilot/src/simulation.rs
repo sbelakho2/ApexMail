@@ -1275,4 +1275,482 @@ mod tests {
         let histogram = action_histogram([DecisionAction::Wait, DecisionAction::Wait]);
         assert_eq!(histogram.get("wait"), Some(&2));
     }
+
+    // -----------------------------------------------------------------------
+    // Canonical-table loader (live database)
+    // -----------------------------------------------------------------------
+
+    /// A decision row is the canonical decision point. `created_at` is bound
+    /// explicitly so the window predicates are deterministic.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_decision(
+        pool: &PgPool,
+        tenant_id: &str,
+        account_id: Option<Uuid>,
+        contact_id: Option<Uuid>,
+        created_at: DateTime<Utc>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_decisions \
+                 (id, tenant_id, account_id, contact_id, action, autonomy_mode, rationale, \
+                  enforcement, review_status, created_at) \
+             VALUES ($1, $2, $3, $4, 'contact', 'autonomous_guarded', 'loader fixture', \
+                     'execute', 'not_required', $5)",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(account_id)
+        .bind(contact_id)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("insert sales_decisions loader fixture");
+        id
+    }
+
+    async fn insert_account(
+        pool: &PgPool,
+        tenant_id: &str,
+        suffix: &str,
+        icp_segment: Option<&str>,
+        eea_relevance: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts \
+                 (id, tenant_id, company, domain, country, industry, employees, eea_relevance, \
+                  icp_segment) \
+             VALUES ($1, $2, $3, $4, 'EE', 'software', 120, $5, $6)",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(format!("Loader Co {suffix}"))
+        .bind(format!("loader-{suffix}.example"))
+        .bind(eea_relevance)
+        .bind(icp_segment)
+        .execute(pool)
+        .await
+        .expect("insert sales_accounts loader fixture");
+        id
+    }
+
+    async fn insert_contact(
+        pool: &PgPool,
+        tenant_id: &str,
+        account_id: Uuid,
+        full_name: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contacts \
+                 (id, tenant_id, account_id, full_name, job_title, department, seniority, persona, \
+                  language) \
+             VALUES ($1, $2, $3, $4, 'CEO', 'exec', 'c_suite', 'founder', 'en')",
+        )
+        .bind(id)
+        .bind(tenant_id)
+        .bind(account_id)
+        .bind(full_name)
+        .execute(pool)
+        .await
+        .expect("insert sales_contacts loader fixture");
+        id
+    }
+
+    async fn cleanup_loader_tenant(pool: &PgPool, tenant_id: &str) {
+        for statement in [
+            "DELETE FROM sales_outcomes WHERE tenant_id = $1",
+            "DELETE FROM sales_opportunities WHERE tenant_id = $1",
+            "DELETE FROM sales_contact_policy_decisions WHERE tenant_id = $1",
+            "DELETE FROM sales_decisions WHERE tenant_id = $1",
+            "DELETE FROM sales_signals WHERE tenant_id = $1",
+            "DELETE FROM sales_evidence WHERE tenant_id = $1",
+            "DELETE FROM sales_contact_points WHERE tenant_id = $1",
+            "DELETE FROM sales_contacts WHERE tenant_id = $1",
+            "DELETE FROM sales_accounts WHERE tenant_id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(tenant_id)
+                .execute(pool)
+                .await
+                .unwrap_or_else(|error| panic!("cleanup `{statement}`: {error}"));
+        }
+    }
+
+    /// Hostile windows and empty tenants are refused before any query — the
+    /// loader can never be turned into an unbounded/tenant-less scan.
+    #[tokio::test]
+    async fn load_replay_cases_refuses_empty_tenants_and_inverted_windows() {
+        let Some(pool) = crate::test_db::canonical_test_pool("replay_loader_guards").await else {
+            return;
+        };
+        let error = load_replay_cases(
+            &pool,
+            "   ",
+            (Utc::now() - Duration::days(1), Utc::now()),
+            10,
+        )
+        .await
+        .expect_err("an empty tenant must be refused");
+        assert!(matches!(error, SalesError::InvalidInput(_)));
+
+        // A zero-length/inverted window selects nothing and is not an error.
+        let now = Utc::now();
+        let cases = load_replay_cases(&pool, "tenant-guard", (now, now), 10)
+            .await
+            .expect("an inverted window is legal");
+        assert!(cases.is_empty());
+        let cases = load_replay_cases(&pool, "tenant-guard", (now, now - Duration::days(1)), 10)
+            .await
+            .expect("an inverted window is legal");
+        assert!(cases.is_empty());
+    }
+
+    /// The loader reconstructs the whole feature vector from the canonical
+    /// tables as of the decision instant, attaches the most significant
+    /// realised outcome, and is strictly tenant-scoped: a second tenant's
+    /// decisions and outcomes never leak into the case set.
+    #[tokio::test]
+    async fn load_replay_cases_reconstructs_features_and_isolates_tenants() {
+        let Some(pool) = crate::test_db::canonical_test_pool("replay_loader_features").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("sim-a");
+        let other = crate::test_db::unique_test_tenant("sim-b");
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+
+        let as_of = Utc::now() - Duration::hours(2);
+        let window_end = Utc::now() + Duration::hours(2);
+        let window = (as_of - Duration::days(1), window_end);
+
+        let account = insert_account(&pool, &tenant, suffix, Some("midmarket"), "in_scope").await;
+        let contact = insert_contact(&pool, &tenant, account, "Loaded Prospect").await;
+        let decision = insert_decision(&pool, &tenant, Some(account), Some(contact), as_of).await;
+
+        // Signals: one live at as_of, one expired before as_of, one observed
+        // after as_of (the future must not inform a historical decision).
+        for (signal_type, observed_at, expires_at) in [
+            (
+                "job_change",
+                as_of - Duration::hours(1),
+                Some(as_of + Duration::hours(1)),
+            ),
+            (
+                "hiring",
+                as_of - Duration::hours(3),
+                Some(as_of - Duration::minutes(1)),
+            ),
+            ("funding", as_of + Duration::hours(1), None),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_signals \
+                     (id, tenant_id, account_id, signal_type, strength, observed_at, expires_at) \
+                 VALUES ($1, $2, $3, $4, 0.8, $5, $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account)
+            .bind(signal_type)
+            .bind(observed_at)
+            .bind(expires_at)
+            .execute(&pool)
+            .await
+            .expect("insert sales_signals loader fixture");
+        }
+
+        // Evidence: two grounded before as_of, one after (excluded).
+        for (confidence, observed_at) in [
+            (0.9_f64, as_of - Duration::hours(1)),
+            (0.7, as_of - Duration::hours(2)),
+            (0.99, as_of + Duration::minutes(30)),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_evidence \
+                     (id, tenant_id, account_id, proposition, confidence, source_kind, observed_at) \
+                 VALUES ($1, $2, $3, 'loader evidence', $4, 'http_fetch', $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account)
+            .bind(confidence)
+            .bind(observed_at)
+            .execute(&pool)
+            .await
+            .expect("insert sales_evidence loader fixture");
+        }
+
+        // A valid contact point and an allowed policy verdict.
+        sqlx::query(
+            "INSERT INTO sales_contact_points \
+                 (id, tenant_id, contact_id, channel, value, normalized_value, verification, \
+                  confidence, source) \
+             VALUES ($1, $2, $3, 'email', $4, lower($4), 'valid', 0.8, 'loader')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(contact)
+        .bind(format!("loader-{suffix}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("insert sales_contact_points loader fixture");
+        sqlx::query(
+            "INSERT INTO sales_contact_policy_decisions \
+                 (id, tenant_id, account_id, contact_id, jurisdiction, decision, basis, created_at) \
+             VALUES ($1, $2, $3, $4, 'QZ', 'allowed', 'legitimate_interest', $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(account)
+        .bind(contact)
+        .bind(as_of - Duration::hours(1))
+        .execute(&pool)
+        .await
+        .expect("insert sales_contact_policy_decisions loader fixture");
+
+        // Prior outcomes at/behind as_of feed the outcome/risk features.
+        for outcome in ["delivered", "complaint", "unsubscribe"] {
+            sqlx::query(
+                "INSERT INTO sales_outcomes \
+                     (id, tenant_id, account_id, contact_id, outcome, value_eur, occurred_at) \
+                 VALUES ($1, $2, $3, $4, $5, 0, $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account)
+            .bind(contact)
+            .bind(outcome)
+            .bind(as_of - Duration::minutes(30))
+            .execute(&pool)
+            .await
+            .expect("insert prior sales_outcomes loader fixture");
+        }
+
+        // A realised future: the most significant outcome wins, and only the
+        // three revenue outcomes contribute revenue.
+        for (outcome, value) in [("meeting_attended", 0.0_f64), ("trial", 1_000.0)] {
+            sqlx::query(
+                "INSERT INTO sales_outcomes \
+                     (id, tenant_id, account_id, contact_id, outcome, value_eur, occurred_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account)
+            .bind(contact)
+            .bind(outcome)
+            .bind(value)
+            .bind(as_of + Duration::minutes(30))
+            .execute(&pool)
+            .await
+            .expect("insert realised sales_outcomes loader fixture");
+        }
+
+        // Open pipeline counts; a lost opportunity must not.
+        for (stage, amount) in [("negotiation", 5_000.0_f64), ("lost", 9_999.0)] {
+            sqlx::query(
+                "INSERT INTO sales_opportunities (id, tenant_id, account_id, stage, amount_eur) \
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account)
+            .bind(stage)
+            .bind(amount)
+            .execute(&pool)
+            .await
+            .expect("insert sales_opportunities loader fixture");
+        }
+
+        // Excluded shapes: no account, outside the window, and another tenant.
+        let no_account = insert_decision(&pool, &tenant, None, None, as_of).await;
+        let outside = insert_decision(
+            &pool,
+            &tenant,
+            Some(account),
+            Some(contact),
+            window_end + Duration::hours(1),
+        )
+        .await;
+        let other_account = insert_account(&pool, &other, suffix, None, "unknown").await;
+        let other_contact = insert_contact(&pool, &other, other_account, "Other Prospect").await;
+        let other_decision = insert_decision(
+            &pool,
+            &other,
+            Some(other_account),
+            Some(other_contact),
+            as_of,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO sales_outcomes \
+                 (id, tenant_id, account_id, contact_id, outcome, value_eur, occurred_at) \
+             VALUES ($1, $2, $3, $4, 'retained_mrr', 777777, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&other)
+        .bind(other_account)
+        .bind(other_contact)
+        .bind(as_of + Duration::minutes(30))
+        .execute(&pool)
+        .await
+        .expect("insert other tenant outcome");
+
+        let cases = load_replay_cases(&pool, &tenant, window, 100)
+            .await
+            .expect("load replay cases");
+        assert_eq!(
+            cases.len(),
+            1,
+            "exactly the in-window decision with an account is a case: {:?}",
+            cases.iter().map(|c| c.as_of).collect::<Vec<_>>()
+        );
+        let case = &cases[0];
+        assert_eq!(case.tenant_id, tenant);
+        assert_eq!(case.account_id, Some(account));
+        assert_eq!(case.contact_id, Some(contact));
+        assert_eq!(case.as_of, as_of);
+
+        // Only the live signal informed the decision.
+        assert_eq!(case.features.intent_signals.len(), 1);
+        assert_eq!(case.features.intent_signals[0].signal_type, "job_change");
+
+        // Evidence: the two grounded rows, mean 0.8, newest ~1h old.
+        assert_eq!(case.features.evidence.count, 2);
+        assert!((case.features.evidence.mean_confidence - 0.8).abs() < 1e-4);
+        let age = case.features.evidence.newest_age_days.expect("age");
+        assert!((age - 1.0 / 24.0).abs() < 0.01, "age={age}");
+
+        // Reachability and legal verdict come from the canonical rows.
+        assert_eq!(case.features.reachability.verified_contact_points, 1);
+        assert!((case.features.reachability.best_confidence - 0.8).abs() < 1e-4);
+        assert_eq!(case.features.legal, ContactDecision::Allowed);
+
+        // Outcome/risk features.
+        assert_eq!(case.features.outcomes.delivered, 1);
+        assert_eq!(case.features.outcomes.complaints, 1);
+        assert_eq!(case.features.outcomes.unsubscribes, 1);
+        assert_eq!(case.features.risk.complaints, 1);
+        assert_eq!(case.features.risk.negative_replies, 1);
+        assert_eq!(case.features.segment_match, SegmentMatch::Partial);
+        assert_eq!(case.features.industry.as_deref(), Some("software"));
+        assert_eq!(case.features.employees, Some(120));
+        assert_eq!(case.features.eea_relevance, EeaRelevance::InScope);
+        assert_eq!(case.features.persona.job_title.as_deref(), Some("CEO"));
+        assert_eq!(case.features.persona.department.as_deref(), Some("exec"));
+        assert_eq!(case.features.persona.seniority.as_deref(), Some("c_suite"));
+
+        // The realised outcome is the most significant one (Trial outranks
+        // MeetingAttended in the ladder); revenue counts only the
+        // revenue-bearing outcomes.
+        assert_eq!(case.realised, Some(OutcomeKind::Trial));
+        assert!((case.realised_value_eur - 1_000.0).abs() < 1e-6);
+        assert!(
+            (case.features.economics.expected_ltv_contribution_eur - 5_000.0).abs() < 1e-6,
+            "a lost opportunity must not count as pipeline"
+        );
+
+        // The other tenant's 777,777 MRR must never appear anywhere.
+        assert!(
+            cases.iter().all(|case| case.tenant_id == tenant),
+            "another tenant's decisions must not leak into the case set"
+        );
+
+        // Tenant B sees only its own case.
+        let other_cases = load_replay_cases(&pool, &other, window, 100)
+            .await
+            .expect("load other tenant cases");
+        assert_eq!(other_cases.len(), 1);
+        assert_eq!(other_cases[0].tenant_id, other);
+        // eea_relevance 'unknown' and an empty ICP segment are Unknown.
+        assert_eq!(other_cases[0].features.eea_relevance, EeaRelevance::Unknown);
+        assert_eq!(other_cases[0].features.segment_match, SegmentMatch::Unknown);
+        // No policy row for the other tenant's contact → fail closed.
+        assert_eq!(
+            other_cases[0].features.legal,
+            ContactDecision::ApprovalRequired,
+            "a contact without a policy verdict must fail closed"
+        );
+
+        // `limit` is clamped to at least one: with two in-window decisions a
+        // hostile zero still returns exactly one.
+        let one = load_replay_cases(&pool, &tenant, window, 0)
+            .await
+            .expect("load with hostile limit");
+        assert_eq!(one.len(), 1, "limit 0 must clamp to 1, not scan everything");
+
+        // Every excluded fixture is real: the rows exist, and the loader
+        // returned only the one eligible case.
+        let stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_decisions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, 3, "decision, no-account and out-of-window rows");
+        let other_stored: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_decisions WHERE tenant_id = $1")
+                .bind(&other)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(other_stored, 1);
+        assert!(![no_account, outside, decision, other_decision].is_empty());
+
+        cleanup_loader_tenant(&pool, &tenant).await;
+        cleanup_loader_tenant(&pool, &other).await;
+    }
+
+    /// The latest policy verdict wins, and a prohibited verdict is carried
+    /// into the feature vector verbatim.
+    #[tokio::test]
+    async fn load_replay_cases_uses_the_latest_policy_verdict() {
+        let Some(pool) = crate::test_db::canonical_test_pool("replay_loader_legal").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("sim-legal");
+        let suffix = &Uuid::new_v4().simple().to_string()[..12];
+        let as_of = Utc::now() - Duration::hours(1);
+        let account = insert_account(&pool, &tenant, suffix, None, "out_of_scope").await;
+        let contact = insert_contact(&pool, &tenant, account, "Legal Prospect").await;
+        let _decision = insert_decision(&pool, &tenant, Some(account), Some(contact), as_of).await;
+
+        for (decision, created_at) in [
+            ("allowed", as_of - Duration::hours(2)),
+            ("prohibited", as_of - Duration::minutes(30)),
+        ] {
+            sqlx::query(
+                "INSERT INTO sales_contact_policy_decisions \
+                     (id, tenant_id, account_id, contact_id, jurisdiction, decision, basis, created_at) \
+                 VALUES ($1, $2, $3, $4, 'QZ', $5, 'fixture', $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&tenant)
+            .bind(account)
+            .bind(contact)
+            .bind(decision)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .expect("insert policy verdict fixture");
+        }
+
+        let cases = load_replay_cases(
+            &pool,
+            &tenant,
+            (as_of - Duration::hours(3), as_of + Duration::hours(1)),
+            10,
+        )
+        .await
+        .expect("load cases");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(
+            cases[0].features.legal,
+            ContactDecision::Prohibited,
+            "the latest verdict must win, not the first"
+        );
+        assert_eq!(cases[0].features.eea_relevance, EeaRelevance::OutOfScope);
+
+        cleanup_loader_tenant(&pool, &tenant).await;
+    }
 }
