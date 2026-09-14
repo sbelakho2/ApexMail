@@ -1085,3 +1085,186 @@ mod tests {
         assert!(config.validate().is_ok(), "{:?}", config.validate());
     }
 }
+
+#[cfg(test)]
+mod adversarial_env_tests {
+    //! Environment-driven configuration: the full parse must be exact, and
+    //! every misconfiguration class (zero ports, collisions, unsafe limits,
+    //! production without TLS/VERP secrets) must be REFUSED at startup.
+
+    use super::*;
+
+    /// Serializes the env-mutating tests in this module (std::env is
+    /// process-global; no other mta test mutates the environment).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set(name: &str, value: &str) {
+        std::env::set_var(name, value);
+    }
+
+    fn clear(names: &[&str]) {
+        for name in names {
+            std::env::remove_var(name);
+        }
+    }
+
+    const MANAGED: &[&str] = &[
+        "NODE_ENV",
+        "INBOUND_PORT",
+        "INBOUND_SECURE_PORT",
+        "INBOUND_HOSTNAME",
+        "BOUNCE_PORT",
+        "BOUNCE_MAX_MSGS_PER_IP_PER_HOUR",
+        "FBL_PORT",
+        "SUBMISSION_PORT",
+        "METRICS_PORT",
+        "METRICS_ENABLED",
+        "HEALTH_PORT",
+        "VERP_HMAC_SECRET",
+        "REQUIRE_SPF",
+        "TRUSTED_RELAYS",
+        "DNSSEC_ENABLED",
+        "TLSA_CACHE_TTL_SECS",
+        "BIMI_SVG_MAX_SIZE",
+        "GRACEFUL_SHUTDOWN_TIMEOUT",
+        "MAILSTORE_GRPC_ADDR",
+        "TLS_ENABLED",
+        "TLS_CERT_PATH",
+        "TLS_KEY_PATH",
+        "DB_MAX_CONNECTIONS",
+        "GRACEFUL_SHUTDOWN_TIMEOUT",
+    ];
+
+    #[test]
+    fn from_env_parses_every_shape_and_validates_cleanly() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear(MANAGED);
+        let secret = "v".repeat(40);
+        set("NODE_ENV", "staging");
+        set("INBOUND_PORT", "2525");
+        set("INBOUND_SECURE_PORT", "2465");
+        set("INBOUND_HOSTNAME", "in.apexmail.test");
+        set("BOUNCE_PORT", "2526");
+        set("BOUNCE_MAX_MSGS_PER_IP_PER_HOUR", "77");
+        set("FBL_PORT", "2527");
+        set("SUBMISSION_PORT", "2587");
+        set("METRICS_PORT", "9094");
+        set("METRICS_ENABLED", "true");
+        set("HEALTH_PORT", "9095");
+        set("VERP_HMAC_SECRET", &secret);
+        set("REQUIRE_SPF", "true");
+        set("TRUSTED_RELAYS", "203.0.113.4, 203.0.113.5");
+        set("DNSSEC_ENABLED", "true");
+        set("TLSA_CACHE_TTL_SECS", "99");
+        set("BIMI_SVG_MAX_SIZE", "1234");
+        set("GRACEFUL_SHUTDOWN_TIMEOUT", "42");
+        set("MAILSTORE_GRPC_ADDR", "http://mailstore.internal:50051");
+        set("DB_MAX_CONNECTIONS", "7");
+        // Self-contained: an empty ambient DATABASE_URL (set by a CI harness,
+        // or by a sibling test in another process family) made validation
+        // fail for a reason this test does not intend to exercise.
+        set(
+            "DATABASE_URL",
+            "postgres://apexmail:apexmail@127.0.0.1:5432/apexmail",
+        );
+
+        let config = MtaConfig::from_env().expect("a complete configuration must validate");
+        assert!(
+            !config.is_production(),
+            "NODE_ENV=staging is not production"
+        );
+        assert_eq!(config.inbound.port, 2525);
+        assert_eq!(config.inbound.secure_port, 2465);
+        assert_eq!(config.inbound.hostname, "in.apexmail.test");
+        assert_eq!(config.bounce.port, 2526);
+        assert_eq!(config.bounce.max_messages_per_ip_per_hour, 77);
+        assert_eq!(config.feedback.port, 2527);
+        assert_eq!(config.submission.port, 2587);
+        assert!(config.metrics.enabled);
+        assert_eq!(config.metrics.port, 9094);
+        assert_eq!(config.health_port, 9095);
+        assert_eq!(config.verp.hmac_secret.as_deref(), Some(secret.as_str()));
+        assert!(config.email_auth.require_spf);
+        assert_eq!(
+            config.email_auth.trusted_relays,
+            vec!["203.0.113.4".to_string(), "203.0.113.5".to_string()],
+            "comma-separated relays are trimmed"
+        );
+        assert!(config.dns.dnssec_enabled);
+        assert_eq!(config.dns.tlsa_cache_ttl_secs, 99);
+        assert_eq!(config.bimi.svg_max_size, 1234);
+        assert_eq!(config.graceful_shutdown_timeout, 42);
+        assert_eq!(config.mailstore_addr, "http://mailstore.internal:50051");
+        assert_eq!(config.database.max_connections, 7);
+
+        clear(MANAGED);
+    }
+
+    #[test]
+    fn validate_refuses_zero_ports_collisions_and_unsafe_limits() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear(MANAGED);
+        set("INBOUND_PORT", "0");
+        set("HEALTH_PORT", "0");
+        set("BOUNCE_PORT", "25");
+        set("FBL_PORT", "25");
+        set("SUBMISSION_PORT", "25");
+        set("METRICS_ENABLED", "false");
+        set("BIMI_SVG_MAX_SIZE", "0");
+        set("TLSA_CACHE_TTL_SECS", "0");
+        set("GRACEFUL_SHUTDOWN_TIMEOUT", "0");
+
+        let error = MtaConfig::from_env().expect_err("invalid configuration must be refused");
+        let message = error.to_string();
+        assert!(message.contains("inbound.port must be > 0"), "{message}");
+        assert!(message.contains("health_port must be > 0"), "{message}");
+        assert!(
+            message.contains("Port collision") && message.contains("port 25"),
+            "{message}"
+        );
+        assert!(message.contains("bimi.svg_max_size"), "{message}");
+        assert!(message.contains("dns.tlsa_cache_ttl_secs"), "{message}");
+        assert!(message.contains("graceful_shutdown_timeout"), "{message}");
+
+        clear(MANAGED);
+    }
+
+    #[test]
+    fn production_requires_tls_material_and_a_strong_verp_secret() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear(MANAGED);
+        set("NODE_ENV", "production");
+        set("INBOUND_PORT", "2525");
+        set("BOUNCE_PORT", "2526");
+        set("FBL_PORT", "2527");
+        set("SUBMISSION_PORT", "2587");
+        set("METRICS_PORT", "9094");
+        set("HEALTH_PORT", "9095");
+        set("TLS_ENABLED", "false");
+
+        let error = MtaConfig::from_env().expect_err("production without TLS must be refused");
+        let message = error.to_string();
+        assert!(
+            message.contains("production with submission enabled requires TLS_ENABLED=true"),
+            "{message}"
+        );
+        assert!(message.contains("TLS_CERT_PATH"), "{message}");
+        assert!(message.contains("TLS_KEY_PATH"), "{message}");
+        assert!(message.contains("VERP_HMAC_SECRET"), "{message}");
+
+        // TLS enabled but missing material, and a too-short VERP secret, are
+        // each refused.
+        set("TLS_ENABLED", "true");
+        set("VERP_HMAC_SECRET", "short");
+        let error = MtaConfig::from_env().expect_err("missing TLS material must be refused");
+        let message = error.to_string();
+        assert!(message.contains("tls.cert_path is not set"), "{message}");
+        assert!(message.contains("tls.key_path is not set"), "{message}");
+        assert!(
+            message.contains("VERP_HMAC_SECRET) must be at least"),
+            "{message}"
+        );
+
+        clear(MANAGED);
+    }
+}

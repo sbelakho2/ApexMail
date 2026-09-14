@@ -290,16 +290,25 @@ impl ActionQueue {
             return Ok(action);
         }
 
-        // Conflict: the same logical work already exists.
-        let existing: SalesAction = sqlx::query_as::<_, SalesActionRow>(
-            "SELECT * FROM sales_actions WHERE idempotency_key = $1",
+        // Conflict: the same logical work already exists. `sales_actions`'s
+        // unique index on `idempotency_key` is GLOBAL, so the conflict may
+        // belong to another tenant. Re-selecting by key alone would hand that
+        // tenant's row (payload, entity, decision) across the isolation
+        // boundary; matching the tenant too fails closed instead.
+        let existing: Option<SalesAction> = sqlx::query_as::<_, SalesActionRow>(
+            "SELECT * FROM sales_actions WHERE idempotency_key = $1 AND tenant_id = $2",
         )
         .bind(idempotency_key)
-        .fetch_one(&self.db)
+        .bind(tenant_id)
+        .fetch_optional(&self.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?
-        .into();
-        Ok(existing)
+        .map(Into::into);
+        existing.ok_or_else(|| {
+            SalesError::InvalidInput(format!(
+                "idempotency key '{idempotency_key}' is already used by another tenant"
+            ))
+        })
     }
 
     /// Enqueue using an open transaction, so the unit of work and its trigger
@@ -340,11 +349,24 @@ impl ActionQueue {
 
         match id {
             Some(id) => Ok(id),
-            None => sqlx::query_scalar("SELECT id FROM sales_actions WHERE idempotency_key = $1")
+            None => {
+                // Same global-key caveat as `enqueue`: scope the re-select to
+                // the requesting tenant so a collision cannot return (and let
+                // the caller mutate) another tenant's action.
+                let existing: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM sales_actions WHERE idempotency_key = $1 AND tenant_id = $2",
+                )
                 .bind(idempotency_key)
-                .fetch_one(&mut **tx)
+                .bind(tenant_id)
+                .fetch_optional(&mut **tx)
                 .await
-                .map_err(|e| SalesError::Database(e.to_string())),
+                .map_err(|e| SalesError::Database(e.to_string()))?;
+                existing.ok_or_else(|| {
+                    SalesError::InvalidInput(format!(
+                        "idempotency key '{idempotency_key}' is already used by another tenant"
+                    ))
+                })
+            }
         }
     }
 
@@ -1080,7 +1102,6 @@ mod tests {
     /// Live-DB proof that the durable queue actually serialises claims: two
     /// workers racing for one action must each get disjoint sets, and the
     /// total claimed must never exceed what was enqueued.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn concurrent_workers_never_claim_the_same_action() {
         // Provisioned canonically (never the ambient TEST_DATABASE_URL, which
@@ -1142,7 +1163,6 @@ mod tests {
 
     /// Live-DB proof of the crash-recovery path: an action leased but never
     /// finished becomes claimable again once its lease expires.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn expired_lease_is_recovered_by_another_worker() {
         let Some(pool) = crate::test_db::canonical_test_pool("lease_recovery").await else {
@@ -1397,7 +1417,6 @@ mod tests {
     // Live-DB proofs
     // -----------------------------------------------------------------------
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn claim_issues_a_distinct_token_per_row() {
         let Some(pool) = crate::test_db::canonical_test_pool("claim_tokens").await else {
@@ -1467,7 +1486,6 @@ mod tests {
     /// The defect this test exists for: a worker whose action was recovered by
     /// another process must not be able to complete it (or mutate it at all)
     /// with its stale owner string. Only the recovering worker's token works.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn stale_token_cannot_finish_an_action_another_worker_recovered() {
         let Some(pool) = crate::test_db::canonical_test_pool("stale_fence").await else {
@@ -1584,7 +1602,6 @@ mod tests {
 
     /// The `FOR SHARE` fence check the dispatcher runs inside its send
     /// transaction: a live claim passes, a forged token does not.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn verify_fence_in_tx_accepts_only_the_live_claim() {
         let Some(pool) = crate::test_db::canonical_test_pool("verify_fence").await else {
@@ -1641,7 +1658,6 @@ mod tests {
     /// AwaitApproval is a parked state, not a completion: the action keeps no
     /// lease, has no `completed_at`, cannot be re-claimed, and — critically —
     /// operator replay refuses it.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn finish_await_approval_parks_the_action_and_replay_refuses_it() {
         let Some(pool) = crate::test_db::canonical_test_pool("await_approval").await else {
@@ -1726,5 +1742,914 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial live-DB proofs (run by default; soft-skip only when the
+    // canonical test database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    /// A handler that always reports the same outcome, for exercising the
+    /// queue's finish paths through a real worker queue.
+    struct FixedHandler(ActionOutcome);
+
+    #[async_trait::async_trait]
+    impl ActionHandler for FixedHandler {
+        async fn handle(&self, _action: &LeasedAction) -> ActionOutcome {
+            self.0.clone()
+        }
+    }
+
+    async fn live_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_test_pool(test_name).await
+    }
+
+    /// Enqueueing the same logical work twice is idempotent *within* a tenant.
+    /// Across tenants the shared global unique index means the second tenant
+    /// must NOT be handed the first tenant's row: that would leak another
+    /// tenant's action (payload, entity, decision) across the isolation
+    /// boundary. The enqueue must refuse instead.
+    #[tokio::test]
+    async fn enqueue_never_hands_another_tenants_action_across_tenants() {
+        let Some(pool) = live_pool("actions_enqueue_tenant_isolation").await else {
+            return;
+        };
+        let tenant_a = crate::test_db::unique_test_tenant("act-iso-a");
+        let tenant_b = crate::test_db::unique_test_tenant("act-iso-b");
+        let queue_a = ActionQueue::new(pool.clone(), format!("worker-a-{tenant_a}"));
+        let queue_b = ActionQueue::new(pool.clone(), format!("worker-b-{tenant_b}"));
+        let key = format!("cross-tenant:{}", Uuid::new_v4());
+
+        let first = queue_a
+            .enqueue(
+                &tenant_a,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &key,
+                serde_json::json!({ "private": "tenant-a" }),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await
+            .expect("tenant A enqueues");
+        assert_eq!(first.tenant_id, tenant_a);
+
+        // Same tenant, same key: the same row comes back, no duplicate.
+        let replay = queue_a
+            .enqueue(
+                &tenant_a,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                first.entity_id,
+                &key,
+                serde_json::json!({ "private": "tenant-a" }),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await
+            .expect("same-tenant replay is idempotent");
+        assert_eq!(replay.id, first.id, "same-tenant replay must reuse the row");
+
+        // Another tenant presenting the same key must not receive tenant A's
+        // action. Refusing is the only fail-closed outcome.
+        let cross = queue_b
+            .enqueue(
+                &tenant_b,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &key,
+                serde_json::json!({ "private": "tenant-b" }),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await;
+        match cross {
+            Ok(action) => panic!(
+                "tenant B received {}'s action {} across the isolation boundary",
+                action.tenant_id, action.id
+            ),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("idempotency key"),
+                    "the refusal must name the idempotency key: {message}"
+                );
+            }
+        }
+
+        // And no row was created for tenant B.
+        let b_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM sales_actions WHERE tenant_id = $1")
+                .bind(&tenant_b)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(b_rows, 0, "tenant B must have no action row");
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant_a)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// `enqueue_tx` has the same isolation contract as `enqueue`: a
+    /// cross-tenant key collision aborts the transaction instead of returning
+    /// (and letting the caller mutate) another tenant's action.
+    #[tokio::test]
+    async fn enqueue_tx_refuses_a_cross_tenant_key_collision() {
+        let Some(pool) = live_pool("actions_enqueue_tx_tenant_isolation").await else {
+            return;
+        };
+        let tenant_a = crate::test_db::unique_test_tenant("act-tx-a");
+        let tenant_b = crate::test_db::unique_test_tenant("act-tx-b");
+        let queue_a = ActionQueue::new(pool.clone(), format!("worker-a-{tenant_a}"));
+        let key = format!("cross-tenant-tx:{}", Uuid::new_v4());
+
+        queue_a
+            .enqueue(
+                &tenant_a,
+                action_type::ENRICH,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &key,
+                serde_json::json!({}),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await
+            .expect("tenant A enqueues");
+
+        let mut tx = pool.begin().await.unwrap();
+        let result = ActionQueue::enqueue_tx(
+            &mut tx,
+            &tenant_b,
+            action_type::ENRICH,
+            entity_type::ACCOUNT,
+            Uuid::new_v4(),
+            &key,
+            serde_json::json!({}),
+            Utc::now(),
+            100,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "enqueue_tx must refuse another tenant's key: {result:?}"
+        );
+        tx.rollback().await.unwrap();
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant_a)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Claim ordering and the limit are load-bearing: highest priority first,
+    /// then earliest due time, and never more rows than asked for.
+    #[tokio::test]
+    async fn claim_is_priority_then_due_ordered_and_bounded() {
+        let Some(pool) = live_pool("actions_claim_order").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-order");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+
+        let low = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("order-low:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        let high = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("order-high:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        let mid = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("order-mid:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                50,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let ids = [low.id, high.id, mid.id];
+        let claimed = queue
+            .claim_filtered(2, DEFAULT_LEASE_SECS, Some(&ids))
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2, "the limit must bound the claim");
+        // The ordering selects WHICH rows are claimed (the two highest
+        // priorities); `RETURNING` does not promise their order, so assert on
+        // the selected set.
+        let mut selected: Vec<Uuid> = claimed.iter().map(|leased| leased.id()).collect();
+        selected.sort_unstable();
+        let mut expected = vec![high.id, mid.id];
+        expected.sort_unstable();
+        assert_eq!(selected, expected, "the two highest priorities are claimed");
+        assert!(
+            !claimed.iter().any(|leased| leased.id() == low.id),
+            "the unbounded row stays queued"
+        );
+
+        // A claim is not repeatable while the lease is live: the second claim
+        // takes only the still-queued low-priority row, never the executing
+        // two.
+        let again = queue
+            .claim_filtered(2, DEFAULT_LEASE_SECS, Some(&ids))
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1, "only the unclaimed row remains: {again:?}");
+        assert_eq!(again[0].id(), low.id);
+        assert!(
+            !again
+                .iter()
+                .any(|leased| leased.id() == high.id || leased.id() == mid.id),
+            "executing actions must not be claimable: {again:?}"
+        );
+        assert_eq!(claimed[0].action.attempt, 1);
+        assert_eq!(
+            claimed[0].action.state, "executing",
+            "the claim and the start of execution are one statement"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// A retryable failure returns the action to the queue with a backoff, and
+    /// the attempt budget is enforced in SQL: once spent, the retry becomes a
+    /// dead letter with `completed_at` set — never an infinite retry loop.
+    #[tokio::test]
+    async fn retry_backs_off_and_dead_letters_when_the_budget_is_spent() {
+        let Some(pool) = live_pool("actions_retry_budget").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-retry");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("retry:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let leased = queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&[action.id]))
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("claim");
+        assert!(queue
+            .finish(&leased.fence(), ActionOutcome::Retry("smtp timeout".into()))
+            .await
+            .unwrap());
+
+        #[derive(sqlx::FromRow)]
+        struct RetryRow {
+            state: String,
+            attempt: i32,
+            last_error: Option<String>,
+            due_at: DateTime<Utc>,
+            lease_owner: Option<String>,
+            lease_token: Option<Uuid>,
+            lease_expires_at: Option<DateTime<Utc>>,
+            completed_at: Option<DateTime<Utc>>,
+        }
+        let row: RetryRow = sqlx::query_as(
+            "SELECT state, attempt, last_error, due_at, lease_owner, lease_token, \
+                    lease_expires_at, completed_at \
+             FROM sales_actions WHERE id = $1",
+        )
+        .bind(action.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.state, "queued", "a bounded failure is retryable");
+        assert_eq!(row.attempt, 1);
+        assert_eq!(row.last_error.as_deref(), Some("smtp timeout"));
+        assert!(row.due_at > Utc::now(), "the retry is backed off");
+        assert_eq!(row.lease_owner, None, "the lease is released");
+        assert_eq!(row.lease_token, None);
+        assert_eq!(row.lease_expires_at, None);
+        assert_eq!(row.completed_at, None, "a retry is not completion");
+
+        // Spend the attempt budget, then let the same retry statement decide.
+        sqlx::query(
+            "UPDATE sales_actions SET attempt = max_attempts, due_at = NOW() WHERE id = $1",
+        )
+        .bind(action.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let leased = queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&[action.id]))
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("re-claim after backoff");
+        assert_eq!(leased.action.attempt, 6, "claiming increments the attempt");
+        assert!(queue
+            .finish(
+                &leased.fence(),
+                ActionOutcome::Retry("still failing".into())
+            )
+            .await
+            .unwrap());
+
+        let row: RetryRow = sqlx::query_as(
+            "SELECT state, attempt, last_error, due_at, lease_owner, lease_token, \
+                    lease_expires_at, completed_at \
+             FROM sales_actions WHERE id = $1",
+        )
+        .bind(action.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.state, "dead_letter", "a spent budget dead-letters");
+        assert!(row.completed_at.is_some(), "a dead letter is terminal");
+        assert_eq!(row.last_error.as_deref(), Some("still failing"));
+
+        // A dead letter is not claimable.
+        let again = queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&[action.id]))
+            .await
+            .unwrap();
+        assert!(
+            again.is_empty(),
+            "dead-lettered work must not be re-claimed"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Cancelling for an entity is a stop signal that must beat a live lease:
+    /// the executing row is cancelled, its lease cleared, and a stale worker's
+    /// fenced finish can no longer land.
+    #[tokio::test]
+    async fn cancel_for_entity_stops_queued_and_executing_work() {
+        let Some(pool) = live_pool("actions_cancel_entity").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-cancel");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let entity_id = Uuid::new_v4();
+
+        let queued = queue
+            .enqueue(
+                &tenant,
+                action_type::SEND_STEP,
+                entity_type::STEP_EXECUTION,
+                entity_id,
+                &format!("cancel-queued:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        let other_entity = queue
+            .enqueue(
+                &tenant,
+                action_type::SEND_STEP,
+                entity_type::STEP_EXECUTION,
+                Uuid::new_v4(),
+                &format!("cancel-other:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        let to_cancel_executing = queue
+            .enqueue(
+                &tenant,
+                action_type::SEND_STEP,
+                entity_type::STEP_EXECUTION,
+                entity_id,
+                &format!("cancel-executing:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let leased = queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&[to_cancel_executing.id]))
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("claim the executing one");
+
+        let cancelled = queue
+            .cancel_for_entity(
+                &tenant,
+                entity_type::STEP_EXECUTION,
+                entity_id,
+                "human reply arrived",
+            )
+            .await
+            .unwrap();
+        assert_eq!(cancelled, 2, "both the queued and executing rows stop");
+
+        let states: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+            "SELECT id, state, last_error FROM sales_actions \
+             WHERE tenant_id = $1 ORDER BY idempotency_key",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (id, state, last_error) in &states {
+            if *id == other_entity.id {
+                assert_eq!(state, "queued", "an unrelated entity is untouched");
+            } else {
+                assert_eq!(state, "cancelled", "row {id} must be cancelled");
+                assert_eq!(last_error.as_deref(), Some("human reply arrived"));
+            }
+        }
+        assert!(!states.is_empty());
+
+        // The cancelled worker's stale fence must not be able to complete it.
+        assert!(
+            !queue
+                .finish(&leased.fence(), ActionOutcome::Succeeded)
+                .await
+                .unwrap(),
+            "a cancelled action must refuse its worker's finish"
+        );
+        // And the queued row is gone from the claimable set.
+        let claimable = queue
+            .claim_filtered(
+                10,
+                DEFAULT_LEASE_SECS,
+                Some(&[queued.id, to_cancel_executing.id]),
+            )
+            .await
+            .unwrap();
+        assert!(
+            claimable.is_empty(),
+            "cancelled work must never be claimed: {claimable:?}"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Operator replay is the recovery hatch for dead letters: it clears the
+    /// stale error/lease, resets the attempt budget, and makes the action
+    /// claimable again. It must never touch a live or terminal-success row.
+    #[tokio::test]
+    async fn replay_recovers_a_dead_letter_and_resets_its_budget() {
+        let Some(pool) = live_pool("actions_replay_dead_letter").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-replay");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("replay:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE sales_actions SET state = 'dead_letter', attempt = max_attempts, \
+                    last_error = 'poison', completed_at = NOW(), due_at = NOW() + interval '1 hour' \
+             WHERE id = $1",
+        )
+        .bind(action.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            queue.replay(&tenant, action.id).await.unwrap(),
+            "a dead letter is replayable"
+        );
+        let (state, attempt, last_error, completed_at, due_at): (
+            String,
+            i32,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            DateTime<Utc>,
+        ) = sqlx::query_as(
+            "SELECT state, attempt, last_error, completed_at, due_at FROM sales_actions WHERE id = $1",
+        )
+        .bind(action.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, "queued");
+        assert_eq!(attempt, 0, "replay grants a fresh attempt budget");
+        assert_eq!(last_error, None);
+        assert_eq!(completed_at, None);
+        assert!(due_at <= Utc::now(), "replay is immediately due");
+
+        // Replay is scoped to the owning tenant.
+        let other_tenant = crate::test_db::unique_test_tenant("act-replay-other");
+        assert!(
+            !queue.replay(&other_tenant, action.id).await.unwrap(),
+            "another tenant must not replay this action"
+        );
+
+        // Succeed it; now replay must refuse (success is terminal).
+        let leased = queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&[action.id]))
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(queue
+            .finish(&leased.fence(), ActionOutcome::Succeeded)
+            .await
+            .unwrap());
+        assert!(
+            !queue.replay(&tenant, action.id).await.unwrap(),
+            "a succeeded action is not replayable"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// `stats` is the CP's view of the queue: per-state counts, due-now and
+    /// dead-letter totals, all scoped to one tenant.
+    #[tokio::test]
+    async fn stats_counts_states_due_work_and_dead_letters_per_tenant() {
+        let Some(pool) = live_pool("actions_stats").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-stats");
+        let other = crate::test_db::unique_test_tenant("act-stats-other");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+
+        queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("stats-due:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("stats-future:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() + ChronoDuration::hours(4),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        let dead = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("stats-dead:{tenant}"),
+                serde_json::json!({}),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_actions SET state = 'dead_letter' WHERE id = $1")
+            .bind(dead.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Another tenant's due work must not be counted.
+        let other_queue = ActionQueue::new(pool.clone(), format!("worker-{other}"));
+        other_queue
+            .enqueue(
+                &other,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("stats-other:{other}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let stats = queue.stats(&tenant).await.unwrap();
+        assert_eq!(stats["total"], 3);
+        assert_eq!(stats["dueNow"], 1, "only the past-due queued row counts");
+        assert_eq!(stats["deadLettered"], 1);
+        assert_eq!(stats["byState"]["queued"], 2);
+        assert_eq!(stats["byState"]["dead_letter"], 1);
+        assert!(
+            stats["byState"].get("succeeded").is_none(),
+            "absent states must not be fabricated: {stats}"
+        );
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = ANY($1)")
+            .bind(vec![tenant.clone(), other.clone()])
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// A deployment without a registered handler must dead-letter loudly with
+    /// the action type in the reason — never drop the work silently.
+    #[tokio::test]
+    async fn unhandled_handler_dead_letters_with_the_action_type_named() {
+        let leased = LeasedAction {
+            action: sample_action(Uuid::new_v4()),
+            lease_owner: "worker-a".into(),
+            lease_token: Uuid::new_v4(),
+        };
+        let outcome = UnhandledActionHandler.handle(&leased).await;
+        match outcome {
+            ActionOutcome::DeadLetter(reason) => {
+                assert!(reason.contains(action_type::RESCORE), "{reason}");
+                assert!(reason.contains("account"), "{reason}");
+            }
+            other => panic!("an unhandled action must dead-letter: {other:?}"),
+        }
+    }
+
+    /// The expired-lease sweeper dead-letters work whose attempt budget is
+    /// already spent instead of looping forever.
+    #[tokio::test]
+    async fn expired_lease_with_a_spent_budget_is_dead_lettered_not_requeued() {
+        let Some(pool) = live_pool("actions_expired_budget").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-expired");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let action = queue
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("expired:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        // A crashed worker at the end of its budget.
+        sqlx::query(
+            "UPDATE sales_actions SET state = 'executing', attempt = max_attempts, \
+                    lease_owner = 'crashed', lease_token = gen_random_uuid(), \
+                    lease_expires_at = NOW() - interval '1 second' \
+             WHERE id = $1",
+        )
+        .bind(action.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The sweep is deployment-global; assert on OUR row's result.
+        requeue_expired_leases(&pool).await.unwrap();
+        let (state, completed): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT state, completed_at FROM sales_actions WHERE id = $1")
+                .bind(action.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            state, "dead_letter",
+            "a spent budget must dead-letter rather than cycle"
+        );
+        assert!(completed.is_some());
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Two workers racing for ONE action: exactly one wins, and the loser's
+    /// every mutation (extend/finish/attach) is refused by the fence. A
+    /// crashed winner's work is then recoverable by the survivor.
+    #[tokio::test]
+    async fn one_winner_per_claim_and_a_stale_token_cannot_write() {
+        let Some(pool) = live_pool("actions_single_winner").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-winner");
+        let queue_a = ActionQueue::new(pool.clone(), format!("worker-a-{tenant}"));
+        let queue_b = ActionQueue::new(pool.clone(), format!("worker-b-{tenant}"));
+        let action = queue_a
+            .enqueue(
+                &tenant,
+                action_type::RESCORE,
+                entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("winner:{tenant}"),
+                serde_json::json!({}),
+                Utc::now() - ChronoDuration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        let ids = [action.id];
+
+        let (a, b) = tokio::join!(
+            queue_a.claim_filtered(1, DEFAULT_LEASE_SECS, Some(&ids)),
+            queue_b.claim_filtered(1, DEFAULT_LEASE_SECS, Some(&ids))
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        let total = a.len() + b.len();
+        assert_eq!(total, 1, "exactly one worker may claim the action");
+        let (winner, winner_queue, loser_queue) = if a.is_empty() {
+            (b.into_iter().next().unwrap(), queue_b, queue_a)
+        } else {
+            (a.into_iter().next().unwrap(), queue_a, queue_b)
+        };
+        assert_eq!(winner.id(), action.id);
+        assert!(!winner.lease_token.is_nil());
+
+        // The loser cannot write with a forged token, and the winner's own
+        // (unissued) token guess cannot either.
+        let forged = ActionFence {
+            action_id: action.id,
+            lease_owner: winner.lease_owner.clone(),
+            lease_token: Uuid::new_v4(),
+        };
+        assert!(!loser_queue
+            .extend_lease(&forged, DEFAULT_LEASE_SECS)
+            .await
+            .unwrap());
+        assert!(!loser_queue
+            .finish(&forged, ActionOutcome::Succeeded)
+            .await
+            .unwrap());
+        assert!(!loser_queue
+            .attach_decision(&forged, Uuid::new_v4())
+            .await
+            .unwrap());
+        let state: String = sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+            .bind(action.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "executing", "no stale write landed");
+
+        // The winner crashes: expire the lease, sweep, and the survivor picks
+        // the work up with a NEW token while the old one stays dead.
+        sqlx::query(
+            "UPDATE sales_actions SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+        )
+        .bind(action.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        requeue_expired_leases(&pool).await.unwrap();
+        let recovered = loser_queue
+            .claim_filtered(1, DEFAULT_LEASE_SECS, Some(&ids))
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("a crashed worker's action must be recoverable");
+        assert_eq!(recovered.action.attempt, 2);
+        assert!(!winner_queue
+            .finish(&winner.fence(), ActionOutcome::Succeeded)
+            .await
+            .unwrap());
+        assert!(loser_queue
+            .finish(&recovered.fence(), ActionOutcome::Succeeded)
+            .await
+            .unwrap());
+        let state: String = sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+            .bind(action.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "succeeded");
+
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// `run` claims nothing before its first interval and stops promptly when
+    /// shutdown resolves — the worker loop's contract.
+    #[tokio::test]
+    async fn run_worker_stops_on_shutdown_without_claiming() {
+        let Some(pool) = live_pool("actions_run_shutdown").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("act-run");
+        let queue = ActionQueue::new(pool.clone(), format!("worker-{tenant}"));
+        let handler: Arc<dyn ActionHandler> = Arc::new(FixedHandler(ActionOutcome::Succeeded));
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let worker = tokio::spawn(run(
+            queue.clone(),
+            handler,
+            60,
+            1,
+            DEFAULT_LEASE_SECS,
+            async move {
+                let _ = rx.await;
+            },
+        ));
+        // Shutdown before one interval elapses: the worker must exit promptly.
+        tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), worker)
+            .await
+            .expect("the worker must stop on shutdown")
+            .expect("the worker task must not panic");
+
+        // Nothing was claimable, so the tenant's queue is still empty.
+        let stats = queue.stats(&tenant).await.unwrap();
+        assert_eq!(stats["total"], 0);
     }
 }

@@ -586,7 +586,7 @@ async fn process_analytics_export(
                 csv.push_str(&format!(
                     "{},{},{},{},{},{}\n",
                     escape_csv(&row.message_id),
-                    escape_csv(&row.subject),
+                    escape_csv(row.subject.as_deref().unwrap_or("")),
                     escape_csv(row.recipient.as_deref().unwrap_or("")),
                     escape_csv(&row.created_at.to_rfc3339()),
                     escape_csv(&row.last_event),
@@ -633,12 +633,17 @@ async fn process_analytics_export(
 
 /// Prefixes dangerous characters with a single quote.
 fn escape_csv(s: &str) -> String {
-    let trimmed = s.trim_start();
-    // CSV injection prevention:prefix = + - @ with single quote
-    let needs_prefix = matches!(
-        trimmed.chars().next(),
-        Some('=' | '+' | '-' | '@' | '\t' | '\r')
-    );
+    // CSV injection prevention: a cell beginning with = + - @ (or with a TAB /
+    // CR that a spreadsheet strips before evaluating the rest) is prefixed
+    // with a single quote. The check runs against the ORIGINAL value: testing
+    // the whitespace-trimmed copy silently dropped a leading TAB or CR, so
+    // `"\t=1+1"` reached the cell unprefixed even though this function exists
+    // to neutralise exactly that. Mirrors billing.rs's sanitize_csv_value; a
+    // leading-space-then-formula value (`" =1+1"`) is neutralised too, because
+    // spreadsheets strip the space as well.
+    let first_non_space = s.trim_start().chars().next();
+    let needs_prefix = matches!(s.chars().next(), Some('=' | '+' | '-' | '@' | '\t' | '\r'))
+        || matches!(first_non_space, Some('=' | '+' | '-' | '@'));
 
     let sanitized = if needs_prefix {
         format!("'{}", s)
@@ -723,7 +728,10 @@ async fn store_export_file(key: &str, content: &[u8]) -> anyhow::Result<()> {
 #[derive(sqlx::FromRow, Serialize)]
 struct ExportRow {
     message_id: String,
-    subject: String,
+    /// Nullable on the table (messages written without a subject) — a
+    /// NULL must not fail the whole export (previously `String`, which
+    /// made any subject-less message decode-error the job).
+    subject: Option<String>,
     /// First entry of the JSONB `to_emails` array (NULL when empty).
     recipient: Option<String>,
     created_at: DateTime<Utc>,
@@ -742,7 +750,10 @@ async fn get_export_job(
     crate::entitlements::require_feature(&state, &auth.tenant_id, FeatureKey::DataExport).await?;
 
     let row: Option<ExportJobRow> = sqlx::query_as(
-        "SELECT id, status, total_rows, processed_rows, download_url, download_expires_at, error_message
+        // `id::text`: the column is UUID and the DTO is a string; sqlx
+        // refuses to decode UUID into String, which used to 500 every
+        // status read of an existing job.
+        "SELECT id::text AS id, status, total_rows, processed_rows, download_url, download_expires_at, error_message
          FROM export_jobs WHERE id = $1 AND tenant_id = $2"
     )
         .bind(job_id)
@@ -1189,7 +1200,8 @@ mod tests {
     }
 
     /// Serialises tests that mutate the `EXPORT_STORAGE_PATH` process env var.
-    static EXPORT_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Async-aware so the guard can legitimately be held across awaits.
+    pub(super) static EXPORT_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// The guard is intentionally held across the awaited store call: the
     /// env var it protects is read on that path, so dropping it early would
@@ -1197,7 +1209,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_store_export_file_writes_content_with_private_directory() {
-        let _guard = EXPORT_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EXPORT_ENV_MUTEX.lock().await;
 
         let dir =
             std::env::temp_dir().join(format!("apexmail-export-test-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
@@ -1227,5 +1239,1500 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::env::remove_var("EXPORT_STORAGE_PATH");
+    }
+}
+
+// ─── Adversarial DB-backed router tests ────────────────────────
+//
+// Every test drives the REAL router (`build_app`) with a real API key and
+// asserts status, body, and database effects. Rows are scoped to a unique
+// tenant id per test; the database is provisioned once per process.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use axum::response::IntoResponse;
+    use serde_json::json;
+    use sqlx::PgPool;
+    use tower::ServiceExt;
+
+    use crate::app::build_app;
+
+    /// Canonical DB shared by this module's tests. The pid suffix keeps a
+    /// nextest run (one process per test) from contending on one database
+    /// name while still sharing a single provisioned DB per cargo-test
+    /// process. Config smoke tests (e.g. app.rs) run against the canonical
+    /// schema, exactly like production.
+    /// A canonical database dedicated to ONE test. `fresh_canonical_pool`
+    /// drops + recreates + migrates it, so the name only needs to be unique
+    /// per test (and per process under nextest, where every test is its own
+    /// process — hence the pid in the shared prefix is unnecessary).
+    async fn pool_for(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_pool(&format!("adv_analytics_{test_name}")).await
+    }
+
+    fn unique_tenant() -> String {
+        uuid::Uuid::new_v4().simple().to_string()[..26].to_string()
+    }
+
+    /// Seed the tenant plus the plan its entitlements resolve from.
+    async fn seed_tenant(pool: &PgPool, tenant_id: &str, features: serde_json::Value) {
+        let plan_name = format!("advplan{}", &tenant_id[..12]);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
+                                email_limit, api_call_limit, features, is_active, sort_order,
+                                created_at, updated_at)
+             VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $1, '', 0, 0,
+                     1000, 1000, $2, true, 0, NOW(), NOW())
+             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+        )
+        .bind(&plan_name)
+        .bind(features)
+        .execute(pool)
+        .await
+        .expect("seed plan");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'adversarial analytics', $2, $3, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(format!("adv-{tenant_id}"))
+        .bind(&plan_name)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    fn full_features() -> serde_json::Value {
+        let mut features =
+            serde_json::to_value(billing_service::types::PlanFeatures::default()).unwrap();
+        features["advanced_analytics"] = json!(true);
+        features["data_export"] = json!(true);
+        features
+    }
+
+    async fn seed_api_key(pool: &PgPool, tenant_id: &str, scopes: &[&str]) -> String {
+        let key = format!("am_adv_{}", uuid::Uuid::new_v4().simple());
+        let secret = crate::app::test_support::test_config().api_key_hash_secret;
+        let hash = apexmail_lib::hash_api_key_with_secret(&key, &secret);
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_hash, key_prefix, scopes, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, 'adversarial', $2, $3, $4, NOW(), NOW())",
+        )
+        .bind(tenant_id)
+        .bind(&hash)
+        .bind(&key[..8])
+        .bind(serde_json::to_value(scopes).unwrap())
+        .execute(pool)
+        .await
+        .expect("seed api key");
+        key
+    }
+
+    /// Seed a tenant whose plan carries `features`, and an API key.
+    async fn tenant_with_key(
+        pool: &PgPool,
+        features: serde_json::Value,
+        scopes: &[&str],
+    ) -> (String, String) {
+        let tenant_id = unique_tenant();
+        seed_tenant(pool, &tenant_id, features).await;
+        let key = seed_api_key(pool, &tenant_id, scopes).await;
+        (tenant_id, key)
+    }
+
+    struct Harness {
+        app: Router,
+        pool: PgPool,
+        tenant_id: String,
+        key: String,
+    }
+
+    async fn harness(suffix: &str) -> Option<Harness> {
+        let pool = pool_for(suffix).await?;
+        let tenant_id = unique_tenant();
+        seed_tenant(&pool, &tenant_id, full_features()).await;
+        let key = seed_api_key(&pool, &tenant_id, &["analytics:read"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some(Harness {
+            app: build_app(state),
+            pool,
+            tenant_id,
+            key,
+        })
+    }
+
+    /// RFC 3339 with `Z` — `+00:00` would decode to a space in a query
+    /// string and turn every ranged request into a 400.
+    fn rfc(dt: DateTime<Utc>) -> String {
+        dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    async fn json_response(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body readable");
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// The `error.code` of a JSON error body (empty when not JSON).
+    fn body_json_code(body: &[u8]) -> String {
+        serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value["error"]["code"].as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    async fn get(harness: &Harness, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("x-api-key", &harness.key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        json_response(response).await
+    }
+
+    async fn get_raw(harness: &Harness, uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let response = harness
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("x-api-key", &harness.key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    async fn post_json(
+        harness: &Harness,
+        uri: &str,
+        content_type: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("x-api-key", &harness.key);
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        let response = harness
+            .app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        json_response(response).await
+    }
+
+    async fn seed_message(
+        pool: &PgPool,
+        tenant: &str,
+        status: &str,
+        subject: &str,
+        created_at: DateTime<Utc>,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at, updated_at)
+             VALUES ($1, $2, 'sender@apexmail.ee', $3, $4, $5, $6, $6)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(json!(["recipient@example.com"]))
+        .bind(subject)
+        .bind(status)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("seed message");
+        id
+    }
+
+    async fn seed_event(
+        pool: &PgPool,
+        tenant: &str,
+        message_id: Option<uuid::Uuid>,
+        event_type: &str,
+        timestamp: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, timestamp)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(uuid::Uuid::new_v4().simple().to_string())
+        .bind(tenant)
+        .bind(message_id.map(|id| id.to_string()))
+        .bind(event_type)
+        .bind(timestamp)
+        .execute(pool)
+        .await
+        .expect("seed event");
+    }
+
+    fn approx(left: f64, right: f64) -> bool {
+        (left - right).abs() < 1e-9
+    }
+
+    // ── authentication / scope / tenant-status contract ────────
+
+    #[tokio::test]
+    async fn adversarial_analytics_auth_and_scope_contract() {
+        let Some(pool) = pool_for("auth_scope").await else {
+            return;
+        };
+        let (tenant, key) = tenant_with_key(&pool, full_features(), &["analytics:read"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let app = build_app(state);
+
+        // Missing credential.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/analytics/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Garbage credential.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/analytics/dashboard")
+                    .header("x-api-key", "am_not_a_real_key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Valid identity but missing the analytics:read scope: 403.
+        let no_scope_key = seed_api_key(&pool, &tenant, &["billing:read"]).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/analytics/dashboard")
+                    .header("x-api-key", &no_scope_key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Expired key: authenticated shape, refused.
+        let expired_key = format!("am_adv_{}", uuid::Uuid::new_v4().simple());
+        let secret = crate::app::test_support::test_config().api_key_hash_secret;
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_hash, key_prefix, scopes, expires_at, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, 'expired', $2, $3, '[\"analytics:read\"]'::jsonb, NOW() - INTERVAL '1 hour', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(apexmail_lib::hash_api_key_with_secret(&expired_key, &secret))
+        .bind(&expired_key[..8])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/analytics/dashboard")
+                    .header("x-api-key", &expired_key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Suspended tenant: the analytics surface is NOT in the
+        // billing-recovery allowlist, so a valid key stops authenticating.
+        let suspended = unique_tenant();
+        seed_tenant(&pool, &suspended, full_features()).await;
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+            .bind(&suspended)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let suspended_key = seed_api_key(&pool, &suspended, &["analytics:read"]).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get("/v1/analytics/dashboard")
+                    .header("x-api-key", &suspended_key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Key for a tenant row that has vanished fails closed.
+        let ghost_key = seed_api_key(&pool, &unique_tenant(), &["analytics:read"]).await;
+        let response = app
+            .oneshot(
+                Request::get("/v1/analytics/dashboard")
+                    .header("x-api-key", &ghost_key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // The good key still works and only sees its own tenant.
+        let (status, body) = get(
+            &Harness {
+                app: build_app(crate::app::test_support::test_state_over(pool.clone()).await),
+                pool: pool.clone(),
+                tenant_id: tenant.clone(),
+                key: key.clone(),
+            },
+            "/v1/analytics/dashboard",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["total_sent"], 0);
+    }
+
+    // ── dashboard: counts, rates, ranges, isolation ─────────────
+
+    #[tokio::test]
+    async fn adversarial_dashboard_counts_rates_and_tenant_isolation() {
+        let Some(h) = harness("dashboard_counts").await else {
+            return;
+        };
+        let now = Utc::now();
+        let delivered = seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "delivered",
+            "ok",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "sent",
+            "ok",
+            now - TimeDelta::hours(2),
+        )
+        .await;
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "bounced",
+            "bad",
+            now - TimeDelta::hours(3),
+        )
+        .await;
+        // Non-counting statuses must be excluded from every numerator.
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "pending",
+            "queued",
+            now - TimeDelta::hours(4),
+        )
+        .await;
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "failed",
+            "failed",
+            now - TimeDelta::hours(5),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(delivered),
+            "opened",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(delivered),
+            "opened",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(delivered),
+            "clicked",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(delivered),
+            "complained",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+
+        // Another tenant's data must never leak into the response.
+        let other = unique_tenant();
+        seed_tenant(&h.pool, &other, full_features()).await;
+        seed_message(&h.pool, &other, "delivered", "other", now).await;
+        seed_event(&h.pool, &other, None, "opened", now).await;
+
+        let (status, body) = get(&h, "/v1/analytics/dashboard").await;
+        assert_eq!(status, StatusCode::OK);
+        let data = &body["data"];
+        assert_eq!(
+            data["total_sent"], 2,
+            "only sent+delivered count as sent: {body}"
+        );
+        assert_eq!(data["total_delivered"], 1);
+        assert_eq!(data["total_bounced"], 1);
+        assert_eq!(data["total_opened"], 2);
+        assert_eq!(data["total_clicked"], 1);
+        assert!(approx(data["delivery_rate"].as_f64().unwrap(), 0.5));
+        // safe_ratio does not clamp: 2 opens / 1 delivered.
+        assert!(approx(data["open_rate"].as_f64().unwrap(), 2.0));
+        assert!(approx(data["click_rate"].as_f64().unwrap(), 1.0));
+
+        // Range excludes everything -> zeros, never division by zero NaNs.
+        let from = rfc(now + TimeDelta::hours(1));
+        let to = rfc(now + TimeDelta::hours(2));
+        let (status, body) = get(&h, &format!("/v1/analytics/dashboard?from={from}&to={to}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["total_sent"], 0);
+        assert_eq!(body["data"]["delivery_rate"], 0.0);
+        assert_eq!(body["data"]["open_rate"], 0.0);
+
+        // `from` before 2020 is floored (no unbounded history scan).
+        let (status, body) = get(
+            &h,
+            "/v1/analytics/dashboard?from=1970-01-01T00:00:00Z&to=1970-02-01T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["total_sent"], 0);
+
+        // Over-wide range is rejected, not silently clamped.
+        let (status, body) = get(
+            &h,
+            "/v1/analytics/dashboard?from=2020-01-01T00:00:00Z&to=2021-06-01T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("366"),
+            "unexpected body: {body}"
+        );
+
+        // Hostile query surface: unknown field and malformed dates.
+        let (status, _) = get(&h, "/v1/analytics/dashboard?bogus=1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get(&h, "/v1/analytics/dashboard?from=not-a-date").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get(&h, "/v1/analytics/volume?from=2020-01-01").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ── volume: interval buckets ────────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_volume_interval_buckets() {
+        let Some(h) = harness("volume_buckets").await else {
+            return;
+        };
+        let day1 = DateTime::from_timestamp(1_767_610_500, 0).unwrap(); // 2026-01-05T10:15:00Z
+        let day1_late = DateTime::from_timestamp(1_767_615_900, 0).unwrap(); // 11:45Z
+        let day2 = DateTime::from_timestamp(1_767_693_600, 0).unwrap(); // 2026-01-06T09:20Z
+        seed_message(&h.pool, &h.tenant_id, "delivered", "a", day1).await;
+        seed_message(&h.pool, &h.tenant_id, "bounced", "b", day1_late).await;
+        seed_message(&h.pool, &h.tenant_id, "sent", "c", day2).await;
+
+        let range = "from=2026-01-05T00:00:00Z&to=2026-01-07T00:00:00Z";
+        for (interval, expected_points) in [
+            ("day", 2usize),
+            ("hour", 3),
+            ("week", 1),
+            ("month", 1),
+            ("grapes", 2),
+        ] {
+            let (status, body) = get(
+                &h,
+                &format!("/v1/analytics/volume?{range}&interval={interval}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "interval {interval}: {body}");
+            let points = body["data"].as_array().expect("volume array");
+            assert_eq!(
+                points.len(),
+                expected_points,
+                "interval {interval} should bucket into {expected_points}: {body}"
+            );
+        }
+
+        // Input is used only through the static query table: an SQL-ish
+        // interval selects the day fallback, never a dynamic statement.
+        let (status, body) = get(
+            &h,
+            &format!(
+                "/v1/analytics/volume?{range}&interval=day%27%3B%20DROP%20TABLE%20messages%3B--"
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+
+        // Tenant with no messages gets an empty series, not an error.
+        let (empty_tenant, empty_key) =
+            tenant_with_key(&h.pool, full_features(), &["analytics:read"]).await;
+        let empty = Harness {
+            app: h.app.clone(),
+            pool: h.pool.clone(),
+            tenant_id: empty_tenant,
+            key: empty_key,
+        };
+        let (status, body) = get(&empty, &format!("/v1/analytics/volume?{range}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
+    }
+
+    // ── engagement / deliverability entitlement gates ───────────
+
+    #[tokio::test]
+    async fn adversarial_engagement_and_deliverability_gate_and_math() {
+        let Some(pool) = pool_for("engagement_gate").await else {
+            return;
+        };
+        // Plan WITHOUT advanced analytics: both endpoints must refuse
+        // BEFORE running any query (fail closed).
+        let mut basic = full_features();
+        basic["advanced_analytics"] = json!(false);
+        let (basic_tenant, basic_key) = tenant_with_key(&pool, basic, &["analytics:read"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let app = build_app(state);
+        let basic = Harness {
+            app: app.clone(),
+            pool: pool.clone(),
+            tenant_id: basic_tenant.clone(),
+            key: basic_key,
+        };
+        for uri in ["/v1/analytics/engagement", "/v1/analytics/deliverability"] {
+            let (status, body) = get(&basic, uri).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+        }
+
+        // Entitled tenant: exact rates including hostile numerators.
+        let (tenant, key) = tenant_with_key(&pool, full_features(), &["analytics:read"]).await;
+        let h = Harness {
+            app,
+            pool: pool.clone(),
+            tenant_id: tenant,
+            key,
+        };
+        let now = Utc::now();
+        let m1 = seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "delivered",
+            "a",
+            now - TimeDelta::hours(2),
+        )
+        .await;
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "delivered",
+            "b",
+            now - TimeDelta::hours(2),
+        )
+        .await;
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "bounced",
+            "c",
+            now - TimeDelta::hours(2),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(m1),
+            "opened",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(m1),
+            "opened",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(m1),
+            "opened",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(m1),
+            "clicked",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(m1),
+            "unsubscribed",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+
+        let (status, body) = get(&h, "/v1/analytics/engagement").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert!(approx(data["open_rate"].as_f64().unwrap(), 1.5), "{data}");
+        assert!(approx(data["click_rate"].as_f64().unwrap(), 0.5));
+        assert!(approx(data["unsubscribe_rate"].as_f64().unwrap(), 0.5));
+        assert_eq!(data["timeseries"].as_array().unwrap().len(), 1);
+
+        // Deliverability: complaints may exceed deliveries; inbox_rate is
+        // clamped at 0 and complaint_rate is allowed above 1 (honest ratio).
+        for _ in 0..5 {
+            seed_event(
+                &h.pool,
+                &h.tenant_id,
+                Some(m1),
+                "complained",
+                now - TimeDelta::minutes(30),
+            )
+            .await;
+        }
+        let (status, body) = get(&h, "/v1/analytics/deliverability").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert!(approx(data["delivery_rate"].as_f64().unwrap(), 2.0 / 3.0));
+        assert!(approx(data["bounce_rate"].as_f64().unwrap(), 1.0 / 3.0));
+        assert!(approx(data["complaint_rate"].as_f64().unwrap(), 2.5));
+        assert_eq!(data["inbox_rate"], 0.0);
+
+        // Zero traffic: every ratio is 0.0, never NaN.
+        let (empty_tenant, empty_key) =
+            tenant_with_key(&pool, full_features(), &["analytics:read"]).await;
+        let empty = Harness {
+            app: h.app.clone(),
+            pool: h.pool.clone(),
+            tenant_id: empty_tenant,
+            key: empty_key,
+        };
+        let (status, body) = get(&empty, "/v1/analytics/deliverability").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["delivery_rate"], 0.0);
+        assert_eq!(body["data"]["complaint_rate"], 0.0);
+        assert_eq!(body["data"]["inbox_rate"], 0.0);
+    }
+
+    // ── subject-line analysis: body validation contract ─────────
+
+    #[tokio::test]
+    async fn adversarial_subject_line_validation_contract() {
+        let Some(h) = harness("subject_line").await else {
+            return;
+        };
+        let path = "/v1/analytics/subject-line";
+
+        // Missing auth never reaches the body extractor.
+        let response = h
+            .app
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"subject":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong content type is a 415, not a silent success.
+        let (status, _) = post_json(&h, path, Some("text/plain"), r#"{"subject":"hi"}"#).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let (status, _) = post_json(&h, path, None, r#"{"subject":"hi"}"#).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        // Malformed JSON -> 400; unknown field / wrong type -> 422.
+        let (status, _) = post_json(&h, path, Some("application/json"), "{not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post_json(
+            &h,
+            path,
+            Some("application/json"),
+            r#"{"subject":"hi","extra":1}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = post_json(&h, path, Some("application/json"), r#"{"subject":42}"#).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        // Duplicate keys are refused by serde's struct deserializer — no
+        // "last one wins" ambiguity for a body the analyzer scores.
+        let (status, _) = post_json(
+            &h,
+            path,
+            Some("application/json"),
+            r#"{"subject":"","subject":"first winner"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Empty / whitespace-only subjects are refused. (U+200B is NOT
+        // Unicode whitespace, so it is data — asserted below, not here.)
+        for subject in ["", "   ", "\t\n"] {
+            let (status, body) = post_json(
+                &h,
+                path,
+                Some("application/json"),
+                &json!({"subject": subject}).to_string(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "subject {subject:?}: {body}"
+            );
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR", "{body}");
+        }
+
+        // Exactly 200 characters is the boundary; 201 is over the limit.
+        let ok = "a".repeat(200);
+        let (status, body) = post_json(
+            &h,
+            path,
+            Some("application/json"),
+            &json!({"subject": ok}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let over = "a".repeat(201);
+        let (status, body) = post_json(
+            &h,
+            path,
+            Some("application/json"),
+            &json!({"subject": over}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Validation failures carry the human message in `details`.
+        assert!(
+            body["error"]["details"][0]
+                .as_str()
+                .unwrap_or_default()
+                .contains("200"),
+            "{body}"
+        );
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+
+        // The limit counts CHARACTERS, not bytes: 200 astral-plane emoji
+        // (800 UTF-8 bytes) pass; 201 fail. A byte-based check would
+        // reject the first as well.
+        let emoji_ok = "🦄".repeat(200);
+        let (status, body) = post_json(
+            &h,
+            path,
+            Some("application/json"),
+            &json!({"subject": emoji_ok}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let emoji_over = "🦄".repeat(201);
+        let (status, _) = post_json(
+            &h,
+            path,
+            Some("application/json"),
+            &json!({"subject": emoji_over}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // RTL / combining marks / NUL / SQL-ish content is data, not syntax
+        // (NUL survives into the analyzer rather than panicking a char scan).
+        for subject in [
+            "\u{202e}gnp.exe",
+            "e\u{0301}\u{0301}",
+            "\0",
+            " \u{200b} ",
+            "'; DROP TABLE events; --",
+        ] {
+            let (status, _) = post_json(
+                &h,
+                path,
+                Some("application/json"),
+                &json!({"subject": subject}).to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "subject {subject:?}");
+        }
+        // The events table still exists after the SQL-ish subject.
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_tables WHERE tablename = 'events')")
+                .fetch_one(&h.pool)
+                .await
+                .unwrap();
+        assert!(exists);
+    }
+
+    // ── export lifecycle, artifact store, download ──────────────
+
+    #[tokio::test]
+    async fn adversarial_export_artifact_lifecycle_and_download() {
+        let Some(h) = harness("export_lifecycle").await else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("adv-analytics-{}", uuid::Uuid::new_v4()));
+        let _guard = lock_export_env().await;
+        std::env::set_var("EXPORT_STORAGE_PATH", &dir);
+
+        let now = Utc::now();
+        let from = now - TimeDelta::days(1);
+        let to = now;
+        let m1 = seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "delivered",
+            "=SUM(A1:A2)",
+            now - TimeDelta::hours(2),
+        )
+        .await;
+        seed_event(
+            &h.pool,
+            &h.tenant_id,
+            Some(m1),
+            "opened",
+            now - TimeDelta::minutes(30),
+        )
+        .await;
+        // A message whose first recipient is NULL/empty must not fail the
+        // whole export (JSONB array empty).
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at, updated_at)
+             VALUES ($1, $2, 's@apexmail.ee', '[]'::jsonb, NULL, 'sent', $3, $3)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&h.tenant_id)
+        .bind(now - TimeDelta::hours(3))
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+        // CSV (default for unknown formats too).
+        let csv_job = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, created_by, created_at)
+             VALUES ($1, $2, 'analytics', 'pending', 'csv', $3, $4, 'system', NOW())",
+        )
+        .bind(csv_job)
+        .bind(&h.tenant_id)
+        .bind(from)
+        .bind(to)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        process_analytics_export(
+            h.pool.clone(),
+            csv_job,
+            h.tenant_id.clone(),
+            from,
+            to,
+            "xlsx".to_string(),
+        )
+        .await
+        .expect("csv export must complete");
+
+        let (status, total_rows, file_size, download_url, error): (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, total_rows, file_size_bytes, download_url, error_message
+             FROM export_jobs WHERE id = $1",
+        )
+        .bind(csv_job)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "completed", "error: {error:?}");
+        assert_eq!(total_rows, Some(2));
+        assert!(file_size.unwrap_or(0) > 0);
+        assert_eq!(
+            download_url,
+            Some(format!("/v1/analytics/export/{csv_job}/download"))
+        );
+
+        // Unknown format falls back to CSV content and extension.
+        let artifact = dir.join(format!("exports_{}_{}.csv", h.tenant_id, csv_job));
+        let csv = std::fs::read_to_string(&artifact).expect("csv artifact on disk");
+        assert!(csv.starts_with("message_id,subject,recipient,created_at,last_event,event_time\n"));
+        assert!(
+            csv.contains("'=SUM(A1:A2)"),
+            "formula-like subject must be neutralised: {csv}"
+        );
+        assert!(
+            csv.contains("opened"),
+            "last_event must reflect the event: {csv}"
+        );
+
+        // JSON export.
+        let json_job = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, created_by, created_at)
+             VALUES ($1, $2, 'analytics', 'pending', 'json', $3, $4, 'system', NOW())",
+        )
+        .bind(json_job)
+        .bind(&h.tenant_id)
+        .bind(from)
+        .bind(to)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        process_analytics_export(
+            h.pool.clone(),
+            json_job,
+            h.tenant_id.clone(),
+            from,
+            to,
+            "json".to_string(),
+        )
+        .await
+        .expect("json export must complete");
+        let json_artifact = dir.join(format!("exports_{}_{}.json", h.tenant_id, json_job));
+        let raw = std::fs::read_to_string(&json_artifact).expect("json artifact");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("pretty JSON array");
+        assert_eq!(parsed.as_array().unwrap().len(), 2);
+        assert_eq!(
+            parsed[0]["subject"].as_str().unwrap_or_default(),
+            "=SUM(A1:A2)"
+        );
+
+        // Router status view: real statuses, expired links hidden.
+        let (status, body) = get(&h, &format!("/v1/analytics/export/{json_job}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["job_id"], json_job.to_string());
+        assert!(body["data"]["download_url"].is_string(), "{body}");
+
+        // Expired completed job hides the link.
+        let expired_job = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, download_url, download_expires_at, created_at)
+             VALUES ($1, $2, 'analytics', 'completed', 'csv', $3, $4, '/x', NOW() - INTERVAL '1 hour', NOW())",
+        )
+        .bind(expired_job)
+        .bind(&h.tenant_id)
+        .bind(from)
+        .bind(to)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let (status, body) = get(&h, &format!("/v1/analytics/export/{expired_job}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"]["download_url"].is_null(), "{body}");
+
+        // Unknown job and another tenant's job are both 404 (no existence oracle).
+        let (status, _) = get(
+            &h,
+            &format!("/v1/analytics/export/{}", uuid::Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let other = unique_tenant();
+        seed_tenant(&h.pool, &other, full_features()).await;
+        let other_job = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, created_at)
+             VALUES ($1, $2, 'analytics', 'completed', 'csv', $3, $4, NOW())",
+        )
+        .bind(other_job)
+        .bind(&other)
+        .bind(from)
+        .bind(to)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let (status, _) = get(&h, &format!("/v1/analytics/export/{other_job}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Download: real bytes with attachment headers.
+        let (status, headers, bytes) =
+            get_raw(&h, &format!("/v1/analytics/export/{csv_job}/download")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE].to_str().unwrap(), "text/csv");
+        assert_eq!(
+            headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
+            format!("attachment; filename=\"analytics-export-{csv_job}.csv\"")
+        );
+        // The global security-headers middleware tightens the route's
+        // `private, no-store`; the export must never be cacheable.
+        assert!(
+            headers[header::CACHE_CONTROL]
+                .to_str()
+                .unwrap()
+                .contains("no-store"),
+            "export artifact must not be cacheable: {:?}",
+            headers[header::CACHE_CONTROL]
+        );
+        assert_eq!(bytes, std::fs::read(&artifact).unwrap());
+
+        // Expired link refuses even though the artifact exists.
+        let (status, _, body) =
+            get_raw(&h, &format!("/v1/analytics/export/{expired_job}/download")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            String::from_utf8_lossy(&body).contains("expired"),
+            "unexpected body: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // Completed row whose artifact vanished: fail closed, no panic.
+        let missing_job = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, download_url, download_expires_at, created_at)
+             VALUES ($1, $2, 'analytics', 'completed', 'csv', $3, $4, '/x', NOW() + INTERVAL '1 hour', NOW())",
+        )
+        .bind(missing_job)
+        .bind(&h.tenant_id)
+        .bind(from)
+        .bind(to)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let (status, _, body) =
+            get_raw(&h, &format!("/v1/analytics/export/{missing_job}/download")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            String::from_utf8_lossy(&body).contains("unavailable"),
+            "unexpected body: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        // Not-yet-completed jobs are 404 on the download route.
+        let pending_job = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO export_jobs (id, tenant_id, job_type, status, format, date_range_start, date_range_end, created_at)
+             VALUES ($1, $2, 'analytics', 'failed', 'csv', $3, $4, NOW())",
+        )
+        .bind(pending_job)
+        .bind(&h.tenant_id)
+        .bind(from)
+        .bind(to)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+        let (status, _, _) =
+            get_raw(&h, &format!("/v1/analytics/export/{pending_job}/download")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Other tenant's artifact key is unreachable from this tenant.
+        let (status, _, _) =
+            get_raw(&h, &format!("/v1/analytics/export/{other_job}/download")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        std::env::remove_var("EXPORT_STORAGE_PATH");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn adversarial_export_endpoint_fail_closed_and_job_row() {
+        let Some(pool) = pool_for("export_endpoint").await else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("adv-analytics-ep-{}", uuid::Uuid::new_v4()));
+        let _guard = lock_export_env().await;
+        std::env::set_var("EXPORT_STORAGE_PATH", &dir);
+
+        // Tenant WITHOUT data_export: the handler must refuse and write NO row.
+        let mut basic = full_features();
+        basic["data_export"] = json!(false);
+        let (basic_tenant, basic_key) = tenant_with_key(&pool, basic, &["analytics:read"]).await;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let app = build_app(state);
+        let h = Harness {
+            app: app.clone(),
+            pool: pool.clone(),
+            tenant_id: basic_tenant.clone(),
+            key: basic_key,
+        };
+        let (status, body) = get(&h, "/v1/analytics/export").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM export_jobs WHERE tenant_id = $1")
+            .bind(&basic_tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "refused export must not create a job row");
+
+        // Over-wide range on an ENTITLED tenant also writes no row.
+        let (tenant, key) = tenant_with_key(&pool, full_features(), &["analytics:read"]).await;
+        let h = Harness {
+            app,
+            pool: pool.clone(),
+            tenant_id: tenant.clone(),
+            key,
+        };
+        let (status, _) = get(
+            &h,
+            "/v1/analytics/export?from=2020-01-01T00:00:00Z&to=2021-06-01T00:00:00Z",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Valid request: 200 immediately with a processing job, and the
+        // background worker marks it completed with a stored artifact.
+        let now = Utc::now();
+        let from = now - TimeDelta::days(2);
+        seed_message(
+            &h.pool,
+            &h.tenant_id,
+            "delivered",
+            "export me",
+            now - TimeDelta::hours(1),
+        )
+        .await;
+        let uri = format!(
+            "/v1/analytics/export?from={}&to={}&format=json",
+            rfc(from),
+            rfc(now)
+        );
+        let (status, body) = get(&h, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["status"], "processing");
+        // The response is deliberately snake_case here (no rename attr).
+        assert!(body["data"]["job_id"].is_string(), "{body}");
+        assert!(body["data"]["download_url"].is_null());
+        let job_id: uuid::Uuid = body["data"]["job_id"].as_str().unwrap().parse().unwrap();
+
+        // Wait (bounded) for the spawned worker to finish.
+        let mut final_status = String::new();
+        for _ in 0..100 {
+            let row: Option<(String, Option<String>)> =
+                sqlx::query_as("SELECT status, error_message FROM export_jobs WHERE id = $1")
+                    .bind(job_id)
+                    .fetch_optional(&h.pool)
+                    .await
+                    .unwrap();
+            match row {
+                Some((status, _)) if status == "completed" || status == "failed" => {
+                    final_status = status;
+                    break;
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+        assert_eq!(final_status, "completed", "export worker never finished");
+        let format: String = sqlx::query_scalar("SELECT format FROM export_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+        assert_eq!(format, "json");
+
+        // A storage failure AFTER the job row exists must mark the job
+        // `failed` with an error message (never leave it `pending` forever).
+        // `EXPORT_STORAGE_PATH` pointing *under a regular file* is
+        // uncreatable on every platform.
+        let blocker = dir.join("blocker-file");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        std::env::set_var("EXPORT_STORAGE_PATH", blocker.join("nested"));
+        let (status, body) = get(&h, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let failing_job: uuid::Uuid = body["data"]["job_id"].as_str().unwrap().parse().unwrap();
+        let mut outcome: Option<(String, Option<String>)> = None;
+        for _ in 0..100 {
+            let row: Option<(String, Option<String>)> =
+                sqlx::query_as("SELECT status, error_message FROM export_jobs WHERE id = $1")
+                    .bind(failing_job)
+                    .fetch_optional(&h.pool)
+                    .await
+                    .unwrap();
+            match row {
+                Some((status, error)) if status == "failed" => {
+                    outcome = Some((status, error));
+                    break;
+                }
+                Some((status, error)) if status == "completed" => {
+                    outcome = Some((status, error));
+                    break;
+                }
+                _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+        let (failed_status, error_message) =
+            outcome.expect("export job never reached a terminal state");
+        assert_eq!(
+            failed_status, "failed",
+            "unwritable storage must fail the job, got {failed_status}"
+        );
+        assert!(
+            !error_message.unwrap_or_default().is_empty(),
+            "failed job must carry an error message"
+        );
+
+        std::env::remove_var("EXPORT_STORAGE_PATH");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── PDF export: renderer contract, fail closed ──────────────
+
+    static PDF_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The lock is deliberately held across awaits: it serialises tests that
+    /// mutate a process-global env var, so the env cannot change mid-request.
+    async fn lock_export_env() -> tokio::sync::MutexGuard<'static, ()> {
+        super::tests::EXPORT_ENV_MUTEX.lock().await
+    }
+
+    async fn lock_pdf_env() -> tokio::sync::MutexGuard<'static, ()> {
+        PDF_ENV_MUTEX.lock().await
+    }
+
+    #[tokio::test]
+    async fn adversarial_export_pdf_renderer_contract() {
+        let Some(h) = harness("export_pdf").await else {
+            return;
+        };
+        let _guard = lock_pdf_env().await;
+
+        // Local mock renderer: first call succeeds with a PDF, later calls
+        // fail — both branches of the renderer contract are asserted.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock_calls = calls.clone();
+        let mock = Router::new()
+            .route(
+                "/v1/pdf/render",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let calls = mock_calls.clone();
+                    async move {
+                        assert_eq!(body["template"], "analytics_export");
+                        assert!(body["data"]["summary"].is_object());
+                        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            (
+                                StatusCode::OK,
+                                [(header::CONTENT_TYPE, "application/pdf")],
+                                b"%PDF-1.4 mock".to_vec(),
+                            )
+                                .into_response()
+                        } else {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "renderer exploded").into_response()
+                        }
+                    }
+                }),
+            )
+            .with_state(());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+        std::env::set_var("PDF_RENDERER_URL", format!("http://{addr}"));
+
+        let now = Utc::now();
+        let uri = format!(
+            "/v1/analytics/export/pdf?from={}&to={}",
+            rfc(now - TimeDelta::days(1)),
+            rfc(now)
+        );
+        let (status, headers, bytes) = get_raw(&h, &uri).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            headers[header::CONTENT_TYPE].to_str().unwrap(),
+            "application/pdf"
+        );
+        assert!(headers[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment; filename=\"analytics-export-"));
+        assert_eq!(bytes, b"%PDF-1.4 mock");
+
+        // Renderer failure is surfaced as a 500, never as a fake document.
+        // (ApiError::Internal masks its message from clients; the proof the
+        // renderer was consulted is the mock's own call counter.)
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (status, _, body) = get_raw(&h, &uri).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body_json_code(&body), "INTERNAL_ERROR");
+
+        // Unreachable renderer: fail closed with a 500.
+        std::env::set_var("PDF_RENDERER_URL", "http://127.0.0.1:1");
+        let (status, _, body) = get_raw(&h, &uri).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body_json_code(&body), "INTERNAL_ERROR");
+
+        // Entitlement refusal happens before any renderer call.
+        std::env::set_var("PDF_RENDERER_URL", format!("http://{addr}"));
+        let mut basic = full_features();
+        basic["data_export"] = json!(false);
+        let (basic_tenant, basic_key) = tenant_with_key(&h.pool, basic, &["analytics:read"]).await;
+        let basic = Harness {
+            app: h.app.clone(),
+            pool: h.pool.clone(),
+            tenant_id: basic_tenant,
+            key: basic_key,
+        };
+        let (status, _, _) = get_raw(&basic, &uri).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        std::env::remove_var("PDF_RENDERER_URL");
+    }
+
+    // ── pure helpers: every arm, hostile values ─────────────────
+
+    #[test]
+    fn adversarial_analytics_pure_helper_edges() {
+        // safe_ratio never divides by zero and preserves sign of a negative
+        // numerator (no clamping, no NaN).
+        assert_eq!(safe_ratio(0, 0), 0.0);
+        assert_eq!(safe_ratio(5, 0), 0.0);
+        assert_eq!(safe_ratio(-5, 0), 0.0);
+        assert_eq!(safe_ratio(1, 2), 0.5);
+        assert_eq!(safe_ratio(-1, 2), -0.5);
+        assert_eq!(safe_ratio(i64::MAX, 1), i64::MAX as f64);
+
+        // CSV escaping: formula prefixes, quoting, embedded quotes/newlines.
+        assert_eq!(escape_csv(""), "");
+        assert_eq!(escape_csv("plain"), "plain");
+        assert_eq!(escape_csv("=1+1"), "'=1+1");
+        assert_eq!(escape_csv("+1"), "'+1");
+        assert_eq!(escape_csv("-1"), "'-1");
+        assert_eq!(escape_csv("@cmd"), "'@cmd");
+        // A leading TAB or CR is itself a formula-prefix hazard (spreadsheets
+        // strip it before evaluating the rest), and a leading space followed
+        // by a formula must be neutralised too. The earlier version trimmed
+        // first, so `"\tx"` slipped through unprefixed; the check now runs
+        // against the original value, matching billing.rs's
+        // `sanitize_csv_value`.
+        assert_eq!(escape_csv("\tx"), "'\tx");
+        assert_eq!(escape_csv("\rx"), "\"'\rx\"");
+        assert_eq!(escape_csv("\t=1+1"), "'\t=1+1");
+        assert_eq!(escape_csv("a,b"), "\"a,b\"");
+        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(
+            escape_csv("  =lead"),
+            "'  =lead",
+            "the prefix is added to the ORIGINAL value once trimming reveals it"
+        );
+        assert_eq!(escape_csv("line\nbreak"), "\"line\nbreak\"");
+
+        // Export keys/extensions are exact and case-sensitive.
+        let job = uuid::Uuid::nil();
+        assert_eq!(export_extension("json"), "json");
+        assert_eq!(export_extension("JSON"), "csv");
+        assert_eq!(export_extension(""), "csv");
+        assert_eq!(
+            export_object_key("tenant/../x", job, "json"),
+            format!("exports/tenant/../x_{job}.json")
+        );
+        assert_eq!(
+            export_file_name("exports/a/../b.json"),
+            "exports_a_.._b.json"
+        );
+        assert_eq!(export_file_name(""), "");
+
+        // Range resolution: exact 366-day boundary and an inverted range are
+        // both accepted unchanged (width is a positive-difference check only).
+        let from = analytics_earliest_from();
+        let (resolved_from, resolved_to) =
+            resolve_analytics_range(Some(from), Some(from + TimeDelta::days(366))).unwrap();
+        assert_eq!(resolved_from, from);
+        assert_eq!(resolved_to, from + TimeDelta::days(366));
+        let (resolved_from, resolved_to) =
+            resolve_analytics_range(Some(from), Some(from - TimeDelta::days(1))).unwrap();
+        assert_eq!(resolved_from, from);
+        assert!(resolved_to < resolved_from);
+        assert_eq!(
+            analytics_earliest_from().timestamp(),
+            1_577_836_800,
+            "2020-01-01T00:00:00Z"
+        );
+        assert!(resolve_analytics_range(Some(from), Some(from + TimeDelta::days(367))).is_err());
+
+        // Subject payload: trimming happens before the length/emptiness rules.
+        assert_eq!(
+            analyze_subject_line_payload("  hi  ")
+                .unwrap()
+                .score
+                .word_count,
+            1
+        );
+        let exactly_200 = "x".repeat(200);
+        assert!(analyze_subject_line_payload(&exactly_200).is_ok());
+        let over = "x".repeat(201);
+        assert!(analyze_subject_line_payload(&over).is_err());
+
+        // Query table: every interval maps to a static fragment.
+        for (interval, needle) in [
+            ("hour", "date_trunc('hour'"),
+            ("week", "date_trunc('week'"),
+            ("month", "date_trunc('month'"),
+            ("day", "date_trunc('day'"),
+            ("bogus", "date_trunc('day'"),
+        ] {
+            assert!(
+                volume_query_for_interval(interval).contains(needle),
+                "{interval}"
+            );
+        }
     }
 }

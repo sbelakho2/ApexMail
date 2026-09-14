@@ -340,3 +340,83 @@ mod tests {
         out
     }
 }
+
+#[cfg(test)]
+mod adversarial_cert_tests {
+    //! Certificate-loading failure modes: a missing/empty/unparseable PEM
+    //! must be an error (never a silent empty chain), and the alarm labels
+    //! the operator/metrics pipeline depends on must stay stable.
+
+    use super::*;
+
+    fn pem(der: &[u8]) -> String {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.push_str(std::str::from_utf8(chunk).unwrap());
+            out.push('\n');
+        }
+        out.push_str("-----END CERTIFICATE-----\n");
+        out
+    }
+
+    fn cert_der() -> Vec<u8> {
+        let params = rcgen::CertificateParams::new(vec!["mail.apexmail.ee".to_string()]).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        params.self_signed(&key).unwrap().der().as_ref().to_vec()
+    }
+
+    #[test]
+    fn alarm_labels_thresholds_and_levels_are_stable() {
+        for (alarm, threshold, label, error) in [
+            (CertExpiryAlarm::Days30, 30, "30d", false),
+            (CertExpiryAlarm::Days14, 14, "14d", false),
+            (CertExpiryAlarm::Days7, 7, "7d", false),
+            (CertExpiryAlarm::Day1, 1, "1d", true),
+        ] {
+            assert_eq!(alarm.threshold_days(), threshold);
+            assert_eq!(alarm.metric_label(), label);
+            assert_eq!(alarm.is_error(), error, "{alarm:?} level");
+        }
+        assert_eq!(CERT_EXPIRY_ALARM_THRESHOLDS_DAYS, [1, 7, 14, 30]);
+    }
+
+    #[test]
+    fn load_certificates_der_fails_closed_on_missing_empty_and_malformed_input() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("missing.pem");
+        let error = load_certificates_der(&missing).expect_err("missing file must fail");
+        assert!(format!("{error:#}").contains("cannot open certificate"));
+
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, "").unwrap();
+        let error = load_certificates_der(&empty).expect_err("empty PEM must fail");
+        assert!(
+            error.to_string().contains("no certificates found"),
+            "unexpected error: {error}"
+        );
+
+        let garbage = dir.path().join("garbage.pem");
+        std::fs::write(&garbage, "this is not a certificate\n").unwrap();
+        assert!(load_certificates_der(&garbage).is_err());
+
+        // A well-formed chain loads; the leaf is inspected.
+        let good = dir.path().join("good.pem");
+        std::fs::write(&good, pem(&cert_der())).unwrap();
+        let certs = load_certificates_der(&good).expect("valid PEM loads");
+        assert_eq!(certs.len(), 1);
+        let expiry = inspect_certificate_file(&good, chrono::Utc::now().timestamp()).unwrap();
+        assert!(expiry.not_after > expiry.not_before);
+    }
+
+    #[test]
+    fn inspect_certificate_der_rejects_non_certificate_bytes() {
+        let error = inspect_certificate_der(b"not a certificate", 0).unwrap_err();
+        assert!(
+            error.to_string().contains("invalid X.509"),
+            "unexpected error: {error}"
+        );
+    }
+}

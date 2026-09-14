@@ -739,3 +739,301 @@ mod tests {
         assert!(json.get("upgradeCount30d").is_none());
     }
 }
+
+// ─── Adversarial cross-tenant aggregation tests ────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    #[test]
+    fn revenue_normalization_and_cents_conversion_edges() {
+        // Half-up rounding on every yearly spelling.
+        assert_eq!(monthly_revenue_cents(Some("yearly"), 1, 25_000), 2_083);
+        assert_eq!(monthly_revenue_cents(Some("YEARLY"), 1, 25_000), 2_083);
+        assert_eq!(monthly_revenue_cents(Some("Year"), 1, 25_000), 2_083);
+        assert_eq!(monthly_revenue_cents(Some("monthly"), 1, 25_000), 1);
+        assert_eq!(monthly_revenue_cents(Some(""), 1, 25_000), 1);
+        assert_eq!(monthly_revenue_cents(None, 0, 11), 0);
+        // Exact divisibility must not gain a cent from the +6 rounding nudge.
+        assert_eq!(monthly_revenue_cents(Some("yearly"), 0, 12_000), 1_000);
+        assert_eq!(cents_to_dollars(12_345), 123.45);
+        assert_eq!(cents_to_dollars(0), 0.0);
+        assert_eq!(cents_to_dollars(-100), -1.0);
+    }
+
+    #[tokio::test]
+    async fn health_aggregates_seeded_sends_bounces_and_rates() {
+        let Some((state, pool)) = state_and_pool("adv_cross_tenant_health").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'cross-tenant adversarial', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        for i in 0..4 {
+            let status = if i < 2 { "delivered" } else { "bounced" };
+            sqlx::query(
+                "INSERT INTO messages (tenant_id, from_email, to_emails, status, created_at, updated_at)
+                 VALUES ($1, 'a@example.com', '[\"b@example.com\"]'::jsonb, $2, NOW(), NOW())",
+            )
+            .bind(&tenant)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed message");
+        }
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, 'adv-bounce-msg', 'bounced', 'b@example.com', NOW())",
+        )
+        .bind(format!("adv-evt-{}", uuid::Uuid::new_v4().simple()))
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed bounce event");
+
+        let Json(health) = get_cross_tenant_health(State(state.clone()), admin_auth())
+            .await
+            .expect("health");
+        assert!(health.total_tenants >= 1);
+        assert!(health.total_emails_sent >= 4);
+        assert!(health.total_emails_delivered >= 2);
+        assert!(health.total_bounces >= 1);
+        assert!(
+            (0.0..=1.0).contains(&health.overall_delivery_rate),
+            "a rate cannot exceed 1.0: {}",
+            health.overall_delivery_rate
+        );
+        assert!(
+            (0.0..=100.0).contains(&health.platform_health_score),
+            "score out of range: {}",
+            health.platform_health_score
+        );
+        assert!(health.bottom_5_tenants.len() <= 5);
+        if let Some(entry) = health
+            .bottom_5_tenants
+            .iter()
+            .find(|t| t.tenant_id == tenant)
+        {
+            assert_eq!(entry.emails_sent, 4);
+            assert_eq!(entry.emails_delivered, 2);
+            assert_eq!(entry.delivery_rate, 0.5);
+            assert_eq!(entry.bounce_count, 1);
+        }
+
+        // Scope gate: a non-wildcard key is refused.
+        let scoped = AuthUser {
+            scopes: vec!["analytics:read".into()],
+            ..admin_auth()
+        };
+        assert!(matches!(
+            get_cross_tenant_health(State(state.clone()), scoped).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        cleanup_cross_tenant(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn plans_aggregate_active_subscriptions_and_yearly_revenue() {
+        let Some((state, pool)) = state_and_pool("adv_cross_tenant_plans").await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let plan_name = format!("adv-plan-{tag}");
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'cross plans', $2, 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO plans (id, name, price_monthly, price_yearly, features)
+             VALUES ($1, $2, 5000, 60000, '{}'::jsonb)",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at)
+             VALUES ($1, $2, $3, 'active', 'yearly', NOW() - INTERVAL '60 days', NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("sub_adv_{tag}"))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed subscription");
+
+        let Json(plans) = get_cross_tenant_plans(State(state.clone()), admin_auth())
+            .await
+            .expect("plans");
+        assert!(plans.total_tenants >= 1);
+        assert!(!plans.notes.is_empty(), "omission notes are mandatory");
+        let entry = plans
+            .plans
+            .iter()
+            .find(|p| p.plan == plan_name)
+            .expect("seeded plan appears");
+        // 60_000 cents/year → 5_000 cents/month → $50.00, half-up.
+        assert_eq!(entry.monthly_revenue, 50.0);
+        assert_eq!(entry.active_subscriptions, 1);
+        assert!(entry.avg_lifetime_days > 0.0);
+        assert!(entry.upgrades_30d.is_none());
+        assert!(entry.downgrades_30d.is_none());
+        assert!(plans.total_revenue >= 50.0);
+        // Velocity is honestly omitted from the wire format.
+        let json = serde_json::to_value(&plans).unwrap();
+        assert!(json.get("velocity").is_none());
+        assert!(json.get("upgradeCount30d").is_none());
+
+        cleanup_cross_tenant(&pool, &tenant).await;
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+    }
+
+    #[tokio::test]
+    async fn growth_reports_seeded_signups_emails_churn_and_revenue() {
+        let Some((state, pool)) = state_and_pool("adv_cross_tenant_growth").await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let plan_name = format!("adv-growth-plan-{tag}");
+        let active = apexmail_lib::id::generate_id("", 26);
+        let churned = apexmail_lib::id::generate_id("", 26);
+        for (id, status) in [(&active, "active"), (&churned, "suspended")] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+                 VALUES ($1, 'cross growth', $2, $3, NOW(), NOW())",
+            )
+            .bind(id)
+            .bind(&plan_name)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+        }
+        sqlx::query(
+            "INSERT INTO plans (id, name, price_monthly, price_yearly, features)
+             VALUES ($1, $2, 1000, 12000, '{}'::jsonb)",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+        // One OLD active subscription (excluded from current-30d previous
+        // MRR) and one NEW one created today (drives positive growth).
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at)
+             VALUES ($1, $2, $3, 'active', 'monthly', NOW() - INTERVAL '90 days', NOW())",
+        )
+        .bind(&active)
+        .bind(format!("sub_old_{tag}"))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed old sub");
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, status, created_at, updated_at)
+             VALUES ($1, 'a@example.com', '[\"b@example.com\"]'::jsonb, 'delivered', NOW(), NOW())",
+        )
+        .bind(&active)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+
+        let Json(growth) = get_cross_tenant_growth(State(state.clone()), admin_auth())
+            .await
+            .expect("growth");
+        assert!(growth.total_emails_sent_daily >= 1);
+        assert!(growth.total_emails_sent_weekly >= 1);
+        assert!(growth.total_emails_sent_monthly >= 1);
+        assert!(growth.new_tenant_signups_daily >= 2);
+        assert!(growth.new_tenant_signups_weekly >= 2);
+        assert!(growth.new_tenant_signups_monthly >= 2);
+        assert!(growth.total_active_tenants >= 1);
+        assert!(growth.churned_tenants_count_30d >= 1);
+        assert!(growth.churn_rate > 0.0);
+        assert!(
+            growth.emails_timeline_daily.iter().any(|p| p.count >= 1),
+            "timeline reflects seeded sends"
+        );
+        assert!(
+            growth.signups_timeline_daily.iter().any(|p| p.count >= 2),
+            "timeline reflects seeded signups"
+        );
+        assert!(growth.platform_revenue_growth_rate.is_finite());
+
+        let scoped = AuthUser {
+            scopes: vec!["reports:read".into()],
+            ..admin_auth()
+        };
+        assert!(matches!(
+            get_cross_tenant_growth(State(state.clone()), scoped).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        cleanup_cross_tenant(&pool, &active).await;
+        cleanup_cross_tenant(&pool, &churned).await;
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+    }
+
+    async fn cleanup_cross_tenant(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM messages WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup messages");
+        sqlx::query("DELETE FROM stripe_subscriptions WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup subs");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup tenant");
+    }
+}

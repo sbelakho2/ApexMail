@@ -23,7 +23,7 @@ impl CampaignsRepo {
             "INSERT INTO campaigns \
              (id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at) \
              VALUES ($1, $2, $3, $4, $5, 'draft', $6, 0, NOW(), NOW()) \
-             RETURNING id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at"
+             RETURNING id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count::bigint AS sent_count, created_at, updated_at"
         )
         .bind(Uuid::new_v4())
         .bind(tenant_id)
@@ -42,7 +42,7 @@ impl CampaignsRepo {
         id: Uuid,
     ) -> Result<Option<Campaign>, sqlx::Error> {
         sqlx::query_as::<_, Campaign>(
-            "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+            "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count::bigint AS sent_count, created_at, updated_at \
              FROM campaigns WHERE id = $1 AND tenant_id = $2"
         )
             .bind(id)
@@ -61,7 +61,7 @@ impl CampaignsRepo {
         let limit = limit.clamp(1, 100);
         let offset = offset.clamp(0, 100_000);
         sqlx::query_as::<_, Campaign>(
-            "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+            "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count::bigint AS sent_count, created_at, updated_at \
              FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
         )
         .bind(tenant_id)
@@ -85,7 +85,7 @@ impl CampaignsRepo {
         match (cursor_created_at, cursor_id) {
             (Some(created_at), Some(id)) => {
                 sqlx::query_as::<_, Campaign>(
-                    "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+                    "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count::bigint AS sent_count, created_at, updated_at \
                      FROM campaigns WHERE tenant_id = $1 AND (created_at, id) < ($2, $3) \
                      ORDER BY created_at DESC, id DESC LIMIT $4"
                 )
@@ -99,7 +99,7 @@ impl CampaignsRepo {
             _ => {
                 // First page — no cursor
                 sqlx::query_as::<_, Campaign>(
-                    "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at \
+                    "SELECT id, tenant_id, name, subject, template_id, status, scheduled_at, sent_count::bigint AS sent_count, created_at, updated_at \
                      FROM campaigns WHERE tenant_id = $1 \
                      ORDER BY created_at DESC, id DESC LIMIT $2"
                 )

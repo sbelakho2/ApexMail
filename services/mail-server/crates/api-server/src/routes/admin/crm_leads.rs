@@ -158,7 +158,6 @@ mod tests {
     /// `last_contacted_at`) and failed with 42703 on every request. There was
     /// no test that EXECUTED them, so the drift went unnoticed. Executing the
     /// exact statement the handler runs is what closes that gap.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn crm_leads_query_executes_against_the_canonical_schema() {
         let Some(pool) = crate::test_db::canonical_pool("crm_leads_sql").await else {

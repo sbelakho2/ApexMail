@@ -300,8 +300,10 @@ pub(crate) async fn admin_transfer_domain(
     }
 
     // The receiving tenant must exist.
+    // `1::bigint`: sqlx cannot decode INT4 into i64, and a plain `SELECT 1`
+    // made every transfer to an EXISTING tenant fail with a database error.
     let target_exists: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1::text")
+        sqlx::query_scalar("SELECT 1::bigint FROM tenants WHERE id = $1::text")
             .bind(&body.to_tenant_id)
             .fetch_optional(&mut *tx)
             .await?;
@@ -804,5 +806,384 @@ mod tests {
             Some(key) => std::env::set_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY", key),
             None => std::env::remove_var("DKIM_PRIVATE_KEY_ENCRYPTION_KEY"),
         }
+    }
+}
+
+// ─── Adversarial transfer remediation tests ────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    const TEST_DKIM_KEY: &str = "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_adv_domains_00001".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    /// Serialise on the process-global DKIM env var and run the async body
+    /// on a current-thread runtime (guard held outside every await).
+    fn with_dkim_env(body: impl std::future::Future<Output = ()>) {
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            TEST_DKIM_KEY,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(body);
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    #[test]
+    fn typed_confirmation_is_exact() {
+        assert_eq!(expected_confirmation("example.com"), "transfer example.com");
+        assert_ne!(expected_confirmation("example.com"), "Transfer example.com");
+        assert_ne!(
+            expected_confirmation("example.com"),
+            "transfer  example.com"
+        );
+    }
+
+    #[test]
+    fn suggestion_requires_unverified_owner_plus_proven_dns_control() {
+        let proven = DnsControlEvidence::Proven {
+            dkim: true,
+            dmarc: false,
+        };
+        assert!(transfer_suggestion(false, &proven));
+        assert!(!transfer_suggestion(true, &proven), "verified owner wins");
+        assert!(!transfer_suggestion(false, &DnsControlEvidence::NotProven));
+        assert!(!transfer_suggestion(
+            false,
+            &DnsControlEvidence::Unavailable
+        ));
+        assert!(transfer_suggestion(
+            false,
+            &DnsControlEvidence::Proven {
+                dkim: false,
+                dmarc: true
+            }
+        ));
+        assert_eq!(proven.label(), "proven");
+        assert_eq!(DnsControlEvidence::NotProven.label(), "not_proven");
+        assert_eq!(DnsControlEvidence::Unavailable.label(), "unavailable");
+    }
+
+    #[test]
+    fn dmarc_detection_is_case_and_whitespace_tolerant_but_precise() {
+        assert!(txt_looks_like_dmarc("v=DMARC1; p=none"));
+        assert!(txt_looks_like_dmarc("  V=dmarc1;p=reject"));
+        assert!(!txt_looks_like_dmarc("v=spf1 include:example.com"));
+        assert!(!txt_looks_like_dmarc(""));
+        // A record that merely CONTAINS the tag is not a DMARC record.
+        assert!(!txt_looks_like_dmarc("x v=dmarc1"));
+    }
+
+    #[test]
+    fn dkim_rebind_requires_complete_material() {
+        with_dkim_env(async {
+            let old_aad = dkim_private_key_aad("ten_old", "dom_1");
+            let new_aad = dkim_private_key_aad("ten_new", "dom_1");
+            // Legacy plaintext PEM is encrypted under the new AAD.
+            let selector = Some("sel".to_string());
+            let plaintext =
+                Some("-----BEGIN PRIVATE KEY-----\nlegacy\n-----END PRIVATE KEY-----".to_string());
+            let rebound = rebind_dkim_material(&selector, &plaintext, &old_aad, &new_aad)
+                .expect("legacy material is carried");
+            assert_eq!(rebound.0, "sel");
+            assert!(is_encrypted_dkim_private_key(&rebound.1));
+            let decrypted =
+                decrypt_dkim_private_key(&rebound.1, &new_aad).expect("new AAD decrypts");
+            assert!(decrypted.contains("legacy"));
+
+            // Missing / blank selector or key → caller rotates instead.
+            assert!(rebind_dkim_material(&None, &plaintext, &old_aad, &new_aad).is_none());
+            assert!(
+                rebind_dkim_material(&Some("  ".into()), &plaintext, &old_aad, &new_aad).is_none()
+            );
+            assert!(rebind_dkim_material(&selector, &None, &old_aad, &new_aad).is_none());
+            assert!(
+                rebind_dkim_material(&selector, &Some(" ".into()), &old_aad, &new_aad).is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn transfer_request_deserialization_is_strict() {
+        let ok: AdminTransferDomainRequest = serde_json::from_str(
+            r#"{"domain":"example.com","toTenantId":"ten_x","confirmation":"transfer example.com"}"#,
+        )
+        .expect("camelCase request");
+        assert_eq!(ok.to_tenant_id, "ten_x");
+        assert!(serde_json::from_str::<AdminTransferDomainRequest>(
+            r#"{"domain":"x","toTenantId":"t","confirmation":"transfer x","extra":1}"#
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<TransferSuggestionQuery>(r#"{"domain":"x","evil":1}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn transfer_rejects_missing_domain_and_wrong_confirmation() {
+        with_dkim_env(async {
+            let Some(pool) = crate::test_db::optional_pg_pool("adv_admin_domains_validation").await
+            else {
+                return;
+            };
+            let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+            let empty = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: "   ".into(),
+                    to_tenant_id: "ten_x".into(),
+                    confirmation: "transfer ".into(),
+                }),
+            )
+            .await;
+            assert!(matches!(empty, Err(ApiError::BadRequest(_))));
+
+            for confirmation in ["transfer other.com", "", "Transfer example.com"] {
+                let resp = admin_transfer_domain(
+                    State(state.clone()),
+                    admin_auth(),
+                    Json(AdminTransferDomainRequest {
+                        domain: "example.com".into(),
+                        to_tenant_id: "ten_x".into(),
+                        confirmation: confirmation.into(),
+                    }),
+                )
+                .await;
+                assert!(
+                    matches!(resp, Err(ApiError::BadRequest(_))),
+                    "confirmation {confirmation:?} must be refused"
+                );
+            }
+
+            // Correct confirmation, unknown domain → 404.
+            let unknown = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: "definitely-not-registered-adv.example".into(),
+                    to_tenant_id: "ten_x".into(),
+                    confirmation: "transfer definitely-not-registered-adv.example".into(),
+                }),
+            )
+            .await;
+            assert!(matches!(unknown, Err(ApiError::NotFound(_))));
+
+            // Scope gate.
+            let mut no_scope = admin_auth();
+            no_scope.scopes = vec![];
+            let denied = admin_transfer_domain(
+                State(state.clone()),
+                no_scope,
+                Json(AdminTransferDomainRequest {
+                    domain: "whatever.example".into(),
+                    to_tenant_id: "ten_x".into(),
+                    confirmation: "transfer whatever.example".into(),
+                }),
+            )
+            .await;
+            assert!(matches!(denied, Err(ApiError::Forbidden(_))));
+        });
+    }
+
+    #[test]
+    fn transfer_success_conflict_and_quota_paths() {
+        with_dkim_env(async {
+            let Some(pool) = crate::test_db::optional_pg_pool("adv_admin_domains_transfer").await
+            else {
+                return;
+            };
+            let state = crate::app::test_support::test_state_over(pool.clone()).await;
+            let tag = uuid::Uuid::new_v4().simple().to_string();
+            let source = apexmail_lib::id::generate_id("", 26);
+            let target = apexmail_lib::id::generate_id("", 26);
+            let limited = apexmail_lib::id::generate_id("", 26);
+            let plan_unlimited = format!("adv-unlimited-{tag}");
+            let plan_one = format!("adv-one-{tag}");
+            for (tenant, plan) in [
+                (&source, "free"),
+                (&target, plan_unlimited.as_str()),
+                (&limited, plan_one.as_str()),
+            ] {
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+                     VALUES ($1, 'domains adversarial', $2, 'active', NOW(), NOW())
+                     ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(tenant)
+                .bind(plan)
+                .execute(&pool)
+                .await
+                .expect("seed tenant");
+            }
+            sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
+                .bind(apexmail_lib::id::generate_id("", 26))
+                .bind(&plan_unlimited)
+                .bind(serde_json::json!({"max_sending_domains": 5}).to_string())
+                .execute(&pool)
+                .await
+                .expect("seed unlimited plan");
+            sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
+                .bind(apexmail_lib::id::generate_id("", 26))
+                .bind(&plan_one)
+                .bind(serde_json::json!({"max_sending_domains": 1}).to_string())
+                .execute(&pool)
+                .await
+                .expect("seed one-domain plan");
+
+            let domain_name = format!("adv-transfer-{tag}.example");
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled)
+                 VALUES ($1, $2, $3, 'verified', true, false)",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(&source)
+            .bind(&domain_name)
+            .execute(&pool)
+            .await
+            .expect("seed domain");
+            // The limited tenant already owns one domain.
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled)
+                 VALUES ($1, $2, $3, 'verified', true, false)",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(&limited)
+            .bind(format!("taken-{tag}.example"))
+            .execute(&pool)
+            .await
+            .expect("seed limited domain");
+
+            // Transferring to the CURRENT owner conflicts.
+            let conflict = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: domain_name.clone(),
+                    to_tenant_id: source.clone(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await;
+            assert!(matches!(conflict, Err(ApiError::Conflict(_))));
+
+            // Unknown target tenant → 404.
+            let ghost = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: domain_name.clone(),
+                    to_tenant_id: "no-such-tenant".into(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await;
+            assert!(matches!(ghost, Err(ApiError::NotFound(_))));
+
+            // Target quota reached → 403 (free-form plans row, one domain).
+            let quota = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: domain_name.clone(),
+                    to_tenant_id: limited.clone(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await;
+            assert!(
+                matches!(quota, Err(ApiError::Forbidden(_))),
+                "quota must refuse, got {quota:?}"
+            );
+
+            // Success: ownership moves, verification resets, key rotates.
+            let (status, Json(transferred)) = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: format!("  {domain_name}  "),
+                    to_tenant_id: target.clone(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await
+            .expect("transfer");
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(transferred.from_tenant_id, source);
+            assert_eq!(transferred.to_tenant_id, target);
+            assert_eq!(transferred.status, "pending");
+            assert!(transferred.dkim_rotated, "no carryable key → rotate");
+            let (owner, verified, dkim_enabled, selector): (String, bool, bool, Option<String>) =
+                sqlx::query_as(
+                    "SELECT tenant_id, verified, dkim_enabled, dkim_selector FROM domains WHERE lower(name) = lower($1)",
+                )
+                .bind(&domain_name)
+                .fetch_one(&pool)
+                .await
+                .expect("transferred row");
+            assert_eq!(owner, target);
+            assert!(!verified, "verification resets for the new owner");
+            assert!(!dkim_enabled);
+            assert!(selector.unwrap_or_default().starts_with("am-"));
+
+            // A second transfer back now sees the NEW owner (and conflicts
+            // when asked to move it to itself again).
+            let again = admin_transfer_domain(
+                State(state.clone()),
+                admin_auth(),
+                Json(AdminTransferDomainRequest {
+                    domain: domain_name.clone(),
+                    to_tenant_id: target.clone(),
+                    confirmation: format!("transfer {domain_name}"),
+                }),
+            )
+            .await;
+            assert!(matches!(again, Err(ApiError::Conflict(_))));
+
+            // Cleanup.
+            for name in [&domain_name, &format!("taken-{tag}.example")] {
+                sqlx::query("DELETE FROM domains WHERE lower(name) = lower($1)")
+                    .bind(name)
+                    .execute(&pool)
+                    .await
+                    .expect("cleanup domain");
+            }
+            for plan in [&plan_unlimited, &plan_one] {
+                sqlx::query("DELETE FROM plans WHERE name = $1")
+                    .bind(plan)
+                    .execute(&pool)
+                    .await
+                    .expect("cleanup plan");
+            }
+            sqlx::query("DELETE FROM tenants WHERE id = ANY($1)")
+                .bind(vec![source, target, limited])
+                .execute(&pool)
+                .await
+                .expect("cleanup tenants");
+        });
     }
 }

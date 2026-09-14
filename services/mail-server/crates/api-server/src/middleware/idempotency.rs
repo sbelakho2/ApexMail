@@ -1346,3 +1346,465 @@ mod tests {
         assert!(task.is_finished(), "renewal must stop once the guard drops");
     }
 }
+
+// ─── Adversarial end-to-end middleware tests ───────────────────
+//
+// These drive the REAL `idempotency_middleware` through `tower::oneshot`
+// over a mini-router (the only way to exercise the Redis claim/store/replay
+// paths end to end). Redis-backed cases soft-skip when TEST_REDIS_URL is
+// absent or unreachable, per the workspace convention.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use axum::body::Bytes;
+    use axum::extract::State as AxumState;
+    use axum::http::Request;
+    use axum::middleware::Next;
+    use axum::response::IntoResponse;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Echo,
+        Fail,
+        BigResponse,
+        Slow,
+    }
+
+    #[derive(Clone)]
+    struct Ctl {
+        counter: Arc<AtomicUsize>,
+        mode: Mode,
+    }
+
+    async fn handler(AxumState(ctl): AxumState<Ctl>, body: Bytes) -> axum::response::Response {
+        ctl.counter.fetch_add(1, Ordering::SeqCst);
+        match ctl.mode {
+            Mode::Echo => (StatusCode::OK, body).into_response(),
+            Mode::Fail => (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response(),
+            Mode::BigResponse => (StatusCode::OK, vec![b'x'; 1_500_000]).into_response(),
+            Mode::Slow => {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                (StatusCode::OK, body).into_response()
+            }
+        }
+    }
+
+    /// Inject a per-request AuthUser from a header before the idempotency
+    /// layer runs (in production `require_auth` does this).
+    async fn inject_auth(mut req: Request<Body>, next: Next) -> Response {
+        let tenant = req
+            .headers()
+            .get("x-test-tenant")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("ten_a")
+            .to_string();
+        req.extensions_mut().insert(AuthUser {
+            tenant_id: tenant,
+            user_id: None,
+            api_key_id: Some("key_adv_idem".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        });
+        next.run(req).await
+    }
+
+    async fn build(mode: Mode) -> (Router, Arc<AtomicUsize>, AppState) {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let ctl = Ctl {
+            counter: counter.clone(),
+            mode,
+        };
+        let app = Router::new()
+            .route("/x", post(handler))
+            .route("/safe", get(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                idempotency_middleware,
+            ))
+            .layer(axum::middleware::from_fn(inject_auth))
+            .with_state(ctl);
+        (app, counter, state)
+    }
+
+    async fn redis_ready(state: &AppState) -> bool {
+        match state.redis.get().await {
+            Ok(mut conn) => {
+                let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
+                    .query_async(&mut *conn)
+                    .await;
+                pong.map(|p| p == "PONG").unwrap_or(false)
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn request(method: &str, uri: &str, key: &str, tenant: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("idempotency-key", key)
+            .header("x-test-tenant", tenant)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn unique_key(label: &str) -> String {
+        format!("adv-idem-{label}-{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// The response store happens on a background task after the body
+    /// streams; poll until the record lands so assertions target the REPLAY
+    /// path rather than the in-flight fence.
+    async fn wait_cached(state: &AppState, cache_key: &str) -> bool {
+        for _ in 0..200 {
+            if lookup_cached(state, cache_key).await.is_some() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn same_key_same_body_replays_the_stored_response() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let key = unique_key("replay");
+        let first = app
+            .clone()
+            .oneshot(request("POST", "/x", &key, "ten_adv_1", r#"{"a":1}"#))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = body_string(first).await;
+        assert!(
+            wait_cached(
+                &state,
+                &cache_key_for("ten_adv_1", &Method::POST, "/x", &key)
+            )
+            .await,
+            "the response must reach the cache"
+        );
+
+        let second = app
+            .oneshot(request("POST", "/x", &key, "ten_adv_1", r#"{"a":1}"#))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_body = body_string(second).await;
+        assert_eq!(first_body, second_body, "replayed bytes must match");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "handler must run exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_key_different_body_is_a_409_and_never_replays() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("conflict");
+        let first = app
+            .clone()
+            .oneshot(request("POST", "/x", &key, "ten_adv_2", r#"{"amount":1}"#))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(
+            wait_cached(
+                &state,
+                &cache_key_for("ten_adv_2", &Method::POST, "/x", &key)
+            )
+            .await,
+            "the response must reach the cache"
+        );
+
+        let second = app
+            .oneshot(request(
+                "POST",
+                "/x",
+                &key,
+                "ten_adv_2",
+                r#"{"amount":999}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+        let body = body_string(second).await;
+        assert!(
+            body.contains("different request body"),
+            "conflict reason: {body}"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "no second effect");
+    }
+
+    #[tokio::test]
+    async fn safe_reads_bypass_the_cache_entirely() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("safe");
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(request("GET", "/safe", &key, "ten_adv_3", ""))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn keys_are_tenant_scoped() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("tenant");
+        let first = app
+            .clone()
+            .oneshot(request("POST", "/x", &key, "ten_adv_a", r#"{"t":"a"}"#))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        // The same key from ANOTHER tenant must not collide with or leak the
+        // first tenant's cached response.
+        let second = app
+            .oneshot(request("POST", "/x", &key, "ten_adv_b", r#"{"t":"b"}"#))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let body = body_string(second).await;
+        assert!(body.contains(r#""t":"b""#));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn server_errors_are_not_cached() {
+        let (app, counter, state) = build(Mode::Fail).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("5xx");
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(request("POST", "/x", &key, "ten_adv_5xx", "{}"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "a 5xx must not be replayed from the cache"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_duplicates_produce_exactly_one_effect() {
+        let (app, counter, state) = build(Mode::Slow).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("concurrent");
+        let a = tokio::spawn({
+            let app = app.clone();
+            let key = key.clone();
+            async move {
+                app.oneshot(request("POST", "/x", &key, "ten_adv_c", "{}"))
+                    .await
+                    .unwrap()
+            }
+        });
+        let b = tokio::spawn({
+            let app = app.clone();
+            let key = key.clone();
+            async move {
+                app.oneshot(request("POST", "/x", &key, "ten_adv_c", "{}"))
+                    .await
+                    .unwrap()
+            }
+        });
+        let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+        let statuses = [ra.status(), rb.status()];
+        assert!(
+            statuses.contains(&StatusCode::OK),
+            "one duplicate must win: {statuses:?}"
+        );
+        assert!(
+            statuses.contains(&StatusCode::CONFLICT),
+            "the other duplicate must be fenced: {statuses:?}"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_claim_returns_409_with_retry_after() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("inflight");
+        let cache_key = cache_key_for("ten_adv_inflight", &Method::POST, "/x", &key);
+        let mut conn = state.redis.get().await.expect("redis");
+        let _: Result<(), _> = conn.set(&cache_key, "someone-elses-token").await;
+
+        let resp = app
+            .oneshot(request("POST", "/x", &key, "ten_adv_inflight", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "handler must not run");
+        let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+            .arg(&cache_key)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn legacy_unbound_records_are_evicted_and_reexecuted() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("legacy");
+        let cache_key = cache_key_for("ten_adv_legacy", &Method::POST, "/x", &key);
+        let legacy = serde_json::json!({
+            "status": 200,
+            "headers": [],
+            "body": "",
+            "user_id": null
+        });
+        let mut conn = state.redis.get().await.expect("redis");
+        let _: Result<(), _> = conn.set(&cache_key, legacy.to_string()).await;
+
+        let resp = app
+            .oneshot(request("POST", "/x", &key, "ten_adv_legacy", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "an unbound legacy record must be a miss, not a replay"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+            .arg(&cache_key)
+            .query_async(&mut *conn)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn oversized_response_streams_through_uncached() {
+        let (app, counter, state) = build(Mode::BigResponse).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("bigresp");
+        let first = app
+            .clone()
+            .oneshot(request("POST", "/x", &key, "ten_adv_big", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(first.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(bytes.len(), 1_500_000, "the full body is forwarded");
+
+        let second = app
+            .oneshot(request("POST", "/x", &key, "ten_adv_big", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "an uncacheable body must not 409 or replay"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_request_body_is_413_before_the_handler() {
+        let (app, counter, state) = build(Mode::Echo).await;
+        if !redis_ready(&state).await {
+            return;
+        }
+        let key = unique_key("bigreq");
+        let big = "x".repeat(MAX_HASH_BODY_SIZE + 1);
+        let resp = app
+            .oneshot(request("POST", "/x", &key, "ten_adv_bigreq", &big))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn redis_outage_proceeds_unclaimed_twice() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let state =
+            crate::app::test_support::test_state_over_lazy_with_redis("redis://127.0.0.1:1").await;
+        let ctl = Ctl {
+            counter: counter.clone(),
+            mode: Mode::Echo,
+        };
+        let app = Router::new()
+            .route("/x", post(handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                idempotency_middleware,
+            ))
+            .layer(axum::middleware::from_fn(inject_auth))
+            .with_state(ctl);
+        let key = unique_key("noredis");
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(request("POST", "/x", &key, "ten_adv_noredis", "{}"))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Redis being down must not fail the request"
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "without Redis every request executes (best-effort semantics)"
+        );
+    }
+}

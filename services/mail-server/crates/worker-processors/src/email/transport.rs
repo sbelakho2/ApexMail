@@ -2631,3 +2631,87 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ses_disposition_tests {
+    //! Only address-proving SES failures may suppress a recipient tenant-wide;
+    //! account/configuration states must dead-letter or retry WITHOUT ever
+    //! claiming the mailbox is bad. This pins the typed mapping the email
+    //! processor consumes.
+
+    use super::*;
+
+    fn classify(code: Option<&str>, status: Option<u16>) -> ProcessorError {
+        SesTransport::ses_error_to_processor_error(code, status, "sdk message")
+    }
+
+    fn ses_flags(error: &ProcessorError) -> (bool, bool) {
+        match error {
+            ProcessorError::Ses {
+                permanent,
+                address_proving,
+                ..
+            } => (*permanent, *address_proving),
+            other => panic!("expected a Ses error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn throttle_codes_and_429_are_rate_limited_never_terminal() {
+        for (code, status) in [
+            (Some("Throttling"), None),
+            (Some("ThrottlingException"), None),
+            (Some("TooManyRequestsException"), None),
+            (Some("LimitExceededException"), None),
+            (None, Some(429)),
+        ] {
+            let error = classify(code, status);
+            assert!(
+                matches!(error, ProcessorError::RateLimited(_)),
+                "{code:?}/{status:?} must be RateLimited, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_address_shaped_failures_are_address_proving() {
+        for code in [
+            "MessageRejected",
+            "MailboxDoesNotExist",
+            "MailboxDoesNotExistException",
+            "InvalidRecipientException",
+        ] {
+            let (permanent, address_proving) = ses_flags(&classify(Some(code), Some(400)));
+            assert!(permanent, "{code} is terminal for this message");
+            assert!(
+                address_proving,
+                "{code} proves the mailbox is bad and may suppress"
+            );
+        }
+
+        // Account/configuration states are permanent for THIS message but
+        // never address-proving: suppressing here would silence valid
+        // recipients for the whole tenant.
+        for code in ["NotFoundException", "SendingPausedException"] {
+            let (permanent, address_proving) = ses_flags(&classify(Some(code), Some(400)));
+            assert!(permanent, "{code} is terminal");
+            assert!(
+                !address_proving,
+                "{code} says nothing about the mailbox and must never suppress"
+            );
+        }
+
+        // Repairable account states and signal-less failures retry.
+        for (code, status) in [
+            (Some("AccountSuspendedException"), Some(400)),
+            (Some("MailFromDomainNotVerifiedException"), Some(400)),
+            (Some("ValidationException"), Some(400)),
+            (None, Some(500)),
+            (None, None),
+        ] {
+            let (permanent, address_proving) = ses_flags(&classify(code, status));
+            assert!(!permanent, "{code:?}/{status:?} must retry");
+            assert!(!address_proving, "{code:?}/{status:?} must never suppress");
+        }
+    }
+}

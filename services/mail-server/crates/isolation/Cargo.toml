@@ -40,6 +40,9 @@ apexmail-lib = { path = "../apexmail-lib" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# In-process HTTP tests drive the real axum Router through tower::ServiceExt
+# (same pattern as the ha/enterprise route tests).
+tower = { workspace = true, features = ["util"] }
 
 # DB-backed tests bootstrap through the REAL production migrator (audit F01):
 # a green test means the code works against the deploy-time schema.

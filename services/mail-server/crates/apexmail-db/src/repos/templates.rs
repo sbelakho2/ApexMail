@@ -50,7 +50,12 @@ impl TemplatesRepo {
     }
 
     /// List templates for a tenant with pagination.
-    /// #224:Added limit/offset and excluded html_body for listing (use find_by_id for full)
+    ///
+    /// #224:Added limit/offset. The projection must carry every column the
+    /// `Template` row type requires (`html_body` is a non-Option String):
+    /// leaving it out made every listing fail with
+    /// `ColumnNotFound("html_body")` while `find_by_id` worked, so callers
+    /// silently saw zero templates.
     pub async fn list(
         pool: &PgPool,
         tenant_id: &str,
@@ -60,7 +65,7 @@ impl TemplatesRepo {
         let limit = limit.clamp(1, 100);
         let offset = offset.max(0);
         sqlx::query_as::<_, Template>(
-            "SELECT id, tenant_id, name, subject, version, status, created_at, updated_at \
+            "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
              FROM templates WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
         )
         .bind(tenant_id)
@@ -84,7 +89,7 @@ impl TemplatesRepo {
         match (cursor_updated_at, cursor_id) {
             (Some(updated_at), Some(id)) => {
                 sqlx::query_as::<_, Template>(
-                    "SELECT id, tenant_id, name, subject, version, status, created_at, updated_at \
+                    "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
                      FROM templates WHERE tenant_id = $1 AND (updated_at, id) < ($2, $3) \
                      ORDER BY updated_at DESC, id DESC LIMIT $4",
                 )
@@ -98,7 +103,7 @@ impl TemplatesRepo {
             _ => {
                 // First page — no cursor
                 sqlx::query_as::<_, Template>(
-                    "SELECT id, tenant_id, name, subject, version, status, created_at, updated_at \
+                    "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
                      FROM templates WHERE tenant_id = $1 \
                      ORDER BY updated_at DESC, id DESC LIMIT $2",
                 )

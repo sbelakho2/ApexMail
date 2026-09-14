@@ -1032,3 +1032,645 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 }
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// Secrets protect live credentials: the value must never leak into a list or
+// audit response, access control must be enforced at every level, expiry and
+// revocation must fail closed, and a tampered ciphertext must never decrypt.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+
+    async fn manager(suffix: &str) -> Option<(PgPool, SecretManager)> {
+        let pool = test_support::canonical_pool(
+            &format!("secrets_{suffix}"),
+            &format!("secrets_{suffix}"),
+        )
+        .await?;
+        test_support::ensure_kdf_salt();
+        let manager = SecretManager::new(
+            pool.clone(),
+            SecretsConfig {
+                encryption_key: "unit-master-key-0123456789abcdef".into(),
+                rotation_days: 90,
+                max_versions_to_keep: 2,
+            },
+        )
+        .expect("manager");
+        Some((pool, manager))
+    }
+
+    async fn create(svc: &SecretManager, tenant: &str, name: &str, value: &str) -> Secret {
+        svc.create_secret(&SecretCreateInput {
+            tenant_id: tenant.into(),
+            name: name.into(),
+            secret_type: SecretType::ApiKey,
+            value: Some(value.into()),
+            created_by: "owner@apexmail.ee".into(),
+            rotation_schedule: None,
+            expires_at: None,
+        })
+        .await
+        .expect("create")
+    }
+
+    #[tokio::test]
+    async fn lifecycle_keeps_plaintext_out_of_metadata_and_prunes_versions() {
+        let Some((pool, svc)) = manager("lifecycle").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let plaintext = "am_live_supersecret_value_0123456789";
+        let secret = create(&svc, &tenant, "primary-api-key", plaintext).await;
+
+        // The stored form is ciphertext, not the value.
+        assert_ne!(secret.encrypted_value, plaintext);
+        assert!(!secret.encrypted_value.contains(plaintext));
+
+        // list() must never carry the plaintext (metadata + ciphertext only).
+        let listed = svc.list_secrets(&tenant, None, 100, 0).await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, secret.id);
+        assert!(!listed[0].encrypted_value.contains(plaintext));
+
+        // The owner can read the value back exactly.
+        let (_, value) = svc
+            .get_secret(&secret.id, "owner@apexmail.ee")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(value, plaintext);
+
+        // Rotations bump the version and prune old versions to the cap.
+        let (rotated, new_value) = svc
+            .rotate_secret(&secret.id, "owner@apexmail.ee", Some("rotated-value-1"))
+            .await
+            .expect("rotate");
+        assert_eq!(rotated.version, 2);
+        assert_eq!(new_value, "rotated-value-1");
+        assert!(rotated.last_rotated_at.is_some());
+        svc.rotate_secret(&secret.id, "owner@apexmail.ee", Some("rotated-value-2"))
+            .await
+            .expect("rotate 2");
+        svc.rotate_secret(&secret.id, "owner@apexmail.ee", Some("rotated-value-3"))
+            .await
+            .expect("rotate 3");
+
+        let history = svc
+            .get_version_history(&secret.id, "owner@apexmail.ee")
+            .await
+            .expect("history");
+        let versions: Vec<i32> = history.iter().map(|(v, _)| *v).collect();
+        assert_eq!(versions, vec![4, 3], "only max_versions_to_keep survive");
+        // History is newest-first.
+        assert!(history[0].1 >= history[1].1);
+
+        // Rollback restores the value of the requested version exactly.
+        let rolled = svc
+            .rollback_to_version(&secret.id, 3, "owner@apexmail.ee")
+            .await
+            .expect("rollback");
+        assert_eq!(rolled.version, 3);
+        let (_, value) = svc
+            .get_secret(&secret.id, "owner@apexmail.ee")
+            .await
+            .expect("read")
+            .expect("present");
+        assert_eq!(value, "rotated-value-2");
+
+        // Rolling back to a pruned version is an explicit error.
+        let err = svc
+            .rollback_to_version(&secret.id, 1, "owner@apexmail.ee")
+            .await
+            .expect_err("pruned version must not resurrect");
+        assert!(err.contains("Version not found"), "{err}");
+
+        // The access log records every operation without the value.
+        let actions: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, user_id FROM secret_access_log WHERE secret_id = $1
+             ORDER BY id",
+        )
+        .bind(&secret.id)
+        .fetch_all(&pool)
+        .await
+        .expect("access log");
+        let names: Vec<&str> = actions.iter().map(|(a, _)| a.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["read", "rotate", "rotate", "rotate", "rollback", "read"]
+        );
+        assert!(actions.iter().all(|(_, user)| user == "owner@apexmail.ee"));
+    }
+
+    #[tokio::test]
+    async fn access_control_is_enforced_by_level_expiry_and_revocation() {
+        let Some((_pool, svc)) = manager("access").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let secret = create(&svc, &tenant, "smtp-password", "hunter2-correct-horse").await;
+
+        // A stranger has no access at all: even reads are denied.
+        assert!(!svc
+            .check_access(&secret.id, "stranger@other.test", AccessLevel::Read)
+            .await
+            .expect("check"));
+        let err = svc
+            .get_secret(&secret.id, "stranger@other.test")
+            .await
+            .expect_err("stranger read");
+        assert!(err.contains("Access denied"), "{err}");
+        assert!(svc
+            .update_secret(
+                &secret.id,
+                "stranger@other.test",
+                &SecretUpdateInput {
+                    name: None,
+                    rotation_schedule: None,
+                    expires_at: None,
+                }
+            )
+            .await
+            .is_err());
+        assert!(svc
+            .delete_secret(&secret.id, "stranger@other.test")
+            .await
+            .is_err());
+        assert!(svc
+            .rotate_secret(&secret.id, "stranger@other.test", None)
+            .await
+            .is_err());
+        assert!(svc
+            .grant_access(
+                &secret.id,
+                "third@other.test",
+                AccessLevel::Admin,
+                "stranger@other.test",
+                None
+            )
+            .await
+            .is_err());
+        assert!(svc
+            .revoke_access(&secret.id, "owner@apexmail.ee", "stranger@other.test")
+            .await
+            .is_err());
+
+        // Read-only grants can read, but not write, rotate or delete.
+        svc.grant_access(
+            &secret.id,
+            "reader@apexmail.ee",
+            AccessLevel::Read,
+            "owner@apexmail.ee",
+            None,
+        )
+        .await
+        .expect("grant read");
+        assert!(svc
+            .get_secret(&secret.id, "reader@apexmail.ee")
+            .await
+            .expect("read")
+            .is_some());
+        assert!(svc
+            .rotate_secret(&secret.id, "reader@apexmail.ee", Some("x"))
+            .await
+            .is_err());
+        assert!(svc
+            .delete_secret(&secret.id, "reader@apexmail.ee")
+            .await
+            .is_err());
+
+        // An expired grant is no grant (the DB clock decides).
+        svc.grant_access(
+            &secret.id,
+            "expired@apexmail.ee",
+            AccessLevel::Admin,
+            "owner@apexmail.ee",
+            Some(Utc::now() - Duration::seconds(5)),
+        )
+        .await
+        .expect("grant expired");
+        assert!(!svc
+            .check_access(&secret.id, "expired@apexmail.ee", AccessLevel::Read)
+            .await
+            .expect("check"));
+
+        // Revocation takes effect immediately for a previously valid grant.
+        svc.grant_access(
+            &secret.id,
+            "temp@apexmail.ee",
+            AccessLevel::Write,
+            "owner@apexmail.ee",
+            None,
+        )
+        .await
+        .expect("grant write");
+        svc.rotate_secret(&secret.id, "temp@apexmail.ee", Some("temp-rotation"))
+            .await
+            .expect("write allowed");
+        svc.revoke_access(&secret.id, "temp@apexmail.ee", "owner@apexmail.ee")
+            .await
+            .expect("revoke");
+        let err = svc
+            .rotate_secret(&secret.id, "temp@apexmail.ee", Some("nope"))
+            .await
+            .expect_err("revoked must fail");
+        assert!(err.contains("Access denied"), "{err}");
+        // Re-granting the same user revives the row rather than duplicating it.
+        svc.grant_access(
+            &secret.id,
+            "temp@apexmail.ee",
+            AccessLevel::Write,
+            "owner@apexmail.ee",
+            None,
+        )
+        .await
+        .expect("regrant");
+        svc.rotate_secret(&secret.id, "temp@apexmail.ee", Some("re-granted"))
+            .await
+            .expect("write allowed after regrant");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM secret_access WHERE secret_id = $1 AND user_id = 'temp@apexmail.ee'",
+        )
+        .bind(&secret.id)
+        .fetch_one(&_pool)
+        .await
+        .expect("count");
+        assert_eq!(rows, 1, "grant/revoke must not duplicate access rows");
+    }
+
+    #[tokio::test]
+    async fn expiry_refuses_reads_and_writes_fail_closed() {
+        let Some((pool, svc)) = manager("expiry").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let secret = create(&svc, &tenant, "expiring", "value-that-expires").await;
+        sqlx::query("UPDATE secrets SET expires_at = NOW() - INTERVAL '1 hour' WHERE id = $1")
+            .bind(&secret.id)
+            .execute(&pool)
+            .await
+            .expect("expire");
+        let err = svc
+            .get_secret(&secret.id, "owner@apexmail.ee")
+            .await
+            .expect_err("expired read must fail");
+        assert!(err.contains("expired"), "{err}");
+        // The metadata-only read (fetch) still works for auditors.
+        assert!(svc
+            .get_version_history(&secret.id, "owner@apexmail.ee")
+            .await
+            .is_ok());
+
+        // Metadata update can extend the expiry and restore reads.
+        let updated = svc
+            .update_secret(
+                &secret.id,
+                "owner@apexmail.ee",
+                &SecretUpdateInput {
+                    name: Some("expiring-renamed".into()),
+                    rotation_schedule: Some(RotationSchedule {
+                        interval_days: 30,
+                        auto_rotate: true,
+                        notify_before_days: 7,
+                    }),
+                    expires_at: Some(Utc::now() + Duration::days(1)),
+                },
+            )
+            .await
+            .expect("update");
+        assert_eq!(updated.name, "expiring-renamed");
+        assert!(updated.next_rotation_at.is_some());
+        assert_eq!(
+            updated.rotation_schedule.as_ref().map(|r| r.interval_days),
+            Some(30)
+        );
+        assert!(svc
+            .get_secret(&secret.id, "owner@apexmail.ee")
+            .await
+            .expect("read after extension")
+            .is_some());
+
+        // A corrupt rotation_schedule in the row degrades to None rather than
+        // poisoning every read of the secret.
+        sqlx::query("UPDATE secrets SET rotation_schedule = '\"garbage\"'::jsonb WHERE id = $1")
+            .bind(&secret.id)
+            .execute(&pool)
+            .await
+            .expect("corrupt schedule");
+        let listed = svc.list_secrets(&tenant, None, 10, 0).await.expect("list");
+        assert!(listed[0].rotation_schedule.is_none());
+
+        // An unknown secret type is an explicit error, never a coerced type.
+        sqlx::query("UPDATE secrets SET type = 'totally_unknown' WHERE id = $1")
+            .bind(&secret.id)
+            .execute(&pool)
+            .await
+            .expect("corrupt type");
+        let err = svc
+            .list_secrets(&tenant, None, 10, 0)
+            .await
+            .expect_err("unknown type must be reported");
+        assert!(err.contains("Unknown secret type"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tampered_ciphertext_in_every_region_fails_closed() {
+        let Some((pool, svc)) = manager("tamper").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let secret = create(&svc, &tenant, "tamper-me", "original-secret-value").await;
+
+        let original = secret.encrypted_value.clone();
+        let bytes = B64.decode(&original).expect("base64");
+        assert!(bytes.len() >= 12 + 16, "nonce + ciphertext+tag");
+
+        // Flip a bit in the nonce, in the ciphertext body, and in the tag.
+        for (label, index) in [
+            ("nonce", 0usize),
+            ("nonce-last", 11),
+            ("ciphertext", 12),
+            ("tag", bytes.len() - 1),
+        ] {
+            let mut tampered = bytes.clone();
+            tampered[index] ^= 0x01;
+            sqlx::query("UPDATE secrets SET encrypted_value = $1 WHERE id = $2")
+                .bind(B64.encode(&tampered))
+                .bind(&secret.id)
+                .execute(&pool)
+                .await
+                .expect("tamper");
+            let err = svc
+                .get_secret(&secret.id, "owner@apexmail.ee")
+                .await
+                .expect_err(&format!("{label} tamper must fail closed"));
+            assert!(
+                err.contains("Decryption failed") || err.contains("too short"),
+                "{label}: {err}"
+            );
+        }
+
+        // Truncation/empty payloads are refused, not decoded as empty secrets.
+        for bad in ["", &original[..8], "!!!not-base64!!!"] {
+            sqlx::query("UPDATE secrets SET encrypted_value = $1 WHERE id = $2")
+                .bind(bad)
+                .bind(&secret.id)
+                .execute(&pool)
+                .await
+                .expect("corrupt");
+            assert!(
+                svc.get_secret(&secret.id, "owner@apexmail.ee")
+                    .await
+                    .is_err(),
+                "value {bad:?} must not decrypt"
+            );
+        }
+
+        // A different master key can never decrypt this secret's ciphertext.
+        sqlx::query("UPDATE secrets SET encrypted_value = $1 WHERE id = $2")
+            .bind(&original)
+            .bind(&secret.id)
+            .execute(&pool)
+            .await
+            .expect("restore");
+        test_support::ensure_kdf_salt();
+        let other = SecretManager::new(
+            pool.clone(),
+            SecretsConfig {
+                encryption_key: "a-completely-different-master".into(),
+                rotation_days: 90,
+                max_versions_to_keep: 2,
+            },
+        )
+        .expect("other manager");
+        let err = other
+            .get_secret(&secret.id, "owner@apexmail.ee")
+            .await
+            .expect_err("wrong key must fail");
+        assert!(err.contains("Decryption failed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn rotation_scan_only_rotates_due_auto_schedules() {
+        let Some((pool, svc)) = manager("rotation").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let due_auto = create(&svc, &tenant, "due-auto", "old-1").await;
+        let due_manual = create(&svc, &tenant, "due-manual", "old-2").await;
+        let future_auto = create(&svc, &tenant, "future-auto", "old-3").await;
+
+        let schedule = |auto_rotate: bool| RotationSchedule {
+            interval_days: 90,
+            auto_rotate,
+            notify_before_days: 7,
+        };
+        sqlx::query(
+            "UPDATE secrets SET rotation_schedule = $1, next_rotation_at = NOW() - INTERVAL '1 day'
+             WHERE id = $2",
+        )
+        .bind(serde_json::to_value(schedule(true)).unwrap())
+        .bind(&due_auto.id)
+        .execute(&pool)
+        .await
+        .expect("due auto");
+        sqlx::query(
+            "UPDATE secrets SET rotation_schedule = $1, next_rotation_at = NOW() - INTERVAL '1 day'
+             WHERE id = $2",
+        )
+        .bind(serde_json::to_value(schedule(false)).unwrap())
+        .bind(&due_manual.id)
+        .execute(&pool)
+        .await
+        .expect("due manual");
+        sqlx::query(
+            "UPDATE secrets SET rotation_schedule = $1, next_rotation_at = NOW() + INTERVAL '30 days'
+             WHERE id = $2",
+        )
+        .bind(serde_json::to_value(schedule(true)).unwrap())
+        .bind(&future_auto.id)
+        .execute(&pool)
+        .await
+        .expect("future auto");
+
+        let due = svc.get_secrets_for_rotation().await.expect("due");
+        let due_ids: Vec<&str> = due.iter().map(|s| s.id.as_str()).collect();
+        assert!(due_ids.contains(&due_auto.id.as_str()));
+        assert!(due_ids.contains(&due_manual.id.as_str()));
+        assert!(!due_ids.contains(&future_auto.id.as_str()));
+
+        let result = svc.process_auto_rotations().await.expect("rotations");
+        assert_eq!(result.rotated, vec![due_auto.id.clone()]);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        // The manual schedule was only left in the scan: its version is
+        // untouched until a human rotates it.
+        let (result_manual, _) = svc
+            .get_secret(&due_manual.id, "owner@apexmail.ee")
+            .await
+            .expect("read manual")
+            .expect("present");
+        assert_eq!(result_manual.version, 1);
+        let (result_auto, auto_value) = svc
+            .get_secret(&due_auto.id, "owner@apexmail.ee")
+            .await
+            .expect("read auto")
+            .expect("present");
+        assert_eq!(result_auto.version, 2);
+        // Auto-rotation generates a fresh key of the declared type.
+        assert!(auto_value.starts_with("am_"));
+        assert_ne!(auto_value, "old-1");
+        // The next rotation moves forward from now.
+        assert!(result_auto.next_rotation_at.expect("next") > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn names_are_tenant_scoped_and_deletion_archives() {
+        let Some((pool, svc)) = manager("tenant").await else {
+            return;
+        };
+        let tenant_a = test_support::unique_tenant();
+        let tenant_b = test_support::unique_tenant();
+        let a = create(&svc, &tenant_a, "shared-name", "tenant-a-value").await;
+        let b = create(&svc, &tenant_b, "shared-name", "tenant-b-value").await;
+        assert_ne!(a.id, b.id);
+
+        // Name lookups resolve only within the requested tenant.
+        let (found_a, value_a) = svc
+            .get_secret_by_name(&tenant_a, "shared-name", "owner@apexmail.ee")
+            .await
+            .expect("lookup a")
+            .expect("present");
+        assert_eq!(found_a.id, a.id);
+        assert_eq!(value_a, "tenant-a-value");
+        let (found_b, value_b) = svc
+            .get_secret_by_name(&tenant_b, "shared-name", "owner@apexmail.ee")
+            .await
+            .expect("lookup b")
+            .expect("present");
+        assert_eq!(found_b.id, b.id);
+        assert_eq!(value_b, "tenant-b-value");
+        assert!(svc
+            .get_secret_by_name(&tenant_a, "not-there", "owner@apexmail.ee")
+            .await
+            .expect("missing")
+            .is_none());
+
+        // Listing one tenant never returns the other's rows, and the type
+        // filter is applied server-side.
+        let listed = svc
+            .list_secrets(&tenant_a, Some(SecretType::ApiKey), 100, 0)
+            .await
+            .expect("list filtered");
+        assert!(listed.iter().all(|s| s.tenant_id == tenant_a));
+        assert_eq!(listed.len(), 1);
+        let listed_other_type = svc
+            .list_secrets(&tenant_a, Some(SecretType::Certificate), 100, 0)
+            .await
+            .expect("list other type");
+        assert!(listed_other_type.is_empty());
+
+        // Deletion archives the row before removing it.
+        svc.delete_secret(&a.id, "owner@apexmail.ee")
+            .await
+            .expect("delete");
+        assert!(svc
+            .get_secret(&a.id, "owner@apexmail.ee")
+            .await
+            .expect_err("deleted secret is gone")
+            .contains("Access denied"));
+        let archived: (String, String) =
+            sqlx::query_as("SELECT id, encrypted_value FROM secrets_archive WHERE id = $1")
+                .bind(&a.id)
+                .fetch_one(&pool)
+                .await
+                .expect("archived row");
+        assert_eq!(archived.0, a.id);
+        assert_ne!(
+            archived.1, "tenant-a-value",
+            "archive keeps ciphertext only"
+        );
+        // The other tenant's row is untouched.
+        assert!(svc
+            .get_secret(&b.id, "owner@apexmail.ee")
+            .await
+            .expect("b survives")
+            .is_some());
+        // Deleting an already-deleted secret is refused (no fabricated success).
+        assert!(svc.delete_secret(&a.id, "owner@apexmail.ee").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn duplicate_names_and_hostile_metadata_are_reported_not_swallowed() {
+        let Some((_pool, svc)) = manager("hostile").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        create(&svc, &tenant, "dup", "one").await;
+        let err = svc
+            .create_secret(&SecretCreateInput {
+                tenant_id: tenant.clone(),
+                name: "dup".into(),
+                secret_type: SecretType::WebhookSecret,
+                value: Some("two".into()),
+                created_by: "owner@apexmail.ee".into(),
+                rotation_schedule: None,
+                expires_at: None,
+            })
+            .await
+            .expect_err("duplicate name must be a DB error");
+        assert!(err.contains("DB error"), "{err}");
+
+        // Auto-generated values follow the type's contract.
+        let generated = svc
+            .create_secret(&SecretCreateInput {
+                tenant_id: tenant.clone(),
+                name: "generated-webhook".into(),
+                secret_type: SecretType::WebhookSecret,
+                value: None,
+                created_by: "owner@apexmail.ee".into(),
+                rotation_schedule: None,
+                expires_at: None,
+            })
+            .await
+            .expect("generate");
+        let (_, value) = svc
+            .get_secret(&generated.id, "owner@apexmail.ee")
+            .await
+            .expect("read")
+            .expect("present");
+        assert!(value.starts_with("whsec_"), "{value}");
+
+        // Hostile names (unicode, empty, very long) are persisted verbatim and
+        // never confuse the tenant-scoped lookup.
+        let hostile_name = format!("名前/../../{}", "x".repeat(300));
+        let hostile = create(&svc, &tenant, &hostile_name, "hostile-value").await;
+        let (found, value) = svc
+            .get_secret_by_name(&tenant, &hostile_name, "owner@apexmail.ee")
+            .await
+            .expect("lookup")
+            .expect("present");
+        assert_eq!(found.id, hostile.id);
+        assert_eq!(value, "hostile-value");
+        // A tenant-less lookup never matches another tenant's hostile name.
+        assert!(svc
+            .get_secret_by_name(
+                &test_support::unique_tenant(),
+                &hostile_name,
+                "owner@apexmail.ee"
+            )
+            .await
+            .expect("other tenant")
+            .is_none());
+
+        // Unknown type filter values are not a way to list everything.
+        assert!(svc
+            .list_secrets(&tenant, Some(SecretType::OauthToken), 100, 0)
+            .await
+            .expect("filter")
+            .is_empty());
+    }
+}

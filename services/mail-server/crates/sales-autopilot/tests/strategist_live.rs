@@ -42,7 +42,6 @@ async fn live_pool(test_name: &str) -> Option<PgPool> {
 }
 
 #[tokio::test]
-#[ignore = "live database required"]
 async fn live_db_strategist_builds_from_canonical_tables() {
     let Some(pool) = live_pool("live_db_strategist_builds_from_canonical_tables").await else {
         eprintln!("skipping: TEST_DATABASE_URL unset");

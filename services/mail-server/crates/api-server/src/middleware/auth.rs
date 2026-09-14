@@ -200,6 +200,35 @@ fn is_control_plane_static_key_request(path: &str, on_control_plane_host: bool) 
     on_control_plane_host && path.starts_with("/v1/admin/")
 }
 
+/// Does this path segment carry a tenant id, or is it a static route word?
+///
+/// Tenant ids in this platform are minted as `ten_<…>` or `t<uuid-simple>`
+/// (26 characters, `tenants.id VARCHAR(26)` — see `auth.rs`'s signup insert and
+/// the canonical fixtures). A path segment after `tenant(s)` is only an id when
+/// it has that shape: the billing plans surface uses `tenant` as a SCOPE WORD
+/// (`/v1/billing/plans/tenant/features|limits|current`), and reading its next
+/// segment as an id made the API-key tenant binding compare the key's tenant
+/// against the literal word `features`, so every real key got a 403 on those
+/// routes. Binding enforcement must be driven by real ids only — an
+/// over-broad parser breaks working routes, which is exactly what this
+/// predicate prevents.
+fn looks_like_tenant_id(segment: &str) -> bool {
+    if segment.is_empty() || segment.len() > 26 {
+        return false;
+    }
+    if !segment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return false;
+    }
+    // A real id either carries the documented `ten_` prefix (integrations and
+    // fixtures) or is a minted nanoid — `apexmail_lib::id::generate_id("", 26)`
+    // — which always contains a digit in practice. Static route words
+    // (`features`, `limits`, `invoices`, `data`) have neither.
+    segment.starts_with("ten_") || segment.chars().any(|c| c.is_ascii_digit())
+}
+
 fn tenant_id_from_request_path(path: &str) -> Option<&str> {
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
     while let Some(segment) = segments.next() {
@@ -208,7 +237,11 @@ fn tenant_id_from_request_path(path: &str) -> Option<&str> {
             if matches!(tenant_id, "current" | "me" | "self") {
                 return None;
             }
-            return Some(tenant_id);
+            return if looks_like_tenant_id(tenant_id) {
+                Some(tenant_id)
+            } else {
+                None
+            };
         }
     }
     None
@@ -2734,5 +2767,395 @@ mod tests {
         );
 
         pool.close().await;
+    }
+}
+
+// ─── Adversarial credential / binding tests ────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    fn user(tenant: &str, user_id: Option<&str>, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: user_id.map(str::to_string),
+            api_key_id: Some("key_adv_auth".into()),
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn bearer_extraction_is_strict_about_scheme_and_emptiness() {
+        assert_eq!(
+            extract_bearer_token(&headers(&[("authorization", "Bearer abc.def")])),
+            Some("abc.def".into())
+        );
+        assert_eq!(
+            extract_bearer_token(&headers(&[("authorization", "bearer   spaced  ")])),
+            Some("spaced".into())
+        );
+        for value in [
+            "Bearer",
+            "Bearer ",
+            "Basic abc",
+            "bearerx abc",
+            "",
+            "Token abc",
+        ] {
+            assert_eq!(
+                extract_bearer_token(&headers(&[("authorization", value)])),
+                None,
+                "{value:?}"
+            );
+        }
+        assert_eq!(extract_bearer_token(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn credential_precedence_prefers_api_key_then_bearer_then_cookie() {
+        let all = headers(&[
+            ("x-api-key", "am_test_key"),
+            ("authorization", "Bearer tok"),
+            ("cookie", "am_session=sess"),
+        ]);
+        assert!(matches!(
+            extract_auth_credential(&all),
+            Some((AuthMechanism::ApiKey, key)) if key == "am_test_key"
+        ));
+        let bearer_only = headers(&[("authorization", "Bearer tok")]);
+        assert!(matches!(
+            extract_auth_credential(&bearer_only),
+            Some((AuthMechanism::BearerToken, token)) if token == "tok"
+        ));
+        let cookie_only = headers(&[("cookie", "am_session=sess")]);
+        assert!(matches!(
+            extract_auth_credential(&cookie_only),
+            Some((AuthMechanism::SessionCookie, token)) if token == "sess"
+        ));
+        // A blank API key header must fall through, not authenticate as "".
+        let blank = headers(&[("x-api-key", "   "), ("authorization", "Bearer tok")]);
+        assert!(matches!(
+            extract_auth_credential(&blank),
+            Some((AuthMechanism::BearerToken, _))
+        ));
+        assert!(extract_auth_credential(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn csrf_is_required_only_for_cookie_auth_on_unsafe_methods() {
+        assert!(requires_csrf(&Method::POST, AuthMechanism::SessionCookie));
+        assert!(requires_csrf(&Method::PUT, AuthMechanism::SessionCookie));
+        assert!(requires_csrf(&Method::DELETE, AuthMechanism::SessionCookie));
+        assert!(!requires_csrf(&Method::GET, AuthMechanism::SessionCookie));
+        assert!(!requires_csrf(&Method::HEAD, AuthMechanism::SessionCookie));
+        assert!(!requires_csrf(
+            &Method::OPTIONS,
+            AuthMechanism::SessionCookie
+        ));
+        assert!(!requires_csrf(&Method::POST, AuthMechanism::ApiKey));
+        assert!(!requires_csrf(&Method::POST, AuthMechanism::BearerToken));
+    }
+
+    #[test]
+    fn session_csrf_requires_matching_cookie_and_header() {
+        let secret = "test-csrf-secret-1234567890abcd";
+        let token = ui_foundation::csrf::generate_csrf_token(secret);
+        let cookie = format!("csrf_token={token}");
+        // Both present + valid → ok.
+        assert!(validate_session_csrf(
+            &headers(&[("cookie", &cookie), ("x-csrf-token", &token)]),
+            secret
+        )
+        .is_ok());
+        // Missing header / missing cookie / mismatched pair / invalid signature.
+        assert!(matches!(
+            validate_session_csrf(&headers(&[("cookie", &cookie)]), secret),
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            validate_session_csrf(&headers(&[("x-csrf-token", &token)]), secret),
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            validate_session_csrf(
+                &headers(&[("cookie", &cookie), ("x-csrf-token", "different")]),
+                secret
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            validate_session_csrf(
+                &headers(&[
+                    ("cookie", "csrf_token=forged.signature"),
+                    ("x-csrf-token", "forged.signature")
+                ]),
+                secret
+            ),
+            Err(ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn static_control_plane_key_only_authenticates_admin_paths_on_cp_host() {
+        assert!(is_control_plane_static_key_request(
+            "/v1/admin/dashboard",
+            true
+        ));
+        assert!(is_control_plane_static_key_request("/v1/admin/", true));
+        // Same path off the control-plane host → refused.
+        assert!(!is_control_plane_static_key_request(
+            "/v1/admin/dashboard",
+            false
+        ));
+        // Control-plane host but customer API path → refused.
+        assert!(!is_control_plane_static_key_request("/v1/messages", true));
+        // Prefix lookalikes must not slip through.
+        assert!(!is_control_plane_static_key_request(
+            "/v1/adminx/thing",
+            true
+        ));
+        assert!(!is_control_plane_static_key_request("", true));
+    }
+
+    #[test]
+    fn path_tenant_extraction_ignores_static_scope_words() {
+        // Genuine tenant paths resolve.
+        assert_eq!(
+            tenant_id_from_request_path("/v1/tenants/ten_abc/invoices"),
+            Some("ten_abc")
+        );
+        assert_eq!(
+            tenant_id_from_request_path("/v1/tenant/ten_abc"),
+            Some("ten_abc")
+        );
+        // Self-references are not ids.
+        for path in [
+            "/v1/tenants/current",
+            "/v1/tenants/me",
+            "/v1/tenants/self/limits",
+        ] {
+            assert_eq!(tenant_id_from_request_path(path), None, "{path}");
+        }
+        // No tenant segment at all.
+        assert_eq!(tenant_id_from_request_path("/v1/messages"), None);
+        assert_eq!(tenant_id_from_request_path(""), None);
+
+        // The STATIC billing routes use `tenant` as a scope word: `features`
+        // and `limits` are sub-resources, NOT tenant ids. Reading them as ids
+        // made the API-key binding 403 every real tenant (fixed 2026-09-13).
+        for path in [
+            "/v1/billing/plans/tenant/features",
+            "/v1/billing/plans/tenant/limits",
+            "/v1/billing/plans/tenant/current",
+        ] {
+            assert_eq!(tenant_id_from_request_path(path), None, "{path}");
+        }
+        // Static words that are not ids are ignored wherever they appear,
+        // while real ids still bind (including the singular form and ids that
+        // carry a dash/underscore).
+        assert_eq!(
+            tenant_id_from_request_path("/v1/tenant/ten_abc/settings"),
+            Some("ten_abc")
+        );
+        assert_eq!(
+            tenant_id_from_request_path("/v1/tenants/t16fc3bc7dc4b4989aba92320c"),
+            Some("t16fc3bc7dc4b4989aba92320c")
+        );
+        assert_eq!(
+            tenant_id_from_request_path("/v1/tenants/features/limits"),
+            None
+        );
+        assert_eq!(
+            tenant_id_from_request_path("/v1/tenants/not-a-real-tenant-id-string"),
+            None,
+            "over-length candidates are not ids"
+        );
+    }
+
+    #[test]
+    fn api_key_tenant_binding_rejects_path_mismatch_and_admits_system() {
+        // System sentinel bypasses path binding entirely.
+        assert!(enforce_api_key_tenant_binding(
+            &user("system", None, &["*"]),
+            "/v1/tenants/anyone/data"
+        )
+        .is_ok());
+        // Matching tenant passes.
+        assert!(enforce_api_key_tenant_binding(
+            &user("ten_abc", None, &["*"]),
+            "/v1/tenants/ten_abc/data"
+        )
+        .is_ok());
+        // Mismatch is a 403.
+        let mismatch = enforce_api_key_tenant_binding(
+            &user("ten_abc", None, &["*"]),
+            "/v1/tenants/ten_other/data",
+        );
+        assert!(matches!(mismatch, Err(ApiError::Forbidden(_))));
+        // No tenant segment → no binding.
+        assert!(
+            enforce_api_key_tenant_binding(&user("ten_abc", None, &["*"]), "/v1/messages").is_ok()
+        );
+    }
+
+    #[test]
+    fn x_tenant_id_header_is_trimmed_and_empty_becomes_absent() {
+        let parsed = tenant_id_from_header(&headers(&[("x-tenant-id", "  ten_x  ")]));
+        assert_eq!(parsed.as_deref(), Some("ten_x"));
+        assert_eq!(
+            tenant_id_from_header(&headers(&[("x-tenant-id", "   ")])),
+            None
+        );
+        assert_eq!(
+            tenant_id_from_header(&headers(&[("x-tenant-id", "")])),
+            None
+        );
+        assert_eq!(tenant_id_from_header(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn authuser_debug_redacts_secrets_and_survives_multibyte_ids() {
+        let user = AuthUser {
+            tenant_id: "тень-üs-é-😀-longer".into(),
+            user_id: Some("пользователь-42".into()),
+            api_key_id: Some("key_0123456789".into()),
+            session_id: Some("sess_super_secret_value".into()),
+            scopes: vec!["messages:read".into()],
+        };
+        let debug = format!("{user:?}");
+        assert!(!debug.contains("тень"), "tenant prefix only: {debug}");
+        assert!(!debug.contains("пользователь-42"), "{debug}");
+        assert!(!debug.contains("sess_super_secret_value"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(debug.contains("messages:read"), "{debug}");
+    }
+
+    #[test]
+    fn require_scopes_wildcard_exact_and_multiple() {
+        assert!(require_scopes(&user("t", None, &["*"]), &["a:b", "c:d"]).is_ok());
+        assert!(require_scopes(&user("t", None, &["a:b"]), &["a:b"]).is_ok());
+        assert!(require_scopes(&user("t", None, &["a:b"]), &["a:b", "c:d"]).is_err());
+        assert!(require_scopes(&user("t", None, &[]), &[]).is_ok());
+        assert!(require_scopes(&user("t", None, &[]), &["a:b"]).is_err());
+        // Prefix matches are not scope matches.
+        assert!(require_scopes(&user("t", None, &["a"]), &["a:b"]).is_err());
+        // Case-sensitive.
+        assert!(require_scopes(&user("t", None, &["A:B"]), &["a:b"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn from_request_parts_rejections_are_401_or_403_never_500() {
+        let state = crate::app::test_support::test_state_over_lazy().await;
+
+        // No credentials at all.
+        let mut parts = axum::http::Request::builder()
+            .method(Method::GET)
+            .uri("/v1/messages")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(matches!(
+            AuthUser::from_request_parts(&mut parts, &state).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+
+        // Malformed bearer token against a REAL RSA keypair — a decode
+        // failure is an auth failure (401), never a 500. The placeholder
+        // keys in `test_config()` cannot decode anything and would fail
+        // closed to a configuration 500, which is a different (startup)
+        // contract.
+        let Some(redis_url) = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            eprintln!("skipping bearer half: TEST_REDIS_URL unset");
+            return;
+        };
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+            .expect("valid PKCS8 private key");
+        let mut config = crate::app::test_support::test_config();
+        config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+        config.jwt_public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("public PEM");
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy pool");
+        let rsa_state =
+            crate::app::test_support::test_state_over_with_config_and_redis(db, config, &redis_url)
+                .await;
+
+        let mut parts = axum::http::Request::builder()
+            .method(Method::GET)
+            .uri("/v1/messages")
+            .header("authorization", "Bearer not-a-jwt")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(matches!(
+            AuthUser::from_request_parts(&mut parts, &rsa_state).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+
+        // Unsafe method + session cookie without CSRF pair → 403 before the
+        // JWT is even considered.
+        let mut parts = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("cookie", "am_session=whatever")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(matches!(
+            AuthUser::from_request_parts(&mut parts, &rsa_state).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // A valid CSRF pair still fails on the invalid session JWT.
+        let secret = "test-csrf-secret-1234567890abcd";
+        let token = ui_foundation::csrf::generate_csrf_token(secret);
+        let mut parts = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header("cookie", format!("am_session=whatever; csrf_token={token}"))
+            .header("x-csrf-token", &token)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(matches!(
+            AuthUser::from_request_parts(&mut parts, &rsa_state).await,
+            Err(ApiError::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn char_safe_prefix_never_splits_a_codepoint() {
+        // 'é' is 2 bytes; a 4-byte budget must stop at the boundary.
+        assert_eq!(char_safe_prefix("ééé", 4), "éé");
+        assert_eq!(char_safe_prefix("abc", 10), "abc");
+        assert_eq!(char_safe_prefix("", 4), "");
+        assert_eq!(char_safe_prefix("😀x", 2), "");
     }
 }

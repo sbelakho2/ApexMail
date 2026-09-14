@@ -906,9 +906,11 @@ impl EstoniaOuCompliance {
         }
 
         let rows = if let Some(m) = month {
+            // SUM(bigint) is NUMERIC in PostgreSQL; cast so the row decodes
+            // as i64 (sqlx type-checks strictly).
             sqlx::query_as::<_, RevenueRow>(
                 "SELECT COALESCE(currency, 'EUR') AS currency,
-                        SUM(subtotal) AS total_cents,
+                        SUM(subtotal)::bigint AS total_cents,
                         COUNT(*) AS invoice_count
                  FROM invoices
                  WHERE EXTRACT(YEAR FROM issued_at) = $1
@@ -923,7 +925,7 @@ impl EstoniaOuCompliance {
         } else {
             sqlx::query_as::<_, RevenueRow>(
                 "SELECT COALESCE(currency, 'EUR') AS currency,
-                        SUM(subtotal) AS total_cents,
+                        SUM(subtotal)::bigint AS total_cents,
                         COUNT(*) AS invoice_count
                  FROM invoices
                  WHERE EXTRACT(YEAR FROM issued_at) = $1
@@ -962,7 +964,7 @@ impl EstoniaOuCompliance {
 
         if has_invoices {
             if let Ok(Some(row)) = sqlx::query_as::<_, ExpenseRow>(
-                "SELECT SUM(subtotal + vat_total) AS total_cents
+                "SELECT SUM(subtotal + vat_total)::bigint AS total_cents
                  FROM invoices
                  WHERE EXTRACT(YEAR FROM issued_at) = $1
                    AND status = 'paid'",
@@ -989,7 +991,7 @@ impl EstoniaOuCompliance {
         if has_operating_costs {
             let rows = sqlx::query_as::<_, CostRow>(
                 "SELECT COALESCE(category, 'infrastructure') AS category,
-                        COALESCE(SUM(amount_cents), 0) AS total_cents
+                        COALESCE(SUM(amount_cents), 0)::bigint AS total_cents
                  FROM operating_costs
                  WHERE EXTRACT(YEAR FROM incurred_at) = $1
                  GROUP BY category",
@@ -1188,11 +1190,11 @@ impl EstoniaOuCompliance {
         let has_sufficient = has_invoices || has_payroll;
         DataQualityNote {
             has_sufficient_data: has_sufficient,
-            missing_fields: if missing.is_empty() {
-                vec!["No database tables found — using placeholder values".into()]
-            } else {
-                missing.iter().map(|f| f.as_ref().to_string()).collect()
-            },
+            // `missing` is the list of sources that could NOT be read. An
+            // empty list means every source was available and must be
+            // reported as such — a blanket "no tables found" would be a false
+            // provenance statement in a statutory document.
+            missing_fields: missing.iter().map(|f| f.as_ref().to_string()).collect(),
             note: if has_sufficient {
                 "Data extracted from live database. Fields with 0 values indicate no data for the period."
                     .into()
@@ -2836,5 +2838,1078 @@ mod tests {
         assert_eq!(DeadlineStatus::Filed.indicator(), "green");
         assert_eq!(DeadlineStatus::Overdue.indicator(), "red");
         assert_eq!(DeadlineStatus::Exempt.indicator(), "grey");
+    }
+}
+
+// ─── Adversarial tests: calendar, filings, formats ──────────────────────────
+//
+// Statutory documents: a wrong amount, a wrong date or a silently-invented
+// zero is a legal event. These tests pin the rate/date boundaries, the
+// classification of every customer type, the rounding of net-to-tax
+// fractions, and the honest not-ready states when source data is missing.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use crate::test_support;
+    use chrono::TimeZone;
+    use sqlx::PgPool;
+
+    async fn engine(suffix: &str) -> Option<(PgPool, EstoniaOuCompliance)> {
+        let pool =
+            test_support::canonical_pool(&format!("estonia_{suffix}"), &format!("est_{suffix}"))
+                .await?;
+        // Invoices reference tenants in the canonical chain; the fixture
+        // tenant is created once per test database.
+        sqlx::query(
+            "INSERT INTO tenants (id, name) VALUES ('itest', 'Integration Test Tenant')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        Some((pool.clone(), EstoniaOuCompliance::new(pool)))
+    }
+
+    fn d(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("test date")
+    }
+
+    async fn seed_invoice(
+        pool: &PgPool,
+        issued_at: chrono::DateTime<Utc>,
+        subtotal: i64,
+        vat: i64,
+        currency: &str,
+        country: &str,
+        vat_number: Option<&str>,
+    ) {
+        let billing_address = vat_number.map(|number| {
+            serde_json::json!({"country": country, "vat_number": number}).to_string()
+        });
+        sqlx::query(
+            "INSERT INTO invoices
+               (id, tenant_id, amount, currency, status, issued_at, created_at, updated_at,
+                subtotal, vat_total, total, billing_country, billing_address)
+             VALUES (gen_random_uuid(), 'itest', $1, $2, 'paid', $3, NOW(), NOW(),
+                     $1, $4, $1 + $4, $5, $6)",
+        )
+        .bind(subtotal)
+        .bind(currency)
+        .bind(issued_at)
+        .bind(vat)
+        .bind(country)
+        .bind(billing_address)
+        .execute(pool)
+        .await
+        .expect("seed invoice");
+    }
+
+    // ── Calendar ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn legal_due_dates_roll_over_months_and_years() {
+        // Monthly filings are due on the 20th (VAT) / 10th (taxes) of the
+        // FOLLOWING month; December rolls into the next year.
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(
+                SubmissionType::VatDeclaration,
+                2026,
+                Some(12)
+            ),
+            d(2027, 1, 20)
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(SubmissionType::IncomeTax, 2026, Some(12)),
+            d(2027, 1, 10)
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(SubmissionType::SocialTax, 2026, Some(12)),
+            d(2027, 1, 10)
+        );
+        // January through November keep the year.
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(
+                SubmissionType::VatDeclaration,
+                2026,
+                Some(1)
+            ),
+            d(2026, 2, 20)
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(SubmissionType::IncomeTax, 2026, Some(11)),
+            d(2026, 12, 10)
+        );
+        // A missing month is January, not "today".
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(
+                SubmissionType::VatDeclaration,
+                2026,
+                None
+            ),
+            d(2026, 2, 20)
+        );
+        // Annual / statistical dates.
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(SubmissionType::AnnualReport, 2025, None),
+            d(2026, 6, 30)
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_legal_due_date(
+                SubmissionType::StatisticalReport,
+                2025,
+                None
+            ),
+            d(2026, 7, 1)
+        );
+    }
+
+    #[test]
+    fn due_dates_are_never_before_the_legal_date_and_land_on_working_days() {
+        for year in [2024, 2025, 2026, 2027, 2028] {
+            for month in 1..=12u32 {
+                for st in [
+                    SubmissionType::VatDeclaration,
+                    SubmissionType::IncomeTax,
+                    SubmissionType::SocialTax,
+                ] {
+                    let legal = ComplianceCalendar::calculate_legal_due_date(st, year, Some(month));
+                    let due = ComplianceCalendar::calculate_due_date(st, year, Some(month));
+                    assert!(
+                        due >= legal,
+                        "{st:?} {year}-{month:02}: adjusted {due} before legal {legal}"
+                    );
+                    let weekday = due.weekday().number_from_monday();
+                    assert!(
+                        weekday <= 5,
+                        "{st:?} {year}-{month:02}: due date {due} is a weekend"
+                    );
+                }
+            }
+        }
+        // Estonian national holidays are shifted: 2026-02-24 (Independence
+        // Day) is a Tuesday; a VAT due date landing on a holiday must move.
+        let shifted =
+            ComplianceCalendar::calculate_due_date(SubmissionType::VatDeclaration, 2026, Some(1));
+        assert_eq!(shifted, d(2026, 2, 20), "the 20th is a Friday in 2026");
+    }
+
+    #[test]
+    fn periods_cover_exactly_the_declared_month_including_leap_february() {
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::VatDeclaration, 2026, Some(1)),
+            (d(2026, 1, 1), d(2026, 1, 31))
+        );
+        // 2028 is a leap year: February has 29 days and must not run into March.
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::VatDeclaration, 2028, Some(2)),
+            (d(2028, 2, 1), d(2028, 2, 29))
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::IncomeTax, 2027, Some(2)),
+            (d(2027, 2, 1), d(2027, 2, 28))
+        );
+        // 30-day and 31-day months.
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::SocialTax, 2026, Some(4)),
+            (d(2026, 4, 1), d(2026, 4, 30))
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::SocialTax, 2026, Some(12)),
+            (d(2026, 12, 1), d(2026, 12, 31))
+        );
+        // Annual periods ignore the month.
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::AnnualReport, 2026, Some(7)),
+            (d(2026, 1, 1), d(2026, 12, 31))
+        );
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::StatisticalReport, 2026, None),
+            (d(2026, 1, 1), d(2026, 12, 31))
+        );
+        // A January period never ends in the previous year.
+        assert_eq!(
+            ComplianceCalendar::calculate_period(SubmissionType::VatDeclaration, 2026, Some(1)).1,
+            d(2026, 1, 31)
+        );
+    }
+
+    // ── File naming & rendering ─────────────────────────────────────────────
+
+    #[test]
+    fn file_names_and_labels_are_exact_for_every_type() {
+        assert_eq!(
+            EstoniaOuCompliance::build_file_name(SubmissionType::AnnualReport, 2025, None, "pdf"),
+            "annual-report-2025-bel-consulting-ou-16588745.pdf"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_file_name(
+                SubmissionType::VatDeclaration,
+                2026,
+                Some(1),
+                "csv"
+            ),
+            "vat-declaration-2026-01-bel-consulting-ou-16588745.csv"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_file_name(SubmissionType::IncomeTax, 2026, Some(12), "json"),
+            "income-tax-declaration-2026-12-bel-consulting-ou-16588745.json"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_file_name(SubmissionType::SocialTax, 2026, None, "pdf"),
+            "social-tax-declaration-2026-01-bel-consulting-ou-16588745.pdf"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_file_name(
+                SubmissionType::StatisticalReport,
+                2026,
+                None,
+                "pdf"
+            ),
+            "statistical-report-2026-bel-consulting-ou-16588745.pdf"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_period_label(SubmissionType::AnnualReport, 2025, None),
+            "FY 2025"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_period_label(SubmissionType::VatDeclaration, 2026, Some(1)),
+            "January 2026"
+        );
+        assert_eq!(
+            EstoniaOuCompliance::build_period_label(SubmissionType::SocialTax, 2026, Some(12)),
+            "December 2026"
+        );
+        // An out-of-range month falls back to a machine label, never panics.
+        assert_eq!(
+            EstoniaOuCompliance::build_period_label(SubmissionType::VatDeclaration, 2026, Some(13)),
+            "Period 2026-13"
+        );
+    }
+
+    #[test]
+    fn pdf_and_csv_rendering_escape_hostile_document_content() {
+        let hostile = serde_json::json!({
+            "company_name": "OÜ \"Bel\" (Consulting) \\ test",
+            "note": "line1\nline2\t\u{0}\u{202e}RTL",
+            "balance_sheet": {
+                "total_assets_cents": 1_000_000,
+                "nested": {"deep": [1, 2.5, "x,y\"z", null, true]}
+            },
+            "income_statement": {"revenue_cents": -1},
+            "cash_flow": {"net_cash_flow_cents": 0},
+            "revenue_sources": [{"category": "a,b", "amount_cents": 5}]
+        });
+
+        let pdf = EstoniaOuCompliance::build_pdf_bytes(
+            SubmissionType::AnnualReport,
+            2025,
+            None,
+            &hostile,
+        );
+        assert!(pdf.starts_with(b"%PDF-"), "PDF header");
+        assert!(pdf.windows(5).any(|w| w == b"%%EOF"), "PDF trailer present");
+        // The rendered PDF text must not contain an unescaped form feed that
+        // would corrupt the content stream, and must not panic on NUL.
+        let pdf_text = String::from_utf8_lossy(&pdf);
+        assert!(pdf_text.contains("O"));
+        assert!(pdf.len() > 100);
+
+        let csv =
+            EstoniaOuCompliance::build_csv_text(SubmissionType::AnnualReport, 2025, None, &hostile);
+        assert!(csv.starts_with("\"Key\",\"Value\"\n"));
+        // Every value is a quoted field and embedded quotes are doubled.
+        assert!(
+            csv.contains("\"balance_sheet.total_assets_cents\",\"1000000\""),
+            "{csv}"
+        );
+        assert!(
+            csv.contains("\"income_statement.revenue_cents\",\"-1\""),
+            "{csv}"
+        );
+        assert!(
+            csv.contains("\"revenue_sources[0].category\",\"a,b\""),
+            "{csv}"
+        );
+        for line in csv.lines() {
+            let quotes = line.matches('"').count();
+            assert_eq!(quotes % 2, 0, "unbalanced CSV quoting in {line:?}");
+        }
+        // A quote in a value never ends the field early: the escaped form
+        // contains a doubled quote, and the raw form is absent.
+        let quoted = EstoniaOuCompliance::build_csv_text(
+            SubmissionType::AnnualReport,
+            2025,
+            None,
+            &serde_json::json!({"revenue_sources": [{"category": "q\"uote"}]}),
+        );
+        assert!(quoted.contains("q\"\"uote"), "{quoted}");
+        assert!(!quoted.contains("\"q\"uote\""), "{quoted}");
+
+        // Every document type renders both formats without panicking on an
+        // empty object.
+        for st in [
+            SubmissionType::AnnualReport,
+            SubmissionType::VatDeclaration,
+            SubmissionType::IncomeTax,
+            SubmissionType::SocialTax,
+            SubmissionType::StatisticalReport,
+        ] {
+            let empty = serde_json::json!({});
+            assert!(!EstoniaOuCompliance::build_pdf_bytes(st, 2026, Some(3), &empty).is_empty());
+            assert!(!EstoniaOuCompliance::build_csv_text(st, 2026, Some(3), &empty).is_empty());
+        }
+    }
+
+    #[test]
+    fn csv_escaping_and_json_flattening_are_lossless() {
+        assert_eq!(csv_escape_value(&serde_json::json!("plain")), "plain");
+        // Commas stay inside the (always quoted) field; a quote is doubled.
+        assert_eq!(csv_escape_value(&serde_json::json!("a,b")), "a,b");
+        assert_eq!(csv_escape_value(&serde_json::json!("a\"b")), "a\"\"b");
+        assert_eq!(csv_escape_value(&serde_json::json!("a\nb")), "a\nb");
+        assert_eq!(csv_escape_value(&serde_json::json!(1.25)), "1.25");
+        assert_eq!(csv_escape_value(&serde_json::json!(true)), "true");
+        assert_eq!(csv_escape_value(&serde_json::json!(null)), "");
+        assert_eq!(csv_escape_value(&serde_json::json!(7)), "7");
+
+        let mut csv = String::new();
+        flatten_json_to_csv(
+            &mut csv,
+            "root",
+            &serde_json::json!({
+                "a": 1,
+                "b": {"c": "x"},
+                "d": [1, {"e": 2}],
+                "f": null
+            }),
+            0,
+        );
+        assert!(csv.contains("root.a"), "{csv}");
+        assert!(csv.contains("root.b.c"), "{csv}");
+        assert!(csv.contains("root.d[0]"), "{csv}");
+        assert!(csv.contains("root.d[1].e"), "{csv}");
+        // Depth is bounded: a pathologically deep document must not recurse
+        // forever (the flattener stops at its depth limit).
+        let mut deep = serde_json::json!(1);
+        for _ in 0..40 {
+            deep = serde_json::json!({"x": deep});
+        }
+        let mut bounded = String::new();
+        flatten_json_to_csv(&mut bounded, "deep", &deep, 0);
+        assert!(bounded.len() < 100000, "flattening must terminate");
+
+        // PDF string escaping escapes the delimiters that would break the
+        // content stream.
+        assert_eq!(escape_pdf_string("a(b)c\\d"), "a\\(b\\)c\\\\d");
+        assert_eq!(escape_pdf_string("plain"), "plain");
+        assert_eq!(escape_xml("<&>\"'"), "&lt;&amp;&gt;&quot;&apos;");
+    }
+
+    // ── Ledger mapping ──────────────────────────────────────────────────────
+
+    #[test]
+    fn declaration_from_ledger_copies_amounts_and_identity_verbatim() {
+        let employee = crate::tsd_ledger::TsdEmployee {
+            posting_id: Uuid::new_v4(),
+            payroll_record_id: Uuid::new_v4(),
+            fiscal_period_id: Uuid::new_v4(),
+            journal_entry_id: Uuid::new_v4(),
+            employee_name: Some("Mari Maasikas".into()),
+            personal_code: Some("49001010001".into()),
+            funded_pension_rate: Some(0.02),
+            gross_salary_cents: 200000,
+            social_tax_cents: 66000,
+            unemployment_insurance_employer_cents: 1600,
+            unemployment_insurance_employee_cents: 3200,
+            funded_pension_cents: 4000,
+            income_tax_withheld_cents: 42416,
+            net_salary_cents: 150384,
+            currency: "EUR".into(),
+        };
+        let source = crate::tsd_ledger::TsdLedgerSource {
+            legal_entity_id: Uuid::new_v4(),
+            legal_name: "Some Other OÜ".into(),
+            registry_code: "12345678".into(),
+            vat_number: Some("EE12345678".into()),
+            currency: "EUR".into(),
+            year: 2026,
+            month: 3,
+            periods: vec![],
+            employees: vec![employee],
+            unposted_payroll_records: 0,
+            incomplete_employees: vec![],
+            identity_violations: vec![],
+            currencies: vec!["EUR".into()],
+            read_at: Utc::now(),
+        };
+        let declaration = EstoniaOuCompliance::declaration_from_ledger(source, 2026, 3);
+        // The declared identity is the entity whose books were read.
+        assert_eq!(declaration.company_name, "Some Other OÜ");
+        assert_eq!(declaration.registry_code, "12345678");
+        assert_eq!(declaration.employees.len(), 1);
+        assert_eq!(declaration.totals.total_gross_salary_cents, 200000);
+        assert_eq!(declaration.totals.total_social_tax_cents, 66000);
+        assert_eq!(declaration.totals.total_unemployment_employer_cents, 1600);
+        assert_eq!(declaration.totals.total_unemployment_employee_cents, 3200);
+        assert_eq!(declaration.totals.total_funded_pension_cents, 4000);
+        assert_eq!(declaration.totals.total_income_tax_withheld_cents, 42416);
+        assert_eq!(declaration.totals.employee_count, 1);
+        // Employer cost = gross + employer taxes, never a recomputed amount.
+        assert_eq!(declaration.totals.total_employer_cost_cents, 267600);
+        assert!(declaration.data_quality.has_sufficient_data);
+        assert_eq!(
+            declaration.due_date,
+            ComplianceCalendar::calculate_due_date(SubmissionType::SocialTax, 2026, Some(3))
+        );
+    }
+
+    // ── Deadline lifecycle ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deadline_lifecycle_seeds_reminds_and_files() {
+        let Some((_pool, engine)) = engine("deadlines").await else {
+            return;
+        };
+        let calendar = engine.calendar();
+        let created = calendar.seed_deadlines().await.expect("seed");
+        // 3 years × (1 annual + 12×3 monthly + 1 statistical) = 114 rows.
+        assert_eq!(created.len(), 114);
+        // Re-seeding is idempotent (unique deadline_type+due_date).
+        calendar.seed_deadlines().await.expect("re-seed");
+        let seeded_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_deadlines WHERE status = 'pending'",
+        )
+        .fetch_one(&_pool)
+        .await
+        .expect("count");
+        assert_eq!(seeded_count, 114);
+
+        let pending = calendar.list_pending().await.expect("pending");
+        assert_eq!(pending.len(), 114);
+        // Ordered by due date ascending.
+        assert!(pending.windows(2).all(|w| w[0].due_date <= w[1].due_date));
+
+        // Overdue refresh only touches past-due pending rows.
+        let past = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO compliance_deadlines
+               (id, deadline_type, label, period_start, period_end, due_date, status, created_at, updated_at)
+             VALUES ($1, 'unit_past', 'past', $2, $2, $2, 'pending', NOW(), NOW())",
+        )
+        .bind(past)
+        .bind(d(2020, 1, 1))
+        .execute(&_pool)
+        .await
+        .expect("insert past");
+        let refreshed = calendar.refresh_overdue().await.expect("refresh");
+        assert!(
+            refreshed >= 1,
+            "the inserted past deadline must be refreshed"
+        );
+        assert!(calendar
+            .list_pending()
+            .await
+            .expect("pending")
+            .iter()
+            .all(|deadline| deadline.id != past));
+
+        // Reminder windows: exactly 7 and 1 day ahead, not reminded yet.
+        let seven = Uuid::new_v4();
+        let one = Uuid::new_v4();
+        let now = Utc::now().date_naive();
+        for (id, days) in [(seven, 7i64), (one, 1i64)] {
+            sqlx::query(
+                "INSERT INTO compliance_deadlines
+                   (id, deadline_type, label, period_start, period_end, due_date, status, created_at, updated_at)
+                 VALUES ($1, $2, 'reminder', $3, $3, $3, 'pending', NOW(), NOW())",
+            )
+            .bind(id)
+            .bind(format!("unit_reminder_{days}"))
+            .bind(now + chrono::Duration::days(days))
+            .execute(&_pool)
+            .await
+            .expect("insert reminder");
+        }
+        // The reminder windows select by EXACT due date across the whole
+        // (shared) fixture database, so asserting a total row count made this
+        // test order-dependent: any sibling test with a pending deadline on
+        // the same date changed the length. Assert on THIS test's rows.
+        let seven_due = calendar.deadlines_for_7day_reminder().await.expect("7d");
+        assert!(
+            seven_due.iter().any(|deadline| deadline.id == seven),
+            "the row due in exactly 7 days must be selected"
+        );
+        assert!(
+            !seven_due.iter().any(|deadline| deadline.id == one),
+            "a row due tomorrow is not a 7-day reminder"
+        );
+        let one_due = calendar.deadlines_for_1day_reminder().await.expect("1d");
+        assert!(
+            one_due.iter().any(|deadline| deadline.id == one),
+            "the row due tomorrow must be selected"
+        );
+        assert!(
+            !one_due.iter().any(|deadline| deadline.id == seven),
+            "a row due in 7 days is not a 1-day reminder"
+        );
+
+        calendar
+            .record_7day_reminder(seven)
+            .await
+            .expect("record 7d");
+        assert!(
+            !calendar
+                .deadlines_for_7day_reminder()
+                .await
+                .expect("7d again")
+                .iter()
+                .any(|deadline| deadline.id == seven),
+            "a reminded row must leave its reminder window"
+        );
+        calendar.record_1day_reminder(one).await.expect("record 1d");
+        assert!(
+            !calendar
+                .deadlines_for_1day_reminder()
+                .await
+                .expect("1d again")
+                .iter()
+                .any(|deadline| deadline.id == one),
+            "a reminded row must leave its reminder window"
+        );
+
+        // mark_filed links the submission and leaves the pending set.
+        let submission_id = Uuid::new_v4();
+        calendar
+            .mark_filed(seven, Some(submission_id))
+            .await
+            .expect("mark filed");
+        let row: (String, Option<Uuid>) =
+            sqlx::query_as("SELECT status, submission_id FROM compliance_deadlines WHERE id = $1")
+                .bind(seven)
+                .fetch_one(&_pool)
+                .await
+                .expect("row");
+        assert_eq!(row.0, "filed");
+        assert_eq!(row.1, Some(submission_id));
+
+        // list_upcoming is bounded by the window and only returns pending rows.
+        let upcoming = calendar.list_upcoming(30).await.expect("upcoming");
+        assert!(upcoming
+            .iter()
+            .all(|deadline| deadline.due_date >= now && deadline.status == "pending"));
+
+        // Widget counts match the window query.
+        let widget = engine.deadline_widget().await.expect("widget");
+        assert!(widget.upcoming_7d >= 1, "{widget:?}");
+        assert!(widget.upcoming_30d >= widget.upcoming_7d, "{widget:?}");
+        assert!(widget.overdue >= 1);
+        assert!(widget.next_due.is_some());
+        // Unknown ids are no-ops, not fabricated success.
+        calendar
+            .record_7day_reminder(Uuid::new_v4())
+            .await
+            .expect("no-op");
+        calendar
+            .mark_filed(Uuid::new_v4(), None)
+            .await
+            .expect("no-op");
+    }
+
+    #[tokio::test]
+    async fn contact_person_and_registry_notices_have_db_backed_deadlines() {
+        let Some((pool, engine)) = engine("contacts").await else {
+            return;
+        };
+        let deadline = engine
+            .calendar()
+            .seed_contact_person_deadline(2026)
+            .await
+            .expect("seed contact deadline");
+        assert_eq!(deadline.deadline_type, "contact_person_verification");
+        assert_eq!(deadline.due_date, d(2026, 1, 31));
+        // Re-seeding the same year does not duplicate the row.
+        engine
+            .calendar()
+            .seed_contact_person_deadline(2026)
+            .await
+            .expect("re-seed");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_deadlines
+             WHERE deadline_type = 'contact_person_verification'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 1);
+
+        let person = engine
+            .calendar()
+            .register_contact_person(
+                "Mari Maasikas",
+                Some("49001010001"),
+                "mari@example.test",
+                Some("+372 5555 0000"),
+            )
+            .await
+            .expect("register");
+        assert_eq!(person.registry_code, REGISTRY_CODE);
+        assert_eq!(person.full_name, "Mari Maasikas");
+        // Upsert by email: the same address updates rather than duplicates.
+        let updated = engine
+            .calendar()
+            .register_contact_person("Mari M.", None, "mari@example.test", None)
+            .await
+            .expect("upsert");
+        assert_eq!(updated.id, person.id);
+        assert_eq!(updated.full_name, "Mari M.");
+        assert!(updated.personal_code.is_none());
+        engine
+            .calendar()
+            .record_contact_person_verification(deadline.id, person.id)
+            .await
+            .expect("record verification");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM compliance_deadlines WHERE id = $1")
+                .bind(deadline.id)
+                .fetch_one(&pool)
+                .await
+                .expect("status");
+        assert_eq!(status, "filed");
+
+        // Registry notices: only incomplete ones become deadlines, and the
+        // sync is idempotent.
+        let created = engine
+            .sync_registry_notices_to_calendar()
+            .await
+            .expect("sync notices");
+        assert!(!created.is_empty());
+        assert!(created
+            .iter()
+            .all(|deadline| deadline.deadline_type.starts_with("registry_")
+                && deadline.due_date >= d(2000, 1, 1)));
+        let again = engine
+            .sync_registry_notices_to_calendar()
+            .await
+            .expect("sync again");
+        assert_eq!(again.len(), created.len());
+        let distinct: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT deadline_type) FROM compliance_deadlines
+             WHERE deadline_type LIKE 'registry_%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("distinct");
+        assert_eq!(distinct, created.len() as i64);
+    }
+
+    // ── Generators from live data ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn annual_report_sums_only_paid_invoices_of_the_fiscal_year() {
+        let Some((pool, engine)) = engine("annual").await else {
+            return;
+        };
+        // Paid EUR invoices inside the year.
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 2, 15, 12, 0, 0).unwrap(),
+            100000,
+            24000,
+            "EUR",
+            "EE",
+            None,
+        )
+        .await;
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap(),
+            50000,
+            12000,
+            "EUR",
+            "DE",
+            Some("DE123"),
+        )
+        .await;
+        // A draft invoice and a different year must be excluded.
+        sqlx::query(
+            "INSERT INTO invoices (id, amount, currency, status, issued_at, created_at, updated_at,
+                                   subtotal, vat_total, total)
+             VALUES (gen_random_uuid(), 999999, 'EUR', 'open', make_timestamptz(2026, 3, 1, 0, 0, 0), NOW(), NOW(),
+                     999999, 0, 999999)",
+        )
+        .execute(&pool)
+        .await
+        .expect("draft");
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap(),
+            777777,
+            0,
+            "EUR",
+            "EE",
+            None,
+        )
+        .await;
+
+        let report = engine.generate_annual_report(2026).await.expect("report");
+        assert_eq!(report.fiscal_year, 2026);
+        assert_eq!(report.company_name, COMPANY_NAME);
+        assert_eq!(report.registry_code, REGISTRY_CODE);
+        assert_eq!(report.period, "2026-01-01 to 2026-12-31");
+        let revenue: i64 = report.revenue_sources.iter().map(|s| s.amount_cents).sum();
+        assert_eq!(revenue, 150000, "only paid 2026 invoices count");
+        assert_eq!(report.income_statement.revenue_cents, 150000);
+        // Expenses include the estimated processing fee on the same invoices.
+        let fees: i64 = report
+            .expense_breakdown
+            .iter()
+            .filter(|e| e.category.contains("Stripe"))
+            .map(|e| e.amount_cents)
+            .sum();
+        // The fee estimate applies to the gross charged amount
+        // (subtotal + VAT) of the same paid invoices.
+        let gross_charged = (100000 + 24000 + 50000 + 12000) as f64;
+        assert_eq!(fees, (gross_charged * 0.029 + 30.0) as i64);
+        assert_eq!(
+            report.income_statement.net_profit_cents,
+            report.income_statement.revenue_cents
+                - report.income_statement.operating_expenses_cents
+        );
+        // Balance sheet stays internally consistent.
+        assert_eq!(
+            report.balance_sheet.equity_cents,
+            report.balance_sheet.share_capital_cents + report.balance_sheet.retained_earnings_cents
+        );
+        assert!(report.data_quality.has_sufficient_data);
+        assert!(report.data_quality.missing_fields.is_empty());
+        // Cash flow ties to net profit.
+        assert_eq!(
+            report.cash_flow.net_cash_flow_cents,
+            report.income_statement.net_profit_cents
+        );
+        // No dividends store exists in the canonical chain: the report must
+        // not claim dividend data it never read.
+        assert!(report
+            .expense_breakdown
+            .iter()
+            .all(|e| !e.category.to_lowercase().contains("dividend")));
+    }
+
+    #[tokio::test]
+    async fn vat_declaration_classifies_every_customer_type_and_refuses_to_be_ready() {
+        let Some((pool, engine)) = engine("vat").await else {
+            return;
+        };
+        // A month with one of every customer class, including a non-EUR
+        // invoice that must be excluded with a named reason.
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            10000,
+            2400,
+            "EUR",
+            "EE",
+            None,
+        )
+        .await; // domestic
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            20000,
+            0,
+            "EUR",
+            "DE",
+            Some("DE811234567"),
+        )
+        .await; // reverse charge
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            30000,
+            7200,
+            "EUR",
+            "FR",
+            None,
+        )
+        .await; // EU B2C → EE VAT
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            40000,
+            0,
+            "EUR",
+            "US",
+            None,
+        )
+        .await; // export
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            50000,
+            0,
+            "USD",
+            "US",
+            None,
+        )
+        .await; // non-EUR excluded
+                // An invoice with a blank VAT number snapshot is NOT reverse-charge.
+        seed_invoice(
+            &pool,
+            Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            5000,
+            0,
+            "EUR",
+            "SE",
+            Some("   "),
+        )
+        .await;
+        // A malformed billing_address snapshot cannot fabricate a VAT number.
+        sqlx::query(
+            "INSERT INTO invoices (id, amount, currency, status, issued_at, created_at, updated_at,
+                                   subtotal, vat_total, total, billing_country, billing_address)
+             VALUES (gen_random_uuid(), 6000, 'EUR', 'paid', make_timestamptz(2026, 3, 20, 0, 0, 0), NOW(), NOW(),
+                     6000, 1440, 7440, 'IT', '{not json')",
+        )
+        .execute(&pool)
+        .await
+        .expect("malformed snapshot");
+
+        let declaration = engine.generate_vat_declaration(2026, 3).await.expect("vat");
+        // Domestic box: EE + EU-without-valid-VAT-number (FR 30k, SE 5k, IT 6k).
+        assert_eq!(
+            declaration.domestic_sales.taxable_amount_cents,
+            10000 + 30000 + 5000 + 6000
+        );
+        assert_eq!(
+            declaration.domestic_sales.vat_amount_cents,
+            2400 + 7200 + 1440
+        );
+        assert_eq!(declaration.domestic_sales.transaction_count, 4);
+        // Reverse charge needs a real VAT number in the snapshot.
+        assert_eq!(declaration.intra_eu_supplies.taxable_amount_cents, 20000);
+        assert_eq!(declaration.intra_eu_supplies.transaction_count, 1);
+        // Exports stay outside the EU.
+        assert_eq!(declaration.exports.taxable_amount_cents, 40000);
+        assert_eq!(declaration.exports.transaction_count, 1);
+        // The 2026 standard rate is 24%.
+        assert_eq!(declaration.domestic_sales.vat_rate, 24);
+        assert_eq!(
+            declaration.summary.total_output_vat_cents,
+            declaration.domestic_sales.vat_amount_cents
+        );
+        assert_eq!(declaration.summary.total_input_vat_cents, 0);
+        assert_eq!(
+            declaration.summary.net_vat_payable_cents,
+            declaration.summary.total_output_vat_cents
+        );
+        assert_eq!(declaration.summary.vat_refund_cents, 0);
+        assert_eq!(
+            declaration.summary.due_date,
+            ComplianceCalendar::calculate_due_date(SubmissionType::VatDeclaration, 2026, Some(3))
+        );
+        // The declaration is NOT ready: non-EUR invoices and no input-VAT store.
+        assert!(!declaration.ready_for_filing);
+        assert!(declaration
+            .incomplete_reasons
+            .iter()
+            .any(|reason| reason.contains("non-EUR")));
+        assert!(declaration
+            .incomplete_reasons
+            .iter()
+            .any(|reason| reason.contains("input VAT")));
+
+        // A clean EUR-only month is ready for filing (the input-VAT caveat is
+        // the only remaining note).
+        let clean = engine
+            .generate_vat_declaration(2026, 4)
+            .await
+            .expect("clean");
+        assert_eq!(clean.domestic_sales.taxable_amount_cents, 0);
+        assert_eq!(clean.domestic_sales.transaction_count, 0);
+        assert!(clean.ready_for_filing);
+        assert_eq!(clean.incomplete_reasons.len(), 1);
+        // Zero rows are explicit zeros, never an error.
+        assert_eq!(clean.summary.net_vat_payable_cents, 0);
+        assert_eq!(clean.summary.vat_refund_cents, 0);
+    }
+
+    #[tokio::test]
+    async fn submission_formats_round_trip_and_upsert_by_period() {
+        let Some((pool, engine)) = engine("submission").await else {
+            return;
+        };
+        let document = serde_json::json!({
+            "company_name": COMPANY_NAME,
+            "summary": {"total_output_vat_cents": 2400},
+            "domestic_sales": {"taxable_amount_cents": 10000},
+            "input_vat": {"total_deductible_vat_cents": 0},
+        });
+        let id = engine
+            .persist_submission_with_formats(
+                SubmissionType::VatDeclaration,
+                2026,
+                Some(3),
+                &document,
+            )
+            .await
+            .expect("persist");
+        let download = engine
+            .get_submission_download(id)
+            .await
+            .expect("download")
+            .expect("present");
+        assert_eq!(download.submission_type, "vat_declaration");
+        assert_eq!(
+            download.file_name,
+            "vat-declaration-2026-03-bel-consulting-ou-16588745.pdf"
+        );
+        assert_eq!(download.period_label, "March 2026");
+        assert_eq!(download.checksum.len(), 64);
+        assert!(download.pdf_data.starts_with(b"%PDF-"));
+        assert!(download.csv_data.contains("vat_summary"));
+        assert_eq!(download.json_data["company_name"], COMPANY_NAME);
+        assert_eq!(download.file_size as usize, download.pdf_data.len());
+
+        // Re-persisting the same period is an upsert, not a duplicate.
+        let again = engine
+            .persist_submission_with_formats(
+                SubmissionType::VatDeclaration,
+                2026,
+                Some(3),
+                &document,
+            )
+            .await
+            .expect("persist again");
+        assert_ne!(again, id, "the statement reports the new attempt's id");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_submissions WHERE submission_type = 'vat_declaration'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(rows, 1, "one row per (type, year, month)");
+
+        // persist_submission delegates to the same full-format path.
+        let annual = engine
+            .persist_submission(SubmissionType::AnnualReport, 2026, None, &document)
+            .await
+            .expect("annual persist");
+        assert!(engine
+            .get_submission_download(annual)
+            .await
+            .expect("annual download")
+            .is_some());
+
+        // get_submission returns the base record; unknown ids are None.
+        let submission = engine
+            .get_submission(id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(submission.submission_type, "vat_declaration");
+        assert_eq!(submission.period_start, d(2026, 3, 1));
+        assert_eq!(submission.period_end, d(2026, 3, 31));
+        assert_eq!(submission.tax_month, Some(3));
+        assert!(engine
+            .get_submission(Uuid::new_v4())
+            .await
+            .expect("unknown")
+            .is_none());
+        assert!(engine
+            .get_submission_download(Uuid::new_v4())
+            .await
+            .expect("unknown download")
+            .is_none());
+
+        // list_submissions_extended exposes the format booleans and paginates.
+        let list = engine.list_submissions_extended(10, 0).await.expect("list");
+        assert_eq!(list.len(), 2);
+        let vat = list
+            .iter()
+            .find(|item| item.submission_type == "vat_declaration")
+            .expect("vat row");
+        assert!(vat.has_pdf && vat.has_csv && vat.has_json);
+        assert_eq!(vat.checksum.as_deref().map(str::len), Some(64));
+        assert!(engines_page_is_empty(&engine).await);
+        // A zero limit returns an explicit empty list, not an error.
+        assert!(engine
+            .list_submissions_extended(0, 0)
+            .await
+            .expect("zero limit")
+            .is_empty());
+    }
+
+    async fn engines_page_is_empty(engine: &EstoniaOuCompliance) -> bool {
+        engine
+            .list_submissions_extended(10, 100)
+            .await
+            .expect("offset")
+            .is_empty()
+    }
+
+    #[tokio::test]
+    async fn build_data_quality_reports_missing_sources_and_zero_rows() {
+        let none =
+            EstoniaOuCompliance::build_data_quality(false, false, false, &Vec::<String>::new());
+        assert!(!none.has_sufficient_data);
+        assert!(none.note.contains("Insufficient data"));
+        // No source was recorded as missing: the note must not claim
+        // otherwise (the report is not-ready because of the data, not the
+        // schema).
+        assert!(none.missing_fields.is_empty());
+
+        let missing: Vec<String> = vec!["invoices table".into(), "payroll_records".into()];
+        let partial = EstoniaOuCompliance::build_data_quality(true, false, false, &missing);
+        assert!(partial.has_sufficient_data, "invoices alone are sufficient");
+        assert_eq!(partial.missing_fields, missing);
+        let complete =
+            EstoniaOuCompliance::build_data_quality(true, true, true, &Vec::<String>::new());
+        assert!(complete.has_sufficient_data);
+        assert!(complete.missing_fields.is_empty(), "no false placeholder");
+        assert!(complete.note.contains("Data extracted"));
+        assert!(partial.note.contains("Data extracted"));
+
+        let via_str: [&str; 1] = ["borrowed"];
+        let borrowed = EstoniaOuCompliance::build_data_quality(false, true, false, &via_str);
+        assert!(borrowed.has_sufficient_data, "payroll alone is sufficient");
+        assert_eq!(borrowed.missing_fields, vec!["borrowed".to_string()]);
+    }
+
+    #[test]
+    fn submission_type_round_trips_and_rejects_unknown_labels() {
+        for st in [
+            SubmissionType::AnnualReport,
+            SubmissionType::VatDeclaration,
+            SubmissionType::IncomeTax,
+            SubmissionType::SocialTax,
+            SubmissionType::StatisticalReport,
+        ] {
+            assert_eq!(SubmissionType::from_str(st.as_str()), Some(st));
+            assert!(!st.label().is_empty());
+            assert_eq!(st.to_string(), st.as_str());
+        }
+        assert_eq!(SubmissionType::from_str("nope"), None);
+        assert_eq!(SubmissionType::from_str(""), None);
+        // Every deadline status renders a stable string and indicator.
+        for status in [
+            DeadlineStatus::Pending,
+            DeadlineStatus::Filed,
+            DeadlineStatus::Overdue,
+            DeadlineStatus::Exempt,
+        ] {
+            assert!(!status.as_str().is_empty());
+            assert!(!status.indicator().is_empty());
+        }
+        for status in [
+            SubmissionStatus::Draft,
+            SubmissionStatus::Generated,
+            SubmissionStatus::Submitted,
+            SubmissionStatus::Acknowledged,
+            SubmissionStatus::Overdue,
+            SubmissionStatus::Error,
+        ] {
+            assert!(!status.as_str().is_empty());
+        }
     }
 }

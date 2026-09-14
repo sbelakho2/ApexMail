@@ -14,7 +14,11 @@ use apexmail_db::repos::warmup::WarmupCatalogRepo;
 use sqlx::PgPool;
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-    match migrator::test_support::fresh_canonical_pool("apexdb_f86_f87", db_suffix).await {
+    // Namespaced per binary for the same reason as the adversarial suite's
+    // helper: the database name is `<base>_<suffix>`, so a suffix shared with
+    // another test binary is a drop/create race under a parallel runner.
+    let namespaced = format!("canonical_{db_suffix}");
+    match migrator::test_support::fresh_canonical_pool("apexdb_f86_f87", &namespaced).await {
         Ok(pool) => pool,
         Err(error) => panic!("{}", error.panic_message()),
     }

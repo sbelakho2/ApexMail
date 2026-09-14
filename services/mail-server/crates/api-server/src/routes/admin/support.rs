@@ -759,3 +759,351 @@ mod tests {
         );
     }
 }
+
+// ─── Adversarial control-plane support tests ───────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: Some("usr_adv_support_000001".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    fn create_body(subject: &str) -> CreateTicketRequest {
+        CreateTicketRequest {
+            subject: subject.into(),
+            description: "  needs help  ".into(),
+            tenant_id: None,
+            tenant_name: Some("forged name".into()),
+            tenant_email: Some("forged@evil.example".into()),
+            priority: "HIGH".into(),
+            category: Some("billing".into()),
+            assignee: Some("operator-1".into()),
+        }
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, ticket_ids: &[String]) {
+        for id in ticket_ids {
+            sqlx::query("DELETE FROM support_ticket_messages WHERE ticket_id = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("cleanup messages");
+            sqlx::query("DELETE FROM support_tickets WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("cleanup ticket");
+        }
+    }
+
+    #[test]
+    fn optional_text_normalization_trims_and_drops_empty() {
+        let empty = String::new();
+        let blank = "   ".to_string();
+        let value = "  x  ".to_string();
+        assert_eq!(normalize_optional_text(None), None);
+        assert_eq!(normalize_optional_text(Some(&empty)), None);
+        assert_eq!(normalize_optional_text(Some(&blank)), None);
+        assert_eq!(normalize_optional_text(Some(&value)), Some("x".into()));
+    }
+
+    #[tokio::test]
+    async fn ticket_create_derives_tenant_and_lowercases_priority() {
+        let Some((state, pool)) = state_and_pool("adv_admin_support_create").await else {
+            return;
+        };
+        let (status, Json(ticket)) = create_ticket(
+            State(state.clone()),
+            admin_auth(),
+            Json(create_body("Cannot export data")),
+        )
+        .await
+        .expect("create ticket");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(ticket.status, "open");
+        assert_eq!(ticket.priority, "high", "priority normalized to lowercase");
+        assert_eq!(ticket.subject, "Cannot export data");
+        assert_eq!(ticket.description.as_deref(), Some("needs help"));
+        // Client-supplied tenant fields must never be trusted.
+        assert_eq!(ticket.tenant_id.as_deref(), Some("system"));
+        assert!(ticket.tenant_name.is_none());
+        assert!(ticket.tenant_email.is_none());
+        assert!(ticket.messages.is_empty());
+
+        // Validation: blank fields and unknown priority.
+        let mut blank = create_body("   ");
+        blank.description = "d".into();
+        assert!(matches!(
+            create_ticket(State(state.clone()), admin_auth(), Json(blank)).await,
+            Err(ApiError::Validation(_))
+        ));
+        let mut blank_desc = create_body("subject");
+        blank_desc.description = "   ".into();
+        assert!(matches!(
+            create_ticket(State(state.clone()), admin_auth(), Json(blank_desc)).await,
+            Err(ApiError::Validation(_))
+        ));
+        let mut bad_priority = create_body("subject");
+        bad_priority.priority = "impossible".into();
+        assert!(matches!(
+            create_ticket(State(state.clone()), admin_auth(), Json(bad_priority)).await,
+            Err(ApiError::Validation(_))
+        ));
+
+        cleanup(&pool, &[ticket.id]).await;
+    }
+
+    #[tokio::test]
+    async fn list_reply_and_update_flow_with_forgery_guards() {
+        let Some((state, pool)) = state_and_pool("adv_admin_support_flow").await else {
+            return;
+        };
+        let (_, Json(ticket)) = create_ticket(
+            State(state.clone()),
+            admin_auth(),
+            Json(create_body(&format!(
+                "Thread {}",
+                uuid::Uuid::new_v4().simple()
+            ))),
+        )
+        .await
+        .expect("create ticket");
+
+        // List with clamps and a status filter.
+        let Json(list) = list_tickets(
+            State(state.clone()),
+            admin_auth(),
+            Query(TicketsQuery {
+                limit: i64::MAX,
+                offset: -1,
+                status: Some("open".into()),
+            }),
+        )
+        .await
+        .expect("list");
+        assert!(list.iter().any(|t| t.id == ticket.id));
+        assert!(list.iter().all(|t| t.status == "open"));
+        let Json(no_match) = list_tickets(
+            State(state.clone()),
+            admin_auth(),
+            Query(TicketsQuery {
+                limit: 1,
+                offset: 0,
+                status: Some("closed".into()),
+            }),
+        )
+        .await
+        .expect("filtered list");
+        assert!(no_match.iter().all(|t| t.status == "closed"));
+
+        // Reply: content required, unknown ticket 404, invalid status refused.
+        assert!(matches!(
+            add_reply(
+                State(state.clone()),
+                admin_auth(),
+                Json(AddReplyRequest {
+                    ticket_id: ticket.id.clone(),
+                    content: "   ".into(),
+                    author: "attacker".into(),
+                    author_type: "customer".into(),
+                    new_status: None,
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            add_reply(
+                State(state.clone()),
+                admin_auth(),
+                Json(AddReplyRequest {
+                    ticket_id: "no-such-ticket".into(),
+                    content: "hi".into(),
+                    author: "attacker".into(),
+                    author_type: "agent".into(),
+                    new_status: None,
+                })
+            )
+            .await,
+            Err(ApiError::NotFound(_))
+        ));
+        assert!(matches!(
+            add_reply(
+                State(state.clone()),
+                admin_auth(),
+                Json(AddReplyRequest {
+                    ticket_id: ticket.id.clone(),
+                    content: "hi".into(),
+                    author: "attacker".into(),
+                    author_type: "agent".into(),
+                    new_status: Some("banana".into()),
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+
+        // A valid reply overrides the client author/author_type and moves
+        // the ticket status.
+        let (status, Json(reply)) = add_reply(
+            State(state.clone()),
+            admin_auth(),
+            Json(AddReplyRequest {
+                ticket_id: ticket.id.clone(),
+                content: "  investigating  ".into(),
+                author: "forged-customer".into(),
+                author_type: "customer".into(),
+                new_status: Some("in_progress".into()),
+            }),
+        )
+        .await
+        .expect("reply");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(reply["author"], "usr_adv_support_000001");
+        assert_eq!(reply["authorType"], "agent", "customer forgery coerced");
+        assert_eq!(reply["content"], "investigating");
+
+        let Json(listed) = list_tickets(
+            State(state.clone()),
+            admin_auth(),
+            Query(TicketsQuery {
+                limit: 100,
+                offset: 0,
+                status: None,
+            }),
+        )
+        .await
+        .expect("list with messages");
+        let fetched = listed
+            .iter()
+            .find(|t| t.id == ticket.id)
+            .expect("ticket present");
+        assert_eq!(fetched.status, "in_progress");
+        assert_eq!(fetched.messages.len(), 1);
+        assert_eq!(fetched.messages[0].content, "investigating");
+
+        // Update: no-op refused, bad enums refused, unknown id 404.
+        assert!(matches!(
+            update_ticket(
+                State(state.clone()),
+                admin_auth(),
+                Json(UpdateTicketRequest {
+                    id: ticket.id.clone(),
+                    status: None,
+                    priority: None,
+                    assignee: None,
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        for (status, priority) in [(Some("nope"), None), (None, Some("nope"))] {
+            assert!(matches!(
+                update_ticket(
+                    State(state.clone()),
+                    admin_auth(),
+                    Json(UpdateTicketRequest {
+                        id: ticket.id.clone(),
+                        status: status.map(str::to_string),
+                        priority: priority.map(str::to_string),
+                        assignee: None,
+                    })
+                )
+                .await,
+                Err(ApiError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            update_ticket(
+                State(state.clone()),
+                admin_auth(),
+                Json(UpdateTicketRequest {
+                    id: "missing".into(),
+                    status: Some("closed".into()),
+                    priority: None,
+                    assignee: None,
+                })
+            )
+            .await,
+            Err(ApiError::NotFound(_))
+        ));
+        let Json(updated) = update_ticket(
+            State(state.clone()),
+            admin_auth(),
+            Json(UpdateTicketRequest {
+                id: ticket.id.clone(),
+                status: Some("resolved".into()),
+                priority: Some("low".into()),
+                assignee: Some("operator-9".into()),
+            }),
+        )
+        .await
+        .expect("update");
+        assert_eq!(updated["status"], "resolved");
+        assert_eq!(updated["priority"], "low");
+
+        // Access gates.
+        let mut customer = admin_auth();
+        customer.tenant_id = "ten_customer_adv".into();
+        assert!(matches!(
+            list_tickets(
+                State(state.clone()),
+                customer.clone(),
+                Query(TicketsQuery {
+                    limit: 1,
+                    offset: 0,
+                    status: None
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        let mut no_scope = admin_auth();
+        no_scope.scopes = vec![];
+        assert!(matches!(
+            post_support(
+                State(state.clone()),
+                no_scope,
+                Json(SupportPostRequest::Create(create_body("nope")))
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        cleanup(&pool, &[ticket.id]).await;
+    }
+
+    #[test]
+    fn support_post_request_disambiguates_create_and_reply() {
+        let create: SupportPostRequest =
+            serde_json::from_str(r#"{"subject":"s","description":"d","priority":"high"}"#)
+                .expect("create shape");
+        assert!(matches!(create, SupportPostRequest::Create(_)));
+        let reply: SupportPostRequest =
+            serde_json::from_str(r#"{"ticketId":"t","content":"c"}"#).expect("reply shape");
+        assert!(matches!(reply, SupportPostRequest::Reply(_)));
+        // Unknown fields remain refused on both shapes.
+        assert!(serde_json::from_str::<CreateTicketRequest>(
+            r#"{"subject":"s","description":"d","evil":1}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<AddReplyRequest>(
+            r#"{"ticketId":"t","content":"c","evil":1}"#
+        )
+        .is_err());
+    }
+}

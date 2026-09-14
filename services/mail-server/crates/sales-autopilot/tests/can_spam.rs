@@ -14,13 +14,13 @@
 //!   signup that did not happen) — is pure renderer coverage and runs by
 //!   default;
 //! * a suppressed recipient is refused at enrollment and again at the
-//!   pre-send recheck (live, `#[ignore]`d);
+//!   pre-send recheck (against the canonical test database);
 //! * over-mailing is blocked by the surviving frequency control: the
 //!   per-account weekly budget enforced inside `decision_engine::decide`. The
 //!   per-recipient 7-day cap survives only in the read-only legacy `dry_run`
 //!   funnel (covered by `dispatcher_integration.rs::dry_run_renders_without_enqueueing`);
 //! * a deployment with no sales sender identity fails loudly instead of
-//!   pretending to send (live, `#[ignore]`d).
+//!   pretending to send (against the canonical test database).
 //!
 //! `mod common` provisions the canonical platform schema through the real
 //! production migrator plus the sales schema via `routes::initialize_schema`.
@@ -189,7 +189,6 @@ fn dispatcher_for(db: &sqlx::PgPool, domain: &str) -> Arc<ProductionCampaignDisp
 /// refuses the send). The old test asserted the dispatch batch skipped them;
 /// the subject is unchanged, the mechanism is the canonical one.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn opted_out_recipient_is_refused_at_enrollment_and_at_send_time() {
     let Some(db) = common::test_pool("can_spam_optout").await else {
         return;
@@ -317,7 +316,6 @@ async fn opted_out_recipient_is_refused_at_enrollment_and_at_send_time() {
 /// refused while a fresh account still sends — the same funnel split the old
 /// per-recipient cap test asserted.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn account_frequency_budget_blocks_over_mailing() {
     let Some(db) = common::test_pool("can_spam_frequency").await else {
         return;
@@ -409,7 +407,6 @@ async fn account_frequency_budget_blocks_over_mailing() {
 /// `routes::start_campaign`), so the surviving loud-failure point is sender
 /// resolution on the sequence path.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn missing_sales_sender_identity_fails_loudly() {
     let Some(db) = common::test_pool("can_spam_no_sender").await else {
         return;

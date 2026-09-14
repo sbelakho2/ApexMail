@@ -1,7 +1,9 @@
 //! Live-DB adversarial tests for the enrichment waterfall (§9), cost-aware
 //! routing (§10) and real discovery (§6).
 //!
-//! Every test is `#[ignore]`d: they need the canonical migrated schema.
+//! These tests provision the canonical migrated schema themselves and
+//! soft-skip when TEST_DATABASE_URL is unset, so they run in the workspace
+//! suite (they were `#[ignore]`d and silently skipped by CI).
 //! Run them with:
 //!
 //! ```sh
@@ -129,7 +131,6 @@ fn fixture(
 
 /// Facts are the source of truth: each persisted row names the provider that
 /// supplied it, carries non-zero confidence and links to an evidence row.
-#[ignore]
 #[tokio::test]
 async fn live_waterfall_persists_provenance_per_field() {
     let Some(db) = common::test_pool("live_waterfall_persists_provenance_per_field").await else {
@@ -223,7 +224,6 @@ async fn live_waterfall_persists_provenance_per_field() {
 
 /// Provider 1 errors, provider 2 still fills its fields, the run reports
 /// partial coverage, and the failure lands in `sales_provider_stats`.
-#[ignore]
 #[tokio::test]
 async fn live_partial_failure_is_survivable_and_recorded() {
     let Some(db) = common::test_pool("live_partial_failure_is_survivable_and_recorded").await
@@ -288,7 +288,6 @@ async fn live_partial_failure_is_survivable_and_recorded() {
 
 /// Cold start (no stats) explores; after enough failures the dead provider is
 /// dropped in favour of an alternative; cost only moves on a fill.
-#[ignore]
 #[tokio::test]
 async fn live_router_cold_start_dead_provider_and_cost_accounting() {
     let Some(db) =
@@ -390,7 +389,6 @@ async fn live_router_cold_start_dead_provider_and_cost_accounting() {
 
 /// The §10 example over real rows: equal coverage, A at €0.002 beats B at
 /// €0.03; with B's coverage much higher, B can win.
-#[ignore]
 #[tokio::test]
 async fn live_routing_cost_example_matches_section_10() {
     let Some(db) = common::test_pool("live_routing_cost_example_matches_section_10").await else {
@@ -479,7 +477,6 @@ async fn live_routing_cost_example_matches_section_10() {
 
 /// Running the same query twice creates one candidate row (partial unique
 /// index) and the second run does not double-count `discovered`.
-#[ignore]
 #[tokio::test]
 async fn live_discovery_dedupe_across_jobs() {
     let Some(db) = common::test_pool("live_discovery_dedupe_across_jobs").await else {
@@ -549,7 +546,6 @@ async fn live_discovery_dedupe_across_jobs() {
 
 /// A source restricted to EE must have its US candidate dropped, and the drop
 /// must be visible in the run record.
-#[ignore]
 #[tokio::test]
 async fn live_discovery_jurisdiction_control_drops_and_reports() {
     let Some(db) = common::test_pool("live_discovery_jurisdiction_control_drops_and_reports").await
@@ -617,7 +613,6 @@ async fn live_discovery_jurisdiction_control_drops_and_reports() {
 
 /// Promotion refuses a domain-less candidate with a clear error and is
 /// idempotent for a valid one (exactly one sales_accounts row).
-#[ignore]
 #[tokio::test]
 async fn live_promotion_is_idempotent_and_refuses_without_domain() {
     let Some(db) =
@@ -714,7 +709,6 @@ async fn live_promotion_is_idempotent_and_refuses_without_domain() {
 /// A hostile provider cannot write malformed rows: over-long domains, missing
 /// domains, non-URLs, empty hashes and out-of-range confidences are sanitized;
 /// the CHECK constraints reject anything that slips through.
-#[ignore]
 #[tokio::test]
 async fn live_discovery_hostile_input_is_sanitized() {
     let Some(db) = common::test_pool("live_discovery_hostile_input_is_sanitized").await else {
@@ -879,7 +873,6 @@ async fn live_discovery_hostile_input_is_sanitized() {
 }
 
 /// `sales_discovery_jobs.cost_eur` equals the sum of its source-run costs.
-#[ignore]
 #[tokio::test]
 async fn live_discovery_cost_accounting_sums_source_runs() {
     let Some(db) = common::test_pool("live_discovery_cost_accounting_sums_source_runs").await
@@ -937,7 +930,6 @@ async fn live_discovery_cost_accounting_sums_source_runs() {
 
 /// A failing source is recorded as `failed`/`rate_limited` with its error, and
 /// a job whose only source fails ends `failed` (not silently completed).
-#[ignore]
 #[tokio::test]
 async fn live_discovery_source_failure_is_recorded() {
     let Some(db) = common::test_pool("live_discovery_source_failure_is_recorded").await else {
@@ -984,7 +976,6 @@ async fn live_discovery_source_failure_is_recorded() {
 
 /// `#[ignore]`d helper test: proving the suite itself is wired to the
 /// requested database when run with `--ignored`.
-#[ignore]
 #[tokio::test]
 async fn live_schema_has_required_sales_tables() {
     let Some(db) = common::test_pool("live_schema_has_required_sales_tables").await else {

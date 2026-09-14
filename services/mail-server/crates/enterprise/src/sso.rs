@@ -1,6 +1,6 @@
 use std::sync::Once;
 
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use quick_xml::escape::escape as xml_escape;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -17,6 +17,17 @@ pub type RedisPool = deadpool_redis::Pool;
 
 static SSO_SESSIONS_MISSING_WARNING: Once = Once::new();
 const OIDC_SECRET_ENCRYPTION_PURPOSE: &str = "enterprise/sso/oidc-client-secret";
+
+/// Tolerated clock skew between this service and the IdP when evaluating a
+/// SAML assertion's `NotBefore` / `NotOnOrAfter` bounds (SAML 2.0 §2.5.1.2).
+/// Applied symmetrically: an assertion may start up to 5 minutes in the
+/// future and may have expired up to 5 minutes ago.
+pub const SAML_CLOCK_SKEW_SECONDS: i64 = 300;
+
+/// Retention horizon for consumed SAML assertion ids in
+/// `ent_saml_assertion_replays` (bounds the replay table): 24 hours, always
+/// at least as long as the maximum assertion validity window.
+pub const SAML_REPLAY_RETENTION_HOURS: i32 = 24;
 
 fn is_missing_relation_error(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("42P01"))
@@ -624,7 +635,9 @@ impl SSOService {
         let mut status_code_value: Option<String> = None;
         let mut issuer_value: Option<String> = None;
         let mut audience_value: Option<String> = None;
+        let mut not_before: Option<chrono::DateTime<Utc>> = None;
         let mut not_on_or_after: Option<chrono::DateTime<Utc>> = None;
+        let mut assertion_id: Option<String> = None;
         let mut name_id_value: Option<String> = None;
         let mut attributes: Vec<(String, String)> = Vec::new();
         let mut in_status_code = false;
@@ -651,26 +664,44 @@ impl SSOService {
                         "Issuer" => in_issuer = true,
                         "Audience" => in_audience = in_conditions && in_audience_restriction,
                         "AudienceRestriction" => in_audience_restriction = true,
+                        "Assertion" => {
+                            // The assertion id is the replay-protection key.
+                            if assertion_id.is_none() {
+                                if let Some(attr) = e
+                                    .attributes()
+                                    .filter_map(|a| a.ok())
+                                    .find(|a| a.key.as_ref() == b"ID")
+                                {
+                                    if let Ok(val) = String::from_utf8(attr.value.to_vec()) {
+                                        assertion_id = Some(val);
+                                    }
+                                }
+                            }
+                        }
                         "Conditions" => {
                             in_conditions = true;
-                            // Extract NotOnOrAfter attribute from Conditions element
-                            if let Some(attr) = e
-                                .attributes()
-                                .filter_map(|a| a.ok())
-                                .find(|a| a.key.as_ref() == b"NotOnOrAfter")
-                            {
-                                if let Ok(val) = String::from_utf8(attr.value.to_vec()) {
-                                    not_on_or_after = chrono::DateTime::parse_from_rfc3339(&val)
+                            // Extract the validity-window attributes from the
+                            // Conditions element.
+                            for attr in e.attributes().filter_map(|a| a.ok()) {
+                                let value = match String::from_utf8(attr.value.to_vec()) {
+                                    Ok(value) => value,
+                                    Err(_) => continue,
+                                };
+                                let parsed = chrono::DateTime::parse_from_rfc3339(&value)
+                                    .map(|dt| dt.with_timezone(&Utc))
+                                    .ok()
+                                    .or_else(|| {
+                                        chrono::DateTime::parse_from_str(
+                                            &value,
+                                            "%Y-%m-%dT%H:%M:%S%:z",
+                                        )
                                         .map(|dt| dt.with_timezone(&Utc))
                                         .ok()
-                                        .or_else(|| {
-                                            chrono::DateTime::parse_from_str(
-                                                &val,
-                                                "%Y-%m-%dT%H:%M:%S%:z",
-                                            )
-                                            .map(|dt| dt.with_timezone(&Utc))
-                                            .ok()
-                                        });
+                                    });
+                                match attr.key.as_ref() {
+                                    b"NotBefore" => not_before = parsed,
+                                    b"NotOnOrAfter" => not_on_or_after = parsed,
+                                    _ => {}
                                 }
                             }
                         }
@@ -815,19 +846,7 @@ impl SSOService {
             }
         }
 
-        // 5. Check NotOnOrAfter condition — reject expired assertions
-        if let Some(expires) = not_on_or_after {
-            if Utc::now() > expires {
-                tracing::warn!(
-                    expires = %expires.to_rfc3339(),
-                    domain = domain,
-                    "SAML assertion has expired"
-                );
-                return Err("SAML assertion has expired (NotOnOrAfter)".to_string());
-            }
-        }
-
-        // 6. Validate and sanitize NameID
+        // 5. Validate and sanitize NameID
         let name_id = name_id_value.ok_or_else(|| {
             tracing::warn!(domain = domain, "SAML response missing NameID");
             "SAML response missing NameID element".to_string()
@@ -840,10 +859,126 @@ impl SSOService {
             return Err("SAML NameID is empty after sanitization".to_string());
         }
 
+        // 6. Enforce the assertion validity window (bounded clock skew) and
+        //    the per-tenant replay guard. Only reached after every signature
+        //    and claim check above has passed, so an invalid assertion cannot
+        //    burn an assertion id.
+        let assertion_id = assertion_id.ok_or_else(|| {
+            tracing::warn!(domain = domain, "SAML response missing Assertion ID");
+            "SAML response missing Assertion ID (required for replay protection)".to_string()
+        })?;
+        self.validate_saml_assertion_claims(
+            &config.tenant_id,
+            &assertion_id,
+            not_before,
+            not_on_or_after,
+            Utc::now(),
+        )
+        .await?;
+
         Ok(ValidatedSamlResponse {
             name_id: sanitized_name_id,
             attributes,
         })
+    }
+
+    /// Enforce a SAML assertion's validity window and replay protection.
+    ///
+    /// This is the post-signature half of
+    /// [`Self::parse_and_validate_saml_response`], kept separate so it can be
+    /// tested without an IdP-signed XML fixture:
+    ///
+    /// * `NotBefore`/`NotOnOrAfter` are compared against `now` with
+    ///   [`SAML_CLOCK_SKEW_SECONDS`] of tolerance on BOTH bounds, so small
+    ///   clock differences between this service and the IdP do not reject
+    ///   otherwise-valid assertions.
+    /// * `assertion_id` is consumed exactly once per `tenant_id` in
+    ///   `ent_saml_assertion_replays` (idempotent `ON CONFLICT DO NOTHING`
+    ///   insert); a second use of the same id is rejected as a replay. The
+    ///   table is pruned to [`SAML_REPLAY_RETENTION_HOURS`] so it stays bounded.
+    pub async fn validate_saml_assertion_claims(
+        &self,
+        tenant_id: &str,
+        assertion_id: &str,
+        not_before: Option<DateTime<Utc>>,
+        not_on_or_after: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Result<(), String> {
+        let assertion_id = assertion_id.trim();
+        if assertion_id.is_empty() {
+            return Err(
+                "SAML assertion is missing an ID; it cannot be protected against replay"
+                    .to_string(),
+            );
+        }
+
+        let skew = TimeDelta::seconds(SAML_CLOCK_SKEW_SECONDS);
+
+        if let Some(not_before) = not_before {
+            if now + skew < not_before {
+                tracing::warn!(
+                    not_before = %not_before.to_rfc3339(),
+                    skew_seconds = SAML_CLOCK_SKEW_SECONDS,
+                    "SAML assertion is not yet valid"
+                );
+                return Err(format!(
+                    "SAML assertion is not yet valid (NotBefore {})",
+                    not_before.to_rfc3339()
+                ));
+            }
+        }
+
+        if let Some(expires) = not_on_or_after {
+            if now - skew > expires {
+                tracing::warn!(
+                    expires = %expires.to_rfc3339(),
+                    skew_seconds = SAML_CLOCK_SKEW_SECONDS,
+                    "SAML assertion has expired"
+                );
+                return Err(format!(
+                    "SAML assertion has expired (NotOnOrAfter {})",
+                    expires.to_rfc3339()
+                ));
+            }
+        }
+
+        // Bounded replay store: drop ids older than the retention horizon
+        // before inserting, so the table cannot grow without bound.
+        sqlx::query(
+            "DELETE FROM ent_saml_assertion_replays
+             WHERE consumed_at < NOW() - make_interval(hours => $1::int)",
+        )
+        .bind(SAML_REPLAY_RETENTION_HOURS)
+        .execute(&self.db)
+        .await
+        .map_err(|error| format!("Prune SAML replay store: {error}"))?;
+
+        // Idempotent, bounded insert: ON CONFLICT DO NOTHING + RETURNING
+        // distinguishes "fresh" from "already consumed" atomically.
+        let inserted: Option<String> = sqlx::query_scalar(
+            "INSERT INTO ent_saml_assertion_replays (tenant_id, assertion_id)
+             VALUES ($1, $2)
+             ON CONFLICT (tenant_id, assertion_id) DO NOTHING
+             RETURNING assertion_id",
+        )
+        .bind(tenant_id)
+        .bind(assertion_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|error| format!("Record SAML assertion replay guard: {error}"))?;
+
+        if inserted.is_none() {
+            tracing::warn!(
+                tenant_id = tenant_id,
+                assertion_id = assertion_id,
+                "SAML assertion replay detected"
+            );
+            return Err(format!(
+                "SAML assertion replay rejected: assertion {assertion_id} was already consumed for this tenant"
+            ));
+        }
+
+        Ok(())
     }
 
     /// Cleanup expired sessions

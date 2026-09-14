@@ -2467,3 +2467,421 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod adversarial_db_tests {
+    //! Adversarial, DB-backed bounce-ingestion tests.
+    //!
+    //! `process_bounce` is driven with real VERP v2 tokens against the
+    //! canonical provisioned schema: RFC 3463 classification decides the
+    //! suppression, a forged/expired/replayed token must never suppress, and
+    //! an unclassifiable reply is a retry — never a silent permanent verdict.
+    //! `TEST_DATABASE_URL` gates the suite: unset soft-skips, configured-but
+    //! broken FAILS.
+
+    use super::*;
+    use sqlx::PgPool;
+
+    const SECRET: &[u8] = b"verp-adversarial-secret-32-bytes!";
+    const VERP_DOMAIN: &str = "bounces.apexmail.ee";
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn redis_pool() -> deadpool_redis::Pool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    fn test_server(pool: PgPool, redis: deadpool_redis::Pool) -> BounceServer {
+        BounceServer::new(
+            BounceConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port: 0,
+                hostname: "bounce.test".into(),
+                verp_domain: VERP_DOMAIN.into(),
+                verp_sanitize: true,
+                max_message_size: 1024 * 1024,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+                max_messages_per_ip_per_hour: 2000,
+            },
+            pool,
+            redis,
+            "bounce.test".into(),
+            Some(SECRET.to_vec()),
+            true,
+        )
+    }
+
+    fn unique_tenant() -> String {
+        format!("b-{}", &Uuid::new_v4().simple().to_string()[..24])
+    }
+
+    async fn seed_sent_message(pool: &PgPool, tenant: &str, recipient: &str) -> (String, String) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status)
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(tenant)
+        .bind(format!("Bounce {tenant}"))
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        let id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue
+                 (id, from_address, to_addresses, subject, tenant_id, message_id, status)
+             VALUES ($1, 'sender@apexmail.test', ARRAY[$2]::text[], 'bounce fixture',
+                     $3, $4, 'sent')",
+        )
+        .bind(id)
+        .bind(recipient)
+        .bind(tenant)
+        .bind(message_id)
+        .execute(pool)
+        .await
+        .expect("insert sent message");
+        (id.to_string(), message_id.to_string())
+    }
+
+    fn claims(queue_id: &str, tenant: &str, recipient: &str, expires_at: i64) -> VerpV2Claims {
+        VerpV2Claims {
+            queue_id: queue_id.to_string(),
+            tenant_id: tenant.to_string(),
+            recipient: recipient.to_string(),
+            expires_at,
+        }
+    }
+
+    fn verp_address(claims: &VerpV2Claims) -> String {
+        apexmail_lib::verp::verp_v2_address(SECRET, claims, VERP_DOMAIN)
+    }
+
+    fn dsn(status: &str, diagnostic: &str) -> Vec<u8> {
+        format!(
+            "Reporting-MTA: dns; mx.reporter.test\r\n\
+             Status: {status}\r\n\
+             Diagnostic-Code: {diagnostic}\r\n\
+             \r\n\
+             Remote MTA mx.receiver.test: SMTP diagnostic\r\n"
+        )
+        .into_bytes()
+    }
+
+    async fn bounce_row(
+        pool: &PgPool,
+        id: &str,
+    ) -> Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        bool,
+        String,
+        Option<String>,
+    )> {
+        sqlx::query_as(
+            "SELECT bounce_type, original_message_id, original_recipient, authoritative,
+                    verp_version, observation_detail
+             FROM bounce_events WHERE id = $1",
+        )
+        .bind(Uuid::parse_str(id).expect("uuid"))
+        .fetch_optional(pool)
+        .await
+        .expect("bounce row")
+    }
+
+    async fn suppression_count(pool: &PgPool, tenant: &str, email: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant)
+            .bind(email)
+            .fetch_one(pool)
+            .await
+            .expect("suppression count")
+    }
+
+    async fn webhook_payloads(server: &BounceServer, len: isize) -> Vec<String> {
+        let mut conn = server.redis.get().await.unwrap();
+        redis::cmd("LRANGE")
+            .arg("mta:webhook_queue")
+            .arg(0)
+            .arg(len - 1)
+            .query_async(&mut *conn)
+            .await
+            .unwrap()
+    }
+
+    // ── RFC 3463 classification matrix (pure, but pinned as the contract) ──
+
+    #[test]
+    fn classification_matrix_never_escalates_an_unknown_reply_to_hard() {
+        let cases: &[(&str, BounceType, &str)] = &[
+            ("5.1.1", BounceType::Hard, "no-mailbox"),
+            ("5.1.2", BounceType::Hard, "no-such-domain"),
+            ("5.2.2", BounceType::Hard, "mailbox-full"),
+            ("5.2.1", BounceType::Hard, "disabled"),
+            ("5.3.0", BounceType::Hard, "system-error"),
+            ("5.4.4", BounceType::Hard, "network-error"),
+            ("5.5.1", BounceType::Hard, "protocol-error"),
+            ("5.6.0", BounceType::Hard, "content-error"),
+            ("5.7.13", BounceType::Hard, "account-disabled"),
+            ("5.7.23", BounceType::Hard, "spf-failed"),
+            ("5.7.25", BounceType::Hard, "ip-blacklisted"),
+            ("5.7.26", BounceType::Hard, "dmarc-failed"),
+            ("4.2.1", BounceType::Soft, "disabled-temp"),
+            ("4.2.2", BounceType::Soft, "mailbox-full"),
+            ("4.4.7", BounceType::Soft, "network-error"),
+            ("4.7.0", BounceType::Soft, "security-temp"),
+            ("4.3.0", BounceType::Transient, "transient"),
+        ];
+        for (code, expected_type, expected_subtype) in cases {
+            let info = classify_bounce(&format!("Status: {code}\r\nDiagnostic-Code: smtp; {code}"));
+            assert_eq!(
+                info.bounce_type, *expected_type,
+                "classification of {code} must be {expected_type:?}"
+            );
+            assert_eq!(info.bounce_subtype, *expected_subtype, "subtype of {code}");
+        }
+
+        // A bare 5.7.1 is a policy rejection (retryable), but an
+        // authentication-flavoured 5.7.1 is a genuine hard failure.
+        let policy = classify_bounce("Status: 5.7.1\r\nDiagnostic-Code: smtp; 550 5.7.1 policy");
+        assert_eq!(policy.bounce_type, BounceType::Soft);
+        assert_eq!(policy.bounce_subtype, "policy");
+        let auth = classify_bounce(
+            "Status: 5.7.1\r\nDiagnostic-Code: smtp; 550 5.7.1 DMARC authentication failed",
+        );
+        assert_eq!(auth.bounce_type, BounceType::Hard);
+        assert_eq!(auth.bounce_subtype, "policy");
+
+        // No status code at all → Transient/unknown, never a silent Hard.
+        let unknown = classify_bounce("Delivery delayed, remote host said nothing useful");
+        assert_eq!(unknown.bounce_type, BounceType::Transient);
+        assert_eq!(unknown.bounce_subtype, "unknown");
+
+        // Keyword heuristics for code-less bounces.
+        assert_eq!(
+            classify_bounce("no such user here").bounce_type,
+            BounceType::Hard
+        );
+        assert_eq!(
+            classify_bounce("mailbox full, over quota").bounce_subtype,
+            "mailbox-full"
+        );
+        assert_eq!(
+            classify_bounce("please try again later").bounce_type,
+            BounceType::Transient
+        );
+    }
+
+    // ── authoritative ingestion ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn authoritative_hard_bounce_suppresses_and_emits_exactly_one_webhook() {
+        let Some(pool) = test_pool("bounce_hard").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "gone@example.test";
+        let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+        let claims = claims(
+            &queue_id,
+            &tenant,
+            recipient,
+            chrono::Utc::now().timestamp() + 3600,
+        );
+        let rcpt = vec![verp_address(&claims)];
+        let raw = dsn("5.1.1", "smtp; 550 5.1.1 User unknown");
+
+        let id = server
+            .process_bounce(&rcpt, &raw)
+            .await
+            .expect("hard bounce processed");
+        let row = bounce_row(&pool, &id).await.expect("recorded");
+        assert_eq!(row.0, "Hard");
+        assert_eq!(row.1.as_deref(), Some(queue_id.as_str()));
+        assert_eq!(row.2.as_deref(), Some(recipient));
+        assert!(row.3, "authoritative");
+        assert_eq!(row.4, "v2");
+        assert!(row.5.is_none());
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 1);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM verp_tokens")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "the authenticated token is recorded as an observation"
+        );
+        let payloads = webhook_payloads(&server, 10).await;
+        assert!(
+            payloads.iter().any(|p| p.contains(&id)),
+            "the bounce webhook must be queued"
+        );
+
+        // REPLAY: same token, same report — no second suppression/webhook.
+        let replay = server
+            .process_bounce(&rcpt, &raw)
+            .await
+            .expect("replayed bounce accepted");
+        let _ = replay;
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 1);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM bounce_events WHERE original_message_id = $1")
+                .bind(&queue_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "replays dedupe on the natural key");
+    }
+
+    #[tokio::test]
+    async fn authoritative_soft_bounce_records_without_suppressing() {
+        let Some(pool) = test_pool("bounce_soft").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "full@example.test";
+        let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+        let claims = claims(
+            &queue_id,
+            &tenant,
+            recipient,
+            chrono::Utc::now().timestamp() + 3600,
+        );
+        let rcpt = vec![verp_address(&claims)];
+
+        let id = server
+            .process_bounce(&rcpt, &dsn("4.2.2", "smtp; 452 4.2.2 Mailbox full"))
+            .await
+            .expect("soft bounce processed");
+        let row = bounce_row(&pool, &id).await.expect("recorded");
+        assert_eq!(row.0, "Soft");
+        assert!(row.3);
+        assert_eq!(
+            suppression_count(&pool, &tenant, recipient).await,
+            0,
+            "a mailbox-full soft bounce must never suppress"
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_token_for_unknown_or_mismatched_message_never_suppresses() {
+        let Some(pool) = test_pool("bounce_mismatch").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "real@example.test";
+        let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+
+        // Unknown queue id: recorded, no suppression.
+        let unknown = claims(
+            &Uuid::new_v4().to_string(),
+            &tenant,
+            recipient,
+            chrono::Utc::now().timestamp() + 3600,
+        );
+        let id = server
+            .process_bounce(
+                &[verp_address(&unknown)],
+                &dsn("5.1.1", "smtp; 550 5.1.1 User unknown"),
+            )
+            .await
+            .expect("recorded");
+        assert!(bounce_row(&pool, &id).await.is_some());
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
+
+        // Token says a DIFFERENT recipient than the queued row: never
+        // suppress the queued address on the token's say-so.
+        let mismatched = claims(
+            &queue_id,
+            &tenant,
+            "someone-else@example.test",
+            chrono::Utc::now().timestamp() + 3600,
+        );
+        let id = server
+            .process_bounce(
+                &[verp_address(&mismatched)],
+                &dsn("5.1.1", "smtp; 550 5.1.1 User unknown"),
+            )
+            .await
+            .expect("recorded");
+        assert!(bounce_row(&pool, &id).await.is_some());
+        assert_eq!(
+            suppression_count(&pool, &tenant, recipient).await,
+            0,
+            "a mismatched claim must not suppress the queued recipient"
+        );
+    }
+
+    #[tokio::test]
+    async fn forged_and_unsigned_tokens_are_observations_only() {
+        let Some(pool) = test_pool("bounce_forged").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "victim@example.test";
+        let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+
+        // Tampered MAC.
+        let genuine = verp_address(&claims(
+            &queue_id,
+            &tenant,
+            recipient,
+            chrono::Utc::now().timestamp() + 3600,
+        ));
+        let token = genuine.split('@').next().unwrap().to_string();
+        let mut chars: Vec<char> = token.chars().collect();
+        let last = chars.last_mut().unwrap();
+        *last = if *last == 'A' { 'B' } else { 'A' };
+        let forged = format!("{}@{VERP_DOMAIN}", chars.into_iter().collect::<String>());
+
+        let id = server
+            .process_bounce(&[forged], &dsn("5.1.1", "smtp; 550 5.1.1 User unknown"))
+            .await
+            .expect("forged bounce recorded as observation");
+        let row = bounce_row(&pool, &id).await.expect("recorded");
+        assert!(!row.3, "a forged MAC is never authoritative");
+        assert_eq!(row.4, "v2-rejected");
+        assert!(row.1.is_none() && row.2.is_none(), "natural keys stay NULL");
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
+
+        // Unsigned v1 VERP address (bounces+{id}={domain}={local}@domain) —
+        // the claims are not authenticated.
+        let (local, domain) = recipient.split_once('@').unwrap();
+        let v1 = format!("bounces+{queue_id}={domain}={local}@{VERP_DOMAIN}");
+        let id = server
+            .process_bounce(&[v1], &dsn("5.1.1", "smtp; 550 5.1.1 User unknown"))
+            .await
+            .expect("v1 observed");
+        let row = bounce_row(&pool, &id).await.expect("recorded");
+        assert!(!row.3);
+        assert_eq!(row.4, "v1");
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
+
+        // No webhook may be emitted for either observation.
+        let payloads = webhook_payloads(&server, 20).await;
+        assert!(
+            !payloads
+                .iter()
+                .any(|p| p.contains("v2-rejected") || p.contains("v1")),
+            "observations must never emit an authentic-looking webhook"
+        );
+    }
+}

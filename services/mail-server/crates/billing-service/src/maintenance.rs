@@ -740,8 +740,11 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     // 1.  Check if a closing record already exists for this period
     //     (re-checked under the advisory lock).
     // ------------------------------------------------------------------
+    // `SELECT 1` is INT4; decoding it as i64 fails with a type mismatch, so
+    // the idempotency re-check (and therefore every second daily run) errored
+    // after the first closing. Project an explicit bigint.
     let already_closed: bool = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT 1 FROM month_end_closings WHERE tax_year = $1 AND tax_month = $2 LIMIT 1",
+        "SELECT 1::bigint FROM month_end_closings WHERE tax_year = $1 AND tax_month = $2 LIMIT 1",
     )
     .bind(target_year)
     .bind(target_month as i32)
@@ -1592,7 +1595,11 @@ async fn insert_metering_events(
 
     query_builder.push(
         r#"
-            ON CONFLICT (id) DO NOTHING
+            -- metering_events is RANGE-partitioned by "timestamp" with
+            -- PRIMARY KEY (id, timestamp): the arbiter must include the
+            -- partition key or PostgreSQL raises 42P10 and the recovery
+            -- drain can never persist anything.
+            ON CONFLICT (id, "timestamp") DO NOTHING
             RETURNING id
             "#,
     );
@@ -2238,8 +2245,11 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
                 )
             })?;
 
+        // `SELECT 1` is INT4 and cannot decode into Option<i64>: the
+        // idempotency re-check failed on every SECOND sweep, aborting the
+        // whole SLA pass. Project an explicit bigint.
         let already_credited: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM sla_credits WHERE tenant_id = $1 AND period_month = $2 LIMIT 1",
+            "SELECT 1::bigint FROM sla_credits WHERE tenant_id = $1 AND period_month = $2 LIMIT 1",
         )
         .bind(&candidate.tenant_id)
         .bind(period_month)
@@ -3958,4 +3968,2499 @@ mod tests {
         assert_eq!(sla_credit_percentage_for_breach(0.1), 10);
         assert_eq!(sla_credit_percentage_for_breach(0.05), 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial coverage tests (DB + Redis backed) for the maintenance sweeps.
+//
+// These call the PRIVATE sweep functions directly — the periodic-job
+// wrappers spawn loops and sleep, which is neither deterministic nor fast.
+// Every test provisions its own canonical database clone; `TEST_DATABASE_URL`
+// unset means soft-skip.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod coverage_adversarial {
+    use super::*;
+    use crate::config::BillingConfig;
+    use chrono::TimeZone;
+    use deadpool_redis::Runtime;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+
+    struct Env {
+        state: Arc<AppState>,
+        pool: sqlx::PgPool,
+        redis: deadpool_redis::Pool,
+        db_name: String,
+        admin_url: String,
+    }
+
+    impl Env {
+        async fn finish(self) {
+            self.pool.close().await;
+            if let Ok(admin) = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&self.admin_url)
+                .await
+            {
+                let _ = sqlx::query(&format!(
+                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                    self.db_name
+                ))
+                .execute(&admin)
+                .await;
+                admin.close().await;
+            }
+        }
+    }
+
+    async fn provision(test_name: &str) -> Option<Env> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let (server_part, db_part) = url.rsplit_once('/').expect("db segment");
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in test_name.bytes() {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let db_name = format!("{db_only}_mtcov_{:08x}", digest & 0xffff_ffff);
+
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{server_part}/postgres"));
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+
+        let migrations_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut count = 0_usize;
+        let mut newest = 0_i64;
+        for entry in std::fs::read_dir(&migrations_dir).expect("migrations dir") {
+            let name = entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            if let Some(prefix) = name.split('_').next() {
+                if let Ok(version) = prefix.parse::<i64>() {
+                    count += 1;
+                    newest = newest.max(version);
+                }
+            }
+        }
+        let template: Option<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
+        )
+        .bind(format!("apexmail_canonical_tpl_{count}_{newest}_%"))
+        .fetch_optional(&admin)
+        .await
+        .expect("template lookup");
+        let template = template.expect("canonical template database must exist");
+
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            db_name
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop test db");
+        sqlx::query(&format!(
+            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+            db_name, template
+        ))
+        .execute(&admin)
+        .await
+        .expect("clone test db");
+        admin.close().await;
+
+        let database_url = format!("{server_part}/{db_name}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&database_url)
+            .await
+            .expect("connect test db");
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .expect("TEST_REDIS_URL must be set");
+        let redis = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(Runtime::Tokio1))
+            .expect("redis pool");
+        let config = BillingConfig {
+            database_url,
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            service_auth_token: "coverage".to_string(),
+            stripe_webhook_secret: "whsec_coverage".to_string(),
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(pool.clone(), redis.clone(), config);
+        Some(Env {
+            state,
+            pool,
+            redis,
+            db_name,
+            admin_url,
+        })
+    }
+
+    macro_rules! env_test {
+        ($name:ident, |$e:ident| $body:block) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(owned) = provision(stringify!($name)).await else {
+                    return;
+                };
+                let $e = &owned;
+                $body
+                owned.finish().await;
+            }
+        };
+    }
+
+    // ---------------- seeding / redis helpers ----------------
+
+    async fn seed_tenant(env: &Env, tenant_id: &str, plan: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE SET plan = EXCLUDED.plan, status = EXCLUDED.status",
+        )
+        .bind(tenant_id)
+        .bind(format!("Coverage {tenant_id}"))
+        .bind(plan)
+        .bind(status)
+        .execute(&env.pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_plan(env: &Env, name: &str, limit: i64, features: Value) {
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit, features)
+             VALUES ($1, $2, $2, 0, $3, 100000, $4)
+             ON CONFLICT (name) DO UPDATE SET email_limit = EXCLUDED.email_limit, features = EXCLUDED.features",
+        )
+        .bind(format!("plan_{name}"))
+        .bind(name)
+        .bind(limit)
+        .bind(features)
+        .execute(&env.pool)
+        .await
+        .expect("seed plan");
+    }
+
+    async fn redis_del(env: &Env, key: &str) {
+        let mut conn = env.redis.get().await.expect("redis");
+        let _: () = redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .expect("redis del");
+    }
+
+    async fn redis_exists(env: &Env, key: &str) -> bool {
+        let mut conn = env.redis.get().await.expect("redis");
+        let exists: bool = conn.exists(key).await.expect("redis exists");
+        exists
+    }
+
+    // ---------------- scripted local HTTP mock ----------------
+
+    #[derive(Clone, Default)]
+    struct Mock {
+        responses: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
+        calls: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl Mock {
+        fn route(&self, path: &str, status: u16, body: impl Into<String>) {
+            self.responses
+                .lock()
+                .expect("lock")
+                .insert(path.to_string(), (status, body.into()));
+        }
+
+        fn call_count(&self, path: &str) -> usize {
+            self.calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|(recorded, _)| recorded == path)
+                .count()
+        }
+    }
+
+    async fn mock_handler(
+        axum::extract::State(mock): axum::extract::State<Mock>,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let path = request.uri().path().to_string();
+        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+        let (status, body) = mock
+            .responses
+            .lock()
+            .expect("lock")
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| (404, "{}".to_string()));
+        mock.calls.lock().expect("lock").push((path, "hit".into()));
+        (
+            axum::http::StatusCode::from_u16(status).expect("status"),
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response()
+    }
+
+    async fn spawn_mock(mock: Mock) -> String {
+        let app = axum::Router::new().fallback(mock_handler).with_state(mock);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Serializes tests that mutate process-global environment variables.
+    /// Async-aware so the guard may be held across await points.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// The metering drain scans the process-shared Redis namespace
+    /// (`meter:pending:*`), so any two drain tests running concurrently
+    /// would consume each other's fixture events. Serialize them.
+    static METER_DRAIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    // ---------------- metering drain ----------------
+
+    env_test!(
+        metering_drain_recovers_valid_and_discards_malformed,
+        |env| {
+            let _drain_guard = METER_DRAIN_LOCK.lock().await;
+            let tenant = "mtcov_drain";
+            seed_tenant(env, tenant, "free", "active").await;
+            redis_del(env, "meter:pending:raw-1").await;
+            redis_del(env, "meter:pending:raw-2").await;
+            redis_del(
+                env,
+                &format!("meter:guard:{}", normalize_metering_event_id("raw-1")),
+            )
+            .await;
+
+            let valid = format!(
+                r#"{{"id":"raw-1","tenantId":"{tenant}","eventType":"api_calls","quantity":7,"timestamp":"{}"}}"#,
+                Utc::now().to_rfc3339()
+            );
+            let mut conn = env.redis.get().await.expect("redis");
+            let _: () = redis::cmd("SET")
+                .arg("meter:pending:raw-1")
+                .arg(&valid)
+                .query_async(&mut conn)
+                .await
+                .expect("set pending");
+            let _: () = redis::cmd("SET")
+                .arg("meter:pending:raw-2")
+                .arg("not json at all")
+                .query_async(&mut conn)
+                .await
+                .expect("set malformed");
+
+            let result = drain_pending_metering_events(&env.state, 100)
+                .await
+                .expect("drain");
+            // The drain walks the WHOLE Redis keyspace, so its counters move
+            // for a sibling test's events too when the suite runs in parallel.
+            // Assert on THIS test's events: the malformed one left the pending
+            // set without being persisted, the valid one was recovered once.
+            assert!(result.processed_count >= 1, "{result:?}");
+            assert!(
+                !redis_exists(env, "meter:pending:raw-2").await,
+                "a malformed event must be discarded from the pending set"
+            );
+
+            let (quantity, event_type): (i64, String) = sqlx::query_as(
+                "SELECT quantity, event_type FROM metering_events WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("metering row");
+            assert_eq!(quantity, 7);
+            assert_eq!(event_type, "api_calls");
+            let audits: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1
+             AND action = 'billing.metering_event_recovered'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("count audits");
+            assert_eq!(audits, 1);
+            assert!(!redis_exists(env, "meter:pending:raw-1").await);
+            assert!(!redis_exists(env, "meter:pending:raw-2").await);
+
+            // Re-running is a clean no-op FOR THIS TEST'S EVENTS: the drain's
+            // counters are global (they cover a sibling test's pending keys
+            // too when the suite runs in parallel), so the replay is asserted
+            // through this tenant's row count and pending keys instead.
+            drain_pending_metering_events(&env.state, 100)
+                .await
+                .expect("replay");
+            let rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("count rows");
+            assert_eq!(rows, 1, "replay must not double-insert");
+        }
+    );
+
+    // ---------------- invoice archival ----------------
+
+    async fn seed_invoice_row(
+        env: &Env,
+        id: Uuid,
+        tenant: &str,
+        status: &str,
+        issued_at: DateTime<Utc>,
+        paid_at: Option<DateTime<Utc>>,
+        pdf_url: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, paid_at, pdf_url,
+                                   due_at, period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, 100, 'EUR', $3, $4, 100, 0, 100, $5, $6, $7,
+                     $5, $5, $5, $5, $5)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(status)
+        .bind(format!("MTCOV-{}", id.simple()))
+        .bind(issued_at)
+        .bind(paid_at)
+        .bind(pdf_url)
+        .execute(&env.pool)
+        .await
+        .expect("seed invoice");
+    }
+
+    env_test!(
+        archive_paid_invoices_respects_window_and_is_idempotent,
+        |env| {
+            let tenant = "mtcov_archive";
+            seed_tenant(env, tenant, "free", "active").await;
+            let now = Utc::now();
+            let old = now - chrono::Duration::days(120);
+
+            let archivable = Uuid::new_v4();
+            let no_pdf = Uuid::new_v4();
+            let recent = Uuid::new_v4();
+            let unpaid = Uuid::new_v4();
+            seed_invoice_row(
+                env,
+                archivable,
+                tenant,
+                "paid",
+                old,
+                Some(old),
+                Some("https://pdf/1"),
+            )
+            .await;
+            seed_invoice_row(env, no_pdf, tenant, "paid", old, Some(old), None).await;
+            seed_invoice_row(
+                env,
+                recent,
+                tenant,
+                "paid",
+                now - chrono::Duration::days(5),
+                Some(now),
+                Some("https://pdf/2"),
+            )
+            .await;
+            seed_invoice_row(
+                env,
+                unpaid,
+                tenant,
+                "pending",
+                old,
+                None,
+                Some("https://pdf/3"),
+            )
+            .await;
+
+            assert_eq!(archive_paid_invoices(&env.state).await.expect("archive"), 1);
+            assert_eq!(archive_paid_invoices(&env.state).await.expect("replay"), 0);
+            let archived: Vec<Uuid> = sqlx::query_scalar("SELECT invoice_id FROM invoice_archives")
+                .fetch_all(&env.pool)
+                .await
+                .expect("archives");
+            assert_eq!(archived, vec![archivable]);
+        }
+    );
+
+    env_test!(archive_paid_invoices_empty_table_is_zero, |env| {
+        assert_eq!(
+            archive_paid_invoices(&env.state)
+                .await
+                .expect("empty archive"),
+            0
+        );
+    });
+
+    // ---------------- month-end closing ----------------
+
+    env_test!(
+        month_end_closing_marks_only_previous_month_paid_and_is_idempotent,
+        |env| {
+            let tenant = "mtcov_close";
+            seed_tenant(env, tenant, "free", "active").await;
+            let now = Utc::now();
+            let this_month = now
+                .date_naive()
+                .with_day(1)
+                .expect("first")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc();
+            let last_month = this_month - chrono::Months::new(1);
+            let mid_last_month = last_month + chrono::Duration::days(10);
+            let three_months_ago = this_month - chrono::Months::new(3);
+
+            let target_paid = Uuid::new_v4();
+            let target_unpaid = Uuid::new_v4();
+            let outside = Uuid::new_v4();
+            seed_invoice_row(
+                env,
+                target_paid,
+                tenant,
+                "paid",
+                mid_last_month,
+                Some(mid_last_month),
+                None,
+            )
+            .await;
+            seed_invoice_row(
+                env,
+                target_unpaid,
+                tenant,
+                "pending",
+                mid_last_month,
+                None,
+                None,
+            )
+            .await;
+            seed_invoice_row(
+                env,
+                outside,
+                tenant,
+                "paid",
+                three_months_ago,
+                Some(three_months_ago),
+                None,
+            )
+            .await;
+
+            assert!(perform_month_end_closing(&env.state)
+                .await
+                .expect("closing"));
+            assert!(!perform_month_end_closing(&env.state).await.expect("replay"));
+
+            let closed: Vec<(Uuid, Option<DateTime<Utc>>)> =
+                sqlx::query_as("SELECT id, closed_at FROM invoices ORDER BY id")
+                    .fetch_all(&env.pool)
+                    .await
+                    .expect("invoices");
+            for (id, closed_at) in closed {
+                if id == target_paid {
+                    assert!(closed_at.is_some(), "target paid invoice closed");
+                } else {
+                    assert!(
+                        closed_at.is_none(),
+                        "invoice {id} outside the window untouched"
+                    );
+                }
+            }
+            let closings: (i64, i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*)::bigint, COALESCE(SUM(total_invoices),0)::bigint,
+                    COALESCE(SUM(total_revenue_cents),0)::bigint
+             FROM month_end_closings",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("closings");
+            assert_eq!(closings, (1, 1, 100));
+        }
+    );
+
+    // ---------------- expired trials ----------------
+
+    env_test!(
+        expired_trials_sweep_downgrades_only_stale_paid_plan_trials,
+        |env| {
+            let stale = "mtcov_trial_stale";
+            let fresh = "mtcov_trial_fresh";
+            let free = "mtcov_trial_free";
+            for tenant in [stale, fresh, free] {
+                seed_tenant(env, tenant, "growth", "active").await;
+            }
+            sqlx::query("UPDATE tenants SET plan = 'free' WHERE id = $1")
+                .bind(free)
+                .execute(&env.pool)
+                .await
+                .expect("downgrade free tenant");
+            let now = Utc::now();
+            for (tenant, sub, trial_end) in [
+                (stale, "sub_trial_stale", now - chrono::Duration::hours(48)),
+                (fresh, "sub_trial_fresh", now - chrono::Duration::hours(1)),
+                (free, "sub_trial_free", now - chrono::Duration::hours(48)),
+            ] {
+                sqlx::query(
+                    "INSERT INTO stripe_subscriptions
+                     (tenant_id, stripe_subscription_id, plan, status, trial_end,
+                      billing_cycle_start, billing_cycle_end)
+                 VALUES ($1, $2, 'growth', 'trialing', $3, $4, $5)",
+                )
+                .bind(tenant)
+                .bind(sub)
+                .bind(trial_end)
+                .bind(now - chrono::Duration::days(14))
+                .bind(now + chrono::Duration::days(16))
+                .execute(&env.pool)
+                .await
+                .expect("seed trial");
+            }
+
+            assert_eq!(
+                sweep_expired_trials(&env.state).await.expect("trial sweep"),
+                1
+            );
+            assert_eq!(sweep_expired_trials(&env.state).await.expect("replay"), 0);
+            let (plan, status): (String, String) = sqlx::query_as(
+                "SELECT t.plan, s.status FROM tenants t
+                            JOIN stripe_subscriptions s ON s.tenant_id = t.id WHERE t.id = $1",
+            )
+            .bind(stale)
+            .fetch_one(&env.pool)
+            .await
+            .expect("stale tenant");
+            assert_eq!(plan, "free");
+            assert_eq!(status, "canceled");
+            let fresh_status: String =
+                sqlx::query_scalar("SELECT status FROM stripe_subscriptions WHERE tenant_id = $1")
+                    .bind(fresh)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("fresh status");
+            assert_eq!(fresh_status, "trialing", "a recent trial is never raced");
+        }
+    );
+
+    // ---------------- wallet reservations / credit expiry ----------------
+
+    env_test!(expired_wallet_reservations_release_and_clamp, |env| {
+        let tenant = "mtcov_wallet_res";
+        seed_tenant(env, tenant, "free", "active").await;
+        let wallet_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO wallets (id, tenant_id, balance, currency, reserved)
+             VALUES ($1, $2, 0, 'EUR', 100)",
+        )
+        .bind(wallet_id)
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("seed wallet");
+        sqlx::query(
+            "INSERT INTO wallet_reservations (tenant_id, wallet_id, amount, status, expires_at)
+             VALUES ($1, $2, 60, 'active', NOW() - INTERVAL '1 minute'),
+                    ($1, $2, 40, 'active', NOW() + INTERVAL '1 hour')",
+        )
+        .bind(tenant)
+        .bind(wallet_id)
+        .execute(&env.pool)
+        .await
+        .expect("seed reservations");
+
+        assert_eq!(
+            process_expired_wallet_reservations(&env.state)
+                .await
+                .expect("release"),
+            1
+        );
+        assert_eq!(
+            process_expired_wallet_reservations(&env.state)
+                .await
+                .expect("replay"),
+            0
+        );
+        let reserved: i64 = sqlx::query_scalar("SELECT reserved FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("reserved");
+        assert_eq!(reserved, 40, "only the expired reservation was released");
+        let released_statuses: Vec<String> = sqlx::query_scalar(
+            "SELECT status FROM wallet_reservations WHERE tenant_id = $1 ORDER BY amount DESC",
+        )
+        .bind(tenant)
+        .fetch_all(&env.pool)
+        .await
+        .expect("statuses");
+        assert_eq!(
+            released_statuses,
+            vec!["released".to_string(), "active".to_string()]
+        );
+    });
+
+    env_test!(
+        wallet_credit_expiry_respects_fifo_and_never_goes_negative,
+        |env| {
+            let expiring = "mtcov_credit_expire";
+            let covered = "mtcov_credit_covered";
+            for tenant in [expiring, covered] {
+                seed_tenant(env, tenant, "free", "active").await;
+            }
+
+            // 100 stale credit, no debits → the full 100 expires.
+            let wallet_a = Uuid::new_v4();
+            sqlx::query("INSERT INTO wallets (id, tenant_id, balance, currency) VALUES ($1, $2, 100, 'EUR')")
+            .bind(wallet_a)
+            .bind(expiring)
+            .execute(&env.pool)
+            .await
+            .expect("wallet a");
+            sqlx::query(
+            "INSERT INTO wallet_transactions (wallet_id, tenant_id, type, amount, balance_after, description, created_at)
+             VALUES ($1, $2, 'credit', 100, 100, 'stale grant', NOW() - INTERVAL '13 months')",
+        )
+        .bind(wallet_a)
+        .bind(expiring)
+        .execute(&env.pool)
+        .await
+        .expect("credit a");
+
+            // 100 stale credit but 150 debits → nothing expires (FIFO consumed).
+            let wallet_b = Uuid::new_v4();
+            sqlx::query("INSERT INTO wallets (id, tenant_id, balance, currency) VALUES ($1, $2, 200, 'EUR')")
+            .bind(wallet_b)
+            .bind(covered)
+            .execute(&env.pool)
+            .await
+            .expect("wallet b");
+            sqlx::query(
+            "INSERT INTO wallet_transactions (wallet_id, tenant_id, type, amount, balance_after, description, created_at)
+             VALUES ($1, $2, 'credit', 100, 100, 'stale grant', NOW() - INTERVAL '13 months'),
+                    ($1, $2, 'credit', 250, 350, 'recent grant', NOW() - INTERVAL '1 month'),
+                    ($1, $2, 'debit', 150, 200, 'spend', NOW() - INTERVAL '2 months')",
+        )
+        .bind(wallet_b)
+        .bind(covered)
+        .execute(&env.pool)
+        .await
+        .expect("ledger b");
+
+            assert_eq!(
+                expire_stale_wallet_credits(&env.state)
+                    .await
+                    .expect("expire"),
+                1
+            );
+            assert_eq!(
+                expire_stale_wallet_credits(&env.state)
+                    .await
+                    .expect("replay"),
+                0,
+                "the expiry debit counts as consumption on the next run"
+            );
+            let balance_a: i64 =
+                sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+                    .bind(expiring)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("balance a");
+            assert_eq!(balance_a, 0);
+            let balance_b: i64 =
+                sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+                    .bind(covered)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("balance b");
+            assert_eq!(balance_b, 200, "covered credits never expire");
+            let expiry_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND reference = 'wallet_credit_expiry'",
+        )
+        .bind(expiring)
+        .fetch_one(&env.pool)
+        .await
+        .expect("expiry rows");
+            assert_eq!(expiry_rows, 1);
+            let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'billing.wallet_credit_expired'",
+        )
+        .bind(expiring)
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit rows");
+            assert_eq!(audits, 1);
+        }
+    );
+
+    // ---------------- payment recovery / restrictions ----------------
+
+    async fn seed_billing_hold(env: &Env, tenant: &str, invoice: &str) {
+        sqlx::query(
+            "INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type)
+             VALUES ($1, 'billing', 'failed payment', 'system')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("restriction");
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, invoice_id, status, next_retry_at, failed_payment_count)
+             VALUES ($1, $2, $3, 'warning', NOW(), 1)",
+        )
+        .bind(format!("dun_{}", &tenant[..tenant.len().min(20)]))
+        .bind(tenant)
+        .bind(invoice)
+        .execute(&env.pool)
+        .await
+        .expect("dunning record");
+        sqlx::query(
+            "INSERT INTO dunning_events (tenant_id, invoice_id, event_type) VALUES ($1, $2, 'payment_failed')",
+        )
+        .bind(tenant)
+        .bind(invoice)
+        .execute(&env.pool)
+        .await
+        .expect("dunning event");
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, status)
+             VALUES ($1, 'a@b.c', '[]'::jsonb, 'dunning_queued')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("queued message");
+    }
+
+    env_test!(
+        payment_recovery_clears_only_billing_hold_for_the_settled_invoice,
+        |env| {
+            let tenant = "mtcov_recovery";
+            seed_tenant(env, tenant, "free", "suspended").await;
+            seed_billing_hold(env, tenant, "in_A").await;
+
+            mark_payment_recovered(&env.state, tenant, Some("in_A"))
+                .await
+                .expect("recovery");
+            let (status, retry): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status, next_retry_at FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!(status, "healthy");
+            assert!(retry.is_none());
+            let tenant_status: String =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant");
+            assert_eq!(tenant_status, "active");
+            let cleared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_restrictions WHERE tenant_id = $1 AND cleared_at IS NOT NULL",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("cleared");
+            assert_eq!(cleared, 1);
+            let queued: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'queued'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("messages");
+            assert_eq!(queued, 1, "queued mail is released on recovery");
+            let recovered_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'payment_recovered'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("recovery event");
+            assert_eq!(recovered_events, 1);
+        }
+    );
+
+    env_test!(
+        payment_recovery_for_a_different_invoice_keeps_dunning,
+        |env| {
+            let tenant = "mtcov_recovery_scope";
+            seed_tenant(env, tenant, "free", "suspended").await;
+            seed_billing_hold(env, tenant, "in_current").await;
+
+            mark_payment_recovered(&env.state, tenant, Some("in_other"))
+                .await
+                .expect("scoped recovery");
+            let (status, retry): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status, next_retry_at FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!(status, "warning", "another failing invoice keeps dunning");
+            assert!(retry.is_some());
+            let tenant_status: String =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant");
+            assert_eq!(tenant_status, "suspended");
+            let queued: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'dunning_queued'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("messages");
+            assert_eq!(queued, 1, "mail stays held");
+        }
+    );
+
+    env_test!(
+        payment_recovery_never_clears_administrative_or_abuse_holds,
+        |env| {
+            let tenant = "mtcov_recovery_admin";
+            seed_tenant(env, tenant, "free", "suspended").await;
+            seed_billing_hold(env, tenant, "in_A").await;
+            sqlx::query(
+                "INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type)
+             VALUES ($1, 'administrative', 'fraud review', 'admin')",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("admin restriction");
+
+            mark_payment_recovered(&env.state, tenant, Some("in_A"))
+                .await
+                .expect("recovery");
+            let tenant_status: String =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("tenant");
+            assert_eq!(
+                tenant_status, "suspended",
+                "an administrative hold must survive payment recovery"
+            );
+            let queued: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'dunning_queued'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("messages");
+            assert_eq!(queued, 1, "mail is not released while a hold remains");
+            let billing_cleared: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_restrictions WHERE tenant_id = $1 AND kind = 'billing' AND cleared_at IS NOT NULL",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("billing cleared");
+            assert_eq!(billing_cleared, 1, "the billing hold itself was cleared");
+        }
+    );
+
+    // ---------------- SLA credits ----------------
+
+    env_test!(
+        sla_credits_use_integer_half_up_and_are_created_once,
+        |env| {
+            let tenant = "mtcov_sla";
+            seed_tenant(env, tenant, "slacov", "active").await;
+            seed_plan(
+                env,
+                "slacov",
+                100_000,
+                json!({"slaGuarantee": true, "slaCreditPercentage": 50}),
+            )
+            .await;
+            let now = Utc::now();
+            let this_month = now
+                .date_naive()
+                .with_day(1)
+                .expect("first")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc();
+            let last_month = this_month - chrono::Months::new(1);
+            let period_date = last_month.date_naive();
+            sqlx::query(
+                "INSERT INTO sla_metrics (tenant_id, period_month, uptime_percent)
+             VALUES ($1, $2, 98.5000)",
+            )
+            .bind(tenant)
+            .bind(period_date)
+            .execute(&env.pool)
+            .await
+            .expect("sla metric");
+            let invoice = Uuid::new_v4();
+            seed_invoice_row(
+                env,
+                invoice,
+                tenant,
+                "paid",
+                last_month + chrono::Duration::days(5),
+                Some(last_month + chrono::Duration::days(6)),
+                None,
+            )
+            .await;
+            sqlx::query(
+                "UPDATE invoices SET total = 10000, subtotal = 10000, amount = 10000 WHERE id = $1",
+            )
+            .bind(invoice)
+            .execute(&env.pool)
+            .await
+            .expect("invoice total");
+
+            let first = process_monthly_sla_credits(&env.state).await.expect("sla");
+            assert_eq!(first.credits_created, 1, "{first:?}");
+            let replay = process_monthly_sla_credits(&env.state)
+                .await
+                .expect("sla replay");
+            assert_eq!(replay.credits_created, 0);
+
+            // 1.5% breach → 50% of a 10 000-cent invoice = 5 000, capped at the
+            // plan's 50% SLA cap (also 5 000).
+            let (credit_amount, credit_percent, currency, status): (i32, f64, String, String) =
+                sqlx::query_as(
+                    "SELECT credit_amount, credit_percent::double precision, currency, status
+                 FROM sla_credits WHERE tenant_id = $1",
+                )
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("sla credit");
+            assert_eq!(credit_amount, 5_000);
+            assert_eq!(credit_percent, 50.0);
+            assert_eq!(currency, "EUR");
+            assert_eq!(status, "pending");
+        }
+    );
+
+    // ---------------- cost margin + throttling ----------------
+
+    env_test!(cost_margin_alerts_and_throttle_lifecycle, |env| {
+        let tenant = "mtcov_margin";
+        seed_tenant(env, tenant, "free", "active").await;
+        let key = billing_common::cost_throttle::cost_throttle_key(tenant);
+        redis_del(env, &key).await;
+        let today = Utc::now().date_naive();
+        sqlx::query(
+            "INSERT INTO tenant_costs (tenant_id, recorded_at, total_cost, revenue)
+             VALUES ($1, $2, 100, 10)",
+        )
+        .bind(tenant)
+        .bind(today)
+        .execute(&env.pool)
+        .await
+        .expect("critical costs");
+
+        let sweep = process_cost_margin_checks(&env.state)
+            .await
+            .expect("margin");
+        assert!(sweep.critical >= 1, "{sweep:?}");
+        assert!(redis_exists(env, &key).await, "throttle key must be set");
+        let alerts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cost_alerts WHERE tenant_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("alerts");
+        assert_eq!(alerts, 1);
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'cost_alert'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("notifications");
+        assert_eq!(queued, 1);
+        // Re-running must not duplicate the open alert or its notification.
+        let replay = process_cost_margin_checks(&env.state)
+            .await
+            .expect("margin replay");
+        assert!(replay.critical >= 1);
+        let alerts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cost_alerts WHERE tenant_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("alerts after replay");
+        assert_eq!(alerts, 1, "open alert is not duplicated");
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'cost_alert'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("notifications after replay");
+        assert_eq!(queued, 1, "notification is not duplicated");
+
+        // The tenant recovers: costs drop and the throttle is cleared.
+        sqlx::query("UPDATE tenant_costs SET total_cost = 10, revenue = 100 WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("recover costs");
+        let recovered = process_cost_margin_checks(&env.state)
+            .await
+            .expect("recovered");
+        assert!(recovered.critical == 0, "{recovered:?}");
+        assert!(
+            !redis_exists(env, &key).await,
+            "throttle clears on recovery"
+        );
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1
+             AND action IN ('billing.cost_throttle.applied', 'billing.cost_throttle.cleared')",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("throttle audits");
+        assert!(audits >= 2, "both transitions are audited: {audits}");
+    });
+
+    // ---------------- usage alerts ----------------
+
+    env_test!(usage_alerts_trigger_once_then_respect_cooldown, |env| {
+        let tenant = "mtcov_alert";
+        seed_tenant(env, tenant, "alertcov", "active").await;
+        seed_plan(env, "alertcov", 1_000, json!({})).await;
+        let mock = Mock::default();
+        mock.route("/hook", 200, "{}");
+        let base = spawn_mock(mock.clone()).await;
+        sqlx::query("UPDATE tenants SET settings = $2::jsonb WHERE id = $1")
+            .bind(tenant)
+            .bind(json!({"webhookUrl": format!("{base}/hook")}).to_string())
+            .execute(&env.pool)
+            .await
+            .expect("tenant webhook");
+        sqlx::query(
+            "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent, notification_channel)
+             VALUES ($1, 'emails', 50, 'webhook'),
+                    ($1, 'unknown_metric', 1, 'webhook')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("alert configs");
+        sqlx::query(
+            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', 600, NOW())",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("usage");
+
+        redis_del(env, &format!("alert:cooldown:{tenant}:emails:50")).await;
+        let client = Client::new();
+        let first = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("alerts");
+        assert_eq!(first.tenants_checked, 1);
+        assert_eq!(first.alerts_triggered, 1, "{first:?}");
+        assert_eq!(
+            mock.call_count("/hook"),
+            1,
+            "webhook delivered once (alerts_triggered={})",
+            first.alerts_triggered
+        );
+        let last_triggered: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT last_triggered_at FROM usage_alert_configs
+             WHERE tenant_id = $1 AND metric_type = 'emails'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("last triggered");
+        assert!(last_triggered.is_some());
+
+        let second = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("alerts replay");
+        assert_eq!(second.alerts_triggered, 0, "cooldown suppresses duplicates");
+        assert_eq!(mock.call_count("/hook"), 1);
+    });
+
+    env_test!(
+        usage_alerts_skip_when_no_webhook_and_threshold_not_met,
+        |env| {
+            let tenant = "mtcov_alert_none";
+            seed_tenant(env, tenant, "alertcov2", "active").await;
+            seed_plan(env, "alertcov2", 1_000, json!({})).await;
+            sqlx::query(
+            "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent, notification_channel)
+             VALUES ($1, 'emails', 50, 'webhook'),
+                    ($1, 'api_calls', 99, 'email')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("alert configs");
+            // 10% usage: the 50% threshold is not met; the 99% config has no
+            // email channel failure (email just enqueues), so nothing triggers.
+            sqlx::query(
+                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', 100, NOW())",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("usage");
+            let client = Client::new();
+            let result = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("alerts");
+            assert_eq!(result.alerts_triggered, 0, "{result:?}");
+        }
+    );
+
+    // ---------------- dedicated IP billing (mock Stripe) ----------------
+
+    #[tokio::test]
+    async fn dedicated_ip_charge_and_cancel_use_mocked_stripe() {
+        let Some(env) = provision("dedicated_ip_charge_and_cancel").await else {
+            return;
+        };
+        let mock = Mock::default();
+        mock.route("/v1/subscription_items", 200, r#"{"id":"si_cov_1"}"#);
+        mock.route("/v1/subscription_items/si_cov_1", 200, "{}");
+        let base = spawn_mock(mock.clone()).await;
+
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+            std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok(),
+        );
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_coverage");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+        std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_cov_dip");
+
+        let tenant = "mtcov_dip";
+        seed_tenant(&env, tenant, "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, 'sub_dip', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_dip')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status)
+             VALUES ('cov_dip_charge', $1, '203.0.113.201', 'active', 'pending_charge'),
+                    ('cov_dip_cancel', $1, '203.0.113.202', 'active', 'pending_cancel')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("dedicated ips");
+        sqlx::query(
+            "UPDATE dedicated_ips SET stripe_subscription_item_id = 'si_cov_1' WHERE id = 'cov_dip_cancel'",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("cancel item");
+
+        let client = Client::new();
+        let result = process_dedicated_ip_billing(&env.state, &client)
+            .await
+            .expect("dip billing");
+        assert_eq!(result.charged, 1, "one charge processed");
+        assert_eq!(result.canceled, 1, "one cancel processed");
+        let (charge_status, item): (String, Option<String>) = sqlx::query_as(
+            "SELECT billing_status, stripe_subscription_item_id FROM dedicated_ips WHERE id = 'cov_dip_charge'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("charged ip");
+        assert_eq!(charge_status, "active");
+        assert_eq!(item.as_deref(), Some("si_cov_1"));
+        let cancel_status: String = sqlx::query_scalar(
+            "SELECT billing_status FROM dedicated_ips WHERE id = 'cov_dip_cancel'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("canceled ip");
+        assert_eq!(cancel_status, "canceled");
+
+        // Failure isolation: a pending charge with NO active subscription
+        // records retry metadata instead of aborting the sweep.
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status)
+             VALUES ('cov_dip_orphan', $1, '203.0.113.203', 'active', 'pending_charge')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("orphan ip");
+        sqlx::query("UPDATE stripe_subscriptions SET status = 'canceled' WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("cancel subscription");
+        let failed = process_dedicated_ip_billing(&env.state, &client)
+            .await
+            .expect("failure isolation");
+        assert_eq!(failed.charged, 0);
+        let (failure_count, retry_after, billing): (i32, Option<DateTime<Utc>>, String) =
+            sqlx::query_as(
+                "SELECT billing_failure_count, billing_retry_after, billing_status
+                 FROM dedicated_ips WHERE id = 'cov_dip_orphan'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("orphan state");
+        assert_eq!(failure_count, 1);
+        assert!(retry_after.is_some(), "backoff recorded for retry");
+        assert_eq!(
+            billing, "pending_charge",
+            "still pending, never silently dropped"
+        );
+
+        match previous {
+            (Some(key), Some(url), Some(price)) => {
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", url);
+                std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", price);
+            }
+            _ => {
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+                std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID");
+            }
+        }
+        drop(guard);
+        env.finish().await;
+    }
+
+    // ---------------- scheduled retries (mock Stripe) ----------------
+
+    #[tokio::test]
+    async fn scheduled_retries_pay_the_open_invoice_once() {
+        let Some(env) = provision("scheduled_retries_pay").await else {
+            return;
+        };
+        let mock = Mock::default();
+        mock.route("/v1/invoices", 200, r#"{"data":[{"id":"in_open_cov"}]}"#);
+        mock.route(
+            "/v1/invoices/in_open_cov/pay",
+            200,
+            r#"{"id":"in_open_cov"}"#,
+        );
+        let base = spawn_mock(mock.clone()).await;
+
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+        std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_coverage");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+        let tenant = "mtcov_retry";
+        seed_tenant(&env, tenant, "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, next_retry_at, failed_payment_count)
+             VALUES ('dun_cov_retry', $1, 'warning', NOW() - INTERVAL '1 hour', 1)",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("dunning");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, 'sub_retry', 'growth', 'past_due', NOW(), NOW() + INTERVAL '30 days', 'cus_retry')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+
+        let client = Client::new();
+        let result = process_scheduled_retries(&env.state, &client)
+            .await
+            .expect("retries");
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(mock.call_count("/v1/invoices"), 1);
+        assert_eq!(
+            mock.call_count("/v1/invoices/in_open_cov/pay"),
+            1,
+            "paid exactly once"
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning status");
+        assert_eq!(status, "healthy", "recovery reset the dunning record");
+
+        match previous {
+            (Some(auto), Some(key), Some(url)) => {
+                std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", url);
+            }
+            _ => {
+                std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+        }
+        drop(guard);
+        env.finish().await;
+    }
+
+    #[tokio::test]
+    async fn auto_pay_disabled_is_the_default_and_moves_no_money() {
+        let Some(env) = provision("auto_pay_disabled").await else {
+            return;
+        };
+        let guard = ENV_LOCK.lock().await;
+        std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
+        let tenant = "mtcov_retry_off";
+        seed_tenant(&env, tenant, "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, next_retry_at, failed_payment_count)
+             VALUES ('dun_cov_off', $1, 'warning', NOW() - INTERVAL '1 hour', 1)",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("dunning");
+        let client = Client::new();
+        let result = process_scheduled_retries(&env.state, &client)
+            .await
+            .expect("retries");
+        assert_eq!(result.attempted, 0, "auto-pay is opt-in");
+        assert_eq!(result.succeeded, 0);
+        drop(guard);
+        env.finish().await;
+    }
+
+    // ---------------- pure boundary helpers ----------------
+
+    #[test]
+    fn percent_of_cents_half_up_boundaries() {
+        assert_eq!(percent_of_cents_half_up(0, 50), 0);
+        assert_eq!(percent_of_cents_half_up(-5, 50), 0);
+        assert_eq!(percent_of_cents_half_up(100, 0), 0);
+        assert_eq!(percent_of_cents_half_up(100, -1), 0);
+        // 1 cent × 50% = 0.5 → half-up to 1 (never silently truncate).
+        assert_eq!(percent_of_cents_half_up(1, 50), 1);
+        assert_eq!(percent_of_cents_half_up(1, 49), 0);
+        assert_eq!(percent_of_cents_half_up(1, 40), 0);
+        assert_eq!(percent_of_cents_half_up(10_000, 25), 2_500);
+        // Saturates instead of overflowing.
+        assert_eq!(percent_of_cents_half_up(i64::MAX, 100), i64::MAX);
+    }
+
+    #[test]
+    fn maintenance_time_boundaries_are_stable() {
+        let dec31 = Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap();
+        assert_eq!(
+            next_month_start(month_start(dec31)),
+            Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()
+        );
+        let jan31 = Utc.with_ymd_and_hms(2027, 1, 31, 12, 0, 0).unwrap();
+        assert_eq!(
+            next_month_start(month_start(jan31)),
+            Utc.with_ymd_and_hms(2027, 2, 1, 0, 0, 0).unwrap()
+        );
+        // Leap February: 2028-02-29's next month starts in March.
+        let leap_day = Utc.with_ymd_and_hms(2028, 2, 29, 8, 0, 0).unwrap();
+        assert_eq!(
+            next_month_start(month_start(leap_day)),
+            Utc.with_ymd_and_hms(2028, 3, 1, 0, 0, 0).unwrap()
+        );
+        let dst_end = Utc.with_ymd_and_hms(2026, 3, 29, 23, 30, 0).unwrap();
+        assert_eq!(
+            next_day_start(dst_end),
+            Utc.with_ymd_and_hms(2026, 3, 30, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            day_start(dst_end),
+            Utc.with_ymd_and_hms(2026, 3, 29, 0, 0, 0).unwrap()
+        );
+    }
+
+    // ---------------- grace-period purges ----------------
+
+    async fn seed_message(env: &Env, tenant: &str, status: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, status)
+             VALUES ($1, 'a@b.c', '[]'::jsonb, $2) RETURNING id",
+        )
+        .bind(tenant)
+        .bind(status)
+        .fetch_one(&env.pool)
+        .await
+        .expect("seed message")
+    }
+
+    env_test!(
+        grace_period_expirations_purge_only_expired_hard_suspensions,
+        |env| {
+            let expired = "mtcov_grace_expired";
+            let future = "mtcov_grace_future";
+            let no_grace = "mtcov_grace_none";
+            let soft = "mtcov_grace_soft";
+            for tenant in [expired, future, no_grace, soft] {
+                seed_tenant(env, tenant, "free", "suspended").await;
+            }
+            let now = Utc::now();
+            sqlx::query(
+                "INSERT INTO dunning_records
+                     (id, tenant_id, status, grace_period_ends_at, failed_payment_count)
+                 VALUES ('dun_grace_exp', $1, 'hard_suspended', $2, 3),
+                        ('dun_grace_fut', $3, 'hard_suspended', $4, 3),
+                        ('dun_grace_non', $5, 'hard_suspended', NULL, 3),
+                        ('dun_grace_soft', $6, 'soft_suspended', $2, 3)",
+            )
+            .bind(expired)
+            .bind(now - chrono::Duration::hours(1))
+            .bind(future)
+            .bind(now + chrono::Duration::hours(1))
+            .bind(no_grace)
+            .bind(soft)
+            .execute(&env.pool)
+            .await
+            .expect("dunning records");
+
+            // Only `dunning_queued` mail of the EXPIRED tenant may be purged.
+            let purge_a = seed_message(env, expired, "dunning_queued").await;
+            let purge_b = seed_message(env, expired, "dunning_queued").await;
+            let keep_queued = seed_message(env, expired, "queued").await;
+            let keep_sent = seed_message(env, expired, "sent").await;
+            let future_msg = seed_message(env, future, "dunning_queued").await;
+            let no_grace_msg = seed_message(env, no_grace, "dunning_queued").await;
+            let soft_msg = seed_message(env, soft, "dunning_queued").await;
+
+            let result = process_grace_period_expirations(&env.state, 100)
+                .await
+                .expect("grace sweep");
+            assert_eq!(result.processed_count, 1, "only the expired tenant acts");
+            assert_eq!(result.purged_messages_count, 2, "only dunning_queued mail");
+
+            let surviving: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM messages ORDER BY id")
+                .fetch_all(&env.pool)
+                .await
+                .expect("surviving messages");
+            for kept in [keep_queued, keep_sent, future_msg, no_grace_msg, soft_msg] {
+                assert!(surviving.contains(&kept), "{kept} must not be purged");
+            }
+            assert!(!surviving.contains(&purge_a) && !surviving.contains(&purge_b));
+
+            // The expired tenant's grace window is closed exactly once.
+            let grace: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT grace_period_ends_at FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(expired)
+            .fetch_one(&env.pool)
+            .await
+            .expect("grace state");
+            assert!(grace.is_none());
+            for tenant in [future, no_grace] {
+                let other: Option<DateTime<Utc>> = sqlx::query_scalar(
+                    "SELECT grace_period_ends_at FROM dunning_records WHERE tenant_id = $1",
+                )
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("other grace state");
+                if tenant == no_grace {
+                    assert!(other.is_none());
+                } else {
+                    assert!(other.is_some(), "future grace window untouched");
+                }
+            }
+
+            let (notification_count, purged_count): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*)::bigint, COALESCE(MAX((payload->>'purgedCount')::bigint), 0)
+                 FROM notification_queue WHERE tenant_id = $1 AND type = 'messages_purged'",
+            )
+            .bind(expired)
+            .fetch_one(&env.pool)
+            .await
+            .expect("notification");
+            assert_eq!((notification_count, purged_count), (1, 2));
+
+            // Replay: the grace window is already closed, so nothing repeats.
+            let replay = process_grace_period_expirations(&env.state, 100)
+                .await
+                .expect("grace replay");
+            assert_eq!(replay.processed_count, 0);
+            assert_eq!(replay.purged_messages_count, 0);
+            let notifications_after: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'messages_purged'",
+            )
+            .bind(expired)
+            .fetch_one(&env.pool)
+            .await
+            .expect("notification replay");
+            assert_eq!(notifications_after, 1, "no duplicate notification");
+        }
+    );
+
+    env_test!(
+        grace_period_expirations_page_through_every_expired_tenant,
+        |env| {
+            let now = Utc::now();
+            let mut tenants = Vec::new();
+            for index in 0..3 {
+                let tenant = format!("mtcov_grace_page_{index}");
+                seed_tenant(env, &tenant, "free", "suspended").await;
+                sqlx::query(
+                    "INSERT INTO dunning_records
+                         (id, tenant_id, status, grace_period_ends_at, failed_payment_count)
+                     VALUES ($1, $2, 'hard_suspended', $3, 1)",
+                )
+                .bind(format!("dun_grace_page_{index}"))
+                .bind(&tenant)
+                .bind(now - chrono::Duration::minutes(10 + index))
+                .execute(&env.pool)
+                .await
+                .expect("dunning row");
+                seed_message(env, &tenant, "dunning_queued").await;
+                tenants.push(tenant);
+            }
+
+            // batch_size = 1 forces the keyset loop to page one tenant at a
+            // time; every expired tenant must still be processed.
+            let sweep = process_grace_period_expirations(&env.state, 1)
+                .await
+                .expect("paged grace sweep");
+            assert_eq!(sweep.processed_count, 3);
+            assert_eq!(sweep.purged_messages_count, 3);
+            for tenant in &tenants {
+                let grace: Option<DateTime<Utc>> = sqlx::query_scalar(
+                    "SELECT grace_period_ends_at FROM dunning_records WHERE tenant_id = $1",
+                )
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("grace state");
+                assert!(grace.is_none(), "{tenant} was processed");
+            }
+        }
+    );
+
+    // ---------------- metering drain idempotency ----------------
+
+    env_test!(metering_drain_replay_never_double_counts, |env| {
+        let _drain_guard = METER_DRAIN_LOCK.lock().await;
+        let tenant = "mtcov_drain_replay";
+        seed_tenant(env, tenant, "free", "active").await;
+        let raw_id = "mtcov-replay-raw-1";
+        let payload = format!(
+            r#"{{"id":"{raw_id}","tenantId":"{tenant}","eventType":"api_calls","quantity":5,"timestamp":"{}"}}"#,
+            Utc::now().to_rfc3339()
+        );
+        let pending_key = format!("meter:pending:{raw_id}");
+        let guard_key = format!("meter:guard:{}", normalize_metering_event_id(raw_id));
+        let counter_key = crate::usage::enforced_counter_key_for_event_type(
+            &env.pool,
+            tenant,
+            "api_calls",
+            Utc::now(),
+        )
+        .await;
+        redis_del(env, &pending_key).await;
+        redis_del(env, &guard_key).await;
+        redis_del(env, &counter_key).await;
+
+        let mut conn = env.redis.get().await.expect("redis");
+        let _: () = redis::cmd("SET")
+            .arg(&pending_key)
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await
+            .expect("set pending");
+        drop(conn);
+
+        let first = drain_pending_metering_events(&env.state, 100)
+            .await
+            .expect("drain");
+        // The drain scans the WHOLE Redis keyspace for pending metering
+        // events, so its global `processed_count` also moves for a sibling
+        // test's event when the suite runs in parallel — asserting on it made
+        // this test order-dependent. Assert on THIS event: it left the pending
+        // set, it was persisted once, and the enforced counter moved by it.
+        assert!(first.processed_count >= 1, "{first:?}");
+        assert!(!redis_exists(env, &pending_key).await);
+        assert_eq!(redis_i64(env, &counter_key).await, 5);
+        let first_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("rows");
+        assert_eq!(first_rows, 1, "the first pass persists the event once");
+
+        // The same raw event is redelivered (crash before the client could
+        // observe the ack): the DB row and the enforced counter must both
+        // stay exactly once.
+        let mut conn = env.redis.get().await.expect("redis");
+        let _: () = redis::cmd("SET")
+            .arg(&pending_key)
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await
+            .expect("re-set pending");
+        drop(conn);
+
+        drain_pending_metering_events(&env.state, 100)
+            .await
+            .expect("drain replay");
+        // The replay must not move THIS tenant's counter or add a row — a
+        // global `processed_count == 0` would only hold if no sibling test
+        // had a pending event.
+        assert_eq!(
+            redis_i64(env, &counter_key).await,
+            5,
+            "never double-counted"
+        );
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("rows");
+        assert_eq!(rows, 1, "exactly-once accounting");
+        assert!(!redis_exists(env, &pending_key).await);
+    });
+
+    async fn redis_i64(env: &Env, key: &str) -> i64 {
+        let mut conn = env.redis.get().await.expect("redis");
+        redis::cmd("GET")
+            .arg(key)
+            .query_async::<Option<i64>>(&mut conn)
+            .await
+            .expect("redis get")
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn normalize_metering_event_id_is_stable_and_uuid_aware() {
+        let uuid = Uuid::new_v4();
+        assert_eq!(normalize_metering_event_id(&uuid.to_string()), uuid);
+        assert_eq!(
+            normalize_metering_event_id(&format!("evt_{uuid}")),
+            uuid,
+            "a trailing UUID suffix is authoritative"
+        );
+        let hashed = normalize_metering_event_id("not-a-uuid");
+        assert_eq!(
+            hashed,
+            normalize_metering_event_id("not-a-uuid"),
+            "hash fallback is deterministic"
+        );
+        assert_ne!(hashed, normalize_metering_event_id("not-a-uuid-2"));
+        // Shaped as a v5-style UUID (version nibble + variant bits).
+        assert_eq!(hashed.get_version_num(), 5);
+        assert_eq!(hashed.as_bytes()[8] & 0xc0, 0x80);
+    }
+
+    // ---------------- EMTA filing ----------------
+
+    fn emta_test_client(base: &str) -> EmtaClient {
+        EmtaClient::new(
+            EmtaConfig {
+                api_base_url: base.to_string(),
+                client_cert_path: "unused-cert.pem".to_string(),
+                client_key_path: "unused-key.pem".to_string(),
+                company_registry_code: "12345678".to_string(),
+                enabled: true,
+            },
+            Client::new(),
+        )
+    }
+
+    env_test!(emta_filing_is_idempotent_and_records_acceptance, |env| {
+        let mock = Mock::default();
+        mock.route(
+            "/api/v1/kmd/submit",
+            200,
+            "<xrd:accepted>true</xrd:accepted><xrd:filingReference>REF-COV-1</xrd:filingReference>",
+        );
+        let base = spawn_mock(mock.clone()).await;
+        let client = emta_test_client(&base);
+
+        let kmd = crate::vat_kmd::generate_kmd_return(&env.pool, 2026, 1)
+            .await
+            .expect("generate kmd");
+        let filing = attempt_emta_filing(&env.pool, &client, &kmd)
+            .await
+            .expect("filing")
+            .expect("first attempt submits");
+        assert!(filing.accepted);
+        assert_eq!(filing.filing_reference.as_deref(), Some("REF-COV-1"));
+        assert_eq!(mock.call_count("/api/v1/kmd/submit"), 1);
+
+        let (status, reference, error): (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT status, filing_reference, filing_error FROM vat_kmd_returns WHERE id = $1",
+        )
+        .bind(kmd.kmd_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("kmd row");
+        assert_eq!(status, "filed");
+        assert_eq!(reference.as_deref(), Some("REF-COV-1"));
+        assert!(error.is_none());
+
+        // Replay: an already-filed return is never re-submitted.
+        let replay = attempt_emta_filing(&env.pool, &client, &kmd)
+            .await
+            .expect("replay");
+        assert!(replay.is_none());
+        assert_eq!(
+            mock.call_count("/api/v1/kmd/submit"),
+            1,
+            "no duplicate submission"
+        );
+
+        // A rejected acknowledgment is recorded as `failed` with the reason.
+        mock.route(
+            "/api/v1/kmd/submit",
+            200,
+            "<accepted>false</accepted><statusMessage>Period rejected</statusMessage>",
+        );
+        let rejected = crate::vat_kmd::generate_kmd_return(&env.pool, 2026, 2)
+            .await
+            .expect("generate rejected kmd");
+        let rejected_result = attempt_emta_filing(&env.pool, &client, &rejected)
+            .await
+            .expect("rejected filing")
+            .expect("attempted");
+        assert!(!rejected_result.accepted);
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, filing_error FROM vat_kmd_returns WHERE id = $1")
+                .bind(rejected.kmd_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("rejected row");
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some("Period rejected"));
+    });
+
+    env_test!(emta_filing_http_failure_leaves_the_return_draft, |env| {
+        let mock = Mock::default();
+        mock.route("/api/v1/kmd/submit", 500, "upstream exploded");
+        let base = spawn_mock(mock.clone()).await;
+        let client = emta_test_client(&base);
+
+        let kmd = crate::vat_kmd::generate_kmd_return(&env.pool, 2026, 3)
+            .await
+            .expect("generate kmd");
+        let error = attempt_emta_filing(&env.pool, &client, &kmd)
+            .await
+            .expect_err("5xx must surface as an error");
+        assert!(error.contains("EMTA"), "{error}");
+        let (status, filed_at): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, filed_at FROM vat_kmd_returns WHERE id = $1")
+                .bind(kmd.kmd_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("kmd row");
+        assert_eq!(status, "draft", "a failed filing is never marked filed");
+        assert!(filed_at.is_none());
+
+        // An unknown KMD id is refused before any HTTP call.
+        let ghost = crate::vat_kmd::VatKmdResult {
+            tax_year: 2026,
+            tax_month: 4,
+            invoice_count: 0,
+            tenant_count: 0,
+            total_taxable_cents: 0,
+            total_vat_cents: 0,
+            rates: Vec::new(),
+            excluded_other_currency: Vec::new(),
+            kmd_id: Uuid::new_v4(),
+        };
+        let missing = attempt_emta_filing(&env.pool, &client, &ghost)
+            .await
+            .expect_err("unknown KMD id");
+        assert!(missing.contains("not found"), "{missing}");
+    });
+
+    // ---------------- usage alert channels ----------------
+
+    env_test!(
+        usage_alert_email_channel_enqueues_once_per_cooldown,
+        |env| {
+            let tenant = "mtcov_alert_mail";
+            seed_tenant(env, tenant, "alertmail", "active").await;
+            seed_plan(env, "alertmail", 1_000, json!({})).await;
+            sqlx::query(
+            "INSERT INTO usage_alert_configs (tenant_id, metric_type, threshold_percent, notification_channel)
+             VALUES ($1, 'emails', 50, 'email')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("alert config");
+            sqlx::query(
+                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', 600, NOW())",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("usage");
+            redis_del(env, &format!("alert:cooldown:{tenant}:emails:50")).await;
+
+            let client = Client::new();
+            let first = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("alerts");
+            assert_eq!(first.alerts_triggered, 1, "{first:?}");
+            let (queued, percent): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*)::bigint, COALESCE(MAX((payload->>'currentPercent')::bigint), -1)
+             FROM notification_queue WHERE tenant_id = $1 AND type = 'usage_alert'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("notification");
+            assert_eq!((queued, percent), (1, 60));
+
+            let replay = process_usage_alerts(&env.state, &client)
+                .await
+                .expect("replay");
+            assert_eq!(replay.alerts_triggered, 0, "cooldown holds for an hour");
+            let queued_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'usage_alert'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("notification replay");
+            assert_eq!(queued_after, 1);
+        }
+    );
+
+    // ---------------- scheduled Stripe retries ----------------
+
+    async fn seed_retry_candidate(env: &Env, tenant: &str, dunning_status: &str, sub_status: &str) {
+        seed_tenant(env, tenant, "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, next_retry_at, failed_payment_count)
+             VALUES ($1, $2, $3, NOW() - INTERVAL '1 hour', 1)",
+        )
+        .bind(format!("dun_{}", &tenant[..tenant.len().min(20)]))
+        .bind(tenant)
+        .bind(dunning_status)
+        .execute(&env.pool)
+        .await
+        .expect("dunning");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, $2, 'growth', $3, NOW(), NOW() + INTERVAL '30 days', 'cus_retry_cov')",
+        )
+        .bind(tenant)
+        .bind(format!("sub_{}", &tenant[..tenant.len().min(20)]))
+        .bind(sub_status)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+    }
+
+    env_test!(scheduled_retries_reschedule_after_stripe_failure, |env| {
+        let mock = Mock::default();
+        mock.route("/v1/invoices", 500, "stripe down");
+        let base = spawn_mock(mock.clone()).await;
+        let guard = ENV_LOCK.lock().await;
+        let previous = (
+            std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+        std::env::set_var("AUTO_PAY_OPEN_INVOICES", "true");
+        std::env::set_var("STRIPE_SECRET_KEY", "sk_test_coverage");
+        std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+        let tenant = "mtcov_retry_fail";
+        seed_retry_candidate(env, tenant, "warning", "past_due").await;
+        let client = Client::new();
+        let result = process_scheduled_retries(&env.state, &client)
+            .await
+            .expect("retries");
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.succeeded, 0, "a 5xx never counts as paid");
+        let (status, retry): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, next_retry_at FROM dunning_records WHERE tenant_id = $1",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("dunning");
+        assert_eq!(status, "warning", "dunning is not reset on failure");
+        let retry = retry.expect("retry rescheduled");
+        assert!(
+            retry > Utc::now() + chrono::Duration::hours(23),
+            "failure backs off a full day"
+        );
+        assert_eq!(
+            mock.call_count("/v1/invoices"),
+            1,
+            "the pay endpoint is never reached on a failed list call"
+        );
+
+        match previous {
+            (Some(auto), Some(key), Some(url)) => {
+                std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
+                std::env::set_var("STRIPE_SECRET_KEY", key);
+                std::env::set_var("STRIPE_API_BASE_URL", url);
+            }
+            _ => {
+                std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
+                std::env::remove_var("STRIPE_SECRET_KEY");
+                std::env::remove_var("STRIPE_API_BASE_URL");
+            }
+        }
+        drop(guard);
+    });
+
+    env_test!(
+        scheduled_retries_clear_retry_when_no_open_invoice_exists,
+        |env| {
+            let mock = Mock::default();
+            mock.route("/v1/invoices", 200, r#"{"data":[]}"#);
+            let base = spawn_mock(mock.clone()).await;
+            let guard = ENV_LOCK.lock().await;
+            let previous = (
+                std::env::var("AUTO_PAY_OPEN_INVOICES").ok(),
+                std::env::var("STRIPE_SECRET_KEY").ok(),
+                std::env::var("STRIPE_API_BASE_URL").ok(),
+            );
+            std::env::set_var("AUTO_PAY_OPEN_INVOICES", "1");
+            std::env::set_var("STRIPE_SECRET_KEY", "sk_test_coverage");
+            std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+            let tenant = "mtcov_retry_empty";
+            seed_retry_candidate(env, tenant, "soft_suspended", "unpaid").await;
+            // Not a candidate: healthy dunning and an ineligible subscription.
+            let other = "mtcov_retry_notcand";
+            seed_retry_candidate(env, other, "healthy", "past_due").await;
+            sqlx::query("UPDATE dunning_records SET next_retry_at = NULL WHERE tenant_id = $1")
+                .bind(other)
+                .execute(&env.pool)
+                .await
+                .expect("clear retry");
+
+            let client = Client::new();
+            let result = process_scheduled_retries(&env.state, &client)
+                .await
+                .expect("retries");
+            assert_eq!(result.attempted, 1, "only the due candidate is attempted");
+            assert_eq!(result.succeeded, 1);
+            let retry: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT next_retry_at FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert!(retry.is_none(), "nothing to collect: retry cleared");
+            assert_eq!(
+                mock.call_count("/v1/invoices"),
+                1,
+                "no invoice exists, so no pay call is made"
+            );
+
+            match previous {
+                (Some(auto), Some(key), Some(url)) => {
+                    std::env::set_var("AUTO_PAY_OPEN_INVOICES", auto);
+                    std::env::set_var("STRIPE_SECRET_KEY", key);
+                    std::env::set_var("STRIPE_API_BASE_URL", url);
+                }
+                _ => {
+                    std::env::remove_var("AUTO_PAY_OPEN_INVOICES");
+                    std::env::remove_var("STRIPE_SECRET_KEY");
+                    std::env::remove_var("STRIPE_API_BASE_URL");
+                }
+            }
+            drop(guard);
+        }
+    );
+
+    // ---------------- dedicated IP edge paths ----------------
+
+    async fn seed_dedicated_ip(
+        env: &Env,
+        ip_id: &str,
+        tenant: &str,
+        address: &str,
+        billing_status: &str,
+        item: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, billing_status,
+                                        stripe_subscription_item_id)
+             VALUES ($1, $2, $3, 'active', $4, $5)",
+        )
+        .bind(ip_id)
+        .bind(tenant)
+        .bind(address)
+        .bind(billing_status)
+        .bind(item)
+        .execute(&env.pool)
+        .await
+        .expect("dedicated ip");
+    }
+
+    env_test!(dedicated_ip_charge_without_price_id_moves_nothing, |env| {
+        let guard = ENV_LOCK.lock().await;
+        let previous = std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok();
+        std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID");
+
+        let tenant = "mtcov_dip_noprice";
+        seed_tenant(env, tenant, "growth", "active").await;
+        seed_dedicated_ip(
+            env,
+            "cov_dip_noprice",
+            tenant,
+            "203.0.113.251",
+            "pending_charge",
+            None,
+        )
+        .await;
+        let client = Client::new();
+        let result = process_dedicated_ip_billing(&env.state, &client)
+            .await
+            .expect("dip billing");
+        assert_eq!((result.charged, result.canceled), (0, 0));
+        let (billing, failures): (String, i32) = sqlx::query_as(
+            "SELECT billing_status, COALESCE(billing_failure_count, 0)
+             FROM dedicated_ips WHERE id = 'cov_dip_noprice'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("ip state");
+        assert_eq!((billing.as_str(), failures), ("pending_charge", 0));
+
+        match previous {
+            Some(price) => std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", price),
+            None => std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID"),
+        }
+        drop(guard);
+    });
+
+    env_test!(
+        dedicated_ip_cancel_without_item_finalizes_without_http,
+        |env| {
+            let mock = Mock::default();
+            let base = spawn_mock(mock.clone()).await;
+            let guard = ENV_LOCK.lock().await;
+            let previous = (
+                std::env::var("STRIPE_SECRET_KEY").ok(),
+                std::env::var("STRIPE_API_BASE_URL").ok(),
+                std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok(),
+            );
+            std::env::set_var("STRIPE_SECRET_KEY", "sk_test_coverage");
+            std::env::set_var("STRIPE_API_BASE_URL", &base);
+            std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_cov_dip");
+
+            let tenant = "mtcov_dip_cancel";
+            seed_tenant(env, tenant, "growth", "active").await;
+            // No subscription item was ever created, so the delete call is
+            // unnecessary — the row still finalizes.
+            seed_dedicated_ip(
+                env,
+                "cov_dip_cancel_none",
+                tenant,
+                "203.0.113.252",
+                "pending_cancel",
+                None,
+            )
+            .await;
+            let client = Client::new();
+            let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
+                .await
+                .expect("cancels");
+            assert_eq!(canceled, 1);
+            let (billing, ended): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT billing_status, billing_ended_at FROM dedicated_ips
+                 WHERE id = 'cov_dip_cancel_none'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("ip state");
+            assert_eq!(billing, "canceled");
+            assert!(ended.is_some(), "cancel is timestamped");
+            assert_eq!(
+                mock.call_count("/v1/subscription_items/cov_missing"),
+                0,
+                "no HTTP for a row without an item"
+            );
+
+            // A 404 on the item delete means the item is already gone: the
+            // local cancel must still finalize (never wedge).
+            mock.route(
+                "/v1/subscription_items/si_gone",
+                404,
+                r#"{"error":{"code":"resource_missing"}}"#,
+            );
+            seed_dedicated_ip(
+                env,
+                "cov_dip_cancel_gone",
+                tenant,
+                "203.0.113.253",
+                "pending_cancel",
+                Some("si_gone"),
+            )
+            .await;
+            let canceled = process_pending_dedicated_ip_cancels(&env.state, &client)
+                .await
+                .expect("cancels");
+            assert_eq!(canceled, 1, "a missing Stripe item is a successful cancel");
+            let billing: String = sqlx::query_scalar(
+                "SELECT billing_status FROM dedicated_ips WHERE id = 'cov_dip_cancel_gone'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("ip state");
+            assert_eq!(billing, "canceled");
+
+            match previous {
+                (Some(key), Some(url), Some(price)) => {
+                    std::env::set_var("STRIPE_SECRET_KEY", key);
+                    std::env::set_var("STRIPE_API_BASE_URL", url);
+                    std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", price);
+                }
+                _ => {
+                    std::env::remove_var("STRIPE_SECRET_KEY");
+                    std::env::remove_var("STRIPE_API_BASE_URL");
+                    std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID");
+                }
+            }
+            drop(guard);
+        }
+    );
+
+    env_test!(dedicated_ip_missing_table_is_a_clean_noop, |env| {
+        let guard = ENV_LOCK.lock().await;
+        let previous = std::env::var("STRIPE_DEDICATED_IP_PRICE_ID").ok();
+        std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", "price_cov_dip");
+        sqlx::query("DROP TABLE IF EXISTS dedicated_ips CASCADE")
+            .execute(&env.pool)
+            .await
+            .expect("drop table");
+
+        let client = Client::new();
+        let result = process_dedicated_ip_billing(&env.state, &client)
+            .await
+            .expect("missing table must not error the sweep");
+        assert_eq!((result.charged, result.canceled), (0, 0));
+
+        match previous {
+            Some(price) => std::env::set_var("STRIPE_DEDICATED_IP_PRICE_ID", price),
+            None => std::env::remove_var("STRIPE_DEDICATED_IP_PRICE_ID"),
+        }
+        drop(guard);
+    });
+
+    // ---------------- SLA credits: override plans + caps + currency ----------------
+
+    env_test!(
+        sla_credits_use_override_plan_and_cap_in_invoice_currency,
+        |env| {
+            let overridden = "mtcov_sla_override";
+            let unentitled = "mtcov_sla_unentitled";
+            seed_tenant(env, overridden, "sla_base", "active").await;
+            seed_tenant(env, unentitled, "sla_base", "active").await;
+            seed_plan(env, "sla_base", 100_000, json!({})).await;
+            seed_plan(
+                env,
+                "sla_capped",
+                100_000,
+                json!({"slaGuarantee": true, "slaCreditPercentage": 10}),
+            )
+            .await;
+            sqlx::query(
+                "INSERT INTO plan_overrides (tenant_id, plan, active)
+                 VALUES ($1, 'sla_capped', true)",
+            )
+            .bind(overridden)
+            .execute(&env.pool)
+            .await
+            .expect("override");
+
+            let now = Utc::now();
+            let this_month = now
+                .date_naive()
+                .with_day(1)
+                .expect("first")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+                .and_utc();
+            let last_month = this_month - chrono::Months::new(1);
+            let period_date = last_month.date_naive();
+            for tenant in [overridden, unentitled] {
+                sqlx::query(
+                    "INSERT INTO sla_metrics (tenant_id, period_month, uptime_percent)
+                     VALUES ($1, $2, 97.0000)",
+                )
+                .bind(tenant)
+                .bind(period_date)
+                .execute(&env.pool)
+                .await
+                .expect("sla metric");
+            }
+            // Only the overridden tenant has a paid invoice: the base tenant
+            // is not entitled, so it must never receive a credit.
+            let invoice = Uuid::new_v4();
+            seed_invoice_row(
+                env,
+                invoice,
+                overridden,
+                "paid",
+                last_month + chrono::Duration::days(5),
+                Some(last_month + chrono::Duration::days(6)),
+                None,
+            )
+            .await;
+            sqlx::query(
+                "UPDATE invoices SET total = 10000, subtotal = 10000, amount = 10000,
+                    currency = 'USD', period_start = $2, period_end = $3 WHERE id = $1",
+            )
+            .bind(invoice)
+            .bind(last_month)
+            .bind(this_month)
+            .execute(&env.pool)
+            .await
+            .expect("invoice totals");
+
+            let sweep = process_monthly_sla_credits(&env.state)
+                .await
+                .expect("sla sweep");
+            assert_eq!(sweep.tenants_checked, 2, "both candidates were evaluated");
+            assert_eq!(sweep.credits_created, 1, "only the entitled tenant");
+            let (amount, percent, currency): (i32, f64, String) = sqlx::query_as(
+                "SELECT credit_amount, credit_percent::double precision, currency
+                 FROM sla_credits WHERE tenant_id = $1",
+            )
+            .bind(overridden)
+            .fetch_one(&env.pool)
+            .await
+            .expect("credit");
+            assert_eq!(amount, 1_000, "50% breach credit capped at the plan's 10%");
+            assert_eq!(percent, 50.0);
+            assert_eq!(currency, "USD", "credited in the invoice's own currency");
+            let unentitled_credits: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sla_credits WHERE tenant_id = $1")
+                    .bind(unentitled)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("unentitled credits");
+            assert_eq!(unentitled_credits, 0);
+        }
+    );
+
+    // ---------------- abuse report transitions ----------------
+
+    env_test!(
+        abuse_review_rejects_unknown_and_illegal_and_mirrors_restrictions,
+        |env| {
+            let tenant = "mtcov_abuse_review";
+            seed_tenant(env, tenant, "free", "active").await;
+
+            let missing = review_abuse_report(&env.pool, Uuid::new_v4(), "resolved", "adm", "")
+                .await
+                .expect_err("unknown report");
+            assert!(missing.contains("not found"), "{missing}");
+
+            let report: Uuid = sqlx::query_scalar(
+                "INSERT INTO abuse_reports (tenant_id, report_type, status)
+                 VALUES ($1, 'spam', 'open') RETURNING id",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("report");
+
+            let illegal = review_abuse_report(&env.pool, report, "confirmed", "adm", "")
+                .await
+                .expect_err("open -> confirmed is not authorized");
+            assert!(illegal.contains("Unauthorized"), "{illegal}");
+
+            review_abuse_report(&env.pool, report, "investigating", "adm", "looking")
+                .await
+                .expect("open -> investigating");
+            let active: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM tenant_restrictions
+                 WHERE tenant_id = $1 AND kind = 'abuse' AND cleared_at IS NULL",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("restriction");
+            assert_eq!(active, 1, "an active report imposes the abuse hold");
+            assert!(tenant_has_open_abuse_hold(&env.state, tenant)
+                .await
+                .expect("hold check"));
+
+            review_abuse_report(&env.pool, report, "confirmed", "adm", "confirmed")
+                .await
+                .expect("investigating -> confirmed");
+            review_abuse_report(&env.pool, report, "resolved", "adm", "fixed")
+                .await
+                .expect("confirmed -> resolved");
+            let (status, resolved_at, cleared): (String, Option<DateTime<Utc>>, i64) =
+                sqlx::query_as(
+                    "SELECT r.status, r.resolved_at,
+                            (SELECT COUNT(*) FROM tenant_restrictions tr
+                             WHERE tr.tenant_id = r.tenant_id AND tr.kind = 'abuse'
+                               AND tr.cleared_at IS NOT NULL)
+                     FROM abuse_reports r WHERE r.id = $1",
+                )
+                .bind(report)
+                .fetch_one(&env.pool)
+                .await
+                .expect("report state");
+            assert_eq!(status, "resolved");
+            assert!(resolved_at.is_some());
+            assert_eq!(cleared, 1, "resolution releases the abuse hold");
+            assert!(!tenant_has_open_abuse_hold(&env.state, tenant)
+                .await
+                .expect("hold check"));
+            let audits: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1
+                 AND action = 'billing.abuse_report_transition'",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("audits");
+            assert_eq!(audits, 3, "every transition is audited");
+        }
+    );
+
+    env_test!(mark_payment_recovered_unscoped_resets_the_hold, |env| {
+        let tenant = "mtcov_recovery_all";
+        seed_tenant(env, tenant, "free", "suspended").await;
+        seed_billing_hold(env, tenant, "in_all").await;
+
+        mark_payment_recovered(&env.state, tenant, None)
+            .await
+            .expect("unscoped recovery");
+        let tenant_status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("tenant");
+        assert_eq!(tenant_status, "active");
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND status = 'queued'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("messages");
+        assert_eq!(queued, 1, "mail is released");
+        let dunning: String =
+            sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+        assert_eq!(dunning, "healthy");
+    });
+
+    env_test!(cost_margin_warning_does_not_throttle, |env| {
+        let tenant = "mtcov_margin_warn";
+        seed_tenant(env, tenant, "free", "active").await;
+        let key = billing_common::cost_throttle::cost_throttle_key(tenant);
+        redis_del(env, &key).await;
+        let today = Utc::now().date_naive();
+        sqlx::query(
+            "INSERT INTO tenant_costs (tenant_id, recorded_at, total_cost, revenue)
+             VALUES ($1, $2, 85, 100)",
+        )
+        .bind(tenant)
+        .bind(today)
+        .execute(&env.pool)
+        .await
+        .expect("warning-band costs");
+
+        let status = check_tenant_cost_margin(&env.state, tenant)
+            .await
+            .expect("margin");
+        assert_eq!(status, CostMarginStatus::Warning);
+        assert!(
+            !redis_exists(env, &key).await,
+            "a warning never rate-limits a tenant"
+        );
+        let alert_type: String = sqlx::query_scalar(
+            "SELECT alert_type FROM cost_alerts
+             WHERE tenant_id = $1 AND resolved_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("alert");
+        assert_eq!(alert_type, "low_margin");
+
+        // Recovery (healthy band) clears nothing that was never set.
+        sqlx::query("UPDATE tenant_costs SET total_cost = 10, revenue = 100 WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("recover");
+        let status = check_tenant_cost_margin(&env.state, tenant)
+            .await
+            .expect("margin");
+        assert_eq!(status, CostMarginStatus::Healthy);
+    });
 }

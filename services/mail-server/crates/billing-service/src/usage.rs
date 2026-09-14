@@ -158,7 +158,7 @@ const DEDUP_TTL_SECS: i64 = 40 * 86_400;
 /// this module (get_usage, check_quota, record_with_quota_check) reads
 /// through this shared statement.
 const TENANT_PLAN_LIMITS_SQL: &str = r#"
-        SELECT t.plan as plan_name,
+        SELECT COALESCE(po.plan, t.plan) as plan_name,
                p.email_limit,
                p.api_call_limit,
                t.created_at as tenant_created_at
@@ -1296,13 +1296,14 @@ async fn tenant_cycle_anchor(
     tenant_id: &str,
     at: DateTime<Utc>,
 ) -> Option<chrono::NaiveDate> {
-    sqlx::query_scalar::<_, chrono::NaiveDate>(
+    let start: Option<chrono::DateTime<Utc>> = sqlx::query_scalar(
         r#"
         SELECT billing_cycle_start
         FROM stripe_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
           AND billing_cycle_start IS NOT NULL
+          AND billing_cycle_start <= $2
         ORDER BY billing_cycle_start DESC
         LIMIT 1
         "#,
@@ -1312,7 +1313,12 @@ async fn tenant_cycle_anchor(
     .fetch_optional(pool)
     .await
     .ok()
-    .flatten()
+    .flatten();
+    // billing_cycle_start is timestamptz; the anchor is only consumed as a
+    // day-of-month (see `most_recent_anchored_cycle`), so decode the instant
+    // and take its UTC date — decoding as NaiveDate directly failed and the
+    // swallowed error left anchoring permanently disabled.
+    start.map(|value| value.date_naive())
 }
 
 /// The exact Redis real-time counter key currently ENFORCED for a tenant —
@@ -1657,6 +1663,10 @@ mod tests {
         assert!(TENANT_PLAN_LIMITS_SQL.contains("plan_overrides"));
         assert!(TENANT_PLAN_LIMITS_SQL.contains("COALESCE(po.plan, t.plan)"));
         assert!(TENANT_PLAN_LIMITS_SQL.contains("po.active = true"));
+        // The PROJECTED plan name must be the override-aware one too: with
+        // `t.plan` here, an override on a free tenant was reported as the
+        // free plan and the launch allowance widened the overridden limit.
+        assert!(TENANT_PLAN_LIMITS_SQL.contains("SELECT COALESCE(po.plan, t.plan) as plan_name"));
     }
 
     #[test]

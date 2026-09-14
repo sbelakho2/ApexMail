@@ -149,7 +149,13 @@ impl AuditService {
         // necessarily reflect chain order (interleaved flushes, windowed
         // queries), so the traversal follows previous_hash links and only
         // falls back to created_at for the start points.
-        verify_chain_rows(&rows, &self.signing_key)
+        //
+        // A gap start (a chained row whose parent is absent from the fetched
+        // rows) is only legitimate when the caller asked for a WINDOW: with
+        // `start_time` set, the parent may simply lie before the window. An
+        // unwindowed verification must treat a missing parent as a deleted
+        // row — truncation — and fail closed.
+        verify_chain_rows(&rows, &self.signing_key, start_time.is_some())
     }
 
     /// Query audit events with pagination and filtering.
@@ -585,7 +591,18 @@ fn chain_meta(row: &AuditRow) -> (&str, &str, &str) {
 ///
 /// `broken_at` indexes the created_at-ordered input slice, matching the
 /// previous implementation's semantics.
-fn verify_chain_rows(rows: &[AuditRow], signing_key: &str) -> anyhow::Result<HashChainResult> {
+/// Truncation-aware chain verification.
+///
+/// `allow_gap_starts` is true only when the caller fetched an explicit time
+/// window (`start_time`), where a parent outside the window is expected. In
+/// every other case a chained row whose `previous_hash` is not present in the
+/// row set means a row was deleted: the row is unreachable by traversal and
+/// the chain is reported invalid.
+fn verify_chain_rows(
+    rows: &[AuditRow],
+    signing_key: &str,
+    allow_gap_starts: bool,
+) -> anyhow::Result<HashChainResult> {
     let invalid = |at: usize| {
         Ok(HashChainResult {
             valid: false,
@@ -631,7 +648,7 @@ fn verify_chain_rows(rows: &[AuditRow], signing_key: &str) -> anyhow::Result<Has
         .copied()
         .filter(|&i| {
             let (prev, _, _) = chain_meta(&rows[i]);
-            prev.is_empty() || !hashes.contains(prev)
+            prev.is_empty() || (allow_gap_starts && !hashes.contains(prev))
         })
         .collect();
     starts.sort_unstable(); // created_at order among starts
@@ -996,7 +1013,7 @@ mod tests {
         // traversal must follow previous_hash links (not slice order) and
         // tolerate the legacy row.
         let rows = vec![r3, legacy_row("old", t0 - Duration::seconds(5)), r1, r2];
-        let result = verify_chain_rows(&rows, CHAIN_TEST_KEY).unwrap();
+        let result = verify_chain_rows(&rows, CHAIN_TEST_KEY, true).unwrap();
         assert!(result.valid, "chain is intact regardless of row order");
         assert_eq!(result.entries_checked, 4);
         assert_eq!(result.broken_at, None);
@@ -1011,7 +1028,7 @@ mod tests {
         // Tamper with the row contents WITHOUT updating the stored hash.
         r2.details = serde_json::json!({ "seq": "tampered" });
 
-        let result = verify_chain_rows(&[r1, r2], CHAIN_TEST_KEY).unwrap();
+        let result = verify_chain_rows(&[r1, r2], CHAIN_TEST_KEY, true).unwrap();
         assert!(!result.valid, "tampered row must invalidate the chain");
         assert_eq!(result.broken_at, Some(1));
     }
@@ -1026,7 +1043,7 @@ mod tests {
         let r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
         let r2b = chain_row("e2-prime", t0 + Duration::seconds(2), &h1);
 
-        let result = verify_chain_rows(&[r1, r2, r2b], CHAIN_TEST_KEY).unwrap();
+        let result = verify_chain_rows(&[r1, r2, r2b], CHAIN_TEST_KEY, true).unwrap();
         assert!(!result.valid, "two claimants of one parent are a fork");
     }
 
@@ -1039,7 +1056,7 @@ mod tests {
         let h1 = chain_meta(&r1).1.to_string();
         let r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
 
-        let result = verify_chain_rows(&[r1, r2], "a-different-signing-key").unwrap();
+        let result = verify_chain_rows(&[r1, r2], "a-different-signing-key", true).unwrap();
         assert!(
             !result.valid,
             "rows signed with a foreign key must not verify"
@@ -1053,9 +1070,44 @@ mod tests {
             legacy_row("a", t0),
             legacy_row("b", t0 + Duration::seconds(1)),
         ];
-        let result = verify_chain_rows(&rows, CHAIN_TEST_KEY).unwrap();
+        let result = verify_chain_rows(&rows, CHAIN_TEST_KEY, true).unwrap();
         assert!(result.valid);
         assert_eq!(result.entries_checked, 2);
+    }
+
+    #[test]
+    fn test_verify_chain_rows_truncation_policy_detects_deleted_parent() {
+        let t0 = Utc::now();
+        let r1 = chain_row("e1", t0, "");
+        let h1 = chain_meta(&r1).1.to_string();
+        let r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
+        let h2 = chain_meta(&r2).1.to_string();
+        let r3 = chain_row("e3", t0 + Duration::seconds(2), &h2);
+
+        // Full chain: valid either way. Independent rebuilds from the same
+        // inputs are byte-identical, so this also pins hash determinism.
+        let full = vec![
+            chain_row("e1", t0, ""),
+            chain_row("e2", t0 + Duration::seconds(1), &h1),
+            chain_row("e3", t0 + Duration::seconds(2), &h2),
+        ];
+        assert!(
+            verify_chain_rows(&full, CHAIN_TEST_KEY, false)
+                .unwrap()
+                .valid
+        );
+
+        // Parent deleted (truncation): an unwindowed verification must fail
+        // closed, while an explicit time window may treat the orphan as a
+        // legitimate start point.
+        let truncated = vec![r1, r3];
+        let strict = verify_chain_rows(&truncated, CHAIN_TEST_KEY, false).unwrap();
+        assert!(
+            !strict.valid,
+            "a deleted interior row must invalidate an unwindowed chain"
+        );
+        let windowed = verify_chain_rows(&truncated, CHAIN_TEST_KEY, true).unwrap();
+        assert!(windowed.valid, "a window boundary is a legitimate start");
     }
 
     fn test_runtime() -> &'static tokio::runtime::Runtime {

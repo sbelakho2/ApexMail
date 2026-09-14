@@ -414,6 +414,26 @@ impl InboundServer {
             .await;
             return;
         }
+        self.run_plain_session(socket, peer, tls).await;
+    }
+
+    /// The ADMITTED plain-SMTP session: RAII slot guard, greeting, command
+    /// loop and the bounded STARTTLS upgrade. Generic over the transport so
+    /// the exact slot/timeout contract can be driven over an in-memory duplex
+    /// stream (a real TCP socket under a paused test clock races tokio's
+    /// time-driver auto-advance — see
+    /// `test_starttls_handshake_timeout_releases_connection_slot`).
+    /// [`handle_session_plain`] supplies the TcpStream and owns the
+    /// pre-admission refusal.
+    async fn run_plain_session<S>(
+        self: Arc<Self>,
+        socket: S,
+        peer: SocketAddr,
+        tls: Option<TlsAcceptor>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let ip = peer.ip();
         // F-19: RAII slot guard (same pattern as the bounce server) — the
         // per-IP slot is released on EVERY exit path, early returns included.
         let _conn_guard = super::bounce::ConnGuard {
@@ -2049,12 +2069,18 @@ fn format_data_response(result: &anyhow::Result<String>) -> String {
 /// M26: run a TLS handshake under a bounded timeout. On timeout or error the
 /// connection is dead; callers must drop the socket and release the
 /// per-IP connection slot.
-pub(crate) async fn tls_handshake_with_timeout<F>(
+///
+/// Generic over the transport so the STARTTLS guard path can be driven over
+/// an in-memory duplex stream in tests (a real TCP socket under a paused test
+/// clock races tokio's auto-advance — see `test_starttls_handshake_timeout_
+/// releases_connection_slot`).
+pub(crate) async fn tls_handshake_with_timeout<IO, F>(
     handshake: F,
     timeout_dur: Duration,
-) -> Result<tokio_rustls::server::TlsStream<TcpStream>, ()>
+) -> Result<tokio_rustls::server::TlsStream<IO>, ()>
 where
-    F: Future<Output = std::io::Result<tokio_rustls::server::TlsStream<TcpStream>>>,
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    F: Future<Output = std::io::Result<tokio_rustls::server::TlsStream<IO>>>,
 {
     match tokio::time::timeout(timeout_dur, handshake).await {
         Ok(Ok(stream)) => {
@@ -2749,45 +2775,73 @@ mod tests {
 
     #[tokio::test]
     async fn test_starttls_handshake_timeout_releases_connection_slot() {
+        // Driven over an in-memory duplex stream under a paused clock. On a
+        // real TCP socket the runtime parks on I/O and tokio's time driver
+        // auto-advances the paused clock to the next timer, so the session
+        // loop's idle timeout can fire before the client's next write — the
+        // verdict becomes a function of thread scheduling (the session-
+        // deadline test above documents the same race and uses the same
+        // duplex idiom). Over the duplex stream every step is under the
+        // test's control, so the handshake timeout is the only timer that can
+        // fire, and advancing the clock is what ends the session.
         tokio::time::pause();
         let (server, _ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
         let server = Arc::new(server);
         let acceptor = test_tls_acceptor();
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let ip = addr.ip();
+        let peer: SocketAddr = "127.0.0.1:25".parse().unwrap();
+        let ip = peer.ip();
+        // Occupy the per-IP slot exactly as the accept loop does; the slot
+        // being released when the session ends is the property under test.
+        assert!(crate::servers::bounce::try_admit_connection(
+            &server.connections,
+            ip,
+            server.rate_limit_config.max_connections_per_ip,
+        ));
+        assert_eq!(server.connections.get(&ip).map(|v| *v), Some(1));
 
+        let (mut client, server_io) = tokio::io::duplex(64 * 1024);
         let srv = server.clone();
         let task = tokio::spawn(async move {
-            let (socket, peer) = listener.accept().await.unwrap();
-            srv.handle_session_plain(socket, peer, Some(acceptor)).await;
+            srv.run_plain_session(server_io, peer, Some(acceptor)).await;
         });
 
-        use tokio::io::AsyncReadExt;
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        let mut buf = [0u8; 2048];
-
+        use tokio::io::AsyncWriteExt;
         // Greeting
-        let n = client.read(&mut buf).await.unwrap();
-        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+        assert!(read_reply_line(&mut client).await.starts_with("220"));
         // EHLO
         client.write_all(b"EHLO test.local\r\n").await.unwrap();
-        let n = client.read(&mut buf).await.unwrap();
-        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("250"));
+        assert!(read_smtp_reply(&mut client).await.starts_with("250"));
         // STARTTLS — server replies 220 and then waits for the handshake.
         client.write_all(b"STARTTLS\r\n").await.unwrap();
-        let n = client.read(&mut buf).await.unwrap();
-        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+        assert!(read_reply_line(&mut client).await.starts_with("220"));
 
         // The client sends no ClientHello: the 30s handshake timeout must
         // fire and the session must end, releasing the per-IP slot.
         tokio::time::advance(TLS_HANDSHAKE_TIMEOUT + Duration::from_secs(1)).await;
-        tokio::time::resume();
 
-        let completed = tokio::time::timeout(Duration::from_secs(5), task).await;
+        // The clock stays PAUSED and the wait is BOUNDED BY YIELDS, not by
+        // wall-clock: a real-time deadline (previously
+        // `timeout(5s, task)` after `time::resume()`) made the test a function
+        // of thread scheduling — under a full-suite run on a saturated machine
+        // the session task could miss a 5-second deadline and fail a guard
+        // that works. Each iteration hands the scheduler a turn and nudges the
+        // paused clock, so the timer that already fired is observed
+        // deterministically; the bound still fails loudly if the guard never
+        // fires.
+        let mut completed = false;
+        for _ in 0..10_000 {
+            if task.is_finished() {
+                task.await.expect("session task must not panic");
+                completed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(1)).await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         assert!(
-            completed.is_ok(),
+            completed,
             "session must terminate after the TLS handshake timeout"
         );
 
@@ -3907,5 +3961,202 @@ mod tests {
             source.contains(trim_needle),
             "the webhook push path must trim the queue to a bounded length"
         );
+    }
+}
+
+#[cfg(test)]
+mod adversarial_db_tests {
+    //! Directory-resolution and helper-edge coverage for the inbound server:
+    //! the RCPT verdict must distinguish "no such mailbox" (550) from a
+    //! directory outage (451), and the hand-rolled PKCS#1/#8 parser must
+    //! accept both PEM shapes while refusing garbage.
+
+    use super::*;
+    use sqlx::PgPool;
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    #[test]
+    fn rcpt_resolution_reply_maps_every_directory_outcome() {
+        assert_eq!(
+            rcpt_resolution_reply(&Ok(Some(ResolvedMailbox {
+                mailbox_id: "mbx".into(),
+                email: "user@example.test".into(),
+            }))),
+            None,
+            "an existing mailbox is accepted"
+        );
+        assert_eq!(
+            rcpt_resolution_reply(&Ok(None)),
+            Some(RCPT_NO_SUCH_USER_REPLY),
+            "a missing mailbox is a permanent 550"
+        );
+        assert_eq!(
+            rcpt_resolution_reply(&Err(DirectoryUnavailable("db down".into()))),
+            Some(RCPT_TEMPFAIL_REPLY),
+            "a directory outage must tempfail, never hard-reject"
+        );
+        assert!(RCPT_NO_SUCH_USER_REPLY.starts_with("550"));
+        assert!(RCPT_TEMPFAIL_REPLY.starts_with("451"));
+    }
+
+    #[tokio::test]
+    async fn pg_mailbox_directory_is_case_insensitive_and_skips_inactive_rows() {
+        let Some(pool) = test_pool("inbound_directory").await else {
+            return;
+        };
+        let directory = PgMailboxDirectory::new(pool.clone());
+        let address = "Mailbox.User@directory.test";
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO mail_accounts (id, email, domain, password_hash, is_active)
+             VALUES ($1, $2, 'directory.test', 'x', true)",
+        )
+        .bind(id)
+        .bind(address)
+        .execute(&pool)
+        .await
+        .expect("insert mailbox");
+
+        let resolved = directory
+            .resolve("mailbox.user@directory.test")
+            .await
+            .expect("directory available")
+            .expect("case-insensitive match");
+        assert_eq!(resolved.mailbox_id, id.to_string());
+        assert_eq!(
+            resolved.email, address,
+            "the canonical (stored) address is returned"
+        );
+
+        assert!(directory
+            .resolve("nobody@directory.test")
+            .await
+            .expect("directory available")
+            .is_none());
+
+        // Deactivated mailboxes disappear from the directory.
+        sqlx::query("UPDATE mail_accounts SET is_active = false WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(directory
+            .resolve(address)
+            .await
+            .expect("directory available")
+            .is_none());
+    }
+
+    #[test]
+    fn rsa_private_key_parser_accepts_pkcs8_and_refuses_garbage() {
+        // Fixture keys are static PEMs (generated once) so the test does not
+        // depend on a CSPRNG: the parser must accept both standard shapes.
+        const PKCS8: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCRdfqZelQGARMS
+yKEGHT1OXtkgDzPogJ2A8azEk+gqIA7tt7+9lHhT03IEz1HbRMCRBbQizd1hSmkX
+pe99kDYiLsgqDs4CjJ8UZ1L1XAf9FFn1tkZKZil4TlhO4ACMMAlOpQ4PH2ql2x4Y
+g5anmwV+KGBzHKjY/l3kbDZjuyx6zRKRU0wd/g0GZwfk17qKc5A7lj7hcajieI6x
+kbgBl40QZJC05rL05GH128MJI2mMWoW+n+2wRddTgHozUVVlMcWIrYeTXtMVNr6O
+3PjiOAMTLX03B+5Qo8cI2ouZJcSeo1WvpwKmddqdRV+Vp7UbR/W5++gruunZY+bW
+gtsej3gpAgMBAAECggEAJ4CAEQzw436INPoqDHSFURKd6UBnqtS+sSUwc2PtUP9K
+vpC/b9bxhGYwGRFKG/9EQj3nyOnaHFEuT/8+lf1DTi4hKpbBqFyS2OIkW8Bl5PsR
+YRJibVLoISU5gxX+4BMte9+D/WRdPHRQbHzTvWlyaOvDIY+fZOpTCjS+4n+SmThN
+6V9eTQJG5xVtcDcCJTIfwZFOUSGz9OeUMY9T5FIP8pJzZi4yZrAmk8e+LgPxsY96
+8lBtBM0377OTWk2mHPYv0ibBdjlFFePFMmh4ERVMsAydgLCsdR9beZPp69CruQQq
+MtN2mm1dGyML+5QdrcGJAZDQEnn2cskZtBoSRLhFNwKBgQDC60a3jBMw0I46OS62
+FN+y90v9eq0ZH508P/dLgbtiIvY0nWZRO9xZ2pLuCt4GayCX8Y5D6Gu9ABBXmwAI
+DYJz7Q0FHSGaet4/JZZiWF1+/r9GqH4al3ctdg+3HZdw3rb2GeJwOMUq+9DlU6iO
+qGuzcL317lrmRZLsoiUB/HkZowKBgQC/CxX4e7qaXpA4oNRuM10tSE1kkkH3st5M
+UkRsHbuVfzUnoZ2dujtQbGCLb81xYIrWy/aYR3po2X1s2rbcon/GhDzIjjxPenrc
+JIDUUwuMGAlb0HNixLSoO09mise4DAQ7wSet1r6YTpRB5GJIBAONZ8Kk7bViZLjm
+DLLaQDxbwwKBgQCuMSSZk4zy6u6wCbo87pqbjXVTqfZXpXEXDvMpf16+bRAqJR/z
+KNPbWQJFyWBxy/rszuqctXDTDuOL5vE4QRp8DzS7hTUqoPNM64JhkSa8/1xhAOLx
+ULso3YFd3AwiymYnuSorsBBEQZaF2yWfl9PoILEiv0hs0XBkGOOJyt9OkQKBgB0+
+ZS6UQgw/TXRdqib0Vd8IolAy00ZHax/jt/WU15Ia1tgqNSZfy5SUAnNVue0RCi+3
+KRhGWMaUBE8Va8h6V3Tb6TIKE9FWvlfUfqQB0lKvmz8iuYb09XKLIaxgshHKRRug
+haJmrOZDoQ41F5ZOhvyuVW1JtepJ4MPWTcp66sJhAoGAVCBRo/3FhGy/2Yi6XPYh
+TeI4RkpFdcfzhvxNe5XXnLTxJiBGPkAfvv8LX6X+Zc+NV2mAadnIy6RExYOtNIEw
+rZXJMug6mIrnzHFfw0obAOYzPKSCCAyEAZVpjXgsv/wlFSppFAJikWxyATIoP3LC
+2jfi+7WPNNZIHYg38eLxa5w=
+-----END PRIVATE KEY-----
+"#;
+        const PKCS1: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAkXX6mXpUBgETEsihBh09Tl7ZIA8z6ICdgPGsxJPoKiAO7be/
+vZR4U9NyBM9R20TAkQW0Is3dYUppF6XvfZA2Ii7IKg7OAoyfFGdS9VwH/RRZ9bZG
+SmYpeE5YTuAAjDAJTqUODx9qpdseGIOWp5sFfihgcxyo2P5d5Gw2Y7sses0SkVNM
+Hf4NBmcH5Ne6inOQO5Y+4XGo4niOsZG4AZeNEGSQtOay9ORh9dvDCSNpjFqFvp/t
+sEXXU4B6M1FVZTHFiK2Hk17TFTa+jtz44jgDEy19NwfuUKPHCNqLmSXEnqNVr6cC
+pnXanUVflae1G0f1ufvoK7rp2WPm1oLbHo94KQIDAQABAoIBACeAgBEM8ON+iDT6
+Kgx0hVESnelAZ6rUvrElMHNj7VD/Sr6Qv2/W8YRmMBkRShv/REI958jp2hxRLk//
+PpX9Q04uISqWwahcktjiJFvAZeT7EWESYm1S6CElOYMV/uATLXvfg/1kXTx0UGx8
+071pcmjrwyGPn2TqUwo0vuJ/kpk4TelfXk0CRucVbXA3AiUyH8GRTlEhs/TnlDGP
+U+RSD/KSc2YuMmawJpPHvi4D8bGPevJQbQTNN++zk1pNphz2L9ImwXY5RRXjxTJo
+eBEVTLAMnYCwrHUfW3mT6evQq7kEKjLTdpptXRsjC/uUHa3BiQGQ0BJ59nLJGbQa
+EkS4RTcCgYEAwutGt4wTMNCOOjkuthTfsvdL/XqtGR+dPD/3S4G7YiL2NJ1mUTvc
+WdqS7greBmsgl/GOQ+hrvQAQV5sACA2Cc+0NBR0hmnrePyWWYlhdfv6/Rqh+Gpd3
+LXYPtx2XcN629hnicDjFKvvQ5VOojqhrs3C99e5a5kWS7KIlAfx5GaMCgYEAvwsV
++Hu6ml6QOKDUbjNdLUhNZJJB97LeTFJEbB27lX81J6Gdnbo7UGxgi2/NcWCK1sv2
+mEd6aNl9bNq23KJ/xoQ8yI48T3p63CSA1FMLjBgJW9BzYsS0qDtPZorHuAwEO8En
+rda+mE6UQeRiSAQDjWfCpO21YmS45gyy2kA8W8MCgYEArjEkmZOM8urusAm6PO6a
+m411U6n2V6VxFw7zKX9evm0QKiUf8yjT21kCRclgccv67M7qnLVw0w7ji+bxOEEa
+fA80u4U1KqDzTOuCYZEmvP9cYQDi8VC7KN2BXdwMIspmJ7kqK7AQREGWhdsln5fT
+6CCxIr9IbNFwZBjjicrfTpECgYAdPmUulEIMP010Xaom9FXfCKJQMtNGR2sf47f1
+lNeSGtbYKjUmX8uUlAJzVbntEQovtykYRljGlARPFWvIeld02+kyChPRVr5X1H6k
+AdJSr5s/IrmG9PVyiyGsYLIRykUboIWiZqzmQ6EONReWTob8rlVtSbXqSeDD1k3K
+eurCYQKBgFQgUaP9xYRsv9mIulz2IU3iOEZKRXXH84b8TXuV15y08SYgRj5AH77/
+C1+l/mXPjVdpgGnZyMukRMWDrTSBMK2VyTLoOpiK58xxX8NKGwDmMzykgggMhAGV
+aY14LL/8JRUqaRQCYpFscgEyKD9ywto34vu1jzTWSB2IN/Hi8Wuc
+-----END RSA PRIVATE KEY-----
+"#;
+        assert!(
+            parse_rsa_private_key(PKCS8).is_ok(),
+            "PKCS#8 PEM must parse"
+        );
+        assert!(
+            parse_rsa_private_key(PKCS1).is_ok(),
+            "PKCS#1 PEM must parse"
+        );
+
+        // Anything else is refused rather than silently producing a bad key.
+        let error = parse_rsa_private_key("not a key").unwrap_err();
+        assert!(error.to_string().contains("invalid RSA private-key PEM"));
+    }
+
+    #[tokio::test]
+    async fn write_line_tcp_delivers_the_full_line() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            write_line_tcp(&socket, "220 inbound.test ESMTP\r\n")
+                .await
+                .unwrap();
+            socket
+        });
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _server_socket = accept.await.unwrap();
+        let mut buf = [0u8; 64];
+        let mut received = Vec::new();
+        loop {
+            client.readable().await.unwrap();
+            match client.try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    received.extend_from_slice(&buf[..n]);
+                    if received.ends_with(b"\r\n") {
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("read failed: {e}"),
+            }
+        }
+        assert_eq!(received, b"220 inbound.test ESMTP\r\n");
     }
 }

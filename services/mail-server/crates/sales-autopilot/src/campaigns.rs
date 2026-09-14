@@ -1432,12 +1432,18 @@ impl CampaignManager {
     /// Record an unsubscribe (suppression) for a tenant (fix I-2).
     /// Suppressed recipients are excluded from every future campaign send.
     pub async fn suppress_recipient(&self, tenant_id: &str, email: &str) -> Result<(), SalesError> {
+        // Store the canonical normalized form. Every suppression check in the
+        // send path (the funnel here, the dispatcher, admission) compares
+        // case-insensitively / lowercased, so persisting the raw spelling made
+        // `is_recipient_suppressed` disagree with the checks that actually
+        // gate sends and let the same address accumulate case-variant rows.
+        let normalized = normalize_recipient_email(email);
         sqlx::query(
             "INSERT INTO sales_unsubscribes (tenant_id, email, created_at) \
              VALUES ($1, $2, NOW()) ON CONFLICT (tenant_id, email) DO NOTHING",
         )
         .bind(tenant_id)
-        .bind(email)
+        .bind(&normalized)
         .execute(&self.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1451,10 +1457,11 @@ impl CampaignManager {
         email: &str,
     ) -> Result<bool, SalesError> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = $2",
+            "SELECT COUNT(*) FROM sales_unsubscribes \
+             WHERE tenant_id = $1 AND LOWER(email) = $2",
         )
         .bind(tenant_id)
-        .bind(email)
+        .bind(normalize_recipient_email(email))
         .fetch_one(&self.db)
         .await
         .map_err(|e| SalesError::Database(e.to_string()))?;
@@ -1775,7 +1782,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_create_and_list() {
         let Some(mgr) = make_mgr("campaigns::tests::test_create_and_list").await else {
@@ -1803,7 +1809,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_start_pause_lifecycle() {
         let Some(mgr) = make_mgr("campaigns::tests::test_start_pause_lifecycle").await else {
@@ -1838,7 +1843,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_max_campaigns_enforced() {
         let Some(mgr) =
@@ -1871,7 +1875,6 @@ mod tests {
     /// The create-time limit counts only ACTIVE campaigns, so a tenant can
     /// stockpile drafts. The limit must therefore be re-checked when the
     /// campaign is started.
-    #[ignore]
     #[tokio::test]
     async fn test_max_campaigns_enforced_at_start() {
         let Some(mgr) =
@@ -1911,7 +1914,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_recipients_and_stats() {
         let Some(mgr) = make_mgr("campaigns::tests::test_recipients_and_stats").await else {
@@ -1939,7 +1941,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_campaign_operations_are_tenant_scoped() {
         let Some(mgr) =
@@ -1965,7 +1966,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_add_recipients_deduplicates_addresses() {
         let Some(mgr) =
@@ -2376,7 +2376,6 @@ mod tests {
     /// accepts ZERO contacts and must NOT activate the campaign: the campaign
     /// parks in `verification_pending` with an operator-visible reason instead
     /// of advertising an active campaign whose only recipient was rejected.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn campaign_start_creates_unknown_point_with_null_account() {
         let Some(pool) =
@@ -2491,7 +2490,6 @@ mod tests {
     /// enrollment proceeds on that verdict — the send path still gates it. The
     /// campaign must NOT be rejected as `stale_policy` for a policy id the
     /// batch resolver invented.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn campaign_start_resolves_policy_per_contact_for_unlisted_jurisdiction() {
         let Some(pool) =
@@ -2888,7 +2886,6 @@ mod tests {
     /// Integration (local Postgres): both reconciliation paths —
     /// (1) events present → `sent` is rewritten to the events count;
     /// (2) events absent → `sent` keeps the enqueue-time count.
-    #[ignore = "requires local PostgreSQL with the sales-autopilot schema"]
     #[tokio::test]
     async fn reconcile_sent_counter_follows_events_or_falls_back() {
         let Some(db) = canonical_test_pool(
@@ -2965,6 +2962,210 @@ mod tests {
         sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
             .bind(campaign.id)
             .execute(&db)
+            .await
+            .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial lifecycle proofs (run by default; soft-skip only when the
+    // canonical test database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    /// The campaign lifecycle from the operator's seat: create/list are
+    /// tenant-scoped and paged, recipients dedupe and validate, stats and the
+    /// dry-run funnel agree, suppression is per-tenant, and pause/complete are
+    /// legal-transition-guarded.
+    #[tokio::test]
+    async fn campaign_lifecycle_stats_suppression_and_tenant_isolation() {
+        let Some(pool) = canonical_test_pool("campaigns::tests::campaign_lifecycle").await else {
+            return;
+        };
+        let tenant = unique_test_tenant("camp-life");
+        let other = unique_test_tenant("camp-other");
+        let mgr = CampaignManager::new(10, pool.clone());
+
+        // create + list, scoped and bounded.
+        let campaign = mgr
+            .create_campaign(
+                tenant.clone(),
+                "Lifecycle".into(),
+                "tmpl_life".into(),
+                "all".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(campaign.status, CampaignStatus::Draft);
+        let listed = mgr.list_campaigns(&tenant, 50, 0).await.unwrap();
+        assert_eq!(listed.len(), 1, "the new campaign is listed");
+        assert_eq!(listed[0].id, campaign.id);
+        assert_eq!(
+            mgr.list_campaigns(&tenant, 1, 0).await.unwrap().len(),
+            1,
+            "limit bounds the page"
+        );
+        assert!(
+            mgr.list_campaigns(&tenant, 50, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "offset past the end is empty"
+        );
+        assert!(
+            mgr.list_campaigns(&other, 50, 0).await.unwrap().is_empty(),
+            "another tenant sees nothing"
+        );
+
+        // Recipients: normalized de-duplication, validation, tenant scoping.
+        let added = mgr
+            .add_recipients(
+                &tenant,
+                campaign.id,
+                vec![
+                    "  A@Example.COM  ".into(),
+                    "a@example.com".into(),
+                    "b@example.com".into(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(added, 2, "the duplicate normalizes away");
+        assert_eq!(
+            mgr.list_campaigns(&tenant, 50, 0).await.unwrap()[0].id,
+            campaign.id
+        );
+        let error = mgr
+            .add_recipients(&tenant, campaign.id, vec!["not-an-email".into()])
+            .await
+            .expect_err("an invalid address must be refused");
+        assert!(error.to_string().contains("invalid recipient"), "{error}");
+        let error = mgr
+            .add_recipients(&other, campaign.id, vec!["c@example.com".into()])
+            .await
+            .expect_err("another tenant cannot add recipients");
+        assert!(
+            matches!(error, SalesError::CampaignNotFound(_)),
+            "{error:?}"
+        );
+
+        // Stats agree with the funnel and are tenant-guarded.
+        let stats = mgr.get_stats(&tenant, campaign.id).await.unwrap();
+        assert_eq!(stats["recipients"], 2);
+        assert_eq!(stats["status"], "draft");
+        assert!(mgr.get_stats(&other, campaign.id).await.is_err());
+        let funnel = mgr
+            .recipient_funnel_counts(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.total, 2);
+        assert_eq!(funnel.due, 2);
+
+        // Suppression is per-tenant and immediately visible to the funnel.
+        assert!(!mgr
+            .is_recipient_suppressed(&tenant, "b@example.com")
+            .await
+            .unwrap());
+        mgr.suppress_recipient(&tenant, "B@Example.com")
+            .await
+            .unwrap();
+        assert!(mgr
+            .is_recipient_suppressed(&tenant, "b@example.com")
+            .await
+            .unwrap());
+        assert!(
+            !mgr.is_recipient_suppressed(&other, "b@example.com")
+                .await
+                .unwrap(),
+            "suppression is tenant-scoped"
+        );
+        let funnel = mgr
+            .recipient_funnel_counts(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(funnel.suppressed_local, 1);
+        assert_eq!(funnel.due, 1);
+
+        // Dry run reports the funnel without enqueueing anything.
+        let dry = mgr.dry_run(&tenant, campaign.id, 10, None).await.unwrap();
+        assert_eq!(dry["dry_run"], true);
+        assert_eq!(dry["recipients"]["total"], 2);
+        assert_eq!(dry["recipients"]["suppressed_local"], 1);
+        assert_eq!(dry["recipients"]["due"], 1);
+        assert!(
+            dry["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("dispatcher not configured")),
+            "{dry}"
+        );
+        // …and the dry run never touched the send ledger.
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_campaign_recipients WHERE campaign_id = $1 AND sent_at IS NOT NULL",
+        )
+        .bind(campaign.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, 0, "dry run stamps nothing");
+        assert!(mgr.dry_run(&other, campaign.id, 10, None).await.is_err());
+
+        // Start needs a sendable point; the suppressed address is refused and
+        // the verified one enrolls.
+        seed_verified_point(&pool, &tenant, "a@example.com").await;
+        let (started, summary) = mgr
+            .start_campaign_with_outreach(&tenant, campaign.id)
+            .await
+            .unwrap();
+        assert_eq!(started.status, CampaignStatus::Active);
+        let summary = summary.expect("recipients exist");
+        assert_eq!(summary.accepted, 1, "{summary:?}");
+        assert_eq!(summary.rejected, 1, "{summary:?}");
+        assert_eq!(summary.rejection_reasons.get("suppressed"), Some(&1));
+
+        // Pause is legal-transition-guarded and tenant-scoped.
+        let paused = mgr.pause_campaign(&tenant, campaign.id).await.unwrap();
+        assert_eq!(paused.status, CampaignStatus::Paused);
+        let error = mgr
+            .pause_campaign(&tenant, campaign.id)
+            .await
+            .expect_err("pausing a paused campaign must be refused");
+        assert!(error.to_string().contains("not active"), "{error}");
+        assert!(mgr.pause_campaign(&other, campaign.id).await.is_err());
+
+        // Restart after pause, then complete only from active.
+        mgr.start_campaign_with_outreach(&tenant, campaign.id)
+            .await
+            .unwrap();
+        mgr.complete_campaign(campaign.id).await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "completed");
+        // Completing an already-completed campaign is a no-op, not an error.
+        mgr.complete_campaign(campaign.id).await.unwrap();
+
+        // Reconciliation is safe with no sent events (keeps the estimate).
+        mgr.reconcile_campaign_stats(campaign.id).await.unwrap();
+
+        cleanup_campaign_fixture(&pool, &tenant).await;
+        sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_campaign_recipients WHERE campaign_id = $1")
+            .bind(campaign.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sales_campaigns WHERE id = $1")
+            .bind(campaign.id)
+            .execute(&pool)
             .await
             .unwrap();
     }

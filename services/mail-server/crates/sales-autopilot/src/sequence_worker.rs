@@ -3447,7 +3447,6 @@ mod tests {
     // ── 1. Offline intelligence still plans, validates and sends ──────────
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn offline_intelligence_plans_a_claim_validated_message() {
         let Some(fx) = fixture("lib_offline_plan", "allowed", "ZA").await else {
             return;
@@ -3563,7 +3562,6 @@ mod tests {
     // ── 2. An AI outage falls back to verified static content ──────────────
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn ai_outage_falls_back_and_records_it() {
         let Some(fx) = fixture("lib_ai_outage", "allowed", "ZB").await else {
             return;
@@ -3645,7 +3643,6 @@ mod tests {
     // ── 3. An unvalidated claim is never sent ──────────────────────────────
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn an_unvalidated_claim_is_rejected_and_replaced() {
         let Some(fx) = fixture("lib_bad_claim", "allowed", "ZC").await else {
             return;
@@ -3717,7 +3714,6 @@ mod tests {
     // ── 4. Fresh evidence feeds the persisted score ────────────────────────
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn fresh_evidence_is_used_for_the_score() {
         let Some(fx) = fixture("lib_fresh_score", "allowed", "ZD").await else {
             return;
@@ -3798,7 +3794,6 @@ mod tests {
     // ── 5. Stale evidence alone does not force a send (§28) ────────────────
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn stale_evidence_alone_does_not_force_a_send() {
         let Some(fx) = fixture("lib_stale_skip", "allowed", "ZE").await else {
             return;
@@ -3864,7 +3859,6 @@ mod tests {
     // ── 6. The decision engine still gates everything ──────────────────────
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn prohibited_legal_verdict_still_blocks_the_ai_path() {
         let Some(fx) = fixture("lib_prohibited", "prohibited", "ZF").await else {
             return;
@@ -3914,6 +3908,532 @@ mod tests {
             decide_at < enqueue_at,
             "the Decision Packet must be produced before any external enqueue \
              (decide at byte {decide_at}, enqueue at byte {enqueue_at})"
+        );
+    }
+
+    // =====================================================================
+    // Adversarial outcome-path proofs (run by default; soft-skip only when
+    // the canonical test database is unconfigured).
+    // =====================================================================
+
+    /// Run the handler on a fresh claim, then finish it, returning both.
+    async fn run_once(
+        fx: &Fixture,
+        handler: &SequenceStepHandler,
+    ) -> (ActionOutcome, LeasedAction) {
+        let leased = enqueue_and_claim(&fx.db, &fx.tenant, fx.step_execution).await;
+        let outcome = handler.handle(&leased).await;
+        let queue = ActionQueue::new(fx.db.clone(), leased.lease_owner.clone());
+        assert!(
+            queue
+                .finish(&leased.fence(), outcome.clone())
+                .await
+                .expect("finish the claimed action"),
+            "the worker must still own its live lease"
+        );
+        (outcome, leased)
+    }
+
+    async fn decision_packets(db: &PgPool, tenant: &str) -> Vec<(String, bool, String)> {
+        sqlx::query_as(
+            "SELECT enforcement, blocked, block_reasons::text FROM sales_decisions \
+             WHERE tenant_id = $1 ORDER BY created_at",
+        )
+        .bind(tenant)
+        .fetch_all(db)
+        .await
+        .expect("read sales_decisions")
+    }
+
+    /// The full unattended send path: one footer-rendered marketing message
+    /// with a v2 unsubscribe link, a recorded execute decision, and a replay
+    /// that produces no second message.
+    #[tokio::test]
+    async fn default_send_path_enqueues_one_marketing_message_and_replay_is_a_noop() {
+        let Some(fx) = fixture("lib_default_send", "allowed", "ZW").await else {
+            return;
+        };
+        insert_evidence(
+            &fx.db,
+            &fx.tenant,
+            fx.account,
+            "The account runs SendGrid for transactional email.",
+            0.9,
+            false,
+        )
+        .await;
+        let handler = fx.handler();
+
+        let (outcome, leased) = run_once(&fx, &handler).await;
+        assert!(
+            matches!(outcome, ActionOutcome::Succeeded),
+            "offline send must succeed: {outcome:?}"
+        );
+        let (state, _) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "sent");
+        assert_eq!(
+            outbound_count(&fx.db, fx.step_execution).await,
+            1,
+            "exactly one outbound message"
+        );
+
+        // Every hard gate recorded an execute verdict with no block reasons.
+        let packets = decision_packets(&fx.db, &fx.tenant).await;
+        assert_eq!(packets.len(), 1, "exactly one Decision Packet");
+        assert_eq!(packets[0].0, "execute");
+        assert!(!packets[0].1, "an executed decision is not blocked");
+
+        // The delivered message is truthful and attributable.
+        let (subject, html, text): (String, String, String) = outbound(&fx.db, fx.step_execution)
+            .await
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(!subject.trim().is_empty());
+        for body in [&html, &text] {
+            let lowered = body.to_ascii_lowercase();
+            assert!(
+                lowered.contains("unsubscribe"),
+                "the footer must offer an unsubscribe route: {body}"
+            );
+            // Positive consent claims only; the truthful footer explicitly
+            // negates ("we are not claiming that you signed up"), which is the
+            // opposite of a claim.
+            for claim in [
+                "because you signed up",
+                "you are receiving this because you",
+                "thanks for signing up",
+                "you opted in to",
+                "you subscribed to",
+            ] {
+                assert!(
+                    !lowered.contains(claim),
+                    "the footer must never claim '{claim}' for a prospect who never did: {body}"
+                );
+            }
+        }
+        // The v2 unsubscribe token is opaque (no email material in the link).
+        assert!(
+            !html.contains("lib-") || !html.contains("@example.com"),
+            "the unsubscribe link must not embed the recipient address: {html}"
+        );
+
+        // Per-path message category: outreach is marketing.
+        let category: String = sqlx::query_scalar(
+            "SELECT message_category FROM email_queue WHERE sales_step_execution_id = $1",
+        )
+        .bind(fx.step_execution)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            category,
+            crate::dispatcher::SALES_MARKETING_CATEGORY,
+            "outreach must be classified marketing"
+        );
+
+        // The send identity is the logical step execution, recorded as the
+        // canonical `sa:{enrollment}:{version}:{step}:{attempt_kind}:{variant}`
+        // key, and the queue's own key is `sa-send:{step_execution_id}`.
+        let (step_key, enrollment_id, version_id, step_id): (String, Uuid, Uuid, Uuid) =
+            sqlx::query_as(
+                "SELECT idempotency_key, enrollment_id, sequence_version_id, sequence_step_id \
+                 FROM sales_step_executions WHERE id = $1",
+            )
+            .bind(fx.step_execution)
+            .fetch_one(&fx.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            step_key,
+            crate::sequences::sales_step_idempotency_key(
+                enrollment_id,
+                version_id,
+                step_id,
+                "primary",
+                "default",
+            ),
+            "the recorded step identity must be the canonical sa: key"
+        );
+        assert!(
+            step_key.starts_with("sa:"),
+            "step identity must carry the canonical prefix: {step_key}"
+        );
+        let action_key: String = sqlx::query_scalar(
+            "SELECT idempotency_key FROM sales_actions WHERE entity_id = $1 \
+               AND action_type = 'send_step'",
+        )
+        .bind(fx.step_execution)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert_eq!(action_key, format!("sa-send:{}", fx.step_execution));
+
+        // A replay of the terminal action must not produce a second message.
+        let replay = handler.handle(&leased).await;
+        assert!(
+            matches!(replay, ActionOutcome::Succeeded),
+            "a terminal replay is a no-op success: {replay:?}"
+        );
+        assert_eq!(
+            outbound_count(&fx.db, fx.step_execution).await,
+            1,
+            "a replay must never produce a second message"
+        );
+    }
+
+    /// The kill switch is read at EXECUTION time, not just enqueue time: a
+    /// queued step is skipped with the reason recorded and no decision packet
+    /// is manufactured.
+    #[tokio::test]
+    async fn kill_switch_at_execution_time_skips_without_a_decision() {
+        let Some(fx) = fixture("lib_kill_switch", "allowed", "ZV").await else {
+            return;
+        };
+        sqlx::query("UPDATE sales_autonomy_state SET kill_switch = TRUE WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, skip_reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        let skip_reason = skip_reason.expect("the skip is recorded");
+        assert!(
+            skip_reason.contains("global kill switch"),
+            "the kill switch skip must name itself: {skip_reason}"
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+        assert!(
+            decision_packets(&fx.db, &fx.tenant).await.is_empty(),
+            "the kill switch stops the worker before any decision is manufactured"
+        );
+    }
+
+    /// A prohibited jurisdiction never sends; the refusal is a recorded
+    /// Decision Packet with the legal reason, and the action reports success
+    /// (a non-retryable skip, never an error loop).
+    #[tokio::test]
+    async fn prohibited_jurisdiction_records_a_denied_decision_and_skips() {
+        let Some(fx) = fixture("lib_prohibited_live", "prohibited", "ZU").await else {
+            return;
+        };
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+
+        let (state, skip_reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        let skip_reason = skip_reason.expect("a denial records why");
+        assert!(
+            skip_reason.contains("denied the send")
+                && skip_reason.contains("legal_policy_prohibited"),
+            "the refusal must be recorded with its reason: {skip_reason}"
+        );
+        let packets = decision_packets(&fx.db, &fx.tenant).await;
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].0, "denied");
+        assert!(packets[0].1, "the packet is marked blocked");
+        assert!(
+            packets[0].2.contains("legal_policy_prohibited"),
+            "the block reasons name the legal gate: {}",
+            packets[0].2
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+    }
+
+    /// Shadow mode runs the brain, records the decision, and sends nothing.
+    #[tokio::test]
+    async fn shadow_mode_records_but_never_sends() {
+        let Some(fx) = fixture("lib_shadow_live", "allowed", "ZT").await else {
+            return;
+        };
+        sqlx::query("UPDATE sales_autonomy_state SET mode = 'shadow' WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, skip_reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        assert!(
+            skip_reason
+                .expect("shadow records why")
+                .contains("does not permit execution"),
+            "shadow must be named in the skip reason"
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+    }
+
+    /// An email step whose template vanished is a recorded skip, not a
+    /// retry loop or a panic.
+    #[tokio::test]
+    async fn missing_template_is_a_recorded_skip() {
+        let Some(fx) = fixture("lib_missing_template", "allowed", "ZS").await else {
+            return;
+        };
+        sqlx::query(
+            "UPDATE sales_sequence_steps SET template_id = 'tpl_missing' \
+             WHERE tenant_id = $1 AND version_id = (SELECT sequence_version_id FROM sales_step_executions WHERE id = $2)",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, skip_reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        assert!(
+            skip_reason
+                .expect("a skip is recorded")
+                .contains("recipient or template unavailable"),
+            "the missing template must be named"
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+    }
+
+    /// A `send_step` action whose entity belongs to another tenant is a dead
+    /// letter — cross-tenant work must never be executed.
+    #[tokio::test]
+    async fn cross_tenant_action_is_dead_lettered() {
+        let Some(fx) = fixture("lib_cross_tenant", "allowed", "ZR").await else {
+            return;
+        };
+        let other_tenant = crate::test_db::unique_test_tenant("other-tenant");
+        let leased = enqueue_and_claim(&fx.db, &other_tenant, fx.step_execution).await;
+        let outcome = fx.handler().handle(&leased).await;
+        match outcome {
+            ActionOutcome::DeadLetter(reason) => assert!(
+                reason.contains("belongs to tenant") && reason.contains(&other_tenant),
+                "{reason}"
+            ),
+            other => panic!("cross-tenant work must dead-letter: {other:?}"),
+        }
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+        sqlx::query("DELETE FROM sales_actions WHERE tenant_id = $1")
+            .bind(&other_tenant)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+    }
+
+    /// A non-email step reaching the send worker is a recorded skip naming the
+    /// kind — never a silent success.
+    #[tokio::test]
+    async fn non_email_step_kind_is_a_recorded_skip() {
+        let Some(fx) = fixture("lib_wait_step", "allowed", "ZQ").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO sales_sequence_steps \
+                 (id, tenant_id, version_id, step_index, kind, min_delay_secs, max_delay_secs, sender_pool) \
+             SELECT gen_random_uuid(), $1, sequence_version_id, 99, 'wait', 60, 60, 'sales_outbound' \
+             FROM sales_step_executions WHERE id = $2",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .expect("insert the wait step");
+        // Point the step execution at the wait step.
+        sqlx::query(
+            "UPDATE sales_step_executions SET sequence_step_id = ( \
+                 SELECT id FROM sales_sequence_steps WHERE tenant_id = $1 AND step_index = 99) \
+             WHERE id = $2",
+        )
+        .bind(&fx.tenant)
+        .bind(fx.step_execution)
+        .execute(&fx.db)
+        .await
+        .unwrap();
+
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, skip_reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        assert!(
+            skip_reason
+                .expect("the skip is recorded")
+                .contains("is not a send step"),
+            "the step kind must be named"
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+    }
+
+    /// A human reply arriving after enrollment blocks the send before any
+    /// decision is taken.
+    #[tokio::test]
+    async fn human_reply_blocks_the_touch_with_a_recorded_skip() {
+        let Some(fx) = fixture("lib_human_reply", "allowed", "ZP").await else {
+            return;
+        };
+        sqlx::query("UPDATE sales_enrollments SET has_human_reply = TRUE WHERE tenant_id = $1")
+            .bind(&fx.tenant)
+            .execute(&fx.db)
+            .await
+            .unwrap();
+
+        let outcome = run_handler(&fx, &fx.handler()).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, skip_reason) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "skipped");
+        assert!(
+            skip_reason
+                .expect("the skip is recorded")
+                .contains("human reply"),
+            "the reply lock must be named"
+        );
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 0);
+        assert!(
+            decision_packets(&fx.db, &fx.tenant).await.is_empty(),
+            "the reply lock stops the worker before a decision is manufactured"
+        );
+    }
+
+    /// A step execution that no longer exists is a dead letter, never a retry
+    /// loop on poisoned work.
+    #[tokio::test]
+    async fn vanished_step_execution_is_dead_lettered() {
+        let Some(fx) = fixture("lib_vanished_step", "allowed", "ZO").await else {
+            return;
+        };
+        let missing = Uuid::new_v4();
+        let leased = enqueue_and_claim(&fx.db, &fx.tenant, missing).await;
+        let outcome = fx.handler().handle(&leased).await;
+        match outcome {
+            ActionOutcome::DeadLetter(reason) => {
+                assert!(reason.contains("no longer exists"), "{reason}");
+            }
+            other => panic!("a vanished entity must dead-letter: {other:?}"),
+        }
+    }
+
+    /// A working intelligence provider still composes only grounded prose:
+    /// every emitted statement cites live evidence (or an allowed knowledge
+    /// fact), and the full send path completes with exactly one message.
+    #[tokio::test]
+    async fn scripted_intelligence_grounds_every_statement_and_the_send_completes() {
+        let Some(fx) = fixture("lib_scripted_grounded", "allowed", "ZN").await else {
+            return;
+        };
+        let evidence_id = insert_evidence(
+            &fx.db,
+            &fx.tenant,
+            fx.account,
+            "The account runs a hybrid email stack.",
+            0.9,
+            false,
+        )
+        .await;
+        let handler = fx.handler_with(Arc::new(ScriptedIntelligence {
+            grounded_evidence_id: evidence_id,
+            grounded_claims: 2,
+        }));
+
+        let ctx = handler
+            .load_context(fx.step_execution)
+            .await
+            .expect("load context")
+            .expect("context exists");
+        let facts = handler
+            .load_planner_facts(&ctx)
+            .await
+            .expect("planner facts");
+        let plan = handler.plan_message(&ctx, &facts).await;
+        assert!(
+            plan.strategy_used,
+            "a working provider must produce a validated strategy: {:?}",
+            plan.fallbacks
+        );
+        assert!(!plan.grounded_statements.is_empty());
+        for statement in &plan.grounded_statements {
+            if let Some(evidence_id) = statement.evidence_id {
+                assert_eq!(evidence_id, facts.evidence_ids[0]);
+            } else if let Some(fact_id) = &statement.knowledge_fact_id {
+                let kb = SalesKnowledgeBase::canonical();
+                assert!(kb
+                    .get(fact_id)
+                    .expect("cited fact exists")
+                    .is_external_copy_allowed_at(Utc::now()));
+            } else {
+                assert!(statement.is_hypothesis, "{statement:?}");
+            }
+        }
+
+        // The full path still gates the send through the decision engine.
+        let outcome = run_handler(&fx, &handler).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, _) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "sent");
+        assert_eq!(outbound_count(&fx.db, fx.step_execution).await, 1);
+        let packets = decision_packets(&fx.db, &fx.tenant).await;
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].0, "execute");
+    }
+
+    /// An AI outage never blocks the sequence: the planner falls back to the
+    /// operator-approved static template (which makes no AI factual claim),
+    /// records the fallback in the decision rationale, and still sends one
+    /// message.
+    #[tokio::test]
+    async fn ai_outage_uses_the_static_template_and_records_the_fallback() {
+        let Some(fx) = fixture("lib_ai_offline_template", "allowed", "ZM").await else {
+            return;
+        };
+        insert_evidence(
+            &fx.db,
+            &fx.tenant,
+            fx.account,
+            "The account runs Postmark.",
+            0.9,
+            false,
+        )
+        .await;
+        let handler = fx.handler_with(Arc::new(FailingIntelligence));
+
+        let ctx = handler
+            .load_context(fx.step_execution)
+            .await
+            .expect("load context")
+            .expect("context exists");
+        let facts = handler
+            .load_planner_facts(&ctx)
+            .await
+            .expect("planner facts");
+        let plan = handler.plan_message(&ctx, &facts).await;
+        assert!(
+            !plan.strategy_used,
+            "an outage must not be papered over with unvalidated prose"
+        );
+        assert!(matches!(plan.content, PlannedContent::Template));
+
+        let outcome = run_handler(&fx, &handler).await;
+        assert!(matches!(outcome, ActionOutcome::Succeeded), "{outcome:?}");
+        let (state, _) = step_state(&fx.db, fx.step_execution).await;
+        assert_eq!(state, "sent");
+        let rows = outbound(&fx.db, fx.step_execution).await;
+        assert_eq!(rows.len(), 1, "the template fallback still sends once");
+        assert!(
+            rows[0].2.contains(TEMPLATE_SENTINEL),
+            "the body must be the approved template: {}",
+            rows[0].2
+        );
+        let rationale: String = sqlx::query_scalar(
+            "SELECT rationale FROM sales_decisions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&fx.tenant)
+        .fetch_one(&fx.db)
+        .await
+        .unwrap();
+        assert!(
+            rationale.contains("strategy=template_fallback"),
+            "the fallback is recorded: {rationale}"
         );
     }
 }

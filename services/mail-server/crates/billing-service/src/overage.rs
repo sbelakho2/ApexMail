@@ -152,7 +152,11 @@ const SWEEP_PAGE: i64 = 500;
 /// unit tests.
 const SWEEP_UNBILLED_PERIODS_SQL: &str = r#"
     SELECT id, tenant_id, stripe_subscription_id, period_start, period_end,
-           plan_name, email_allowance, overage_rate_millicents, currency
+           plan_name, email_allowance,
+           -- billing_periods.overage_rate_millicents is INT4; the Rust row
+           -- decodes i64, so project an explicit bigint cast.
+           overage_rate_millicents::bigint AS overage_rate_millicents,
+           currency
     FROM billing_periods
     WHERE usage_kind = 'subscription'
       AND invoice_state = 'unbilled'
@@ -318,7 +322,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
                         ELSE ss.plan
                    END AS plan_name,
                    COALESCE(UPPER(t.settings->>'billingCurrency'), 'EUR') AS currency
-        ) eff ON TRUE
+        ) eff
         LEFT JOIN plans p ON p.name = eff.plan_name
         CROSS JOIN LATERAL (
             SELECT CASE eff.plan_name
@@ -329,7 +333,7 @@ async fn ensure_subscription_period_records(db: &PgPool) -> Result<(), String> {
                         WHEN 'starter' THEN 80
                         ELSE NULL
                    END AS rate_millicents
-        ) rate ON TRUE
+        ) rate
         WHERE ss.billing_cycle_start IS NOT NULL
           AND ss.billing_cycle_end IS NOT NULL
           AND ss.billing_cycle_end > ss.billing_cycle_start
@@ -2836,4 +2840,1083 @@ mod tests {
         // tenant is frequently already downgraded).
         assert!(EFFECTIVE_PERIOD_PLAN_SQL.contains("ELSE ss.plan"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial coverage tests (DB + Redis backed) for the overage/PAYG sweep,
+// the collection outbox ladder, and its retry/dead-letter/backoff states.
+//
+// The public sweep entry points are covered by tests/coverage_adversarial.rs;
+// these tests drive the PRIVATE per-period and per-collection functions the
+// public sweep only reaches through specific failure states.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod coverage_adversarial {
+    use super::*;
+    use crate::config::BillingConfig;
+    use deadpool_redis::Runtime;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct Env {
+        state: Arc<AppState>,
+        pool: sqlx::PgPool,
+        db_name: String,
+        admin_url: String,
+    }
+
+    impl Env {
+        async fn finish(self) {
+            self.pool.close().await;
+            if let Ok(admin) = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&self.admin_url)
+                .await
+            {
+                let _ = sqlx::query(&format!(
+                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                    self.db_name
+                ))
+                .execute(&admin)
+                .await;
+                admin.close().await;
+            }
+        }
+    }
+
+    async fn provision(test_name: &str) -> Option<Env> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let (server_part, db_part) = url.rsplit_once('/').expect("db segment");
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in test_name.bytes() {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let db_name = format!("{db_only}_ovcov_{:08x}", digest & 0xffff_ffff);
+
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{server_part}/postgres"));
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+
+        let migrations_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut count = 0_usize;
+        let mut newest = 0_i64;
+        for entry in std::fs::read_dir(&migrations_dir).expect("migrations dir") {
+            let name = entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            if let Some(prefix) = name.split('_').next() {
+                if let Ok(version) = prefix.parse::<i64>() {
+                    count += 1;
+                    newest = newest.max(version);
+                }
+            }
+        }
+        let template: Option<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
+        )
+        .bind(format!("apexmail_canonical_tpl_{count}_{newest}_%"))
+        .fetch_optional(&admin)
+        .await
+        .expect("template lookup");
+        let template = template.expect("canonical template database must exist");
+
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            db_name
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop test db");
+        sqlx::query(&format!(
+            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+            db_name, template
+        ))
+        .execute(&admin)
+        .await
+        .expect("clone test db");
+        admin.close().await;
+
+        let database_url = format!("{server_part}/{db_name}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&database_url)
+            .await
+            .expect("connect test db");
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .expect("TEST_REDIS_URL must be set");
+        let redis = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(Runtime::Tokio1))
+            .expect("redis pool");
+        let config = BillingConfig {
+            database_url,
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            service_auth_token: "coverage".to_string(),
+            stripe_webhook_secret: "whsec_coverage".to_string(),
+            api_base_url: "http://127.0.0.1:9".to_string(),
+            ..BillingConfig::default()
+        };
+        let state = AppState::new(pool.clone(), redis, config);
+        Some(Env {
+            state,
+            pool,
+            db_name,
+            admin_url,
+        })
+    }
+
+    macro_rules! env_test {
+        ($name:ident, |$e:ident| $body:block) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(owned) = provision(stringify!($name)).await else {
+                    return;
+                };
+                let $e = &owned;
+                $body
+                owned.finish().await;
+            }
+        };
+    }
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[derive(Clone, Default)]
+    struct Mock {
+        responses: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Mock {
+        fn route(&self, path: &str, status: u16, body: impl Into<String>) {
+            self.responses
+                .lock()
+                .expect("lock")
+                .insert(path.to_string(), (status, body.into()));
+        }
+
+        fn call_count(&self, path: &str) -> usize {
+            self.calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|recorded| recorded.as_str() == path)
+                .count()
+        }
+    }
+
+    async fn mock_handler(
+        axum::extract::State(mock): axum::extract::State<Mock>,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let path = request.uri().path().to_string();
+        let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+        let (status, body) = mock
+            .responses
+            .lock()
+            .expect("lock")
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| (404, "{}".to_string()));
+        mock.calls.lock().expect("lock").push(path);
+        (
+            axum::http::StatusCode::from_u16(status).expect("status"),
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response()
+    }
+
+    async fn spawn_mock(mock: Mock) -> String {
+        let app = axum::Router::new().fallback(mock_handler).with_state(mock);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn seed_tenant(env: &Env, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, $3, 'active')
+             ON CONFLICT (id) DO UPDATE SET plan = EXCLUDED.plan, status = 'active'",
+        )
+        .bind(tenant)
+        .bind(format!("Coverage {tenant}"))
+        .bind(plan)
+        .execute(&env.pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_invoice(env: &Env, tenant: &str, total: i64, currency: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, 'draft', $5, $3, 0, $3, $6, $6, $6, $6, $6, $6)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(total)
+        .bind(currency)
+        .bind(format!("OVCOV-{}", id.simple()))
+        .bind(now)
+        .execute(&env.pool)
+        .await
+        .expect("seed invoice");
+        id
+    }
+
+    async fn seed_outbox(
+        env: &Env,
+        invoice_id: Uuid,
+        tenant: &str,
+        status: &str,
+        attempts: i32,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) {
+        sqlx::query(
+            "INSERT INTO invoice_collection_outbox
+                 (tenant_id, invoice_id, operation, status, attempts, payload, next_attempt_at)
+             VALUES ($1, $2, 'collect_usage_invoice', $3, $4, '{}'::jsonb, $5)
+             ON CONFLICT (invoice_id, operation) DO UPDATE SET status = EXCLUDED.status,
+                 attempts = EXCLUDED.attempts, next_attempt_at = EXCLUDED.next_attempt_at",
+        )
+        .bind(tenant)
+        .bind(invoice_id)
+        .bind(status)
+        .bind(attempts)
+        .bind(next_attempt_at)
+        .execute(&env.pool)
+        .await
+        .expect("seed outbox");
+    }
+
+    // ---------------- sweep failure state ----------------
+
+    env_test!(period_sweep_failure_backoff_is_capped_then_cleared, |env| {
+        let tenant = "ovcov_backoff";
+        seed_tenant(env, tenant, "growth").await;
+        let now = Utc::now();
+        let period_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO billing_periods
+                 (tenant_id, usage_kind, period_start, period_end, currency, plan_name, email_allowance)
+             VALUES ($1, 'subscription', $2, $3, 'EUR', 'growth', 1000)
+             RETURNING id",
+        )
+        .bind(tenant)
+        .bind(now - chrono::Duration::days(31))
+        .bind(now - chrono::Duration::days(1))
+        .fetch_one(&env.pool)
+        .await
+        .expect("period");
+
+        record_period_sweep_failure(&env.pool, period_id, "first failure").await;
+        let (attempts, error, next): (i32, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT sweep_attempts, last_sweep_error, next_sweep_attempt_at
+             FROM billing_periods WHERE id = $1",
+        )
+        .bind(period_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("period");
+        assert_eq!(attempts, 1);
+        assert_eq!(error.as_deref(), Some("first failure"));
+        let next = next.expect("backoff scheduled");
+        let delay = (next - Utc::now()).num_minutes();
+        assert!(
+            (58..=61).contains(&delay),
+            "first backoff is ~1h, got {delay}"
+        );
+
+        record_period_sweep_failure(&env.pool, period_id, "second failure").await;
+        let (attempts, next): (i32, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT sweep_attempts, next_sweep_attempt_at FROM billing_periods WHERE id = $1",
+        )
+        .bind(period_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("period");
+        assert_eq!(attempts, 2);
+        let delay = (next.expect("backoff") - Utc::now()).num_minutes();
+        assert!((118..=121).contains(&delay), "backoff doubles, got {delay}");
+
+        // A period with a long failure history is capped at 48h, never
+        // scheduled weeks out.
+        sqlx::query("UPDATE billing_periods SET sweep_attempts = 9 WHERE id = $1")
+            .bind(period_id)
+            .execute(&env.pool)
+            .await
+            .expect("age attempts");
+        record_period_sweep_failure(&env.pool, period_id, "capped").await;
+        let next: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT next_sweep_attempt_at FROM billing_periods WHERE id = $1")
+                .bind(period_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("period");
+        let delay = (next.expect("backoff") - Utc::now()).num_minutes();
+        assert!((2878..=2881).contains(&delay), "capped at 48h, got {delay}");
+
+        let mut tx = env.pool.begin().await.expect("tx");
+        clear_period_sweep_failure(&mut tx, period_id)
+            .await
+            .expect("clear");
+        tx.commit().await.expect("commit");
+        let (attempts, error, next): (i32, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT sweep_attempts, last_sweep_error, next_sweep_attempt_at
+             FROM billing_periods WHERE id = $1",
+        )
+        .bind(period_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("period");
+        assert_eq!((attempts, error, next), (0, None, None));
+    });
+
+    env_test!(collection_failure_backs_off_then_dead_letters, |env| {
+        let tenant = "ovcov_collect_fail";
+        seed_tenant(env, tenant, "growth").await;
+        let invoice = seed_invoice(env, tenant, 2500, "EUR").await;
+        seed_outbox(env, invoice, tenant, "in_progress", 1, None).await;
+
+        record_collection_failure(&env.state, invoice, "col-owner-1", "stripe down").await;
+        let (status, error, next, owner): (
+            String,
+            Option<String>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT status, last_error, next_attempt_at, owner_token
+             FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
+        assert_eq!(status, "pending", "retryable failure returns to pending");
+        assert_eq!(error.as_deref(), Some("stripe down"));
+        assert!(owner.is_none(), "the lease is released");
+        let delay = (next.expect("backoff") - Utc::now()).num_seconds();
+        assert!((295..=300).contains(&delay), "~5min backoff, got {delay}");
+
+        // A foreign owner can never overwrite another collector's state.
+        sqlx::query(
+            "UPDATE invoice_collection_outbox SET owner_token = 'col-other' WHERE invoice_id = $1",
+        )
+        .bind(invoice)
+        .execute(&env.pool)
+        .await
+        .expect("owner");
+        record_collection_failure(&env.state, invoice, "col-mine", "stale failure").await;
+        let error: Option<String> = sqlx::query_scalar(
+            "SELECT last_error FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
+        assert_eq!(
+            error.as_deref(),
+            Some("stripe down"),
+            "a non-owner cannot record state"
+        );
+
+        // At the attempt cap the operation dead-letters visibly.
+        sqlx::query(
+            "UPDATE invoice_collection_outbox
+             SET attempts = 10, owner_token = NULL WHERE invoice_id = $1",
+        )
+        .bind(invoice)
+        .execute(&env.pool)
+        .await
+        .expect("exhaust");
+        record_collection_failure(&env.state, invoice, "col-any", "still down").await;
+        let (status, next, error): (String, Option<DateTime<Utc>>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, next_attempt_at, last_error FROM invoice_collection_outbox
+             WHERE invoice_id = $1",
+            )
+            .bind(invoice)
+            .fetch_one(&env.pool)
+            .await
+            .expect("outbox");
+        assert_eq!(status, "failed", "exhausted retries dead-letter");
+        assert!(next.is_none(), "no further retry is scheduled");
+        assert_eq!(error.as_deref(), Some("still down"));
+    });
+
+    // ---------------- collection resume ladder ----------------
+
+    env_test!(resume_settles_from_wallet_exactly_once, |env| {
+        let tenant = "ovcov_wallet";
+        seed_tenant(env, tenant, "growth").await;
+        sqlx::query("INSERT INTO wallets (tenant_id, balance, currency) VALUES ($1, 5000, 'EUR')")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("wallet");
+        let invoice = seed_invoice(env, tenant, 5000, "EUR").await;
+        seed_outbox(env, invoice, tenant, "pending", 0, None).await;
+
+        let stats = resume_pending_collections(&env.state)
+            .await
+            .expect("resume");
+        assert_eq!(stats.resumed, 1);
+        assert_eq!(stats.dead_lettered, 0);
+        let (status, paid_at): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT status, paid_at FROM invoices WHERE id = $1")
+                .bind(invoice)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(status, "paid");
+        assert!(paid_at.is_some());
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("wallet");
+        assert_eq!(balance, 0, "the wallet is debited exactly once");
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("allocations");
+        assert_eq!(allocations, 1);
+        let outbox: String = sqlx::query_scalar(
+            "SELECT status FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(invoice)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
+        assert_eq!(outbox, "done");
+        let dunning: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dunning_records")
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+        assert_eq!(dunning, 0, "a settled invoice never enters dunning");
+
+        // The outbox is done: a replay cannot debit again.
+        let replay = resume_pending_collections(&env.state)
+            .await
+            .expect("replay");
+        assert_eq!(replay.resumed, 0);
+        let transactions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'debit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("wallet transactions");
+        assert_eq!(transactions, 1);
+    });
+
+    env_test!(resume_deadletters_exhausted_and_missing_invoices, |env| {
+        let tenant = "ovcov_resume";
+        seed_tenant(env, tenant, "growth").await;
+
+        // Exhausted attempts: dead-lettered, never blindly retried.
+        let exhausted = seed_invoice(env, tenant, 1200, "EUR").await;
+        seed_outbox(env, exhausted, tenant, "pending", 10, None).await;
+        // Attempts below the cap but the invoice row is gone: the operation
+        // is failed with the reason, not lost.
+        let missing = Uuid::new_v4();
+        seed_outbox(env, missing, tenant, "pending", 0, None).await;
+
+        let stats = resume_pending_collections(&env.state)
+            .await
+            .expect("resume");
+        assert_eq!(stats.resumed, 0);
+        assert_eq!(stats.dead_lettered, 1);
+        let dead: String = sqlx::query_scalar(
+            "SELECT status FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(exhausted)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
+        assert_eq!(dead, "failed");
+        let (missing_status, missing_error): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_error FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(missing)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
+        assert_eq!(missing_status, "failed");
+        assert_eq!(missing_error.as_deref(), Some("invoice row missing"));
+
+        // A backoff in the future is respected (not claimed early).
+        let deferred = seed_invoice(env, tenant, 900, "EUR").await;
+        seed_outbox(
+            env,
+            deferred,
+            tenant,
+            "pending",
+            1,
+            Some(Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await;
+        let stats = resume_pending_collections(&env.state)
+            .await
+            .expect("resume");
+        assert_eq!(stats.resumed, 0);
+        let deferred_status: String = sqlx::query_scalar(
+            "SELECT status FROM invoice_collection_outbox WHERE invoice_id = $1",
+        )
+        .bind(deferred)
+        .fetch_one(&env.pool)
+        .await
+        .expect("outbox");
+        assert_eq!(deferred_status, "pending", "the backoff is honored");
+    });
+
+    // ---------------- Stripe usage collection ----------------
+
+    env_test!(
+        stripe_usage_collection_finalizes_and_keeps_retryable_state,
+        |env| {
+            let mock = Mock::default();
+            mock.route("/v1/invoiceitems", 200, r#"{"id":"ii_ov_1"}"#);
+            mock.route("/v1/invoices", 200, r#"{"id":"in_ov_1"}"#);
+            mock.route("/v1/invoices/in_ov_1/finalize", 200, r#"{"id":"in_ov_1"}"#);
+            let base = spawn_mock(mock.clone()).await;
+
+            let guard = ENV_LOCK.lock().await;
+            let previous = (
+                std::env::var("STRIPE_SECRET_KEY").ok(),
+                std::env::var("STRIPE_API_BASE_URL").ok(),
+            );
+            std::env::set_var("STRIPE_SECRET_KEY", "sk_test_ovcov");
+            std::env::set_var("STRIPE_API_BASE_URL", &base);
+
+            let tenant = "ovcov_stripe";
+            seed_tenant(env, tenant, "growth").await;
+            sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, 'sub_ov', 'growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_ov')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("subscription");
+            let invoice = seed_invoice(env, tenant, 1000, "EUR").await;
+            seed_outbox(env, invoice, tenant, "pending", 0, None).await;
+
+            let stats = resume_pending_collections(&env.state)
+                .await
+                .expect("resume");
+            assert_eq!(stats.resumed, 1);
+            assert_eq!(mock.call_count("/v1/invoiceitems"), 1);
+            assert_eq!(mock.call_count("/v1/invoices"), 1);
+            assert_eq!(mock.call_count("/v1/invoices/in_ov_1/finalize"), 1);
+            let (status, stripe_invoice, stripe_item): (String, Option<String>, Option<String>) =
+                sqlx::query_as(
+                    "SELECT status, stripe_invoice_id, stripe_invoice_item_id
+                 FROM invoices WHERE id = $1",
+                )
+                .bind(invoice)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+            assert_eq!(status, "pending");
+            assert_eq!(stripe_invoice.as_deref(), Some("in_ov_1"));
+            assert_eq!(stripe_item.as_deref(), Some("ii_ov_1"));
+            let (dunning, retry): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status, next_retry_at FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!(dunning, "warning");
+            assert!(retry.is_some(), "dunning retry is scheduled");
+
+            // A Stripe outage on the NEXT invoice keeps the outbox retryable:
+            // the invoice is not pushed to done on the back of a failure.
+            mock.route("/v1/invoiceitems", 500, "stripe exploded");
+            let failing = seed_invoice(env, tenant, 700, "EUR").await;
+            seed_outbox(env, failing, tenant, "pending", 0, None).await;
+            let stats = resume_pending_collections(&env.state)
+                .await
+                .expect("resume");
+            assert_eq!(stats.resumed, 0, "a failed ladder is not a resume");
+            let (status, error, next): (String, Option<String>, Option<DateTime<Utc>>) =
+                sqlx::query_as(
+                    "SELECT status, last_error, next_attempt_at
+                 FROM invoice_collection_outbox WHERE invoice_id = $1",
+                )
+                .bind(failing)
+                .fetch_one(&env.pool)
+                .await
+                .expect("outbox");
+            assert_eq!(status, "pending");
+            assert!(
+                error.as_deref().is_some_and(|e| e.contains("500")),
+                "{error:?}"
+            );
+            assert!(next.is_some(), "a backoff is recorded");
+            let draft: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+                .bind(failing)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+            assert_eq!(draft, "draft", "the invoice stays draft for the retry");
+
+            match previous {
+                (Some(key), Some(url)) => {
+                    std::env::set_var("STRIPE_SECRET_KEY", key);
+                    std::env::set_var("STRIPE_API_BASE_URL", url);
+                }
+                _ => {
+                    std::env::remove_var("STRIPE_SECRET_KEY");
+                    std::env::remove_var("STRIPE_API_BASE_URL");
+                }
+            }
+            drop(guard);
+        }
+    );
+
+    env_test!(
+        stripe_usage_invoice_guards_amount_and_missing_config,
+        |env| {
+            let guard = ENV_LOCK.lock().await;
+            let previous = std::env::var("STRIPE_SECRET_KEY").ok();
+            std::env::remove_var("STRIPE_SECRET_KEY");
+
+            let tenant = "ovcov_zero";
+            seed_tenant(env, tenant, "growth").await;
+            let invoice_id = seed_invoice(env, tenant, 100, "EUR").await;
+            let invoice = crate::invoices::get_invoice_by_id(&env.pool, invoice_id)
+                .await
+                .expect("load invoice")
+                .expect("invoice exists");
+
+            // Zero remaining: nothing to collect, no Stripe configuration needed.
+            let none = create_and_finalize_stripe_usage_invoice(
+                &env.state,
+                &invoice,
+                0,
+                "EUR",
+                "usage",
+                Utc::now(),
+                "overage",
+            )
+            .await
+            .expect("zero amount");
+            assert!(none.is_none());
+            // Negative remaining is equally refused.
+            let none = create_and_finalize_stripe_usage_invoice(
+                &env.state,
+                &invoice,
+                -5,
+                "EUR",
+                "usage",
+                Utc::now(),
+                "overage",
+            )
+            .await
+            .expect("negative amount");
+            assert!(none.is_none());
+
+            // Positive amount but Stripe not configured: the wallet+dunning
+            // path is chosen, never a half-configured HTTP call.
+            let none = create_and_finalize_stripe_usage_invoice(
+                &env.state,
+                &invoice,
+                100,
+                "EUR",
+                "usage",
+                Utc::now(),
+                "overage",
+            )
+            .await
+            .expect("unconfigured");
+            assert!(none.is_none());
+
+            // Configured with a blank secret and no Stripe customer: still a
+            // clean `None` (no attempt to reach Stripe).
+            std::env::set_var("STRIPE_SECRET_KEY", "   ");
+            let none = create_and_finalize_stripe_usage_invoice(
+                &env.state,
+                &invoice,
+                100,
+                "EUR",
+                "usage",
+                Utc::now(),
+                "overage",
+            )
+            .await
+            .expect("blank secret");
+            assert!(none.is_none());
+
+            match previous {
+                Some(key) => std::env::set_var("STRIPE_SECRET_KEY", key),
+                None => std::env::remove_var("STRIPE_SECRET_KEY"),
+            }
+            drop(guard);
+        }
+    );
+
+    // ---------------- subscription period state machine ----------------
+
+    async fn seed_billing_period(
+        env: &Env,
+        tenant: &str,
+        plan_name: Option<&str>,
+        allowance: Option<i64>,
+        rate: Option<i64>,
+        currency: &str,
+        period_end: DateTime<Utc>,
+    ) -> BillingPeriodRow {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO billing_periods
+                 (id, tenant_id, usage_kind, period_start, period_end, currency, plan_name,
+                  email_allowance, overage_rate_millicents)
+             VALUES ($1, $2, 'subscription', $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(period_end - chrono::Duration::days(30))
+        .bind(period_end)
+        .bind(currency)
+        .bind(plan_name)
+        .bind(allowance)
+        .bind(rate)
+        .execute(&env.pool)
+        .await
+        .expect("seed period");
+        BillingPeriodRow {
+            id,
+            tenant_id: tenant.to_string(),
+            stripe_subscription_id: None,
+            period_start: period_end - chrono::Duration::days(30),
+            period_end,
+            plan_name: plan_name.map(str::to_string),
+            email_allowance: allowance,
+            overage_rate_millicents: rate,
+            currency: currency.to_string(),
+        }
+    }
+
+    async fn period_state(env: &Env, id: Uuid) -> String {
+        sqlx::query_scalar("SELECT invoice_state::text FROM billing_periods WHERE id = $1")
+            .bind(id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("period state")
+    }
+
+    async fn send_emails(env: &Env, tenant: &str, quantity: i64, at: DateTime<Utc>) {
+        sqlx::query(
+            "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp)
+             VALUES (gen_random_uuid(), $1, 'emails_sent', $2, $3)",
+        )
+        .bind(tenant)
+        .bind(quantity)
+        .bind(at)
+        .execute(&env.pool)
+        .await
+        .expect("metering");
+    }
+
+    env_test!(
+        subscription_period_states_are_terminal_and_explicit,
+        |env| {
+            let tenant = "ovcov_period";
+            seed_tenant(env, tenant, "growth").await;
+            let now = Utc::now();
+            let mut result = OverageSweepResult::default();
+
+            // Unlimited allowance: no overage by definition.
+            let unlimited = seed_billing_period(
+                env,
+                tenant,
+                Some("growth"),
+                Some(-1),
+                Some(35),
+                "EUR",
+                now - chrono::Duration::days(20),
+            )
+            .await;
+            process_subscription_period(&env.state, &unlimited, &mut result)
+                .await
+                .expect("unlimited");
+            assert_eq!(period_state(env, unlimited.id).await, "skipped");
+            assert_eq!(result.skipped_no_overage, 1);
+
+            // No resolvable plan anywhere: explicit review state, never today's
+            // plan, and never a limit-0 invoice.
+            let orphan = seed_billing_period(
+                env,
+                tenant,
+                None,
+                None,
+                None,
+                "EUR",
+                now - chrono::Duration::days(5),
+            )
+            .await;
+            process_subscription_period(&env.state, &orphan, &mut result)
+                .await
+                .expect("orphan");
+            assert_eq!(period_state(env, orphan.id).await, "needs_review");
+            assert_eq!(result.skipped_unknown_plan, 1);
+
+            // A named plan with no builtin seed: needs_review too.
+            let ghost = seed_billing_period(
+                env,
+                tenant,
+                Some("ghost_plan"),
+                None,
+                Some(35),
+                "EUR",
+                now - chrono::Duration::days(8),
+            )
+            .await;
+            process_subscription_period(&env.state, &ghost, &mut result)
+                .await
+                .expect("ghost");
+            assert_eq!(period_state(env, ghost.id).await, "needs_review");
+            assert_eq!(result.skipped_unknown_plan, 2);
+
+            // Overage accrued but no billing address: DEFERRED, the period stays
+            // unbilled so the next sweep retries it after backfill.
+            let addressless = seed_billing_period(
+                env,
+                tenant,
+                Some("growth"),
+                Some(1000),
+                Some(35),
+                "EUR",
+                now - chrono::Duration::days(2),
+            )
+            .await;
+            send_emails(env, tenant, 1500, now - chrono::Duration::days(3)).await;
+            process_subscription_period(&env.state, &addressless, &mut result)
+                .await
+                .expect("addressless");
+            assert_eq!(period_state(env, addressless.id).await, "unbilled");
+            assert_eq!(result.skipped_no_address, 1);
+
+            // Below the allowance: skipped, no invoice.
+            sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+                .bind(tenant)
+                .execute(&env.pool)
+                .await
+                .expect("address");
+            let below = seed_billing_period(
+                env,
+                tenant,
+                Some("growth"),
+                Some(10_000),
+                Some(35),
+                "EUR",
+                now - chrono::Duration::days(11),
+            )
+            .await;
+            process_subscription_period(&env.state, &below, &mut result)
+                .await
+                .expect("below");
+            assert_eq!(period_state(env, below.id).await, "skipped");
+            assert_eq!(result.skipped_no_overage, 2);
+
+            // Already-completed period: the in-lock recheck makes it a no-op.
+            sqlx::query("UPDATE billing_periods SET invoice_state = 'invoiced' WHERE id = $1")
+                .bind(below.id)
+                .execute(&env.pool)
+                .await
+                .expect("mark invoiced");
+            process_subscription_period(&env.state, &below, &mut result)
+                .await
+                .expect("completed recheck");
+            assert_eq!(result.invoices_created, 0);
+
+            // The overage path now bills the addressable period exactly once.
+            process_subscription_period(&env.state, &addressless, &mut result)
+                .await
+                .expect("bill with address");
+            assert_eq!(period_state(env, addressless.id).await, "invoiced");
+            assert_eq!(result.invoices_created, 1, "{result:?}");
+            let invoice: (i64, i64, i64, String) = sqlx::query_as(
+                "SELECT COALESCE(subtotal, amount)::bigint, COALESCE(vat_total, 0)::bigint,
+                        COALESCE(total, amount)::bigint, status
+                 FROM invoices WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("invoice");
+            assert_eq!(
+                invoice.0, 18,
+                "500 overage emails at 35 millicents = 18c half-up ceiling"
+            );
+            assert_eq!(
+                invoice.2,
+                invoice.0 + invoice.1,
+                "the invoice total reconciles with its own VAT line"
+            );
+            assert_eq!(invoice.3, "pending");
+            process_subscription_period(&env.state, &addressless, &mut result)
+                .await
+                .expect("replay");
+            let invoices: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoices");
+            assert_eq!(invoices, 1, "the completed period is never re-billed");
+        }
+    );
+
+    // ---------------- PAYG month state ----------------
+
+    env_test!(
+        payg_month_defers_without_address_and_bills_after_backfill,
+        |env| {
+            let tenant = "ovcov_payg";
+            seed_tenant(env, tenant, "payg").await;
+            let now = Utc::now();
+            let month_start = first_of_month(now) - chrono::Months::new(1);
+            let month_end = first_of_month(now);
+            // 5 000 emails at tier 1 (100 millicents) = 500 cents.
+            send_emails(env, tenant, 5_000, month_start + chrono::Duration::days(3)).await;
+
+            let mut result = OverageSweepResult::default();
+            let pricing = PaygPricing::default();
+            process_payg_month(
+                &env.state,
+                tenant,
+                month_start,
+                month_end,
+                &pricing,
+                &mut result,
+            )
+            .await
+            .expect("first pass");
+            assert_eq!(result.skipped_no_address, 1);
+            assert_eq!(result.payg_invoices_created, 0, "{result:?}");
+            let periods: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM billing_periods
+             WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
+            )
+            .bind(tenant)
+            .bind(month_start)
+            .fetch_one(&env.pool)
+            .await
+            .expect("period count");
+            assert_eq!(
+                periods, 0,
+                "a deferred claim is rolled back whole: nothing is half-recorded"
+            );
+            let invoices_before: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice count");
+            assert_eq!(invoices_before, 0, "no invoice without a billing address");
+
+            // Address backfilled: the same month now bills exactly once.
+            sqlx::query("INSERT INTO billing_addresses (tenant_id, country) VALUES ($1, 'EE')")
+                .bind(tenant)
+                .execute(&env.pool)
+                .await
+                .expect("address");
+            process_payg_month(
+                &env.state,
+                tenant,
+                month_start,
+                month_end,
+                &pricing,
+                &mut result,
+            )
+            .await
+            .expect("second pass");
+            assert_eq!(result.payg_invoices_created, 1, "{result:?}");
+            let (subtotal, vat, total, status, currency): (i64, i64, i64, String, String) =
+                sqlx::query_as(
+                    "SELECT COALESCE(subtotal, amount)::bigint, COALESCE(vat_total, 0)::bigint,
+                            COALESCE(total, amount)::bigint, status, UPPER(currency)
+                     FROM invoices WHERE tenant_id = $1",
+                )
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+            assert_eq!(subtotal, 500, "5 000 PAYG emails at 100 millicents");
+            assert_eq!(
+                total,
+                subtotal + vat,
+                "the invoice total reconciles with its own VAT line"
+            );
+            assert_eq!(status, "pending");
+            assert_eq!(currency, "EUR");
+            let period_state: String = sqlx::query_scalar(
+                "SELECT invoice_state::text FROM billing_periods
+             WHERE tenant_id = $1 AND usage_kind = 'payg' AND period_start = $2",
+            )
+            .bind(tenant)
+            .bind(month_start)
+            .fetch_one(&env.pool)
+            .await
+            .expect("period");
+            assert_eq!(period_state, "invoiced");
+
+            // Replay: completed periods are excluded by the state recheck.
+            process_payg_month(
+                &env.state,
+                tenant,
+                month_start,
+                month_end,
+                &pricing,
+                &mut result,
+            )
+            .await
+            .expect("replay");
+            assert_eq!(result.payg_invoices_created, 1, "never bills twice");
+
+            // The sweep over the tenant pages through the same single month.
+            let mut sweep_result = OverageSweepResult::default();
+            sweep_payg_calendar_months(&env.state, &mut sweep_result)
+                .await
+                .expect("payg sweep");
+            assert_eq!(sweep_result.payg_invoices_created, 0);
+        }
+    );
 }

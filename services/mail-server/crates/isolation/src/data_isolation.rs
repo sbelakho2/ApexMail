@@ -162,6 +162,167 @@ fn utf8_char_len(bytes: &[u8], i: usize) -> usize {
     }
 }
 
+/// PostgreSQL SQLSTATE for `duplicate_object` (e.g. re-creating a policy).
+const DUPLICATE_OBJECT_SQLSTATE: &str = "42710";
+
+// ── Shared→DedicatedSchema capability pre-flight ───────────
+//
+// The migration copies (then deletes) each table with
+// `WHERE workspace_id = $1`, so a shared table that is absent or has no
+// `workspace_id` column makes the migration impossible. The canonical
+// lineage's `contacts` / `templates` / `campaigns` / `webhooks` are
+// TENANT-scoped (`tenant_id`) and never gained a `workspace_id`, and no
+// canonical migration creates `public.emails` at all. Inventing a fake
+// `workspace_id` column is not an option; instead the migration refuses up
+// front and the refusal names every missing object and the migration it
+// would need, so an operator can act on it.
+
+/// A table the Shared→DedicatedSchema copy requires in the shared schema,
+/// together with the canonical migration file that creates it today (`None`
+/// when no canonical migration creates it). No listed migration adds the
+/// required `workspace_id` column — that is exactly what the pre-flight
+/// reports.
+struct TenantTableRequirement {
+    table: &'static str,
+    created_by: Option<&'static str>,
+}
+
+static REQUIRED_TENANT_TABLES: &[TenantTableRequirement] = &[
+    TenantTableRequirement {
+        table: "campaigns",
+        created_by: Some("075_create_missing_tables.sql"),
+    },
+    TenantTableRequirement {
+        table: "contacts",
+        created_by: Some("075_create_missing_tables.sql"),
+    },
+    TenantTableRequirement {
+        table: "emails",
+        created_by: None,
+    },
+    TenantTableRequirement {
+        table: "templates",
+        created_by: Some("075_create_missing_tables.sql"),
+    },
+    TenantTableRequirement {
+        table: "webhooks",
+        created_by: Some("075_create_missing_tables.sql"),
+    },
+];
+
+/// One required tenancy capability that is absent from the shared schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationCapabilityGap {
+    /// The shared schema that was inspected (production: `public`).
+    pub schema: String,
+    /// The table missing the capability.
+    pub table: &'static str,
+    /// `true` when the table itself does not exist; `false` when the table
+    /// exists but its `workspace_id` column does not.
+    pub table_missing: bool,
+    /// Canonical migration file that creates the table today (the table, not
+    /// the missing column); `None` for a table the canonical chain never
+    /// creates.
+    pub created_by: Option<&'static str>,
+}
+
+impl MigrationCapabilityGap {
+    /// The migration that would have to exist before the copy can touch this
+    /// table: a `CREATE TABLE … workspace_id` for an absent table, an
+    /// `ALTER TABLE … ADD COLUMN workspace_id` for a non-tenanted one.
+    pub fn required_migration(&self) -> String {
+        let qualified = format!("{}.{}", self.schema, self.table);
+        if self.table_missing {
+            format!("CREATE TABLE {qualified} (… workspace_id …)")
+        } else {
+            format!("ALTER TABLE {qualified} ADD COLUMN workspace_id …")
+        }
+    }
+}
+
+impl std::fmt::Display for MigrationCapabilityGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.table_missing {
+            let origin = self
+                .created_by
+                .map(|migration| format!("last defined by canonical migration {migration}"))
+                .unwrap_or_else(|| "no canonical migration creates it".to_string());
+            write!(
+                f,
+                "{}.{}: required table missing; needed migration: {} ({origin})",
+                self.schema,
+                self.table,
+                self.required_migration()
+            )
+        } else {
+            write!(
+                f,
+                "{}.{}: required column workspace_id missing; needed migration: {} \
+                 (table created by canonical migration {})",
+                self.schema,
+                self.table,
+                self.required_migration(),
+                self.created_by.unwrap_or("unknown")
+            )
+        }
+    }
+}
+
+/// Typed pre-flight refusal for a Shared→DedicatedSchema migration.
+///
+/// The migration is refused BEFORE any DDL/DML when the shared schema cannot
+/// support the copy, so it can never half-apply. Every missing table/column
+/// is named together with the migration it would need.
+#[derive(Debug)]
+pub enum MigrationCapabilityError {
+    /// The capability inspection itself failed (catalog/database error);
+    /// nothing was attempted.
+    Inspection {
+        schema: String,
+        source: anyhow::Error,
+    },
+    /// One or more required (table, `workspace_id`) capabilities are absent.
+    Missing {
+        schema: String,
+        gaps: Vec<MigrationCapabilityGap>,
+    },
+}
+
+impl std::fmt::Display for MigrationCapabilityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inspection { schema, source } => write!(
+                f,
+                "Shared→DedicatedSchema migration pre-flight could not inspect schema {schema:?}: {source}"
+            ),
+            Self::Missing { schema, gaps } => {
+                writeln!(
+                    f,
+                    "Shared→DedicatedSchema migration refused: schema {schema:?} is missing {} required \
+                     tenancy capability(ies); no data was copied or deleted. Required migrations:",
+                    gaps.len()
+                )?;
+                for gap in gaps {
+                    writeln!(f, "  - {gap}")?;
+                }
+                write!(
+                    f,
+                    "Apply the listed migrations to the canonical chain, then retry."
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for MigrationCapabilityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inspection { source, .. } => Some(source.as_ref()),
+            Self::Missing { .. } => None,
+        }
+    }
+}
+
 // ── Data Isolation Service ─────────────────────────────────
 
 pub struct DataIsolationService {
@@ -329,11 +490,92 @@ impl DataIsolationService {
         let schema_quoted = quote_sql_ident(&schema);
 
         for stmt in rls_statements(&schema_quoted, &table_quoted) {
-            sqlx::query(&stmt).execute(&self.db).await?;
+            match sqlx::query(&stmt).execute(&self.db).await {
+                Ok(_) => {}
+                // PostgreSQL has no CREATE POLICY IF NOT EXISTS; a repeated
+                // setup must stay idempotent (the policies are identical)
+                // instead of surfacing a duplicate-object 500 to the caller.
+                Err(sqlx::Error::Database(error))
+                    if error.code().as_deref() == Some(DUPLICATE_OBJECT_SQLSTATE) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
 
         info!(table = table_name, schema = schema_name, "RLS configured");
         Ok(())
+    }
+
+    /// Pre-flight capability check for a Shared→DedicatedSchema migration.
+    ///
+    /// The migration copies (then deletes) every required table with
+    /// `WHERE workspace_id = $1`; a table that is absent or has no
+    /// `workspace_id` column makes the copy impossible. This inspects the
+    /// shared schema up front and returns a typed error naming EVERY missing
+    /// table/column and the migration it would need, so the refusal is
+    /// diagnosable and the caller fails before any DDL/DML — the migration
+    /// can never half-apply.
+    pub async fn check_migration_capability(
+        &self,
+        shared_schema: &str,
+    ) -> Result<(), MigrationCapabilityError> {
+        let schema = validate_sql_ident(shared_schema).map_err(|error| {
+            MigrationCapabilityError::Inspection {
+                schema: shared_schema.to_string(),
+                source: error,
+            }
+        })?;
+        let required: Vec<&str> = REQUIRED_TENANT_TABLES.iter().map(|r| r.table).collect();
+
+        let existing_tables: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = $1 AND table_type = 'BASE TABLE' AND table_name = ANY($2)",
+        )
+        .bind(&schema)
+        .bind(&required)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|error| MigrationCapabilityError::Inspection {
+            schema: schema.clone(),
+            source: error.into(),
+        })?;
+
+        let tenanted_tables: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name FROM information_schema.columns \
+             WHERE table_schema = $1 AND column_name = 'workspace_id' AND table_name = ANY($2)",
+        )
+        .bind(&schema)
+        .bind(&required)
+        .fetch_all(&self.db)
+        .await
+        .map_err(|error| MigrationCapabilityError::Inspection {
+            schema: schema.clone(),
+            source: error.into(),
+        })?;
+
+        let mut gaps = Vec::new();
+        for requirement in REQUIRED_TENANT_TABLES {
+            if !existing_tables.iter().any(|t| t == requirement.table) {
+                gaps.push(MigrationCapabilityGap {
+                    schema: schema.clone(),
+                    table: requirement.table,
+                    table_missing: true,
+                    created_by: None,
+                });
+            } else if !tenanted_tables.iter().any(|t| t == requirement.table) {
+                gaps.push(MigrationCapabilityGap {
+                    schema: schema.clone(),
+                    table: requirement.table,
+                    table_missing: false,
+                    created_by: requirement.created_by,
+                });
+            }
+        }
+
+        if gaps.is_empty() {
+            Ok(())
+        } else {
+            Err(MigrationCapabilityError::Missing { schema, gaps })
+        }
     }
 
     /// Migrate a workspace between isolation levels.
@@ -343,6 +585,21 @@ impl DataIsolationService {
         current_level: &IsolationLevel,
         target_level: &IsolationLevel,
     ) -> anyhow::Result<()> {
+        self.migrate_isolation_level_in_schema(workspace_id, current_level, target_level, "public")
+            .await
+    }
+
+    /// [`Self::migrate_isolation_level`] with an explicit shared source
+    /// schema. Production always passes `public`; the parameter exists for
+    /// deployments whose shared tables live in another schema, and lets
+    /// tests drive the real copy/delete path against a capable schema.
+    pub async fn migrate_isolation_level_in_schema(
+        &self,
+        workspace_id: &str,
+        current_level: &IsolationLevel,
+        target_level: &IsolationLevel,
+        shared_schema: &str,
+    ) -> anyhow::Result<()> {
         info!(
             workspace_id = workspace_id,
             from = %current_level,
@@ -350,14 +607,26 @@ impl DataIsolationService {
             "Starting isolation migration"
         );
 
+        // Pre-flight BEFORE the transaction: a Shared→DedicatedSchema
+        // migration that cannot run must refuse with every missing
+        // table/column named and must write nothing at all.
+        if matches!(
+            (current_level, target_level),
+            (IsolationLevel::Shared, IsolationLevel::DedicatedSchema)
+        ) {
+            self.check_migration_capability(shared_schema).await?;
+        }
+
         let mut tx = self.db.begin().await?;
 
         match (current_level, target_level) {
             (IsolationLevel::Shared, IsolationLevel::DedicatedSchema) => {
-                self.migrate_to_schema(workspace_id, &mut tx).await?;
+                self.migrate_to_schema(workspace_id, shared_schema, &mut tx)
+                    .await?;
             }
             (IsolationLevel::DedicatedSchema, IsolationLevel::Shared) => {
-                self.migrate_from_schema(workspace_id, &mut tx).await?;
+                self.migrate_from_schema(workspace_id, shared_schema, &mut tx)
+                    .await?;
             }
             _ => {
                 anyhow::bail!(
@@ -541,33 +810,33 @@ impl DataIsolationService {
     async fn migrate_to_schema(
         &self,
         workspace_id: &str,
+        shared_schema: &str,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
         let schema = format!("ws_{}", sanitize_sql_ident(workspace_id));
         let schema_safe = validate_sql_ident(&schema)?;
         let schema_quoted = quote_sql_ident(&schema_safe);
+        let source_safe = validate_sql_ident(shared_schema)?;
+        let source_quoted = quote_sql_ident(&source_safe);
         sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", schema_quoted))
             .execute(&mut **tx)
             .await?;
 
         let tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
         for table in tables {
-            // Create table in new schema
+            let table_quoted = quote_sql_ident(table);
+            // Create table in new schema, cloning the shared table's shape.
             sqlx::query(&format!(
-                "CREATE TABLE IF NOT EXISTS {}.{} (LIKE public.{} INCLUDING ALL)",
-                schema_quoted,
-                quote_sql_ident(table),
-                quote_sql_ident(table)
+                "CREATE TABLE IF NOT EXISTS {}.{} (LIKE {}.{} INCLUDING ALL)",
+                schema_quoted, table_quoted, source_quoted, table_quoted
             ))
             .execute(&mut **tx)
             .await?;
 
             // Copy data
             sqlx::query(&format!(
-                "INSERT INTO {}.{} SELECT * FROM public.{} WHERE workspace_id = $1",
-                schema_quoted,
-                quote_sql_ident(table),
-                quote_sql_ident(table)
+                "INSERT INTO {}.{} SELECT * FROM {}.{} WHERE workspace_id = $1",
+                schema_quoted, table_quoted, source_quoted, table_quoted
             ))
             .bind(workspace_id)
             .execute(&mut **tx)
@@ -575,8 +844,8 @@ impl DataIsolationService {
 
             // Delete from shared
             sqlx::query(&format!(
-                "DELETE FROM public.{} WHERE workspace_id = $1",
-                quote_sql_ident(table)
+                "DELETE FROM {}.{} WHERE workspace_id = $1",
+                source_quoted, table_quoted
             ))
             .bind(workspace_id)
             .execute(&mut **tx)
@@ -596,6 +865,7 @@ impl DataIsolationService {
     async fn migrate_from_schema(
         &self,
         workspace_id: &str,
+        shared_schema: &str,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> anyhow::Result<()> {
         // Get current schema
@@ -611,11 +881,14 @@ impl DataIsolationService {
         };
         let schema_safe = validate_sql_ident(&schema)?;
         let schema_quoted = quote_sql_ident(&schema_safe);
+        let destination_safe = validate_sql_ident(shared_schema)?;
+        let destination_quoted = quote_sql_ident(&destination_safe);
 
         let tables = ["emails", "contacts", "templates", "campaigns", "webhooks"];
         for table in tables {
             sqlx::query(&format!(
-                "INSERT INTO public.{} SELECT * FROM {}.{} WHERE workspace_id = $1",
+                "INSERT INTO {}.{} SELECT * FROM {}.{} WHERE workspace_id = $1",
+                destination_quoted,
                 quote_sql_ident(table),
                 schema_quoted,
                 quote_sql_ident(table)

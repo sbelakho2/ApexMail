@@ -2320,7 +2320,6 @@ mod tests {
     /// §21 RELEASE GATE: a reply racing a queued send cancels the action, and
     /// the committed `has_human_reply` flag is set, so the next scheduled
     /// touch cannot race out.
-    #[ignore = "requires PostgreSQL (TEST_DATABASE_URL; defaults to local Postgres)"]
     #[tokio::test]
     async fn live_reply_racing_a_queued_send_is_cancelled() {
         let Some(pool) = live_pool("reply_race").await else {
@@ -2425,7 +2424,6 @@ mod tests {
     }
 
     /// Table-driven live test for every disposition's durable effects.
-    #[ignore = "requires PostgreSQL (TEST_DATABASE_URL; defaults to local Postgres)"]
     #[tokio::test]
     async fn live_disposition_effects_match_the_policy_table() {
         let Some(pool) = live_pool("reply_effects").await else {
@@ -2669,7 +2667,6 @@ mod tests {
 
     /// §10 idempotency + the operator-correction helper: an exact repeat is
     /// one row; a changed action is a first-class `operator` correction row.
-    #[ignore = "requires PostgreSQL (TEST_DATABASE_URL; defaults to local Postgres)"]
     #[tokio::test]
     async fn live_repeat_classification_and_operator_correction_are_first_class() {
         let Some(pool) = live_pool("reply_correction").await else {
@@ -2816,7 +2813,6 @@ mod tests {
 
     /// §8/§6/§4 live: deterministic DSN and OOO paths through the real
     /// processor (headers win, OOO does not cancel, hard bounce invalidates).
-    #[ignore = "requires PostgreSQL (TEST_DATABASE_URL; defaults to local Postgres)"]
     #[tokio::test]
     async fn live_deterministic_dsn_and_ooo_paths() {
         let Some(pool) = live_pool("reply_deterministic").await else {
@@ -2934,6 +2930,331 @@ mod tests {
                 .unwrap();
         assert_eq!(unsubscribes, 0);
 
+        pool.close().await;
+    }
+
+    // =======================================================================
+    // Adversarial live set, RUN by default (TEST_DATABASE_URL gates it):
+    // the ignored scenarios above stay untouched; these pin the durable
+    // effects of the same entry points under replay and under-threshold
+    // confidence so the behaviour cannot regress unnoticed.
+    // =======================================================================
+
+    #[tokio::test]
+    async fn live_unsubscribe_reply_suppresses_and_replay_is_a_noop() {
+        let Some(pool) = live_pool("adv_reply_unsubscribe").await else {
+            return;
+        };
+        let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+        let fixture = seed_live_fixture(&pool, &tenant).await;
+        let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &msg_id,
+            &tenant,
+            &fixture.email,
+            "Re: proposal",
+            "Please unsubscribe me from all future mail.",
+            serde_json::json!({}),
+        )
+        .await;
+
+        let handler = scripted_handler(pool.clone(), ReplyDisposition::Unsubscribe, 0.99);
+        let msg = fetch_message_by_id(&handler, &msg_id)
+            .await
+            .expect("claim the inbound reply");
+        handler
+            .process_message(msg.clone())
+            .await
+            .expect("unsubscribe reply processed");
+
+        // Durable effects: the sequence stops, the address is unsubscribed
+        // and a full classification row records the action taken.
+        let (state, has_human_reply) = enrollment_state(&pool, fixture.enrollment_id).await;
+        assert_eq!(state, "suppressed");
+        assert!(has_human_reply);
+        let unsubscribes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&fixture.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unsubscribes, 1,
+            "the unsubscribe must be recorded exactly once"
+        );
+        let (disposition, classifier, actual): (String, String, Option<String>) = sqlx::query_as(
+            "SELECT disposition, classifier, actual_action \
+                 FROM sales_reply_classifications WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(disposition, "unsubscribe");
+        assert_eq!(
+            classifier, "deterministic",
+            "the deterministic unsubscribe token must win over the scripted AI"
+        );
+        assert!(
+            actual
+                .unwrap_or_default()
+                .contains("enrollment_locked:suppressed"),
+            "the audit row must name the executed lock"
+        );
+
+        // REPLAY (crash-between-writes retry): reprocessing the same logical
+        // message must not add a second classification or unsubscribe.
+        handler
+            .process_message(msg)
+            .await
+            .expect("replay is accepted idempotently");
+        let classifications: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_reply_classifications WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(classifications, 1, "replays collapse to one audit row");
+        let unsubscribes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&fixture.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unsubscribes, 1, "replays must not double-unsubscribe");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn live_low_confidence_reply_pauses_without_suppressing() {
+        let Some(pool) = live_pool("adv_reply_low_conf").await else {
+            return;
+        };
+        let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+        let fixture = seed_live_fixture(&pool, &tenant).await;
+        let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+        seed_inbound(
+            &pool,
+            &msg_id,
+            &tenant,
+            &fixture.email,
+            "Re: proposal",
+            "maybe? unclear",
+            serde_json::json!({}),
+        )
+        .await;
+
+        // 0.2 is below the auto-execute threshold: the reply must be treated
+        // as Unknown (pause) and must NOT suppress a valid contact point.
+        let handler = scripted_handler(pool.clone(), ReplyDisposition::Unsubscribe, 0.2);
+        process_message_by_id(&handler, &msg_id)
+            .await
+            .expect("low-confidence reply processed");
+
+        let (state, has_human_reply) = enrollment_state(&pool, fixture.enrollment_id).await;
+        assert_eq!(state, "paused", "low confidence must not stop the sequence");
+        // A human did reply (the race gate is set), but the guess was too
+        // weak to stop the sequence or suppress anything.
+        assert!(has_human_reply);
+        let unsubscribes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&fixture.email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unsubscribes, 0,
+            "a sub-threshold guess must never unsubscribe a recipient"
+        );
+        let (verification, suppressed): (String, bool) = sqlx::query_as(
+            "SELECT verification, suppressed_at IS NOT NULL \
+             FROM sales_contact_points WHERE id = $1",
+        )
+        .bind(fixture.contact_point_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(verification, "valid");
+        assert!(!suppressed);
+
+        pool.close().await;
+    }
+
+    /// Table-driven live set for the remaining dispositions: each row's
+    /// durable effects (sequence state, unsubscribe upsert, contact-point
+    /// invalidation, cancellation/OOO reschedule) must match the policy.
+    #[tokio::test]
+    async fn live_remaining_disposition_effects_match_the_policy() {
+        let Some(pool) = live_pool("adv_reply_effects").await else {
+            return;
+        };
+        // (disposition, confidence, state, unsubscribe, invalidate, complaint)
+        let cases = [
+            (
+                ReplyDisposition::Complaint,
+                0.99,
+                "suppressed",
+                true,
+                false,
+                true,
+            ),
+            (
+                ReplyDisposition::BounceHard,
+                0.99,
+                "suppressed",
+                true,
+                true,
+                false,
+            ),
+            (
+                ReplyDisposition::BounceSoft,
+                0.99,
+                "waiting",
+                false,
+                false,
+                false,
+            ),
+            (
+                ReplyDisposition::OutOfOffice,
+                0.99,
+                "waiting",
+                false,
+                false,
+                false,
+            ),
+            (
+                ReplyDisposition::NotInterested,
+                0.99,
+                "completed",
+                false,
+                false,
+                false,
+            ),
+            (
+                ReplyDisposition::MeetingRequest,
+                0.99,
+                "replied",
+                false,
+                false,
+                false,
+            ),
+        ];
+
+        for (
+            index,
+            (disposition, confidence, expected_state, expect_unsub, expect_inval, expect_penalty),
+        ) in cases.into_iter().enumerate()
+        {
+            let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
+            let fixture = seed_live_fixture(&pool, &tenant).await;
+            let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
+            seed_inbound(
+                &pool,
+                &msg_id,
+                &tenant,
+                &fixture.email,
+                "Re: proposal",
+                "Fine, thanks.",
+                serde_json::json!({}),
+            )
+            .await;
+
+            let handler = scripted_handler(pool.clone(), disposition, confidence);
+            process_message_by_id(&handler, &msg_id)
+                .await
+                .unwrap_or_else(|error| panic!("case {index} ({disposition:?}): {error}"));
+
+            let (state, has_human_reply) = enrollment_state(&pool, fixture.enrollment_id).await;
+            assert_eq!(
+                state, expected_state,
+                "case {index}: state for {disposition:?}"
+            );
+            assert_eq!(
+                has_human_reply,
+                disposition.stops_normal_sequence(),
+                "case {index}: race gate for {disposition:?}"
+            );
+
+            let unsubscribes: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sales_unsubscribes WHERE tenant_id = $1 AND email = lower($2)",
+            )
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                unsubscribes,
+                i64::from(expect_unsub),
+                "case {index}: unsubscribe upsert for {disposition:?}"
+            );
+
+            let (verification, suppressed): (String, bool) = sqlx::query_as(
+                "SELECT verification, suppressed_at IS NOT NULL \
+                 FROM sales_contact_points WHERE id = $1",
+            )
+            .bind(fixture.contact_point_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                verification,
+                if expect_inval { "invalid" } else { "valid" },
+                "case {index}: contact-point verification for {disposition:?}"
+            );
+            assert_eq!(suppressed, expect_inval, "case {index}: suppression");
+
+            let complaints: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sales_outcomes WHERE tenant_id = $1 AND outcome = 'complaint'",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                complaints,
+                i64::from(expect_penalty),
+                "case {index}: sender-health penalty for {disposition:?}"
+            );
+
+            let action_state_value = action_state(&pool, fixture.action_step_id).await;
+            if matches!(
+                disposition,
+                ReplyDisposition::OutOfOffice | ReplyDisposition::BounceSoft
+            ) {
+                // An autoreply / soft bounce must NOT cancel queued work.
+                assert_ne!(
+                    action_state_value, "cancelled",
+                    "case {index}: {disposition:?} must leave the queued send alive"
+                );
+            } else {
+                assert_eq!(
+                    action_state_value, "cancelled",
+                    "case {index}: queued send for {disposition:?}"
+                );
+            }
+            if disposition == ReplyDisposition::OutOfOffice {
+                let due_at: chrono::DateTime<chrono::Utc> =
+                    sqlx::query_scalar("SELECT due_at FROM sales_actions WHERE id = $1")
+                        .bind(fixture.action_step_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert!(
+                    due_at > Utc::now() + chrono::Duration::days(6),
+                    "case {index}: OOO must reschedule beyond the default wait"
+                );
+            }
+        }
         pool.close().await;
     }
 }

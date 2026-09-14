@@ -96,6 +96,10 @@ aws-sdk-sesv2.workspace = true
 outbound-mta = { path = "../outbound-mta" }
 
 [dev-dependencies]
+# `start_paused` for the supervisor backoff test (a real 5s+10s wait would
+# make the suite slow); tokio is already a dependency — this only enables
+# its test-util feature for tests.
+tokio = { workspace = true, features = ["test-util"] }
 # F67 DB-backed handoff test: canonical schema via the production migrator.
 migrator = { path = "../migrator" }
 # C: cross-crate round-trip tests — worker-encoded tracking tokens must

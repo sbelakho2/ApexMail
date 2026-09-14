@@ -1048,3 +1048,238 @@ mod tests {
         }
     }
 }
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// The ROPA is a legal record: an activity cannot be registered without its
+// required facts, approved without an asserted lawful basis, or transferred
+// under a mechanism that is not a Chapter V mechanism.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+
+    async fn pool(suffix: &str) -> Option<PgPool> {
+        test_support::canonical_pool(&format!("gov_{suffix}"), &format!("gov_{suffix}")).await
+    }
+
+    fn activity(retention_class: &str) -> NewProcessingActivity {
+        NewProcessingActivity {
+            id: None,
+            name: "Transactional email delivery".into(),
+            description: "Store and deliver customer email".into(),
+            controller_or_processor: "processor".into(),
+            purpose: "deliver transactional email".into(),
+            data_subjects: vec!["recipients".into()],
+            data_categories: vec!["email address".into()],
+            recipients: vec!["customers".into()],
+            data_stores: vec!["messages".into()],
+            retention_class_id: retention_class.into(),
+            transfer_situation: TransferSituation::None,
+            source_location: "compliance/src/governance.rs".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_requires_every_legal_fact() {
+        let Some(pool) = pool("register").await else {
+            return;
+        };
+        let seeded = seed_registry(&pool).await.expect("seed registry");
+        assert!(seeded.retention_classes_inserted >= 1);
+        // Re-seeding is idempotent.
+        let again = seed_registry(&pool).await.expect("re-seed");
+        assert_eq!(again.activities_inserted, 0);
+        let classes = retention_classes::list(&pool).await.expect("classes");
+        assert!(!classes.is_empty());
+        let class_id = classes[0].id.clone();
+
+        // Missing required fields are named, not silently defaulted.
+        let mut broken = activity(&class_id);
+        broken.name = "  ".into();
+        broken.data_categories.clear();
+        let err = register_activity(&pool, &broken)
+            .await
+            .expect_err("missing fields");
+        assert!(err.contains("missing required fields"), "{err}");
+        assert!(err.contains("name"), "{err}");
+
+        // An unknown retention class is not a store registration.
+        let err = register_activity(&pool, &activity("no-such-class"))
+            .await
+            .expect_err("unknown class");
+        assert!(err.contains("unknown retention class"), "{err}");
+
+        // An unknown transfer assessment is refused.
+        let mut transfer = activity(&class_id);
+        transfer.transfer_situation = TransferSituation::Assessment("TIA-missing".into());
+        let err = register_activity(&pool, &transfer)
+            .await
+            .expect_err("unknown TIA");
+        assert!(err.contains("unknown transfer assessment"), "{err}");
+
+        // A valid registration creates the activity AND its lawful-basis
+        // record in the explicit requires-legal-input state.
+        let registered = register_activity(&pool, &activity(&class_id))
+            .await
+            .expect("register");
+        assert!(registered.id.starts_with("PA-"));
+        assert_eq!(registered.status, "active");
+        assert_eq!(registered.review_status, "legal_input_required");
+        let basis_id = registered
+            .lawful_basis_record_id
+            .clone()
+            .expect("lawful basis record");
+        assert_eq!(
+            get_activity(&pool, &registered.id)
+                .await
+                .expect("get")
+                .expect("present")
+                .lawful_basis_record_id
+                .as_deref(),
+            Some(basis_id.as_str())
+        );
+        assert!(list_activities(&pool)
+            .await
+            .expect("list")
+            .iter()
+            .any(|a| a.id == registered.id));
+        // Unknown ids are None, never fabricated.
+        assert!(get_activity(&pool, "PA-nope").await.expect("get").is_none());
+
+        // Approval is refused until the basis is asserted.
+        let err = approve_activity(&pool, &registered.id)
+            .await
+            .expect_err("unresolved basis");
+        assert!(err.contains("cannot be approved"), "{err}");
+        // A blank basis cannot be recorded.
+        let err = record_lawful_basis(
+            &pool,
+            &registered.id,
+            "  ",
+            None,
+            None,
+            "legal@apexmail.ee",
+            "",
+        )
+        .await
+        .expect_err("blank basis");
+        assert!(err.contains("cannot be recorded as empty"), "{err}");
+        let err = record_lawful_basis(
+            &pool,
+            &registered.id,
+            "legitimate_interests",
+            None,
+            None,
+            "   ",
+            "",
+        )
+        .await
+        .expect_err("no assessor");
+        assert!(err.contains("requires the assessing person"), "{err}");
+        // Recording against an unknown activity is refused.
+        assert!(record_lawful_basis(
+            &pool,
+            "PA-missing",
+            "consent",
+            None,
+            None,
+            "legal@apexmail.ee",
+            ""
+        )
+        .await
+        .is_err());
+
+        let basis = record_lawful_basis(
+            &pool,
+            &registered.id,
+            "legitimate_interests",
+            Some("6(1)(f)"),
+            Some("EE"),
+            "legal@apexmail.ee",
+            "Delivery of the service the customer asked for",
+        )
+        .await
+        .expect("record basis");
+        assert_eq!(basis.basis.as_deref(), Some("legitimate_interests"));
+        assert_eq!(basis.basis_status, "asserted");
+        assert_eq!(basis.gdpr_article.as_deref(), Some("6(1)(f)"));
+        assert_eq!(
+            basis.assessment_notes,
+            "Delivery of the service the customer asked for"
+        );
+        // With an asserted basis the activity can be approved.
+        approve_activity(&pool, &registered.id)
+            .await
+            .expect("approve");
+        let approved = get_activity(&pool, &registered.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(approved.review_status, "approved");
+        // Approving an unknown activity is refused.
+        assert!(approve_activity(&pool, "PA-nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn transfer_assessments_only_accept_chapter_v_mechanisms() {
+        let Some(pool) = pool("transfer").await else {
+            return;
+        };
+        seed_registry(&pool).await.expect("seed");
+        for mechanism in ["", "privacy_shield", "handshake", "ADEQUACY_DECISION"] {
+            let err = complete_transfer_assessment(
+                &pool,
+                "TIA-1",
+                mechanism,
+                "evidence-1",
+                "risk assessed",
+            )
+            .await
+            .expect_err("invalid mechanism");
+            assert!(
+                err.contains("is not a Chapter V mechanism") || err.contains("not found"),
+                "{mechanism:?}: {err}"
+            );
+        }
+        // A missing evidence reference or risk assessment is refused even for
+        // a valid mechanism.
+        let err = complete_transfer_assessment(&pool, "TIA-1", "sccs", "  ", "risk")
+            .await
+            .expect_err("no evidence");
+        assert!(err.contains("evidence reference"), "{err}");
+        let err = complete_transfer_assessment(&pool, "TIA-1", "sccs", "evidence-1", "  ")
+            .await
+            .expect_err("no risk assessment");
+        assert!(err.contains("risk assessment"), "{err}");
+        // An unknown assessment id is refused (the UPDATE affects nothing).
+        let err = complete_transfer_assessment(&pool, "TIA-missing", "sccs", "evidence-1", "risk")
+            .await
+            .expect_err("unknown assessment");
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_declared_store_inventory_is_explicit() {
+        let Some(pool) = pool("stores").await else {
+            return;
+        };
+        let before = declared_store_inventory(&pool).await.expect("inventory");
+        assert!(
+            before.is_empty(),
+            "a fresh registry declares no stores yet: {before:?}"
+        );
+        seed_registry(&pool).await.expect("seed");
+        let after = declared_store_inventory(&pool).await.expect("inventory");
+        assert!(
+            !after.is_empty(),
+            "the seeded registry must declare its stores"
+        );
+        // Stable ordering and no duplicates: the inventory is reproducible.
+        let mut sorted = after.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(after, sorted);
+    }
+}

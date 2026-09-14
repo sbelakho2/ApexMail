@@ -12,12 +12,13 @@
 //!   is retained as `cancelled`;
 //! * round-robin must rotate to the least-loaded salesperson across bookings.
 //!
-//! All tests are `#[ignore]`d so `cargo test -p sales-autopilot` stays green
-//! without infrastructure. Run them with:
+//! These tests provision the canonical schema themselves and soft-skip when the
+//! database env is unset, so the workspace suite runs them (they used to be
+//! `#[ignore]`d and were silently skipped by CI). Run them explicitly with:
 //!
 //! ```text
 //! TEST_DATABASE_URL=postgresql://user:pass@host:5432/db \
-//!   cargo test -p sales-autopilot --test calendar_live -- --ignored
+//!   cargo test -p sales-autopilot --test calendar_live
 //! ```
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
@@ -29,8 +30,8 @@ use sales_autopilot::calendar::{
     WorkingHours,
 };
 
-const IGNORE_REASON: &str =
-    "live database required: run with TEST_DATABASE_URL set and -- --ignored";
+const SKIP_REASON: &str =
+    "live database required: set TEST_DATABASE_URL (or SALES_TEST_DATABASE_URL)";
 
 /// A dedicated database carrying the complete pinned canonical chain,
 /// provisioned through the REAL production migrator (audit F01) exactly like
@@ -131,10 +132,9 @@ fn request_for(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live database required"]
 async fn live_db_exclusion_constraint_rejects_overlap() {
     let Some(pool) = live_pool("live_db_exclusion_constraint_rejects_overlap").await else {
-        eprintln!("skipping: TEST_DATABASE_URL unset ({IGNORE_REASON})");
+        eprintln!("skipping: TEST_DATABASE_URL unset ({SKIP_REASON})");
         return;
     };
     let tenant = tenant_id("constraint");
@@ -182,10 +182,9 @@ async fn live_db_exclusion_constraint_rejects_overlap() {
 }
 
 #[tokio::test]
-#[ignore = "live database required"]
 async fn live_db_double_booking_race_has_exactly_one_winner() {
     let Some(pool) = live_pool("live_db_double_booking_race_has_exactly_one_winner").await else {
-        eprintln!("skipping: TEST_DATABASE_URL unset ({IGNORE_REASON})");
+        eprintln!("skipping: TEST_DATABASE_URL unset ({SKIP_REASON})");
         return;
     };
     let tenant = tenant_id("race");
@@ -234,10 +233,9 @@ async fn live_db_double_booking_race_has_exactly_one_winner() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live database required"]
 async fn live_db_cancelled_meeting_frees_the_slot() {
     let Some(pool) = live_pool("live_db_cancelled_meeting_frees_the_slot").await else {
-        eprintln!("skipping: TEST_DATABASE_URL unset ({IGNORE_REASON})");
+        eprintln!("skipping: TEST_DATABASE_URL unset ({SKIP_REASON})");
         return;
     };
     let tenant = tenant_id("cancel");
@@ -289,10 +287,9 @@ async fn live_db_cancelled_meeting_frees_the_slot() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live database required"]
 async fn live_db_round_robin_rotates_salespeople() {
     let Some(pool) = live_pool("live_db_round_robin_rotates_salespeople").await else {
-        eprintln!("skipping: TEST_DATABASE_URL unset ({IGNORE_REASON})");
+        eprintln!("skipping: TEST_DATABASE_URL unset ({SKIP_REASON})");
         return;
     };
     let tenant = tenant_id("roundrobin");
@@ -356,10 +353,9 @@ async fn live_db_round_robin_rotates_salespeople() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live database required"]
 async fn live_db_legacy_calendar_surface_still_works() {
     let Some(pool) = live_pool("live_db_legacy_calendar_surface_still_works").await else {
-        eprintln!("skipping: TEST_DATABASE_URL unset ({IGNORE_REASON})");
+        eprintln!("skipping: TEST_DATABASE_URL unset ({SKIP_REASON})");
         return;
     };
     let tenant = tenant_id("legacy");

@@ -763,6 +763,10 @@ impl MailstoreService for MailstoreServiceImpl {
             "Message stored"
         );
 
+        // The cached mailbox snapshot carries total_messages / unread_messages
+        // / uidnext, so it is stale the moment a message lands.
+        self.invalidate_mailbox_cache(&account_id);
+
         Ok(Response::new(StoreMessageResponse {
             message_id,
             uid,
@@ -969,6 +973,11 @@ impl MailstoreService for MailstoreServiceImpl {
             count = %updated,
             "Setting flags"
         );
+
+        // UNSEEN (and the \Deleted flag that later feeds EXISTS) changed, so
+        // the cached mailbox snapshot is stale — the same reason create and
+        // delete invalidate it.
+        self.invalidate_mailbox_cache(&account_id);
 
         Ok(Response::new(SetFlagsResponse {
             updated_count: updated,
@@ -1346,6 +1355,9 @@ impl MailstoreService for MailstoreServiceImpl {
             "Expunge completed"
         );
 
+        // EXISTS changes on every expunge.
+        self.invalidate_mailbox_cache(&account_id);
+
         Ok(Response::new(ExpungeResponse { expunged_uids }))
     }
 
@@ -1626,6 +1638,7 @@ mod tests {
     use super::*;
     use crate::models::MailboxType;
     use crate::storage::MessageStorage;
+    use futures::StreamExt as _;
     use sqlx::PgPool;
 
     // ── F3: UIDVALIDITY minting is monotonic and stable per row ──────────
@@ -2830,5 +2843,989 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // Adversarial gRPC-service suite (real canonical database)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    async fn service_with_db(test_name: &str) -> Option<(MailstoreServiceImpl, PgPool)> {
+        let pool = crate::test_db::canonical_pool(test_name).await?;
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(error) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({error})");
+            return None;
+        }
+        Some((MailstoreServiceImpl::new(storage), pool))
+    }
+
+    async fn make_account(svc: &MailstoreServiceImpl, tag: &str) -> String {
+        let response = svc
+            .create_account(Request::new(CreateAccountRequest {
+                email: format!("{tag}-{}@example.com", Uuid::new_v4()),
+                password: "correct horse battery staple".to_string(),
+                display_name: "Adversarial".to_string(),
+                initial_quota: None,
+            }))
+            .await
+            .expect("create_account");
+        response.into_inner().account_id
+    }
+
+    fn raw_message(subject: &str, message_id: &str) -> Vec<u8> {
+        format!(
+            "From: Sender <sender@example.com>\r\n\
+             To: rcpt@example.com\r\n\
+             Subject: {subject}\r\n\
+             Message-ID: <{message_id}>\r\n\
+             Date: Mon, 1 Jan 2024 10:00:00 +0000\r\n\
+             \r\n\
+             Body of {subject}\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn store_request(account_id: &str, mailbox: &str, raw: Vec<u8>) -> StoreMessageRequest {
+        StoreMessageRequest {
+            account_id: account_id.to_string(),
+            mailbox: mailbox.to_string(),
+            raw_message: raw.into(),
+            flags: None,
+            internal_date: 0,
+            dedup_exempt: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn service_account_lifecycle_and_authentication() {
+        let Some((svc, pool)) = service_with_db("service_account_auth").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        // Empty email or password is refused before any hashing.
+        for (email, password) in [("", "pw"), ("a@b.com", "")] {
+            let err = svc
+                .create_account(Request::new(CreateAccountRequest {
+                    email: email.to_string(),
+                    password: password.to_string(),
+                    display_name: String::new(),
+                    initial_quota: None,
+                }))
+                .await
+                .expect_err("empty credentials must be refused");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        }
+
+        let email = format!("auth-{}@example.com", Uuid::new_v4());
+        let created = svc
+            .create_account(Request::new(CreateAccountRequest {
+                email: email.clone(),
+                password: "s3cret-passphrase".to_string(),
+                display_name: "  ".to_string(),
+                initial_quota: None,
+            }))
+            .await
+            .expect("create account")
+            .into_inner();
+        let account_id = created.account_id.clone();
+        assert!(Uuid::parse_str(&account_id).is_ok());
+
+        // Duplicate email is surfaced as an internal error from the storage
+        // layer (unique violation), never a panic.
+        let dup = svc
+            .create_account(Request::new(CreateAccountRequest {
+                email: email.clone(),
+                password: "another".to_string(),
+                display_name: String::new(),
+                initial_quota: None,
+            }))
+            .await
+            .expect_err("duplicate email must fail");
+        assert_eq!(dup.code(), tonic::Code::Internal);
+
+        // get_account by id, by email and the failure modes.
+        let by_id = svc
+            .get_account(Request::new(GetAccountRequest {
+                account_id: account_id.clone(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_id.email, email);
+        assert!(by_id.active);
+        let by_email = svc
+            .get_account(Request::new(GetAccountRequest {
+                account_id: String::new(),
+                email: email.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(by_email.account_id, account_id);
+        assert_eq!(
+            svc.get_account(Request::new(GetAccountRequest {
+                account_id: "not-a-uuid".into(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            svc.get_account(Request::new(GetAccountRequest {
+                account_id: String::new(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            svc.get_account(Request::new(GetAccountRequest {
+                account_id: Uuid::new_v4().to_string(),
+                email: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        // Authentication: success, wrong password, unknown email, empty input.
+        let ok = svc
+            .authenticate_account(Request::new(AuthenticateRequest {
+                email: email.clone(),
+                password: "s3cret-passphrase".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ok.success);
+        assert_eq!(ok.account_id, account_id);
+        for (em, pw) in [
+            (email.clone(), "wrong".to_string()),
+            (
+                format!("nobody-{}@example.com", Uuid::new_v4()),
+                "x".to_string(),
+            ),
+            (String::new(), String::new()),
+        ] {
+            let bad = svc
+                .authenticate_account(Request::new(AuthenticateRequest {
+                    email: em,
+                    password: pw,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(!bad.success);
+            assert!(bad.account_id.is_empty());
+            assert_eq!(bad.error, "Invalid credentials");
+        }
+
+        // An account whose stored hash is unparseable must never authenticate
+        // (the dummy verification path keeps timing flat).
+        let broken_email = format!("broken-{}@example.com", Uuid::new_v4());
+        sqlx::query("INSERT INTO mail_accounts (email, domain, password_hash) VALUES ($1, 'example.com', 'not-a-hash')")
+            .bind(&broken_email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let broken = svc
+            .authenticate_account(Request::new(AuthenticateRequest {
+                email: broken_email,
+                password: "anything".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!broken.success);
+
+        // Quota: a fresh account is empty; unknown/invalid are typed.
+        let quota = svc
+            .get_quota(Request::new(GetQuotaRequest {
+                account_id: account_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .quota
+            .unwrap();
+        assert_eq!(quota.used_bytes, 0);
+        assert_eq!(quota.used_messages, 0);
+        assert_eq!(quota.max_messages, 100_000);
+        assert!(quota.max_bytes > 0);
+        assert_eq!(
+            svc.get_quota(Request::new(GetQuotaRequest {
+                account_id: "bad".into()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            svc.get_quota(Request::new(GetQuotaRequest {
+                account_id: Uuid::new_v4().to_string()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn service_store_get_list_and_uid_semantics() {
+        let Some((svc, pool)) = service_with_db("service_store_get").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let account_id = make_account(&svc, "store").await;
+
+        // Address resolution failures are typed: bad uuid / unknown account /
+        // unknown mailbox.
+        assert_eq!(
+            svc.store_message(Request::new(store_request(
+                "not-a-uuid",
+                "Inbox",
+                raw_message("x", "b1@example.com")
+            )))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            svc.store_message(Request::new(store_request(
+                &Uuid::new_v4().to_string(),
+                "Inbox",
+                raw_message("x", "b2@example.com")
+            )))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            svc.store_message(Request::new(store_request(
+                &account_id,
+                "NoSuchMailbox",
+                raw_message("x", "b3@example.com")
+            )))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        // A real store: UID starts at 1, blob_hash is the SHA-256 of the raw.
+        let raw = raw_message("First", "first@example.com");
+        let stored = svc
+            .store_message(Request::new(store_request(
+                &account_id,
+                "inbox",
+                raw.clone(),
+            )))
+            .await
+            .expect("store")
+            .into_inner();
+        assert_eq!(stored.uid, 1);
+        assert_eq!(stored.blob_hash.len(), 64, "sha-256 hex");
+        assert!(Uuid::parse_str(&stored.message_id).is_ok());
+
+        // SMTP-style redelivery (dedup_exempt false) collapses onto the row.
+        let mut redelivery = store_request(&account_id, "Inbox", raw.clone());
+        redelivery.internal_date = 0;
+        let again = svc
+            .store_message(Request::new(redelivery))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(again.uid, stored.uid, "redelivery collapses");
+
+        // A client APPEND (dedup_exempt true) always materializes a row.
+        let mut append = store_request(&account_id, "Inbox", raw.clone());
+        append.dedup_exempt = true;
+        let appended = svc
+            .store_message(Request::new(append))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_ne!(appended.uid, stored.uid, "APPEND gets a fresh UID");
+
+        // Explicit internal_date is honored; 0 means now.
+        let mut dated = store_request(
+            &account_id,
+            "Inbox",
+            raw_message("Dated", "dated@example.com"),
+        );
+        dated.internal_date = 1_700_000_000;
+        svc.store_message(Request::new(dated)).await.unwrap();
+
+        // get_message: body inclusion is opt-in; unknown uid is NOT_FOUND.
+        let meta_only = svc
+            .get_message(Request::new(GetMessageRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uid: stored.uid,
+                include_body: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(meta_only.body.is_empty(), "body is opt-in");
+        let meta = meta_only.meta.expect("meta");
+        assert_eq!(meta.uid, stored.uid);
+        assert_eq!(meta.envelope.as_ref().unwrap().subject, "First");
+        assert_eq!(meta.blob_hash.len(), 64);
+        let with_body = svc
+            .get_message(Request::new(GetMessageRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uid: stored.uid,
+                include_body: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(with_body.body, raw);
+        assert_eq!(
+            svc.get_message(Request::new(GetMessageRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uid: 999_999,
+                include_body: true,
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        // list_messages: every message in UID order, with the dated one
+        // carrying its explicit INTERNALDATE.
+        let list = svc
+            .list_messages(Request::new(ListMessagesRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uid_min: 0,
+                uid_max: 0,
+                limit: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(list.messages.len(), 3);
+        let dated_meta = list
+            .messages
+            .iter()
+            .find(|m| m.envelope.as_ref().unwrap().subject == "Dated")
+            .expect("dated message");
+        assert_eq!(dated_meta.internal_date, 1_700_000_000);
+        // UID bounds are inclusive and pushed into SQL.
+        let bounded = svc
+            .list_messages(Request::new(ListMessagesRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uid_min: 2,
+                uid_max: 2,
+                limit: 10,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(bounded.messages.len(), 1);
+        assert_eq!(bounded.messages[0].uid, 2);
+
+        // The mailbox status reflects the store.
+        let status = svc
+            .get_mailbox_status(Request::new(GetMailboxStatusRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let mb = status.mailbox.expect("mailbox");
+        // The counters come from the mailbox snapshot the account's cache
+        // holds; storing messages must INVALIDATE it, or STATUS would serve
+        // pre-store numbers (exists 0 / uidnext 1) until the TTL expired.
+        assert_eq!(
+            mb.exists, 3,
+            "STATUS must reflect the stored messages, not a stale cache"
+        );
+        assert_eq!(mb.unseen, 3);
+        assert_eq!(mb.uidnext, 4);
+        assert_eq!(mb.delimiter, "/");
+        assert!(mb.uidvalidity > 0);
+
+        // Quota tracks both bytes and message count.
+        let quota = svc
+            .get_quota(Request::new(GetQuotaRequest {
+                account_id: account_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .quota
+            .unwrap();
+        assert_eq!(quota.used_messages, 3);
+        assert!(quota.used_bytes > 0);
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn service_flags_search_copy_move_expunge() {
+        let Some((svc, pool)) = service_with_db("service_flags_copy_move").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let account_id = make_account(&svc, "flags").await;
+
+        let mut uids = Vec::new();
+        for (subject, tag) in [
+            ("invoice quarterly", "s1"),
+            ("lunch", "s2"),
+            ("invoice reminder", "s3"),
+        ] {
+            let stored = svc
+                .store_message(Request::new(store_request(
+                    &account_id,
+                    "Inbox",
+                    raw_message(subject, tag),
+                )))
+                .await
+                .unwrap()
+                .into_inner();
+            uids.push(stored.uid);
+        }
+
+        // An unknown FlagOperation is rejected before touching the DB (the
+        // old code silently coerced it to a destructive SET).
+        assert_eq!(
+            svc.set_flags(Request::new(SetFlagsRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![uids[0]],
+                flags: Some(MessageFlags::default()),
+                operation: 99,
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        // Empty UID list is a 0-update no-op.
+        let empty = svc
+            .set_flags(Request::new(SetFlagsRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![],
+                flags: Some(MessageFlags::default()),
+                operation: FlagOperation::Add as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(empty.updated_count, 0);
+
+        // Add \Seen + \Answered + a keyword to one message.
+        let added = svc
+            .set_flags(Request::new(SetFlagsRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![uids[0]],
+                flags: Some(MessageFlags {
+                    seen: true,
+                    answered: true,
+                    custom: vec!["ProjectX".to_string()],
+                    ..Default::default()
+                }),
+                operation: FlagOperation::Add as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(added.updated_count, 1);
+
+        // get_flags returns the merged state and a default for unknown UIDs.
+        let flags = svc
+            .get_flags(Request::new(GetFlagsRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![uids[0], 999_999],
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .flags;
+        let first = flags.get(&uids[0]).expect("first flags");
+        assert!(first.seen && first.answered);
+        assert_eq!(first.custom, vec!["ProjectX".to_string()]);
+        let unknown = flags.get(&999_999).expect("unknown uid entry");
+        assert!(!unknown.seen && !unknown.flagged);
+
+        // A UID > i64::MAX is rejected rather than wrapping.
+        assert_eq!(
+            svc.set_flags(Request::new(SetFlagsRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![u64::MAX],
+                flags: Some(MessageFlags::default()),
+                operation: FlagOperation::Add as i32,
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        // Fulltext search: only the invoice messages, metadata-only rows.
+        let search = svc
+            .search_messages(Request::new(SearchMessagesRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                query: "invoice".into(),
+                limit: 100,
+                offset: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(search.total, 2);
+        assert_eq!(search.messages.len(), 2);
+        // A too-short query returns an empty result, not an error.
+        let short = svc
+            .search_messages(Request::new(SearchMessagesRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                query: "a".into(),
+                limit: 100,
+                offset: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(short.total, 0);
+        assert!(short.messages.is_empty());
+
+        // The header-query convention routes to the headers JSONB search.
+        let header = svc
+            .search_messages(Request::new(SearchMessagesRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                query: header_search_query("Message-ID", "s2"),
+                limit: 100,
+                offset: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(header.total, 1);
+        assert_eq!(header.messages[0].uid, uids[1]);
+        // A plain query that merely starts with "header:" is still fulltext.
+        assert_eq!(parse_header_query("header: no separator"), None);
+
+        // COPY: distinct row + a UID allocated in the DESTINATION's own UID
+        // space. (UIDs are per-mailbox, so comparing the copy's UID against
+        // the source's would be wrong — an empty Archive legitimately starts
+        // at 1, which is exactly what the earlier version of this test
+        // mis-asserted.)
+        let archive_uidnext_before = svc
+            .get_mailbox_status(Request::new(GetMailboxStatusRequest {
+                account_id: account_id.clone(),
+                mailbox: "Archive".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .mailbox
+            .expect("archive mailbox")
+            .uidnext;
+        let copied = svc
+            .copy_message(Request::new(CopyMessageRequest {
+                account_id: account_id.clone(),
+                source_mailbox: "Inbox".into(),
+                dest_mailbox: "Archive".into(),
+                uids: vec![uids[0]],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let copy_uid = *copied.uid_mapping.get(&uids[0]).expect("copy uid");
+        assert_eq!(
+            copy_uid, archive_uidnext_before,
+            "the copy takes the destination's next UID"
+        );
+        // Copying again yields yet another row (APPEND-style exemption).
+        let copied_again = svc
+            .copy_message(Request::new(CopyMessageRequest {
+                account_id: account_id.clone(),
+                source_mailbox: "Inbox".into(),
+                dest_mailbox: "Archive".into(),
+                uids: vec![uids[0]],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let second_copy = *copied_again.uid_mapping.get(&uids[0]).unwrap();
+        assert_ne!(second_copy, copy_uid);
+        // Unknown destination is NOT_FOUND.
+        assert_eq!(
+            svc.copy_message(Request::new(CopyMessageRequest {
+                account_id: account_id.clone(),
+                source_mailbox: "Inbox".into(),
+                dest_mailbox: "Ghost".into(),
+                uids: vec![uids[0]],
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        // MOVE: source loses the row, destination gains a mapping.
+        let moved = svc
+            .move_message(Request::new(MoveMessageRequest {
+                account_id: account_id.clone(),
+                source_mailbox: "Inbox".into(),
+                dest_mailbox: "Trash".into(),
+                uids: vec![uids[1]],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let moved_uid = *moved.uid_mapping.get(&uids[1]).expect("moved uid");
+        assert!(moved_uid > 0);
+        assert_eq!(
+            svc.move_message(Request::new(MoveMessageRequest {
+                account_id: account_id.clone(),
+                source_mailbox: "Inbox".into(),
+                dest_mailbox: "Inbox".into(),
+                uids: vec![uids[0]],
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        // EXPUNGE: nothing is \Deleted yet; then mark and expunge a subset.
+        let nothing = svc
+            .expunge(Request::new(ExpungeRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(nothing.expunged_uids.is_empty());
+        svc.set_flags(Request::new(SetFlagsRequest {
+            account_id: account_id.clone(),
+            mailbox: "Inbox".into(),
+            uids: uids.clone(),
+            flags: Some(MessageFlags {
+                deleted: true,
+                ..Default::default()
+            }),
+            operation: FlagOperation::Add as i32,
+        }))
+        .await
+        .unwrap();
+        // UID EXPUNGE for a non-deleted/absent UID is a no-op.
+        let subset = svc
+            .expunge(Request::new(ExpungeRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![999_999],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(subset.expunged_uids.is_empty());
+        // Export only the second remaining UID.
+        let subset = svc
+            .expunge(Request::new(ExpungeRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![uids[0]],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(subset.expunged_uids, vec![uids[0]]);
+        // A UID > i64::MAX in the expunge set is rejected.
+        assert_eq!(
+            svc.expunge(Request::new(ExpungeRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+                uids: vec![u64::MAX],
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn service_mailbox_lifecycle_status_and_subscription() {
+        let Some((svc, pool)) = service_with_db("service_mailbox_lifecycle").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let account_id = make_account(&svc, "mailbox").await;
+
+        // create_mailbox failure modes.
+        assert_eq!(
+            svc.create_mailbox(Request::new(CreateMailboxRequest {
+                account_id: "nope".into(),
+                name: "X".into(),
+                special_use: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            svc.create_mailbox(Request::new(CreateMailboxRequest {
+                account_id: Uuid::new_v4().to_string(),
+                name: "X".into(),
+                special_use: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            svc.create_mailbox(Request::new(CreateMailboxRequest {
+                account_id: account_id.clone(),
+                name: "   ".into(),
+                special_use: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            svc.create_mailbox(Request::new(CreateMailboxRequest {
+                account_id: account_id.clone(),
+                name: "Inbox".into(),
+                special_use: String::new(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::AlreadyExists
+        );
+
+        let created = svc
+            .create_mailbox(Request::new(CreateMailboxRequest {
+                account_id: account_id.clone(),
+                name: "Projects".into(),
+                special_use: "\\Archive".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .mailbox
+            .expect("created mailbox");
+        assert_eq!(created.name, "Projects");
+        assert_eq!(created.attributes, vec!["\\Archive".to_string()]);
+        assert_eq!(created.uidnext, 1);
+        assert!(created.uidvalidity > 0);
+        // The cache was invalidated by the create: the new mailbox resolves.
+        assert_eq!(
+            svc.get_mailbox_status(Request::new(GetMailboxStatusRequest {
+                account_id: account_id.clone(),
+                mailbox: "projects".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .mailbox
+            .unwrap()
+            .name,
+            "Projects",
+            "mailbox names resolve case-insensitively"
+        );
+
+        // list_mailboxes: pattern filter + unknown account.
+        let all = svc
+            .list_mailboxes(Request::new(ListMailboxesRequest {
+                account_id: account_id.clone(),
+                pattern: "*".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(all.mailboxes.len(), 7);
+        let filtered = svc
+            .list_mailboxes(Request::new(ListMailboxesRequest {
+                account_id: account_id.clone(),
+                pattern: "proj".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(filtered.mailboxes.len(), 1);
+        assert_eq!(filtered.mailboxes[0].name, "Projects");
+        assert_eq!(
+            svc.list_mailboxes(Request::new(ListMailboxesRequest {
+                account_id: Uuid::new_v4().to_string(),
+                pattern: "*".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        // The default mailboxes carry their RFC 6154 attributes.
+        let mut attrs: Vec<(String, Vec<String>)> = all
+            .mailboxes
+            .iter()
+            .map(|m| (m.name.clone(), m.attributes.clone()))
+            .collect();
+        attrs.sort();
+        assert!(attrs.iter().any(|(n, a)| n == "Inbox" && a.is_empty()));
+        assert!(attrs
+            .iter()
+            .any(|(n, a)| n == "Sent" && a == &vec!["\\Sent".to_string()]));
+        assert!(attrs
+            .iter()
+            .any(|(n, a)| n == "Spam" && a == &vec!["\\Junk".to_string()]));
+
+        // delete_mailbox: system mailboxes are FAILED_PRECONDITION, unknown
+        // ones NOT_FOUND, custom ones succeed.
+        assert_eq!(
+            svc.delete_mailbox(Request::new(DeleteMailboxRequest {
+                account_id: account_id.clone(),
+                name: "Inbox".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            svc.delete_mailbox(Request::new(DeleteMailboxRequest {
+                account_id: account_id.clone(),
+                name: "DoesNotExist".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            svc.delete_mailbox(Request::new(DeleteMailboxRequest {
+                account_id: Uuid::new_v4().to_string(),
+                name: "Projects".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+        // "Projects" was created with \Archive, i.e. it IS the system Archive
+        // mailbox (mailbox_type=archive), so deleting it must be REFUSED —
+        // the earlier version of this test expected success and "proved" a
+        // deletion the product correctly refuses.
+        assert_eq!(
+            svc.delete_mailbox(Request::new(DeleteMailboxRequest {
+                account_id: account_id.clone(),
+                name: "Projects".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::FailedPrecondition,
+            "a system mailbox must never be deletable"
+        );
+        // A genuinely custom mailbox deletes successfully (L14(a): the cache
+        // is invalidated so the name stops resolving).
+        svc.create_mailbox(Request::new(CreateMailboxRequest {
+            account_id: account_id.clone(),
+            name: "Scratch".into(),
+            special_use: String::new(),
+        }))
+        .await
+        .expect("create custom mailbox");
+        assert!(
+            svc.delete_mailbox(Request::new(DeleteMailboxRequest {
+                account_id: account_id.clone(),
+                name: "Scratch".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .success
+        );
+
+        // get_mailbox_status on an unknown mailbox is NOT_FOUND.
+        assert_eq!(
+            svc.get_mailbox_status(Request::new(GetMailboxStatusRequest {
+                account_id: account_id.clone(),
+                mailbox: "Ghost".into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+
+        // subscribe_mailbox yields the initial MailboxUpdated event.
+        let mut stream = svc
+            .subscribe_mailbox(Request::new(SubscribeMailboxRequest {
+                account_id: account_id.clone(),
+                mailbox: "Inbox".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let first = stream
+            .next()
+            .await
+            .expect("initial event")
+            .expect("ok event")
+            .event
+            .expect("event payload");
+        match first {
+            mailbox_event::Event::MailboxUpdated(update) => {
+                assert_eq!(update.mailbox.expect("mailbox").name, "Inbox");
+            }
+            other => panic!("unexpected initial event: {other:?}"),
+        }
+        // Unknown mailbox: the resolution failure happens before streaming.
+        // (`unwrap_err` is unusable here: the Ok side is a boxed stream and
+        // not Debug.)
+        match svc
+            .subscribe_mailbox(Request::new(SubscribeMailboxRequest {
+                account_id: account_id.clone(),
+                mailbox: "Ghost".into(),
+            }))
+            .await
+        {
+            Err(status) => assert_eq!(status.code(), tonic::Code::NotFound),
+            Ok(_) => panic!("an unknown mailbox must fail before streaming"),
+        }
+        drop(stream);
+
+        pool.close().await;
     }
 }

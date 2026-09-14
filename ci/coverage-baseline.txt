@@ -20,4 +20,11 @@
 # ASiC signing module, the validated filing packages and the TSD ledger
 # derivation, each with DB-backed tests; the gate had instructed the raise in
 # that run's log. Truncated to two decimals, the ratchet's own convention.
-66.80
+#
+# 2026-09-14: raised 66.80 → 84.48 after the adversarial coverage campaign
+# measured 84.4946% over 8,406 tests (598 files; the same run is now
+# 8406/8406 with zero skipped — every #[ignore] attribute in the workspace was
+# removed and every gated suite is exercised, including the three that need a
+# live ClickHouse). The campaign also found and fixed production bugs the
+# suites had never reached. Truncated to two decimals.
+84.48

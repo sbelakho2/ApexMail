@@ -1785,8 +1785,12 @@ mod tests {
     //   docker exec -i <ctr> clickhouse-client --multiquery < deploy/clickhouse/initdb/001_schema.sql
     //   cargo test -p tracking-service -- --ignored --nocapture clickhouse_roundtrip
 
+    /// Requires a running ClickHouse with the canonical schema applied
+    /// (`deploy/clickhouse/initdb/001_schema.sql`) at `CLICKHOUSE_TEST_URL`
+    /// (default 127.0.0.1:8124); soft-skips when it is absent, like every other
+    /// infrastructure-gated test in the workspace. It was `#[ignore]`d, so CI
+    /// never ran it.
     #[tokio::test]
-    #[ignore = "requires a running ClickHouse with the apexmail schema"]
     async fn clickhouse_roundtrip_roundtrip_through_clickhouse() {
         use chrono::TimeZone;
 
@@ -1794,6 +1798,22 @@ mod tests {
             std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
         let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
+        // Soft-skip when no ClickHouse is running (the workspace convention for
+        // infrastructure-gated tests): the test was `#[ignore]`d, so it never
+        // ran in CI and nobody saw it panic here.
+        let probe = clickhouse::Client::default()
+            .with_url(&url)
+            .with_database("default")
+            .with_user(&user);
+        let probe = if password.is_empty() {
+            probe
+        } else {
+            probe.with_password(password.clone())
+        };
+        if probe.query("SELECT 1").fetch_one::<u8>().await.is_err() {
+            eprintln!("skipping clickhouse_roundtrip: no ClickHouse at {url}");
+            return;
+        }
         let ch = clickhouse::Client::default()
             .with_url(&url)
             .with_database("apexmail")

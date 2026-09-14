@@ -666,7 +666,10 @@ async fn upsert_failure_row(
              updated_at = NOW()
          WHERE dedicated_ips.status IN ('provisioning', 'created', 'attached', 'rdns_ready')",
     )
-    .bind(record.id)
+    // `dedicated_ips.id` is VARCHAR(64) (migration 093): a Uuid-typed bind
+    // makes `id = $1` fail with "operator does not exist: character varying
+    // = uuid", so every persisted id crosses as text.
+    .bind(record.id.to_string())
     .bind(&record.tenant_id)
     .bind(&record.ip_address)
     .bind(&record.region)
@@ -722,7 +725,7 @@ impl ProvisioningStore for PgProvisioningStore<'_> {
                   hetzner_floating_ip_id, billing_status, allocated_at, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, 'created', 0.0, $5, $6, NOW(), NOW(), NOW())",
             )
-            .bind(row.id)
+            .bind(row.id.to_string())
             .bind(&row.tenant_id)
             .bind(&row.ip_address)
             .bind(&row.region)
@@ -746,7 +749,7 @@ impl ProvisioningStore for PgProvisioningStore<'_> {
                  SET status = 'attached', hetzner_server_id = $2, updated_at = NOW()
                  WHERE id = $1 AND status = 'created'",
             )
-            .bind(id)
+            .bind(id.to_string())
             .bind(server_id)
             .execute(self.db)
             .await?;
@@ -767,7 +770,7 @@ impl ProvisioningStore for PgProvisioningStore<'_> {
                      rdns_verified_at = NOW(), updated_at = NOW()
                  WHERE id = $1 AND status = 'attached'",
             )
-            .bind(id)
+            .bind(id.to_string())
             .bind(&hostname)
             .execute(self.db)
             .await?;
@@ -788,7 +791,7 @@ impl ProvisioningStore for PgProvisioningStore<'_> {
                    AND rdns_hostname IS NOT NULL
                    AND rdns_verified_at IS NOT NULL",
             )
-            .bind(id)
+            .bind(id.to_string())
             .execute(self.db)
             .await?;
             Ok(result.rows_affected() == 1)
@@ -1508,7 +1511,7 @@ impl DedicatedIpProvider {
             "SELECT ip_address, hetzner_floating_ip_id FROM dedicated_ips
              WHERE id = $1 AND tenant_id = $2 AND status NOT IN ('retired', 'releasing')",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .bind(tenant_id)
         .fetch_optional(&self.db)
         .await?;
@@ -1544,7 +1547,7 @@ impl DedicatedIpProvider {
                  updated_at = NOW()
              WHERE id = $1",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .execute(&self.db)
         .await?;
 
@@ -1582,7 +1585,7 @@ impl DedicatedIpProvider {
                )
              RETURNING ip_address, warmup_progress, warmup_started_at",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .bind(tenant_id)
         .fetch_optional(&self.db)
         .await?;
@@ -1595,7 +1598,7 @@ impl DedicatedIpProvider {
                 let current: Option<(String,)> = sqlx::query_as(
                     "SELECT status FROM dedicated_ips WHERE id = $1 AND tenant_id = $2",
                 )
-                .bind(dedicated_ip_id)
+                .bind(dedicated_ip_id.to_string())
                 .bind(tenant_id)
                 .fetch_optional(&self.db)
                 .await?;
@@ -1631,7 +1634,7 @@ impl DedicatedIpProvider {
             "SELECT EXTRACT(DAY FROM NOW() - warmup_started_at)::int
              FROM dedicated_ips WHERE id = $1 AND warmup_started_at IS NOT NULL",
         )
-        .bind(id)
+        .bind(id.to_string())
         .fetch_optional(&self.db)
         .await?;
         Ok(day.map(|(d,)| d).unwrap_or(0))
@@ -1643,8 +1646,8 @@ impl DedicatedIpProvider {
     pub async fn tick_warmup(&self) -> Result<u32, IpProviderError> {
         assert_transition(DedicatedIpState::Warming, DedicatedIpState::Active)?;
 
-        let candidates: Vec<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM dedicated_ips
+        let candidates: Vec<(String,)> = sqlx::query_as(
+            "SELECT id::text AS id FROM dedicated_ips
              WHERE status = 'warming' AND warmup_started_at IS NOT NULL
                AND EXTRACT(DAY FROM NOW() - warmup_started_at) >= $1",
         )
@@ -1653,14 +1656,18 @@ impl DedicatedIpProvider {
         .await?;
 
         let mut graduated = 0u32;
-        for (id,) in candidates {
+        for (id_text,) in candidates {
+            let Ok(id) = Uuid::parse_str(&id_text) else {
+                warn!(id = %id_text, "skipping dedicated IP with a non-UUID id");
+                continue;
+            };
             let result = sqlx::query(
                 "UPDATE dedicated_ips
                  SET status = 'active', warmup_progress = 1.0,
                      warmup_completed_at = NOW(), updated_at = NOW()
                  WHERE id = $1 AND status = 'warming' AND warmup_started_at IS NOT NULL",
             )
-            .bind(id)
+            .bind(id.to_string())
             .execute(&self.db)
             .await?;
             if result.rows_affected() == 1 {
@@ -1697,7 +1704,7 @@ impl DedicatedIpProvider {
         tenant_id: &str,
     ) -> Result<Vec<AllocatedIp>, IpProviderError> {
         let rows: Vec<(
-            Uuid,
+            String,
             String,
             Option<i64>,
             String,
@@ -1705,7 +1712,7 @@ impl DedicatedIpProvider {
             i32,
             String,
         )> = sqlx::query_as(
-            "SELECT id, ip_address, hetzner_floating_ip_id, region, rdns_hostname,
+            "SELECT id::text AS id, ip_address, hetzner_floating_ip_id, region, rdns_hostname,
                         EXTRACT(DAY FROM NOW() - COALESCE(warmup_started_at, created_at))::int,
                         COALESCE(billing_status, 'included')
                  FROM dedicated_ips
@@ -1718,15 +1725,17 @@ impl DedicatedIpProvider {
 
         Ok(rows
             .into_iter()
-            .map(|(id, ip, hid, region, rdns, day, billing)| AllocatedIp {
-                id,
-                ip_address: ip,
-                hetzner_floating_ip_id: hid.unwrap_or(0),
-                region,
-                rdns_hostname: rdns,
-                warmup_day: day,
-                billing_status: billing,
-            })
+            .map(
+                |(id_text, ip, hid, region, rdns, day, billing)| AllocatedIp {
+                    id: Uuid::parse_str(&id_text).unwrap_or_else(|_| Uuid::nil()),
+                    ip_address: ip,
+                    hetzner_floating_ip_id: hid.unwrap_or(0),
+                    region,
+                    rdns_hostname: rdns,
+                    warmup_day: day,
+                    billing_status: billing,
+                },
+            )
             .collect())
     }
 }
@@ -2802,5 +2811,975 @@ mod tests {
             !NON_OCCUPYING_STATUSES.contains(&"active"),
             "active occupies the allowance and must be counted"
         );
+    }
+}
+
+// ─── Adversarial DB-backed tests for the production adapters ───
+//
+// The `ProvisioningStore` port has fake-based tests above; these drive the
+// REAL Postgres adapter against the canonical schema (where
+// `dedicated_ips.id`/`tenant_id` are VARCHAR, not UUID). Each test owns a
+// freshly provisioned database.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use chrono::TimeDelta;
+    use std::sync::Mutex as StdMutex;
+
+    async fn pool_for(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_pool(&format!("adv_ip_provider_{test_name}")).await
+    }
+
+    fn unique_id() -> String {
+        uuid::Uuid::new_v4().simple().to_string()[..26].to_string()
+    }
+
+    async fn seed_plan(pool: &PgPool, name: &str, allowed: bool, included_count: i32) {
+        let mut features =
+            serde_json::to_value(billing_service::types::PlanFeatures::default()).unwrap();
+        features["dedicated_ip"] = serde_json::json!(allowed);
+        features["dedicated_ip_count"] = serde_json::json!(included_count);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
+                                email_limit, api_call_limit, features, is_active, sort_order,
+                                created_at, updated_at)
+             VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $1, '', 0, 0,
+                     1000, 1000, $2, true, 0, NOW(), NOW())
+             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+        )
+        .bind(name)
+        .bind(features)
+        .execute(pool)
+        .await
+        .expect("seed plan");
+    }
+
+    async fn seed_tenant(pool: &PgPool, tenant_id: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'adversarial ip', $2, $3, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(format!("advip-{tenant_id}"))
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_domain(pool: &PgPool, tenant: &str, name: &str, verified: bool) {
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, verified, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, $3, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(name)
+        .bind(verified)
+        .execute(pool)
+        .await
+        .expect("seed domain");
+    }
+
+    async fn seed_ip_row(
+        pool: &PgPool,
+        tenant: &str,
+        id: Uuid,
+        ip: &str,
+        status: &str,
+        hetzner_id: Option<i64>,
+        warmup_started_at: Option<DateTime<Utc>>,
+        rdns_hostname: Option<&str>,
+        rdns_verified_at: Option<DateTime<Utc>>,
+        billing_status: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO dedicated_ips
+             (id, tenant_id, ip_address, region, status, warmup_progress,
+              hetzner_floating_ip_id, billing_status, warmup_started_at, rdns_hostname,
+              rdns_verified_at, allocated_at, created_at, updated_at)
+             VALUES ($1, $2, $3, 'fsn1', $4, 0.0, $5, $6, $7, $8, $9, NOW(), NOW(), NOW())",
+        )
+        .bind(id.to_string())
+        .bind(tenant)
+        .bind(ip)
+        .bind(status)
+        .bind(hetzner_id)
+        .bind(billing_status.unwrap_or("included"))
+        .bind(warmup_started_at)
+        .bind(rdns_hostname)
+        .bind(rdns_verified_at)
+        .execute(pool)
+        .await
+        .expect("seed dedicated IP row");
+    }
+
+    // ── ProvisioningStore adapter ───────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_store_plan_gate_and_allowance_count() {
+        let Some(pool) = pool_for("store_plan_count").await else {
+            return;
+        };
+        seed_plan(&pool, "advip2", true, 2).await;
+        seed_plan(&pool, "advip0", false, 0).await;
+        let eligible = unique_id();
+        let ineligible = unique_id();
+        let no_plan = unique_id();
+        seed_tenant(&pool, &eligible, "advip2").await;
+        seed_tenant(&pool, &ineligible, "advip0").await;
+        seed_tenant(&pool, &no_plan, "plan_that_does_not_exist").await;
+        let store = PgProvisioningStore { db: &pool };
+
+        let plan = store.load_plan(&eligible).await.unwrap();
+        assert!(plan.allowed);
+        assert_eq!(plan.included_count, 2);
+        let plan = store.load_plan(&ineligible).await.unwrap();
+        assert!(!plan.allowed);
+        assert_eq!(plan.included_count, 0);
+        // Unknown plan / unknown tenant both fail closed.
+        let plan = store.load_plan(&no_plan).await.unwrap();
+        assert!(!plan.allowed);
+        let plan = store.load_plan(&unique_id()).await.unwrap();
+        assert!(!plan.allowed);
+
+        // Allowance counts every non-terminal status, not just active.
+        let mut expected = 0;
+        for (index, status) in [
+            "active",
+            "warming",
+            "created",
+            "attached",
+            "rdns_ready",
+            "provisioning",
+            "pending",
+            "suspended",
+            "cooldown",
+        ]
+        .iter()
+        .enumerate()
+        {
+            seed_ip_row(
+                &pool,
+                &eligible,
+                Uuid::new_v4(),
+                &format!("203.0.113.{index}"),
+                status,
+                None,
+                // The canonical schema enforces the warmup anchor for new
+                // warming rows (migration 207).
+                (*status == "warming").then(Utc::now),
+                None,
+                None,
+                None,
+            )
+            .await;
+            expected += 1;
+        }
+        for (index, status) in ["retired", "releasing", "failed", "cleanup_failed"]
+            .iter()
+            .enumerate()
+        {
+            seed_ip_row(
+                &pool,
+                &eligible,
+                Uuid::new_v4(),
+                &format!("198.51.100.{index}"),
+                status,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+        }
+        assert_eq!(store.count_active(&eligible).await.unwrap(), expected);
+        assert_eq!(store.count_active(&ineligible).await.unwrap(), 0);
+        assert_eq!(store.count_active(&unique_id()).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn adversarial_store_rdns_hostname_requires_verified_domain() {
+        let Some(pool) = pool_for("store_rdns").await else {
+            return;
+        };
+        seed_plan(&pool, "adviprdns", true, 1).await;
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "adviprdns").await;
+        let store = PgProvisioningStore { db: &pool };
+
+        assert_eq!(store.load_rdns_hostname(&tenant).await.unwrap(), None);
+        seed_domain(&pool, &tenant, "unverified.example", false).await;
+        assert_eq!(store.load_rdns_hostname(&tenant).await.unwrap(), None);
+        seed_domain(&pool, &tenant, "verified.example", true).await;
+        assert_eq!(
+            store.load_rdns_hostname(&tenant).await.unwrap().as_deref(),
+            Some("mail.verified.example"),
+            "the FIRST verified domain (by created_at) is the rDNS target"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_store_lifecycle_cas_and_failure_states() {
+        let Some(pool) = pool_for("store_lifecycle").await else {
+            return;
+        };
+        seed_plan(&pool, "adviplife", true, 1).await;
+        let tenant = unique_id();
+        let other = unique_id();
+        seed_tenant(&pool, &tenant, "adviplife").await;
+        seed_tenant(&pool, &other, "adviplife").await;
+        let store = PgProvisioningStore { db: &pool };
+        let id = Uuid::new_v4();
+
+        // insert_created persists the canonical `created` row.
+        store
+            .insert_created(NewDedicatedIp {
+                id,
+                tenant_id: tenant.clone(),
+                ip_address: "203.0.113.200".into(),
+                region: "fsn1".into(),
+                provider_resource_id: 4242,
+                billing_status: "included".into(),
+            })
+            .await
+            .unwrap();
+        let (status, persisted_tenant, hetzner): (String, String, Option<i64>) = sqlx::query_as(
+            "SELECT status, tenant_id, hetzner_floating_ip_id FROM dedicated_ips WHERE id = $1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "created");
+        assert_eq!(persisted_tenant, tenant);
+        assert_eq!(hetzner, Some(4242));
+
+        // A duplicate id is refused (no silent overwrite).
+        let duplicate = store
+            .insert_created(NewDedicatedIp {
+                id,
+                tenant_id: tenant.clone(),
+                ip_address: "203.0.113.201".into(),
+                region: "fsn1".into(),
+                provider_resource_id: 4243,
+                billing_status: "included".into(),
+            })
+            .await;
+        assert!(matches!(duplicate, Err(IpProviderError::Database(_))));
+
+        // CAS: attached only from created, once.
+        assert!(store.mark_attached(id, 42).await.unwrap());
+        assert!(
+            !store.mark_attached(id, 42).await.unwrap(),
+            "created -> attached must not replay"
+        );
+        // rdns_ready only from attached.
+        assert!(store
+            .mark_rdns_ready(id, "mail.example.com".into())
+            .await
+            .unwrap());
+        assert!(!store
+            .mark_rdns_ready(id, "mail.example.com".into())
+            .await
+            .unwrap());
+        // warming requires rdns_ready AND a stored hostname.
+        assert!(store.mark_warming(id).await.unwrap());
+        assert!(
+            !store.mark_warming(id).await.unwrap(),
+            "rdns_ready -> warming must not replay"
+        );
+
+        // Failure recording: in-flight rows are updated...
+        let failure_id = Uuid::new_v4();
+        store
+            .insert_created(NewDedicatedIp {
+                id: failure_id,
+                tenant_id: tenant.clone(),
+                ip_address: "203.0.113.202".into(),
+                region: "fsn1".into(),
+                provider_resource_id: 5000,
+                billing_status: "included".into(),
+            })
+            .await
+            .unwrap();
+        let recorded = store
+            .record_failure(FailureRecord {
+                id: failure_id,
+                tenant_id: tenant.clone(),
+                ip_address: "203.0.113.202".into(),
+                region: "fsn1".into(),
+                provider_resource_id: Some(5000),
+                billing_status: "included".into(),
+                status: DedicatedIpState::Failed,
+                error_detail: "attach failed; provider resource 5000 deleted".into(),
+            })
+            .await
+            .unwrap();
+        assert!(recorded);
+        let (status, error): (String, Option<String>) =
+            sqlx::query_as("SELECT status, provisioning_error FROM dedicated_ips WHERE id = $1")
+                .bind(failure_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "failed");
+        assert!(error.unwrap_or_default().contains("attach failed"));
+
+        // ...while a warming (selectable) row must NOT be failed over.
+        let refused = store
+            .record_failure(FailureRecord {
+                id,
+                tenant_id: tenant.clone(),
+                ip_address: "203.0.113.200".into(),
+                region: "fsn1".into(),
+                provider_resource_id: Some(4242),
+                billing_status: "included".into(),
+                status: DedicatedIpState::CleanupFailed,
+                error_detail: "late failure".into(),
+            })
+            .await
+            .unwrap();
+        assert!(!refused, "selectable states must never be overwritten");
+        let status: String = sqlx::query_scalar("SELECT status FROM dedicated_ips WHERE id = $1")
+            .bind(id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "warming");
+
+        // Unique-conflict retry: a second failure claiming an already-linked
+        // provider resource id is recorded WITHOUT the link (worklist entry).
+        let conflicting = Uuid::new_v4();
+        let recorded = store
+            .record_failure(FailureRecord {
+                id: conflicting,
+                tenant_id: other.clone(),
+                ip_address: "203.0.113.250".into(),
+                region: "fsn1".into(),
+                provider_resource_id: Some(5000),
+                billing_status: "included".into(),
+                status: DedicatedIpState::CleanupFailed,
+                error_detail: "provider cleanup failed".into(),
+            })
+            .await
+            .unwrap();
+        assert!(recorded, "the loud failure record must survive a conflict");
+        let (status, hetzner, error): (String, Option<i64>, Option<String>) = sqlx::query_as(
+            "SELECT status, hetzner_floating_ip_id, provisioning_error FROM dedicated_ips WHERE id = $1",
+        )
+        .bind(conflicting.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "cleanup_failed");
+        assert_eq!(hetzner, None, "the conflicting link must be dropped");
+        assert!(error.unwrap_or_default().contains("not linked"));
+    }
+
+    // ── DedicatedIpProvider DB methods (no provider HTTP needed) ─
+
+    async fn provider_for(pool: &PgPool) -> DedicatedIpProvider {
+        DedicatedIpProvider::new("test-token".into(), pool.clone(), "fsn1".into(), Some(7))
+            .expect("provider construction must not need the network")
+    }
+
+    #[tokio::test]
+    async fn adversarial_provider_plan_and_count_wrappers() {
+        let Some(pool) = pool_for("provider_wrappers").await else {
+            return;
+        };
+        seed_plan(&pool, "advipwrap", true, 3).await;
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "advipwrap").await;
+        seed_ip_row(
+            &pool,
+            &tenant,
+            Uuid::new_v4(),
+            "203.0.113.10",
+            "active",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let provider = provider_for(&pool).await;
+        assert_eq!(
+            provider.check_plan_eligibility(&tenant).await.unwrap(),
+            (true, 3)
+        );
+        assert_eq!(provider.count_active_ips(&tenant).await.unwrap(), 1);
+        assert_eq!(
+            provider.check_plan_eligibility(&unique_id()).await.unwrap(),
+            (false, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_provider_release_ip_tenant_scoped_and_idempotent() {
+        let Some(pool) = pool_for("provider_release").await else {
+            return;
+        };
+        seed_plan(&pool, "adviprel", true, 1).await;
+        let tenant = unique_id();
+        let other = unique_id();
+        seed_tenant(&pool, &tenant, "adviprel").await;
+        seed_tenant(&pool, &other, "adviprel").await;
+
+        // Unknown id -> IpNotFound.
+        let provider = provider_for(&pool).await;
+        assert!(matches!(
+            provider.release_ip(Uuid::new_v4(), &tenant).await,
+            Err(IpProviderError::IpNotFound { .. })
+        ));
+
+        // A row with NO provider id skips the (network) delete entirely and
+        // retires with billing_status flipped to pending_cancel.
+        let releasable = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            releasable,
+            "203.0.113.20",
+            "active",
+            None,
+            None,
+            None,
+            None,
+            Some("active"),
+        )
+        .await;
+        provider.release_ip(releasable, &tenant).await.unwrap();
+        let (status, billing): (String, String) =
+            sqlx::query_as("SELECT status, billing_status FROM dedicated_ips WHERE id = $1")
+                .bind(releasable.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "retired");
+        assert_eq!(billing, "pending_cancel");
+
+        // Retired rows are no longer releasable, and tenant scoping holds.
+        assert!(matches!(
+            provider.release_ip(releasable, &tenant).await,
+            Err(IpProviderError::IpNotFound { .. })
+        ));
+        let foreign = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &other,
+            foreign,
+            "203.0.113.21",
+            "failed",
+            None,
+            None,
+            None,
+            None,
+            Some("included"),
+        )
+        .await;
+        assert!(
+            provider.release_ip(foreign, &tenant).await.is_err(),
+            "another tenant's IP must not be releasable"
+        );
+        // A non-billable status is preserved on release.
+        provider.release_ip(foreign, &other).await.unwrap();
+        let (status, billing): (String, String) =
+            sqlx::query_as("SELECT status, billing_status FROM dedicated_ips WHERE id = $1")
+                .bind(foreign.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "retired");
+        assert_eq!(billing, "included", "non-cancellable billing kept as-is");
+    }
+
+    #[tokio::test]
+    async fn adversarial_provider_warmup_state_machine() {
+        let Some(pool) = pool_for("provider_warmup").await else {
+            return;
+        };
+        seed_plan(&pool, "advipwarm", true, 1).await;
+        let tenant = unique_id();
+        let other = unique_id();
+        seed_tenant(&pool, &tenant, "advipwarm").await;
+        seed_tenant(&pool, &other, "advipwarm").await;
+        let provider = provider_for(&pool).await;
+
+        // Unknown id.
+        assert!(matches!(
+            provider.start_warmup(Uuid::new_v4(), &tenant).await,
+            Err(IpProviderError::IpNotFound { .. })
+        ));
+
+        // rdns_ready WITHOUT a hostname/verification anchor is refused by the
+        // poll predicate and reported as a state error (not a 404).
+        let anchorless = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            anchorless,
+            "203.0.113.30",
+            "rdns_ready",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        match provider.start_warmup(anchorless, &tenant).await {
+            Err(IpProviderError::InvalidStateTransition { from, to }) => {
+                assert_eq!(from, "rdns_ready");
+                assert_eq!(to, "warming");
+            }
+            other => panic!("expected InvalidStateTransition, got {other:?}"),
+        }
+
+        // A verified rdns_ready row starts warmup at day 0 with the day-0 cap.
+        let ready = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            ready,
+            "203.0.113.31",
+            "rdns_ready",
+            None,
+            None,
+            Some("mail.example.com"),
+            Some(Utc::now()),
+            None,
+        )
+        .await;
+        let status = provider.start_warmup(ready, &tenant).await.unwrap();
+        assert_eq!(status.ip_address, "203.0.113.31");
+        assert_eq!(status.health, IpHealth::Warming);
+        assert_eq!(status.warmup_day, 0);
+        assert_eq!(status.daily_limit, Some(50));
+        // Resume is idempotent (warming + anchor).
+        let resumed = provider.start_warmup(ready, &tenant).await.unwrap();
+        assert_eq!(resumed.warmup_started_at, status.warmup_started_at);
+
+        // An IP in the wrong tenant is a 404, and a terminal state a 409.
+        assert!(matches!(
+            provider.start_warmup(ready, &other).await,
+            Err(IpProviderError::IpNotFound { .. })
+        ));
+        let terminal = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            terminal,
+            "203.0.113.32",
+            "retired",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            provider.start_warmup(terminal, &tenant).await,
+            Err(IpProviderError::InvalidStateTransition { .. })
+        ));
+
+        // Warmup day is derived from the anchor, and the schedule follows it.
+        let ten_days_ago = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            ten_days_ago,
+            "203.0.113.33",
+            "warming",
+            None,
+            Some(Utc::now() - TimeDelta::days(10)),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let status = provider.start_warmup(ten_days_ago, &tenant).await.unwrap();
+        assert_eq!(status.warmup_day, 10);
+        assert_eq!(status.daily_limit, Some(warmup_schedule::limit_for_day(10)));
+        // Schedule tier for days 8-10.
+        assert_eq!(status.daily_limit, Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn adversarial_provider_tick_warmup_graduates_only_full_term() {
+        let Some(pool) = pool_for("provider_tick").await else {
+            return;
+        };
+        seed_plan(&pool, "advip tick", true, 1).await;
+        let tenant = unique_id();
+        seed_tenant(&pool, &tenant, "advip tick").await;
+        let provider = provider_for(&pool).await;
+
+        // Nothing warming -> no work.
+        assert_eq!(provider.tick_warmup().await.unwrap(), 0);
+
+        let graduated = Uuid::new_v4();
+        let in_progress = Uuid::new_v4();
+        let active = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            graduated,
+            "203.0.113.40",
+            "warming",
+            None,
+            Some(Utc::now() - TimeDelta::days(i64::from(warmup_schedule::FULL_WARMUP_DAYS) + 5)),
+            None,
+            None,
+            None,
+        )
+        .await;
+        seed_ip_row(
+            &pool,
+            &tenant,
+            in_progress,
+            "203.0.113.41",
+            "warming",
+            None,
+            Some(Utc::now() - TimeDelta::days(3)),
+            None,
+            None,
+            None,
+        )
+        .await;
+        seed_ip_row(
+            &pool,
+            &tenant,
+            active,
+            "203.0.113.42",
+            "active",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let touched = provider.tick_warmup().await.unwrap();
+        assert_eq!(
+            touched, 2,
+            "one graduation + one progress refresh (active rows untouched)"
+        );
+        let (status, progress): (String, f64) =
+            sqlx::query_as("SELECT status, warmup_progress FROM dedicated_ips WHERE id = $1")
+                .bind(graduated.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "active");
+        assert_eq!(progress, 1.0);
+        let (status, progress): (String, f64) =
+            sqlx::query_as("SELECT status, warmup_progress FROM dedicated_ips WHERE id = $1")
+                .bind(in_progress.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "warming");
+        assert!(progress > 0.0 && progress < 1.0, "progress {progress}");
+        // The active row was not touched by the refresh.
+        let status: String = sqlx::query_scalar("SELECT status FROM dedicated_ips WHERE id = $1")
+            .bind(active.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "active");
+        assert_eq!(
+            provider.tick_warmup().await.unwrap(),
+            1,
+            "the graduated row is not re-graduated; only the warming row refreshes"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_provider_list_tenant_ips() {
+        let Some(pool) = pool_for("provider_list").await else {
+            return;
+        };
+        seed_plan(&pool, "adviplist", true, 1).await;
+        let tenant = unique_id();
+        let other = unique_id();
+        seed_tenant(&pool, &tenant, "adviplist").await;
+        seed_tenant(&pool, &other, "adviplist").await;
+        let provider = provider_for(&pool).await;
+
+        assert!(provider.list_tenant_ips(&tenant).await.unwrap().is_empty());
+
+        let live = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            live,
+            "203.0.113.50",
+            "active",
+            None,
+            Some(Utc::now() - TimeDelta::days(4)),
+            Some("mail.example.com"),
+            Some(Utc::now()),
+            Some("pending_charge"),
+        )
+        .await;
+        let retired = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            retired,
+            "203.0.113.51",
+            "retired",
+            Some(99),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let failed = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &tenant,
+            failed,
+            "203.0.113.52",
+            "cleanup_failed",
+            Some(100),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let foreign = Uuid::new_v4();
+        seed_ip_row(
+            &pool,
+            &other,
+            foreign,
+            "203.0.113.53",
+            "active",
+            Some(101),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let listed = provider.list_tenant_ips(&tenant).await.unwrap();
+        assert_eq!(
+            listed.len(),
+            2,
+            "terminal retired row is hidden: {listed:?}"
+        );
+        let live_entry = listed
+            .iter()
+            .find(|row| row.id == live)
+            .expect("live row listed");
+        assert_eq!(live_entry.ip_address, "203.0.113.50");
+        assert_eq!(live_entry.hetzner_floating_ip_id, 0, "NULL link -> 0");
+        assert_eq!(
+            live_entry.rdns_hostname.as_deref(),
+            Some("mail.example.com")
+        );
+        assert_eq!(live_entry.billing_status, "pending_charge");
+        assert_eq!(live_entry.warmup_day, 4);
+        let failed_entry = listed.iter().find(|row| row.id == failed).unwrap();
+        assert_eq!(failed_entry.billing_status, "included");
+        // Tenant isolation.
+        let other_list = provider.list_tenant_ips(&other).await.unwrap();
+        assert_eq!(other_list.len(), 1);
+        assert_eq!(other_list[0].id, foreign);
+    }
+
+    // ── construction / verifier ─────────────────────────────────
+
+    static HETZNER_ENV_MUTEX: StdMutex<()> = StdMutex::new(());
+
+    /// Held across awaits on purpose (serialises Hetzner env mutation for the
+    /// duration of the request); acquired via a helper.
+    fn lock_hetzner_env() -> std::sync::MutexGuard<'static, ()> {
+        HETZNER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_env(key: &str, value: Option<&str>) -> Option<std::ffi::OsString> {
+        let previous = std::env::var_os(key);
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+        previous
+    }
+
+    fn restore_env(key: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[tokio::test]
+    async fn adversarial_provider_from_env_and_construction() {
+        let Some(pool) = pool_for("provider_from_env").await else {
+            return;
+        };
+        let _guard = lock_hetzner_env();
+        let token = set_env("HETZNER_API_TOKEN", None);
+        let location = set_env("HETZNER_DEFAULT_LOCATION", None);
+        let server = set_env("HETZNER_MTA_SERVER_ID", None);
+
+        // Not configured -> disabled (None), never a panic.
+        assert!(DedicatedIpProvider::from_env(pool.clone()).is_none());
+
+        std::env::set_var("HETZNER_API_TOKEN", "hetzner-token");
+        let provider = DedicatedIpProvider::from_env(pool.clone()).expect("configured provider");
+        assert_eq!(provider.default_location, "fsn1");
+        assert_eq!(provider.mta_server_id, None);
+
+        std::env::set_var("HETZNER_DEFAULT_LOCATION", "nbg1");
+        std::env::set_var("HETZNER_MTA_SERVER_ID", "1234");
+        let provider = DedicatedIpProvider::from_env(pool.clone()).unwrap();
+        assert_eq!(provider.default_location, "nbg1");
+        assert_eq!(provider.mta_server_id, Some(1234));
+
+        // A malformed server id degrades to "attachment impossible" (None)
+        // rather than failing startup.
+        std::env::set_var("HETZNER_MTA_SERVER_ID", "not-a-number");
+        let provider = DedicatedIpProvider::from_env(pool.clone()).unwrap();
+        assert_eq!(provider.mta_server_id, None);
+        // An explicit constructor with an impossible server id still builds.
+        assert!(DedicatedIpProvider::new(
+            "tok".into(),
+            pool.clone(),
+            "hel1".into(),
+            Some(u64::MAX)
+        )
+        .is_ok());
+
+        restore_env("HETZNER_API_TOKEN", token);
+        restore_env("HETZNER_DEFAULT_LOCATION", location);
+        restore_env("HETZNER_MTA_SERVER_ID", server);
+    }
+
+    #[tokio::test]
+    async fn adversarial_dns_verifier_refuses_unparseable_ip_without_lookup() {
+        let verifier = DnsRdnsVerifier;
+        for hostile in [
+            "",
+            "not-an-ip",
+            "999.999.999.999",
+            "203.0.113.1/24",
+            "203.0.113.1:25",
+            "'; DROP TABLE dedicated_ips;--",
+        ] {
+            match verifier.verify(hostile, "mail.example.com").await {
+                RdnsVerification::Mismatch {
+                    reason, expected, ..
+                } => {
+                    assert_eq!(expected, "mail.example.com");
+                    assert!(
+                        reason.contains("unparseable"),
+                        "{hostile:?} reason: {reason}"
+                    );
+                }
+                other => panic!("{hostile:?} must be rejected before any lookup, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn adversarial_non_occupying_sql_matches_the_constant() {
+        let sql = non_occupying_status_list_sql();
+        for status in NON_OCCUPYING_STATUSES {
+            assert!(sql.contains(&format!("'{status}'")), "{sql}");
+        }
+        for occupying in ["active", "warming", "created", "rdns_ready", "suspended"] {
+            assert!(!sql.contains(&format!("'{occupying}'")), "{sql}");
+        }
+        // `parse_selectable` must agree with the SQL exclusion list: every
+        // non-occupying status is a real state that never sends.
+        for status in NON_OCCUPYING_STATUSES {
+            assert!(DedicatedIpState::parse(status).is_some(), "{status}");
+        }
+    }
+
+    #[test]
+    fn adversarial_state_machine_exhaustive_matrix() {
+        // Idempotent resume is allowed for EVERY state, including terminals.
+        for state in DedicatedIpState::ALL {
+            assert_eq!(transition(state, state).unwrap(), state, "{state:?}");
+        }
+        // Every in-flight state may fail to both terminal failure states.
+        for state in DedicatedIpState::ALL.iter().filter(|s| s.is_in_flight()) {
+            assert!(transition(*state, DedicatedIpState::Failed).is_ok());
+            assert!(transition(*state, DedicatedIpState::CleanupFailed).is_ok());
+        }
+        // Terminal states can never move anywhere else.
+        for state in DedicatedIpState::ALL.iter().filter(|s| s.is_terminal()) {
+            for target in DedicatedIpState::ALL {
+                if target != *state {
+                    assert!(
+                        transition(*state, target).is_err(),
+                        "{state:?} -> {target:?} must be refused"
+                    );
+                }
+            }
+        }
+        // Selectable states are never terminal and always have a successor
+        // path toward active.
+        for state in DedicatedIpState::ALL.iter().filter(|s| s.is_selectable()) {
+            assert!(!state.is_terminal(), "{state:?}");
+            assert!(!state.is_in_flight(), "{state:?}");
+        }
+        // Only the five chain states have a next().
+        let chained: Vec<&str> = DedicatedIpState::ALL
+            .iter()
+            .filter(|s| s.next().is_some())
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            chained,
+            vec![
+                "provisioning",
+                "created",
+                "attached",
+                "rdns_ready",
+                "warming"
+            ]
+        );
+
+        // Verifier failure reasons: verified -> None, mismatch -> reason,
+        // unavailable -> prefixed reason (never silently empty).
+        assert_eq!(
+            RdnsVerification::Verified {
+                ptr_names: vec!["a.".into()]
+            }
+            .failure_reason(),
+            None
+        );
+        let mismatch = RdnsVerification::Mismatch {
+            ptr_names: vec!["b.".into()],
+            expected: "a.".into(),
+            reason: "PTR b. != a.".into(),
+        };
+        assert_eq!(mismatch.failure_reason().as_deref(), Some("PTR b. != a."));
+        let unavailable = RdnsVerification::LookupUnavailable {
+            reason: "resolver down".into(),
+        };
+        assert!(unavailable
+            .failure_reason()
+            .unwrap()
+            .contains("rDNS lookup unavailable: resolver down"));
+
+        // PTR normalisation trims, lowercases and drops the root dot.
+        assert_eq!(normalize_ptr("  Mail.Example.COM.  "), "mail.example.com");
+        assert_eq!(normalize_ptr(""), "");
+        assert_eq!(normalize_ptr("."), "");
     }
 }

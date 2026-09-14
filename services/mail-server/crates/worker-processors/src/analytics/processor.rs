@@ -916,3 +916,686 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod adversarial_db_tests {
+    //! Adversarial, DB-backed tests for the analytics pipeline.
+    //!
+    //! These drive the REAL entry points (`fetch_events`, `process_events`,
+    //! `flush_buffers`, `run_hourly_aggregation`, `update_aggregation`,
+    //! `mark_events_processed`, `reset_processing`, `stop`) against the
+    //! canonical provisioned schema plus the local Redis. `TEST_DATABASE_URL`
+    //! gates the suite exactly like the rest of the crate: unset soft-skips,
+    //! configured-but-broken FAILS.
+
+    use super::*;
+    use crate::analytics::types::AnalyticsEvent;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    fn redis_pool() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    fn dead_redis_pool() -> RedisPool {
+        let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let mut pool_cfg = deadpool_redis::PoolConfig::default();
+        pool_cfg.timeouts.create = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.wait = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.recycle = Some(Duration::from_millis(100));
+        cfg.pool = Some(pool_cfg);
+        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool construction")
+    }
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn test_config() -> AnalyticsConfig {
+        AnalyticsConfig {
+            base: crate::common::ProcessorConfig {
+                name: "analytics-adversarial".to_string(),
+                batch_size: 2,
+                poll_interval: Duration::from_millis(20),
+                flush_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            stats_ttl: Duration::from_secs(60),
+        }
+    }
+
+    fn processor(pool: PgPool, config: AnalyticsConfig) -> AnalyticsProcessor {
+        AnalyticsProcessor::new(pool, redis_pool(), config)
+    }
+
+    fn unique_tenant() -> String {
+        format!("an-{}", &Uuid::new_v4().simple().to_string()[..20])
+    }
+
+    async fn enqueue_event(
+        pool: &PgPool,
+        tenant: &str,
+        event_type: &str,
+        domain_id: Option<&str>,
+        campaign_id: Option<&str>,
+    ) -> String {
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO analytics_queue
+                 (tenant_id, event_type, message_id, domain_id, campaign_id, recipient, metadata, \"timestamp\")
+             VALUES ($1, $2, $3, $4, $5, 'prospect@example.test', '{\"src\":\"test\"}'::jsonb, NOW())
+             RETURNING id",
+        )
+        .bind(tenant)
+        .bind(event_type)
+        .bind(format!("msg-{}", &Uuid::new_v4().simple().to_string()[..20]))
+        .bind(domain_id)
+        .bind(campaign_id)
+        .fetch_one(pool)
+        .await
+        .expect("enqueue analytics event")
+        .to_string()
+    }
+
+    fn event(id: &str, tenant: &str, event_type: &str) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: id.to_string(),
+            tenant_id: tenant.to_string(),
+            event_type: event_type.to_string(),
+            message_id: None,
+            domain_id: None,
+            campaign_id: None,
+            recipient: None,
+            metadata: None,
+            timestamp: Utc::now(),
+        }
+    }
+
+    async fn hourly_totals(pool: &PgPool, tenant: &str, metric: &str) -> i64 {
+        let sql = format!(
+            "SELECT COALESCE(SUM({metric}), 0)::bigint FROM analytics_hourly WHERE tenant_id = $1"
+        );
+        sqlx::query_scalar::<_, i64>(&sql)
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("hourly totals")
+    }
+
+    /// The tenant-level (`domain_id`/`campaign_id` NULL) bucket only — the
+    /// flush path writes the same event into up to four key shapes, so the
+    /// un-shaped SUM above would multiply-count it.
+    async fn tenant_bucket_total(pool: &PgPool, tenant: &str, metric: &str) -> i64 {
+        let sql = format!(
+            "SELECT COALESCE(SUM({metric}), 0)::bigint FROM analytics_hourly
+              WHERE tenant_id = $1 AND domain_id IS NULL AND campaign_id IS NULL"
+        );
+        sqlx::query_scalar::<_, i64>(&sql)
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("tenant bucket totals")
+    }
+
+    // ── queue claiming ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fetch_events_claims_pending_and_reclaims_stale_processing_only() {
+        let Some(pool) = test_pool("an_fetch_events").await else {
+            return;
+        };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+
+        let pending = enqueue_event(&pool, &tenant, "sent", None, None).await;
+        let already_done = enqueue_event(&pool, &tenant, "sent", None, None).await;
+        let stale = enqueue_event(&pool, &tenant, "delivered", None, None).await;
+        let fresh_processing = enqueue_event(&pool, &tenant, "delivered", None, None).await;
+
+        sqlx::query("UPDATE analytics_queue SET processed = true WHERE id = $1")
+            .bind(already_done.parse::<i64>().unwrap())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE analytics_queue SET processing = true, processing_at = NOW() - INTERVAL '11 minutes' WHERE id = $1",
+        )
+        .bind(stale.parse::<i64>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE analytics_queue SET processing = true, processing_at = NOW() WHERE id = $1",
+        )
+        .bind(fresh_processing.parse::<i64>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let events = proc.fetch_events(50).await.expect("fetch events");
+        let ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            ids.contains(&pending.as_str()),
+            "pending row must be claimed"
+        );
+        assert!(
+            ids.contains(&stale.as_str()),
+            "a crashed worker's claim must be reclaimed after 10 minutes"
+        );
+        assert!(
+            !ids.contains(&already_done.as_str()),
+            "processed rows stay out"
+        );
+        assert!(
+            !ids.contains(&fresh_processing.as_str()),
+            "a live claim must not be stolen"
+        );
+
+        let processing: bool =
+            sqlx::query_scalar("SELECT processing FROM analytics_queue WHERE id = $1")
+                .bind(pending.parse::<i64>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(processing, "claim marks the row processing");
+    }
+
+    #[tokio::test]
+    async fn mark_and_reset_processing_are_exact_and_empty_safe() {
+        let Some(pool) = test_pool("an_mark_reset").await else {
+            return;
+        };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+        let id = enqueue_event(&pool, &tenant, "sent", None, None).await;
+        let numeric: i64 = id.parse().unwrap();
+
+        proc.mark_events_processed(&[]).await.unwrap();
+        proc.reset_processing(&[]).await.unwrap();
+
+        proc.mark_events_processed(std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        let (processed, processing, processed_at): (bool, bool, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as(
+                "SELECT processed, processing, processed_at FROM analytics_queue WHERE id = $1",
+            )
+            .bind(numeric)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(processed && !processing && processed_at.is_some());
+
+        proc.reset_processing(&[id]).await.unwrap();
+        let (processing, processing_at): (bool, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT processing, processing_at FROM analytics_queue WHERE id = $1")
+                .bind(numeric)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!processing && processing_at.is_none());
+    }
+
+    // ── aggregation semantics ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn flush_writes_additive_hourly_aggregates_across_all_key_shapes() {
+        let Some(pool) = test_pool("an_flush_additive").await else {
+            return;
+        };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+        let domain = format!("dom-{}", &Uuid::new_v4().simple().to_string()[..16]);
+        let campaign = format!("camp-{}", &Uuid::new_v4().simple().to_string()[..16]);
+
+        let id1 = enqueue_event(&pool, &tenant, "sent", Some(&domain), Some(&campaign)).await;
+        let id2 = enqueue_event(&pool, &tenant, "opened", Some(&domain), Some(&campaign)).await;
+        let events = proc.fetch_events(10).await.expect("claim");
+        assert_eq!(events.len(), 2);
+        proc.process_events(events).await.expect("process batch");
+        proc.flush_buffers().await.expect("flush");
+
+        // The event was processed exactly once.
+        let processed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM analytics_queue WHERE id = ANY($1::bigint[]) AND processed",
+        )
+        .bind(vec![
+            id1.parse::<i64>().unwrap(),
+            id2.parse::<i64>().unwrap(),
+        ])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(processed, 2, "flushed events must be marked processed");
+
+        // Tenant + domain + campaign + domain-campaign buckets all exist.
+        let key_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM analytics_hourly WHERE tenant_id = $1
+               AND (domain_id = $2 OR campaign_id = $3)",
+        )
+        .bind(&tenant)
+        .bind(&domain)
+        .bind(&campaign)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(key_count, 3, "D:, C: and DC: buckets must be written");
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "sent").await, 1);
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "opened").await, 1);
+
+        // A second batch for the SAME period upserts additively.
+        let id3 = enqueue_event(&pool, &tenant, "sent", Some(&domain), Some(&campaign)).await;
+        let _ = id3;
+        let events = proc.fetch_events(10).await.expect("claim 2");
+        proc.process_events(events).await.expect("process 2");
+        proc.flush_buffers().await.expect("flush 2");
+        assert_eq!(
+            tenant_bucket_total(&pool, &tenant, "sent").await,
+            2,
+            "the second flush must ADD, not replace"
+        );
+
+        // Redis real-time counters were incremented with a TTL.
+        let mut conn = proc.redis.get().await.unwrap();
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+        let key = format!("stats:{}:{}:sent", tenant, date);
+        let count: Option<i64> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(count, Some(2), "tenant sent counter");
+        let ttl: i64 = redis::cmd("TTL")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            ttl > 0 && ttl <= 60,
+            "counter TTL must be bounded, got {ttl}"
+        );
+        let domain_key = format!("stats:{}:{}:domain:{}:sent", tenant, date, domain);
+        let domain_count: Option<i64> = redis::cmd("GET")
+            .arg(&domain_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(domain_count, Some(2), "domain sent counter");
+        let campaign_key = format!("stats:{}:{}:campaign:{}:sent", tenant, date, campaign);
+        let campaign_count: Option<i64> = redis::cmd("GET")
+            .arg(&campaign_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(campaign_count, Some(2), "campaign sent counter");
+        let _: () = redis::cmd("DEL")
+            .arg(&key)
+            .arg(&domain_key)
+            .arg(&campaign_key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_aggregation_write_restores_buffers_and_keeps_events_unprocessed() {
+        let Some(pool) = test_pool("an_flush_restore").await else {
+            return;
+        };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+        let id = enqueue_event(&pool, &tenant, "sent", None, None).await;
+
+        // Force the aggregation write to fail: the canonical analytics_hourly
+        // table is dropped for this test database only.
+        sqlx::query("DROP TABLE analytics_hourly")
+            .execute(&pool)
+            .await
+            .expect("drop analytics_hourly");
+
+        let events = proc.fetch_events(10).await.expect("claim");
+        assert_eq!(events.len(), 1);
+        proc.process_events(events).await.expect("process");
+
+        let error = proc.flush_buffers().await.expect_err("flush must fail");
+        let message = error.to_string();
+        assert!(!message.is_empty());
+
+        // Buffers were restored: nothing is lost, nothing is marked processed.
+        assert_eq!(
+            proc.event_buffer.read().unwrap().len(),
+            1,
+            "failed flush must restore the event buffer"
+        );
+        assert!(
+            !proc.aggregation_buffer.read().unwrap().is_empty(),
+            "failed flush must restore the aggregation buffer"
+        );
+        let processed: bool =
+            sqlx::query_scalar("SELECT processed FROM analytics_queue WHERE id = $1")
+                .bind(id.parse::<i64>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            !processed,
+            "events must not be marked processed on a failed write"
+        );
+
+        // A restored buffer does not double-count on a subsequent flush.
+        sqlx::query(
+            "CREATE TABLE analytics_hourly (
+                id TEXT PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL, domain_id VARCHAR(26),
+                campaign_id VARCHAR(64), period_start TIMESTAMPTZ NOT NULL,
+                period_end TIMESTAMPTZ NOT NULL, sent BIGINT NOT NULL DEFAULT 0,
+                delivered BIGINT NOT NULL DEFAULT 0, opened BIGINT NOT NULL DEFAULT 0,
+                clicked BIGINT NOT NULL DEFAULT 0, bounced BIGINT NOT NULL DEFAULT 0,
+                unsubscribed BIGINT NOT NULL DEFAULT 0, complained BIGINT NOT NULL DEFAULT 0,
+                failed BIGINT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate analytics_hourly");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_analytics_hourly_unique_tmp ON analytics_hourly
+                (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)",
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate unique index");
+        proc.flush_buffers().await.expect("retry flush");
+        assert_eq!(
+            tenant_bucket_total(&pool, &tenant, "sent").await,
+            1,
+            "the restored event is written exactly once"
+        );
+        assert!(proc.event_buffer.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn redis_outage_does_not_block_durable_aggregation() {
+        let Some(pool) = test_pool("an_redis_outage").await else {
+            return;
+        };
+        let proc = AnalyticsProcessor::new(pool.clone(), dead_redis_pool(), test_config());
+        let tenant = unique_tenant();
+        let id = enqueue_event(&pool, &tenant, "delivered", None, None).await;
+
+        let events = proc.fetch_events(10).await.expect("claim");
+        proc.process_events(events).await.expect("process");
+        proc.flush_buffers()
+            .await
+            .expect("Redis counters are rebuildable from the DB: flush must succeed");
+
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "delivered").await, 1);
+        let processed: bool =
+            sqlx::query_scalar("SELECT processed FROM analytics_queue WHERE id = $1")
+                .bind(id.parse::<i64>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            processed,
+            "the durable path must complete despite Redis being down"
+        );
+        // An empty counter update is a no-op.
+        proc.update_redis_counters(&[]).await.expect("empty no-op");
+        proc.write_aggregations(&HashMap::new())
+            .await
+            .expect("empty aggregation write is a no-op");
+    }
+
+    #[tokio::test]
+    async fn hourly_rollup_is_additive_across_runs() {
+        let Some(pool) = test_pool("an_hourly_rollup").await else {
+            return;
+        };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+        let domain = format!("dom-{}", &Uuid::new_v4().simple().to_string()[..16]);
+        let campaign = format!("camp-{}", &Uuid::new_v4().simple().to_string()[..16]);
+        let previous_hour = (Utc::now() - TimeDelta::try_hours(1).unwrap())
+            .with_minute(10)
+            .unwrap()
+            .with_second(0)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap();
+
+        for (event_type, recipient) in [
+            ("sent", "a@example.test"),
+            ("sent", "b@example.test"),
+            ("bounced", "a@example.test"),
+        ] {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, event_type, recipient, domain_id, campaign_id, \"timestamp\")
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&tenant)
+            .bind(event_type)
+            .bind(recipient)
+            .bind(&domain)
+            .bind(&campaign)
+            .bind(previous_hour)
+            .execute(&pool)
+            .await
+            .expect("insert event");
+        }
+
+        proc.run_hourly_aggregation().await.expect("rollup");
+        assert_eq!(hourly_totals(&pool, &tenant, "sent").await, 2);
+        assert_eq!(hourly_totals(&pool, &tenant, "bounced").await, 1);
+
+        // A second rollup over the same window must ADD (F7), never replace.
+        proc.run_hourly_aggregation().await.expect("rollup again");
+        assert_eq!(
+            hourly_totals(&pool, &tenant, "sent").await,
+            4,
+            "the rollup must be additive like the flush writer"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_aggregation_builds_tenant_domain_campaign_buckets() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let proc = AnalyticsProcessor::new(pool, redis_pool(), test_config());
+        let tenant = "t-buckets";
+        let mut ev = event("1", tenant, "clicked");
+        ev.domain_id = Some("dom-1".to_string());
+        ev.campaign_id = Some("camp-1".to_string());
+
+        proc.update_aggregation(&ev);
+        let buffer = proc.aggregation_buffer.read().unwrap();
+        assert_eq!(buffer.len(), 4, "T:, D:, C: and DC: keys must be present");
+        assert!(buffer
+            .keys()
+            .any(|k| k.starts_with(&format!("T:{tenant}:"))));
+        assert!(buffer
+            .keys()
+            .any(|k| k.starts_with(&format!("D:{tenant}:dom-1:"))));
+        assert!(buffer
+            .keys()
+            .any(|k| k.starts_with(&format!("C:{tenant}:camp-1:"))));
+        assert!(buffer
+            .keys()
+            .any(|k| k.starts_with(&format!("DC:{tenant}:dom-1:camp-1:"))));
+        for stats in buffer.values() {
+            assert_eq!(stats.clicked, 1);
+            assert_eq!(
+                stats.period_end - stats.period_start,
+                TimeDelta::try_hours(1).unwrap()
+            );
+        }
+        drop(buffer);
+
+        // An unknown event type is counted nowhere but still buckets the key.
+        let mut unknown = event("2", tenant, "not-a-real-event");
+        unknown.domain_id = None;
+        unknown.campaign_id = None;
+        proc.update_aggregation(&unknown);
+        let buffer = proc.aggregation_buffer.read().unwrap();
+        let tenant_key = buffer
+            .keys()
+            .find(|k| k.starts_with(&format!("T:{tenant}:")))
+            .unwrap()
+            .clone();
+        assert_eq!(buffer[&tenant_key].clicked, 1);
+        assert_eq!(buffer[&tenant_key].sent, 0);
+    }
+
+    #[tokio::test]
+    async fn aggregation_buffer_evicts_oldest_periods_at_the_cap() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let proc = AnalyticsProcessor::new(pool, redis_pool(), test_config());
+        let old = Utc::now() - TimeDelta::try_days(30).unwrap();
+        {
+            let mut buffer = proc.aggregation_buffer.write().unwrap();
+            for i in 0..MAX_AGGREGATION_BUFFER_SIZE {
+                let period_start = old + TimeDelta::try_seconds(i as i64).unwrap();
+                buffer.insert(
+                    format!("T:tenant-cap:{i}"),
+                    AggregatedStats::new(
+                        "tenant-cap".to_string(),
+                        None,
+                        None,
+                        period_start,
+                        period_start + TimeDelta::try_hours(1).unwrap(),
+                    ),
+                );
+            }
+        }
+        let mut fresh = event("cap", "tenant-cap", "sent");
+        fresh.timestamp = Utc::now();
+        proc.update_aggregation(&fresh);
+
+        let buffer = proc.aggregation_buffer.read().unwrap();
+        assert!(
+            buffer.len() <= MAX_AGGREGATION_BUFFER_SIZE,
+            "the aggregation buffer must respect its cap, got {}",
+            buffer.len()
+        );
+        // The eviction is by period age: the newest key (the fresh event) stays.
+        let fresh_key = buffer.keys().find(|k| {
+            k.starts_with("T:tenant-cap:")
+                && buffer[*k].period_start > old + TimeDelta::try_days(1).unwrap()
+        });
+        assert!(fresh_key.is_some(), "the fresh entry must survive eviction");
+    }
+
+    #[tokio::test]
+    async fn event_buffer_cap_drops_oldest_without_losing_the_newest() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let proc = AnalyticsProcessor::new(pool, redis_pool(), test_config());
+        let tenant = "tenant-event-cap";
+        {
+            let mut buffer = proc.event_buffer.write().unwrap();
+            for i in 0..(MAX_EVENT_BUFFER_SIZE + 10) {
+                buffer.push(event(&format!("ev-{i}"), tenant, "sent"));
+            }
+        }
+        let newest = event("ev-newest", tenant, "sent");
+        proc.process_events_inner(vec![newest.clone()])
+            .await
+            .expect("process at cap");
+        let buffer = proc.event_buffer.read().unwrap();
+        assert!(
+            buffer.len() <= MAX_EVENT_BUFFER_SIZE,
+            "the event buffer must respect its cap, got {}",
+            buffer.len()
+        );
+        assert!(
+            buffer.iter().any(|e| e.id == "ev-newest"),
+            "the newest event must survive the drop-oldest policy"
+        );
+        assert!(
+            !buffer.iter().any(|e| e.id == "ev-0"),
+            "the oldest buffered events are the ones dropped"
+        );
+    }
+
+    // ── lifecycle ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stop_flushes_buffers_and_repeated_flush_is_a_noop() {
+        let Some(pool) = test_pool("an_stop").await else {
+            return;
+        };
+        let proc = processor(pool.clone(), test_config());
+        let tenant = unique_tenant();
+        let _ = enqueue_event(&pool, &tenant, "complained", None, None).await;
+        let events = proc.fetch_events(10).await.expect("claim");
+        proc.process_events(events).await.expect("process");
+        proc.is_running.store(true, Ordering::SeqCst);
+
+        proc.stop().await.expect("stop");
+        assert!(!proc.is_running.load(Ordering::SeqCst));
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "complained").await, 1);
+
+        // Concurrent flush guard: while is_flushing is latched, flush is a no-op.
+        proc.is_flushing.store(true, Ordering::SeqCst);
+        proc.flush_buffers().await.expect("guarded flush");
+        proc.is_flushing.store(false, Ordering::SeqCst);
+        let _ = enqueue_event(&pool, &tenant, "failed", None, None).await;
+        let events = proc.fetch_events(10).await.expect("claim 2");
+        proc.process_events(events).await.expect("process 2");
+        proc.flush_buffers().await.expect("flush 2");
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "failed").await, 1);
+    }
+
+    #[tokio::test]
+    async fn start_ingests_queued_events_and_stop_drains_the_pipeline() {
+        let Some(pool) = test_pool("an_start_stop").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let first = enqueue_event(&pool, &tenant, "sent", None, None).await;
+        let second = enqueue_event(&pool, &tenant, "delivered", None, None).await;
+
+        let mut config = test_config();
+        config.base.flush_interval = Duration::from_millis(20);
+        let proc = Arc::new(processor(pool.clone(), config));
+        let running = Arc::clone(&proc);
+        let handle = tokio::spawn(async move { running.start().await });
+
+        let mut processed = 0i64;
+        for _ in 0..200 {
+            processed = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM analytics_queue WHERE id = ANY($1::bigint[]) AND processed",
+            )
+            .bind(vec![
+                first.parse::<i64>().unwrap(),
+                second.parse::<i64>().unwrap(),
+            ])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if processed == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        proc.stop().await.expect("stop");
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+        assert_eq!(processed, 2, "the poll loop must ingest both queued events");
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "sent").await, 1);
+        assert_eq!(tenant_bucket_total(&pool, &tenant, "delivered").await, 1);
+    }
+}

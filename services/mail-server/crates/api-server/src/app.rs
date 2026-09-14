@@ -1851,6 +1851,21 @@ pub(crate) mod test_support {
     /// [`test_state_over`] with a caller-supplied Config (e.g. a real RSA
     /// signing pair for JWT round-trips).
     pub(crate) async fn test_state_over_with_config(db: sqlx::PgPool, config: Config) -> AppState {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        test_state_over_with_config_and_redis(db, config, &redis_url).await
+    }
+
+    /// [`test_state_over_with_config`] with an EXPLICIT Redis URL — lets
+    /// adversarial tests pin a dead endpoint (fail-open/closed paths) or the
+    /// configured test Redis without mutating the process-global env.
+    pub(crate) async fn test_state_over_with_config_and_redis(
+        db: sqlx::PgPool,
+        config: Config,
+        redis_url: &str,
+    ) -> AppState {
         static INSTALL: std::sync::Once = std::sync::Once::new();
         INSTALL.call_once(|| {
             let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
@@ -1858,11 +1873,7 @@ pub(crate) mod test_support {
             std::env::set_var("AWS_ACCESS_KEY_ID", "test");
             std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
         });
-        let redis_url = std::env::var("TEST_REDIS_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
-        let redis = deadpool_redis::Config::from_url(&redis_url)
+        let redis = deadpool_redis::Config::from_url(redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("lazy redis pool");
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -1895,6 +1906,74 @@ pub(crate) mod test_support {
             None,
             crate::resilience::ResilientClient::new_from_config(&test_config()),
         )
+    }
+
+    /// Lazy-pool AppState for middleware tests whose handlers never touch
+    /// Postgres (e.g. the idempotency layer's Redis paths). The pool is
+    /// created with `connect_lazy`: no connection is attempted, so a missing
+    /// database cannot turn a Redis-only test into a skip.
+    pub(crate) async fn test_state_over_lazy() -> AppState {
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        test_state_over_lazy_with_redis(&redis_url).await
+    }
+
+    /// [`test_state_over_lazy`] with an explicit Redis URL (dead endpoint for
+    /// fail-open/fail-closed paths).
+    pub(crate) async fn test_state_over_lazy_with_redis(redis_url: &str) -> AppState {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "postgres://apexmail:apexmail@127.0.0.1:1/apexmail".into());
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy(&database_url)
+            .expect("lazy test pool");
+        test_state_over_with_config_and_redis(db, test_config(), redis_url).await
+    }
+
+    /// Seed an ACTIVE tenant with a scoped API key on the caller's database.
+    /// Returns `(tenant_id, raw_api_key)`. SQL failures PANIC (a configured
+    /// fixture failure must never read as a skip).
+    pub(crate) async fn seed_api_tenant(db: &sqlx::PgPool, scopes: &[&str]) -> (String, String) {
+        let tenant_id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'adversarial fixture', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .execute(db)
+        .await
+        .expect("seed tenant");
+        let api_key = seed_api_key_for(db, &tenant_id, scopes).await;
+        (tenant_id, api_key)
+    }
+
+    /// Seed a single API key for an EXISTING tenant id; returns the raw key.
+    pub(crate) async fn seed_api_key_for(
+        db: &sqlx::PgPool,
+        tenant_id: &str,
+        scopes: &[&str],
+    ) -> String {
+        let raw_key = apexmail_lib::id::generate_api_key(true);
+        let key_hash = apexmail_lib::hash_api_key_with_secret(
+            &raw_key,
+            "test-api-key-secret-12345678901234567890",
+        );
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+             VALUES ($1, $2, 'adversarial fixture', 'am_test_', $3, $4::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(tenant_id)
+        .bind(&key_hash)
+        .bind(serde_json::json!(scopes).to_string())
+        .execute(db)
+        .await
+        .expect("seed api key");
+        raw_key
     }
 }
 
@@ -4985,3 +5064,451 @@ mod tests {
     }
 }
 // Build cache invalidation: 1785670948
+
+// ─── Adversarial router-composition tests ──────────────────────
+//
+// Attack the assembled `build_app` router directly: gate ordering
+// (404 vs 401 vs 403), scope enforcement on real routes, the CORS
+// credentials policy, body limits, content-type/version negotiation and the
+// security-header contract. DB-backed cases run on the shared isolated
+// `_api` database and scope their rows under freshly seeded tenants.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn app_and_pool(test_name: &str) -> Option<(Router, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(test_name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((build_app(state), pool))
+    }
+
+    async fn response_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn request(method: Method, uri: &str) -> axum::http::request::Builder {
+        Request::builder().method(method).uri(uri)
+    }
+
+    #[tokio::test]
+    async fn unknown_api_routes_are_404_before_any_auth_check() {
+        let Some((app, _pool)) = app_and_pool("adv_app_unknown_routes").await else {
+            return;
+        };
+        // An UNMATCHED /v1 path must be a JSON 404 even without credentials:
+        // the fallback is outside the authenticated router, so a scanner
+        // probing paths learns nothing except "no such endpoint".
+        for path in ["/v1/definitely-not-a-route", "/api/definitely-not-a-route"] {
+            let resp = app
+                .clone()
+                .oneshot(request(Method::GET, path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{path}");
+            let body = response_json(resp).await;
+            assert_eq!(body["error"]["code"], "NOT_FOUND", "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn matched_protected_route_without_credentials_is_401_and_leaks_nothing() {
+        let Some((app, _pool)) = app_and_pool("adv_app_no_creds").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/v1/lists")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(resp).await;
+        let text = body.to_string();
+        assert!(
+            !text.contains("subscriber"),
+            "no list data may leak: {text}"
+        );
+        assert!(!text.contains("list_"), "no list ids may leak: {text}");
+    }
+
+    #[tokio::test]
+    async fn admin_route_rejects_customer_wildcard_key_with_403() {
+        let Some((app, pool)) = app_and_pool("adv_app_admin_customer").await else {
+            return;
+        };
+        // A customer tenant admin's "*" scope must never reach the control
+        // plane: the system-tenant gate runs after require_auth and refuses.
+        let (_tenant, key) = crate::app::test_support::seed_api_tenant(&pool, &["*"]).await;
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/v1/admin/dashboard/stats")
+                    .header("x-api-key", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = response_json(resp).await;
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("system tenant"),
+            "the refusal must name the tenant gate: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_route_admits_system_tenant_machine_key() {
+        let Some((app, pool)) = app_and_pool("adv_app_admin_system").await else {
+            return;
+        };
+        let key = crate::app::test_support::seed_api_key_for(&pool, "system", &["*"]).await;
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/v1/admin/dashboard/stats")
+                    .header("x-api-key", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a system machine key must authenticate"
+        );
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "a system machine key must pass the tenant gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_missing_the_route_scope_is_403() {
+        let Some((app, pool)) = app_and_pool("adv_app_scope").await else {
+            return;
+        };
+        // Scope-less / wrong-scope key on a route that requires lists:read.
+        let (_tenant, key) = crate::app::test_support::seed_api_tenant(&pool, &[]).await;
+        let resp = app
+            .clone()
+            .oneshot(
+                request(Method::GET, "/v1/lists")
+                    .header("x-api-key", &key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = response_json(resp).await;
+        assert!(!body.to_string().contains("subscriber"));
+
+        // The same key with the read scope is admitted (handler-level result
+        // is a 200 page, never a 401/403).
+        let (_tenant2, key2) =
+            crate::app::test_support::seed_api_tenant(&pool, &["lists:read"]).await;
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/v1/lists")
+                    .header("x-api-key", &key2)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn x_tenant_id_header_from_another_tenant_is_403() {
+        let Some((app, pool)) = app_and_pool("adv_app_tenant_header").await else {
+            return;
+        };
+        let (_tenant, key) =
+            crate::app::test_support::seed_api_tenant(&pool, &["lists:read"]).await;
+        let other = apexmail_lib::id::generate_id("", 26);
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/v1/lists")
+                    .header("x-api-key", &key)
+                    .header("x-tenant-id", other)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn malformed_and_expired_api_keys_are_401_without_data() {
+        let Some((app, pool)) = app_and_pool("adv_app_bad_keys").await else {
+            return;
+        };
+        // Unknown key.
+        let resp = app
+            .clone()
+            .oneshot(
+                request(Method::GET, "/v1/lists")
+                    .header("x-api-key", "am_test_definitely-not-a-real-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Expired key for a real tenant.
+        let (tenant, raw) = crate::app::test_support::seed_api_tenant(&pool, &["lists:read"]).await;
+        let hash = apexmail_lib::hash_api_key_with_secret(
+            &raw,
+            "test-api-key-secret-12345678901234567890",
+        );
+        sqlx::query(
+            "UPDATE api_keys SET expires_at = NOW() - INTERVAL '1 hour' WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("expire key");
+        let _ = hash;
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/v1/lists")
+                    .header("x-api-key", &raw)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(resp).await;
+        let text = body.to_string();
+        assert!(!text.contains(&tenant), "tenant id must not leak: {text}");
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_mirrors_wildcard_origin_without_credentials() {
+        let Some((app, _pool)) = app_and_pool("adv_app_cors").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                request(Method::OPTIONS, "/v1/lists")
+                    .header("origin", "https://evil.example")
+                    .header("access-control-request-method", "GET")
+                    .header("access-control-request-headers", "x-api-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "preflight must succeed, got {}",
+            resp.status()
+        );
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://evil.example"),
+            "wildcard mode mirrors the caller origin"
+        );
+        assert!(
+            resp.headers()
+                .get("access-control-allow-credentials")
+                .is_none(),
+            "wildcard origin mode must NEVER allow credentials"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_content_type_is_415_before_auth() {
+        let Some((app, _pool)) = app_and_pool("adv_app_content_type").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                request(Method::POST, "/v1/lists")
+                    .header("content-type", "application/xml")
+                    .body(Body::from("<list/>"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn unsupported_accept_version_is_406() {
+        let Some((app, _pool)) = app_and_pool("adv_app_version").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/health/live")
+                    .header("accept", "application/json; version=99")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+        let body = response_json(resp).await;
+        assert_eq!(body["error"]["code"], "UNSUPPORTED_API_VERSION");
+    }
+
+    #[tokio::test]
+    async fn oversized_declared_body_is_rejected_before_any_handler() {
+        let Some((app, _pool)) = app_and_pool("adv_app_body_limit").await else {
+            return;
+        };
+        // 40 MiB + 1 declared Content-Length with no bytes: the body-limit
+        // layer refuses on the size hint, so no allocation and no handler.
+        let resp = app
+            .oneshot(
+                request(Method::POST, "/v1/lists")
+                    .header("content-type", "application/json")
+                    .header("content-length", (40 * 1024 * 1024 + 1).to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn security_headers_cover_public_json_routes() {
+        let Some((app, _pool)) = app_and_pool("adv_app_headers").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/health/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers();
+        assert_eq!(headers["x-api-version"], "v1");
+        assert_eq!(headers["x-frame-options"], "DENY");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["x-xss-protection"], "0");
+        assert_eq!(
+            headers["strict-transport-security"],
+            "max-age=63072000; includeSubDomains; preload"
+        );
+        assert_eq!(
+            headers["referrer-policy"],
+            "strict-origin-when-cross-origin"
+        );
+        assert_eq!(
+            headers["content-security-policy"],
+            "default-src 'none'; frame-ancestors 'none'"
+        );
+        assert!(
+            headers["cache-control"]
+                .to_str()
+                .unwrap()
+                .contains("no-store"),
+            "API responses are never cacheable"
+        );
+        assert_eq!(
+            headers["permissions-policy"],
+            "camera=(), microphone=(), geolocation=(), payment=()"
+        );
+    }
+
+    #[tokio::test]
+    async fn icon_requests_are_204_and_unknown_browser_pages_are_branded_html_404() {
+        let Some((app, _pool)) = app_and_pool("adv_app_fallback").await else {
+            return;
+        };
+        let resp = app
+            .clone()
+            .oneshot(
+                request(Method::GET, "/favicon-not-served")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let resp = app
+            .oneshot(
+                request(Method::GET, "/definitely-not-a-page")
+                    .header("host", "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+    }
+
+    #[tokio::test]
+    async fn static_asset_cache_control_is_tiered_by_immutability() {
+        assert_eq!(
+            static_asset_cache_control("/css/app.css"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            static_asset_cache_control("/js/app.js"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            static_asset_cache_control("/fonts/inter.woff2"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            static_asset_cache_control("/images/logo.svg"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            static_asset_cache_control("/manifest.json"),
+            "public, max-age=3600"
+        );
+        assert_eq!(
+            static_asset_cache_control("/sitemap.xml"),
+            "public, max-age=3600"
+        );
+        assert_eq!(
+            static_asset_cache_control("/.well-known/autoconfig/mail/config-v1.1.xml"),
+            "public, max-age=3600"
+        );
+        assert_eq!(
+            static_asset_cache_control("/v1/admin/dashboard"),
+            "no-store, no-cache, must-revalidate"
+        );
+        // A path that merely CONTAINS an immutable prefix is not immutable.
+        assert_eq!(
+            static_asset_cache_control("/v1/css/secret"),
+            "no-store, no-cache, must-revalidate"
+        );
+    }
+}

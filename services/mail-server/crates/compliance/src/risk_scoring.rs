@@ -101,7 +101,10 @@ impl RiskScoringEngine {
     /// Retrieve a previously-persisted profile.
     pub async fn get_profile(&self, tenant_id: &str) -> Result<Option<TenantRiskProfile>, String> {
         let row = sqlx::query_as::<_, ProfileRow>(
-            "SELECT tenant_id, risk_score, risk_level, factors, limits, flags,
+            // `risk_score` is REAL in the canonical schema (migration 038) while
+            // the Rust field is f64: sqlx type-checks strictly, so the column
+            // must be widened in SQL or every profile read fails to decode.
+            "SELECT tenant_id, risk_score::float8, risk_level, factors, limits, flags,
                     last_assessed_at, next_assessment_at, created_at, updated_at
              FROM risk_profiles WHERE tenant_id = $1",
         )
@@ -176,7 +179,7 @@ impl RiskScoringEngine {
     /// All tenants at critical risk level.
     pub async fn get_critical_risk_tenants(&self) -> Result<Vec<TenantRiskProfile>, String> {
         let rows = sqlx::query_as::<_, ProfileRow>(
-            "SELECT tenant_id, risk_score, risk_level, factors, limits, flags,
+            "SELECT tenant_id, risk_score::float8, risk_level, factors, limits, flags,
                     last_assessed_at, next_assessment_at, created_at, updated_at
              FROM risk_profiles WHERE risk_level = 'critical'
              ORDER BY risk_score DESC",
@@ -1957,5 +1960,255 @@ mod tests {
             100.0,
             "Spam_rate=20% -> combined=200 -> capped at 100"
         );
+    }
+}
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// Risk scores gate sending limits: the metrics must come from the canonical
+// sources, an unknown tenant is still assessed (not a crash), and a stored
+// REAL risk_score must be readable (schema-drift regression).
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+
+    fn engine_for(pool: &PgPool) -> RiskScoringEngine {
+        RiskScoringEngine::new(pool.clone(), test_support::config("risk-token"))
+    }
+
+    async fn pool(suffix: &str) -> Option<PgPool> {
+        let pool =
+            test_support::canonical_pool(&format!("risk_{suffix}"), &format!("risk_{suffix}"))
+                .await?;
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn assessment_reads_the_canonical_sources_and_persists_readable_profile() {
+        let Some(pool) = pool("assess").await else {
+            return;
+        };
+        let engine = engine_for(&pool);
+        let tenant = test_support::unique_tenant();
+        sqlx::query(
+            "INSERT INTO tenants (id, name, created_at) VALUES ($1, 'Risk Tenant', NOW() - INTERVAL '10 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("tenant");
+        // Canonical signals: verified domains, messages (incl. recent), a
+        // bounce, a complaint event, an abuse report and a blocked scan.
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, verified) VALUES
+               (gen_random_uuid(), $1, 'risk.example', true),
+               (gen_random_uuid(), $1, 'unverified.example', false)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("domains");
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_address, to_addresses, status, from_email, to_emails, created_at, updated_at) VALUES
+               (gen_random_uuid(), $1, 'a@apexmail.ee', ARRAY['b@example.test'], 'sent', 'a@apexmail.ee', '[]'::jsonb, NOW(), NOW()),
+               (gen_random_uuid(), $1, 'a@apexmail.ee', ARRAY['b@example.test'], 'sent', 'a@apexmail.ee', '[]'::jsonb, NOW() - INTERVAL '10 days', NOW()),
+               (gen_random_uuid(), $1, 'a@apexmail.ee', ARRAY['b@example.test'], 'bounced', 'a@apexmail.ee', '[]'::jsonb, NOW() - INTERVAL '2 days', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("messages");
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, event_type, timestamp) VALUES
+               (gen_random_uuid(), $1, 'complained', NOW()),
+               (gen_random_uuid(), $1, 'delivered', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("events");
+        sqlx::query(
+            "INSERT INTO scan_results (id, tenant_id, message_id, scanned_at, results, overall_verdict, spam_detected, phishing_detected)
+             VALUES (gen_random_uuid(), $1, 'm-1', NOW(), '{}'::jsonb, 'blocked', false, true)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("scan");
+        sqlx::query(
+            "INSERT INTO abuse_reports (id, tenant_id, report_type, status, created_at)
+             VALUES (gen_random_uuid(), $1, 'spam', 'open', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("abuse");
+
+        let profile = engine.assess_tenant(&tenant).await.expect("assess");
+        assert_eq!(profile.tenant_id, tenant);
+        assert!(!profile.factors.is_empty());
+        assert!(profile.risk_score >= 0.0 && profile.risk_score <= 100.0);
+        assert!(profile.next_assessment_at > profile.last_assessed_at);
+        // The flagged factors reflect the seeded signals.
+        let complaints = profile
+            .factors
+            .iter()
+            .find(|f| f.factor_type == RiskFactorType::SpamComplaints)
+            .expect("complaint factor");
+        assert!(complaints.details.contains("Spam complaint rate"));
+        let phishing = profile
+            .factors
+            .iter()
+            .find(|f| f.factor_type == RiskFactorType::PhishingDetection)
+            .expect("phishing factor");
+        assert!(phishing.score > 0.0, "one phishing detection is scored");
+        let verification = profile
+            .factors
+            .iter()
+            .find(|f| f.factor_type == RiskFactorType::VerificationStatus)
+            .expect("verification factor");
+        assert_eq!(verification.details, "1 verified domains");
+        assert!(!profile.limits.allowed_domains.is_empty() || profile.limits.max_daily_emails >= 0);
+
+        // The stored profile round-trips (REAL risk_score in the schema).
+        let stored = engine
+            .get_profile(&tenant)
+            .await
+            .expect("read profile")
+            .expect("present");
+        assert_eq!(stored.tenant_id, tenant);
+        assert_eq!(stored.risk_score, profile.risk_score);
+        assert_eq!(stored.risk_level, profile.risk_level);
+        assert_eq!(stored.factors.len(), profile.factors.len());
+        assert_eq!(
+            stored.limits.max_daily_emails,
+            profile.limits.max_daily_emails
+        );
+
+        // Reassessment is an upsert, not a second row.
+        engine.assess_tenant(&tenant).await.expect("reassess");
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM risk_profiles WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(rows, 1);
+
+        // Limits can be overridden and resolve_flag is recorded.
+        let limits = TenantLimits {
+            max_daily_emails: 42,
+            max_hourly_emails: 7,
+            max_recipients: 3,
+            max_attachment_size_mb: 1,
+            require_double_opt_in: true,
+            require_unsubscribe_link: true,
+            allowed_domains: vec!["risk.example".into()],
+            blocked_recipient_patterns: vec![],
+        };
+        engine
+            .update_limits(&tenant, &limits)
+            .await
+            .expect("limits");
+        engine
+            .resolve_flag(&tenant, &RiskFlagType::SpamTrapHit, "cleared by support")
+            .await
+            .expect("resolve");
+        let resolutions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM flag_resolutions WHERE tenant_id = $1 AND flag_type = 'spam_trap_hit'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("resolutions");
+        assert_eq!(resolutions, 1);
+
+        // Stats and critical lists include the tenant without panicking on
+        // empty/other tenants.
+        let stats = engine.get_risk_stats().await.expect("stats");
+        assert!(stats["total"].as_i64().unwrap_or(0) >= 1);
+        assert!(engine
+            .get_critical_risk_tenants()
+            .await
+            .expect("critical")
+            .iter()
+            .all(|p| p.risk_level == RiskLevel::Critical));
+        // An unknown tenant has no profile.
+        assert!(engine
+            .get_profile(&test_support::unique_tenant())
+            .await
+            .expect("unknown")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_tenant_is_assessed_from_empty_sources_not_an_error() {
+        let Some(pool) = pool("empty").await else {
+            return;
+        };
+        let engine = engine_for(&pool);
+        let tenant = test_support::unique_tenant();
+        let profile = engine.assess_tenant(&tenant).await.expect("assess unknown");
+        assert_eq!(profile.tenant_id, tenant);
+        assert!(
+            profile.risk_level == RiskLevel::Low || profile.risk_level == RiskLevel::Medium,
+            "a tenant with no history is not critical: {:?}",
+            profile.risk_level
+        );
+        // A brand-new account is riskier than an old one: the age factor is
+        // present and positive.
+        let age = profile
+            .factors
+            .iter()
+            .find(|f| f.factor_type == RiskFactorType::AccountAge)
+            .expect("age factor");
+        assert!(age.score > 0.0, "0-day-old account: {:?}", age);
+    }
+
+    #[test]
+    fn scoring_functions_clamp_and_never_exceed_one_hundred() {
+        for (low, high) in [(0.0, 0.0), (0.5, 50.0), (1.0, 100.0), (10.0, 100.0)] {
+            assert!((spam_score(low) - high).abs() < f64::EPSILON, "{low}");
+        }
+        assert_eq!(bounce_score(-1.0), 0.0);
+        assert_eq!(bounce_score(1000.0), 100.0);
+        assert_eq!(phishing_score(-5), 0.0);
+        assert_eq!(phishing_score(100), 100.0);
+        assert_eq!(violation_score(0), 0.0);
+        assert_eq!(violation_score(1_000), 100.0);
+        assert_eq!(payment_score(0), 0.0);
+        assert_eq!(payment_score(1_000), 100.0);
+        assert_eq!(account_age_score(0), 80.0);
+        assert_eq!(account_age_score(365), 0.0);
+        assert_eq!(account_age_score(10_000), 0.0);
+        assert_eq!(verification_score(0), 80.0);
+        assert_eq!(verification_score(3), 0.0);
+        assert_eq!(sending_pattern_score(0, 0.0), 0.0);
+        assert_eq!(sending_pattern_score(100, 0.0), 0.0);
+        assert_eq!(sending_pattern_score(100, 100.0), 0.0);
+        assert!(sending_pattern_score(500, 100.0) > 0.0);
+        assert_eq!(sending_pattern_score(10_000, 1.0), 100.0);
+        assert_eq!(list_quality_score(-5.0, -5.0), 0.0);
+        assert_eq!(list_quality_score(500.0, 500.0), 100.0);
+        assert_eq!(engagement_score(0.0, 0.0), 50.0);
+        assert_eq!(engagement_score(20.0, 3.0), 0.0);
+        assert_eq!(engagement_score(0.0, 0.0), 50.0);
+        assert!(engagement_score(1.0, 0.1) > 40.0);
+        // Every level has a positive reassessment horizon and a multiplier.
+        for level in [
+            RiskLevel::Low,
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+        ] {
+            assert!(level.reassessment_secs() > 0, "{level:?}");
+            assert!(level.limit_multiplier() > 0.0, "{level:?}");
+            assert!(!level.to_string().is_empty());
+        }
+        assert_eq!(percent_of(0, 0), 0.0);
+        assert_eq!(percent_of(5, 0), 0.0);
+        assert_eq!(percent_of(1, 4), 25.0);
     }
 }

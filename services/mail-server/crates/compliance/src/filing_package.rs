@@ -1634,3 +1634,301 @@ pub fn build_oss_package(
         Vec::new(),
     ))
 }
+
+// ─── Contract tests: required fields, validation report, digest, refusal ────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn every_form_declares_a_complete_required_contract() {
+        for form in [
+            FilingForm::Kmd,
+            FilingForm::KmdInf,
+            FilingForm::Tsd,
+            FilingForm::Vd,
+            FilingForm::Oss,
+        ] {
+            let fields = form.required_fields();
+            assert!(!fields.is_empty(), "{form:?} has an empty contract");
+            // Identity is required everywhere; period too.
+            assert!(fields.contains(&"period"), "{form:?}");
+            // No duplicates: a repeated field would double-report problems.
+            let mut sorted: Vec<&str> = fields.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), fields.len(), "{form:?} repeats a field");
+            // Field paths are dotted or indexed, never free text.
+            for field in fields {
+                assert!(
+                    field
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._[]".contains(c)),
+                    "{form:?}: {field:?} is not a field path"
+                );
+            }
+            assert!(!form.label().is_empty());
+            assert!(!form.payload_format().is_empty());
+            assert_eq!(FilingForm::from_str(form.as_str()), Some(form));
+            assert_eq!(form.to_string(), form.as_str());
+        }
+        // The identity is legally required on the domestic forms.
+        for form in [FilingForm::Kmd, FilingForm::KmdInf, FilingForm::Tsd] {
+            assert!(form.required_fields().contains(&"entity.legal_name"));
+            assert!(form.required_fields().contains(&"entity.registry_code"));
+        }
+        // The OSS return is filed under the scheme registration, not the
+        // domestic identity alone.
+        assert!(FilingForm::Oss
+            .required_fields()
+            .contains(&"registration.registration_number"));
+        assert!(FilingForm::Oss
+            .required_fields()
+            .contains(&"registration.scheme"));
+        // The TSD contract pins the person facts and the totals.
+        assert!(FilingForm::Tsd
+            .required_fields()
+            .contains(&"employees[i].funded_pension_rate"));
+        assert!(FilingForm::Tsd
+            .required_fields()
+            .contains(&"totals.employee_count"));
+        // Unknown/aliased spellings.
+        assert_eq!(FilingForm::from_str("KMD_INF"), Some(FilingForm::KmdInf));
+        assert_eq!(FilingForm::from_str("kmd-inf"), Some(FilingForm::KmdInf));
+        assert_eq!(FilingForm::from_str(" KMD "), Some(FilingForm::Kmd));
+        assert_eq!(FilingForm::from_str(""), None);
+        assert_eq!(FilingForm::from_str("vat"), None);
+    }
+
+    #[test]
+    fn validation_report_names_absent_required_fields_in_contract_order() {
+        let report = ValidationReport {
+            ruleset: FILING_VALIDATION_RULESET.into(),
+            form: FilingForm::Kmd,
+            fields: vec![
+                FieldCheck {
+                    field: "entity.legal_name".into(),
+                    required: true,
+                    present: true,
+                    detail: None,
+                },
+                FieldCheck {
+                    field: "period".into(),
+                    required: true,
+                    present: false,
+                    detail: Some("missing".into()),
+                },
+                FieldCheck {
+                    field: "summary.due_date".into(),
+                    required: true,
+                    present: false,
+                    detail: Some("missing".into()),
+                },
+                FieldCheck {
+                    field: "warnings.note".into(),
+                    required: false,
+                    present: false,
+                    detail: None,
+                },
+            ],
+            problems: vec![
+                PackageProblem {
+                    field: "period".into(),
+                    kind: ProblemKind::MissingRequiredField,
+                    detail: "missing".into(),
+                },
+                PackageProblem {
+                    field: "summary.due_date".into(),
+                    kind: ProblemKind::InvalidValue,
+                    detail: "unparseable".into(),
+                },
+            ],
+            warnings: vec![],
+            outcome: ValidationOutcome::Invalid,
+        };
+        assert!(!report.is_valid());
+        assert_eq!(
+            report.absent_required_fields(),
+            vec!["period", "summary.due_date"]
+        );
+        assert_eq!(ValidationOutcome::Valid.as_str(), "valid");
+        assert_eq!(ValidationOutcome::Invalid.as_str(), "invalid");
+        assert_eq!(
+            report.problems[0].to_string(),
+            "period (missing required field: missing)"
+        );
+        assert_eq!(
+            report.problems[1].to_string(),
+            "summary.due_date (invalid value: unparseable)"
+        );
+        assert_eq!(
+            PackageProblem {
+                field: "x".into(),
+                kind: ProblemKind::InsufficientSourceData,
+                detail: "d".into(),
+            }
+            .to_string(),
+            "x (insufficient source data: d)"
+        );
+
+        // `is_valid` follows the recorded outcome; the absent-field list is
+        // derived from the per-field report independently.
+        let valid = ValidationReport {
+            outcome: ValidationOutcome::Valid,
+            problems: vec![],
+            ..report
+        };
+        assert!(valid.is_valid());
+        assert_eq!(
+            valid.absent_required_fields(),
+            vec!["period", "summary.due_date"]
+        );
+    }
+
+    #[test]
+    fn canonical_json_is_key_sorted_and_digest_binds_the_payload() {
+        let first = json!({"b": [1, {"z": true, "a": null}], "a": {"y": 2, "x": 1}});
+        let second = json!({"a": {"x": 1, "y": 2}, "b": [1, {"a": null, "z": true}]});
+        assert_eq!(canonical_json(&first), canonical_json(&second));
+        assert_eq!(
+            canonical_json(&first),
+            r#"{"a":{"x":1,"y":2},"b":[1,{"a":null,"z":true}]}"#
+        );
+        // Scalars and empty containers.
+        assert_eq!(canonical_json(&json!(null)), "null");
+        assert_eq!(canonical_json(&json!([])), "[]");
+        assert_eq!(canonical_json(&json!({})), "{}");
+        assert_eq!(canonical_json(&json!(-0.5)), "-0.5");
+        assert_eq!(canonical_json(&json!("ünïcode 🔏")), "\"ünïcode 🔏\"");
+
+        let digest = payload_digest(&first);
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, sha256_hex(canonical_json(&first).as_bytes()));
+        assert!(payload_digest_matches(&first, &digest));
+        assert!(
+            payload_digest_matches(&first, &digest.to_uppercase()),
+            "case-insensitive"
+        );
+        assert!(
+            payload_digest_matches(&first, &format!("  {digest}  ")),
+            "trimmed"
+        );
+        // Any mutation of the payload breaks the digest.
+        let mut tampered = first.clone();
+        tampered["a"]["x"] = json!(3);
+        assert!(!payload_digest_matches(&tampered, &digest));
+        assert!(!payload_digest_matches(&first, "not-a-digest"));
+    }
+
+    #[test]
+    fn package_refuses_submission_when_a_gap_or_problem_exists() {
+        let payload = json!({"period": "2026-03", "summary": {"net_vat_payable_cents": 100}});
+        let valid_report = ValidationReport {
+            ruleset: FILING_VALIDATION_RULESET.into(),
+            form: FilingForm::Kmd,
+            fields: vec![],
+            problems: vec![],
+            warnings: vec![],
+            outcome: ValidationOutcome::Valid,
+        };
+        let package = FilingPackage::assemble(
+            FilingForm::Kmd,
+            "2026-03".into(),
+            EntityIdentity {
+                legal_name: Some("Bel Consulting OÜ".into()),
+                registry_code: Some("16588745".into()),
+                vat_number: None,
+                registration_number: None,
+            },
+            payload.clone(),
+            valid_report,
+            vec![kmd_vat_number_gap()],
+        );
+        assert_eq!(package.schema, FILING_PACKAGE_SCHEMA);
+        assert_eq!(package.digest_scope, PAYLOAD_DIGEST_SCOPE);
+        assert!(package.digest_matches_payload());
+        assert_eq!(
+            package.canonical_payload_bytes(),
+            canonical_json(&payload).as_bytes()
+        );
+        // A named gap blocks submission even with a valid field contract.
+        assert!(!package.is_submittable());
+        let reason = package.refusal_reason().expect("refusal");
+        assert!(reason.contains("kmd"), "{reason}");
+        assert!(reason.contains("entity.vat_number"), "{reason}");
+        assert!(reason.contains("named gap"), "{reason}");
+        let summary = package.summary();
+        assert_eq!(summary["form"], json!("kmd"));
+        assert_eq!(summary["submittable"], json!(false));
+        assert_eq!(summary["named_gaps"], json!(["entity.vat_number"]));
+
+        // No gaps + valid ⇒ submittable and no refusal reason.
+        let clean = FilingPackage {
+            named_gaps: vec![],
+            ..package
+        };
+        assert!(clean.is_submittable());
+        assert!(clean.refusal_reason().is_none());
+        assert_eq!(clean.summary()["submittable"], json!(true));
+
+        // A mutated payload is caught by the digest even before validation.
+        let mut mutated = clean;
+        mutated.payload["summary"]["net_vat_payable_cents"] = json!(999_999);
+        assert!(!mutated.digest_matches_payload());
+
+        // Problems are named in the refusal.
+        let invalid = FilingPackage {
+            validation: ValidationReport {
+                outcome: ValidationOutcome::Invalid,
+                problems: vec![PackageProblem {
+                    field: "summary.due_date".into(),
+                    kind: ProblemKind::MissingRequiredField,
+                    detail: "absent".into(),
+                }],
+                ..mutated.validation
+            },
+            ..mutated
+        };
+        let reason = invalid.refusal_reason().expect("refusal");
+        assert!(reason.contains("summary.due_date"), "{reason}");
+        assert!(reason.contains("missing required field"), "{reason}");
+        let mut with_warning = invalid;
+        with_warning.push_warning("source data quality: unposted payroll");
+        assert_eq!(with_warning.validation.warnings.len(), 1);
+        // Warnings never change the digest or the verdict.
+        assert!(!with_warning.is_submittable());
+    }
+
+    #[test]
+    fn named_gaps_and_package_errors_are_machine_readable() {
+        let gaps = [
+            kmd_vat_number_gap(),
+            kmd_inf_derivation_gap(),
+            tsd_payment_type_gap(),
+        ];
+        for named in &gaps {
+            assert!(!named.field.is_empty());
+            assert!(!named.reason.is_empty());
+            assert!(named.reason.len() > 20, "the reason must explain the law");
+        }
+        assert_eq!(gaps[0].field, KMD_VAT_NUMBER_GAP);
+        // Descriptions must be distinct per gap.
+        assert_ne!(gaps[0].reason, gaps[1].reason);
+        assert_ne!(gaps[1].reason, gaps[2].reason);
+
+        let error = PackageError::new(
+            FilingForm::Tsd,
+            vec![PackageProblem {
+                field: "employees[i].personal_code".into(),
+                kind: ProblemKind::MissingRequiredField,
+                detail: "absent".into(),
+            }],
+        );
+        assert_eq!(error.fields(), vec!["employees[i].personal_code"]);
+        let text = error.to_string();
+        assert!(text.contains("tsd"), "{text}");
+        assert!(text.contains("employees[i].personal_code"), "{text}");
+    }
+}

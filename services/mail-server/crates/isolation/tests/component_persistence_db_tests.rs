@@ -9,7 +9,7 @@
 //! its own canonical database via the production migrator's template clone.
 
 use isolation::config::{IsolationLevel, SecurityConfig};
-use isolation::data_isolation::DataIsolationService;
+use isolation::data_isolation::{DataIsolationService, MigrationCapabilityError};
 use isolation::encryption::EncryptionService;
 use isolation::types::{EncryptionPolicy, IsolationContext};
 use sqlx::PgPool;
@@ -248,6 +248,250 @@ async fn encryption_policies_persist_and_reload_across_restart() {
         passthrough.get("email").and_then(|v| v.as_str()),
         Some("a@b.c")
     );
+
+    pool.close().await;
+}
+
+/// BUG 1 regression: on the canonical schema the Shared→DedicatedSchema
+/// migration must refuse BEFORE writing anything, and the refusal must be
+/// diagnosable — it names every missing table/column and the migration each
+/// one needs.
+#[tokio::test]
+async fn shared_to_dedicated_refusal_names_every_missing_capability_and_writes_nothing() {
+    let Some(pool) = canonical_pool("migration_refusal").await else {
+        return;
+    };
+    seed_org_and_workspace(&pool, "org-blocked", "ws-blocked")
+        .await
+        .expect("seed org/ws");
+    sqlx::query(
+        "INSERT INTO iso_isolation_configs (workspace_id, current_level, migration_status) \
+         VALUES ('ws-blocked', 'shared', 'completed')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed config");
+
+    let service = DataIsolationService::new(pool.clone());
+    let error = service
+        .migrate_isolation_level(
+            "ws-blocked",
+            &IsolationLevel::Shared,
+            &IsolationLevel::DedicatedSchema,
+        )
+        .await
+        .expect_err("the canonical public tables cannot support the copy");
+
+    // The refusal is TYPED: the API exposes every gap, not just a string.
+    match error
+        .downcast_ref::<MigrationCapabilityError>()
+        .expect("refusal must be the typed capability error")
+    {
+        MigrationCapabilityError::Missing { schema, gaps } => {
+            assert_eq!(schema, "public");
+            let names: Vec<&str> = gaps.iter().map(|gap| gap.table).collect();
+            assert_eq!(
+                names,
+                vec!["campaigns", "contacts", "emails", "templates", "webhooks"],
+                "every required table must be reported, in a stable order"
+            );
+            let emails = gaps.iter().find(|gap| gap.table == "emails").unwrap();
+            assert!(
+                emails.table_missing,
+                "no canonical migration creates emails"
+            );
+            let contacts = gaps.iter().find(|gap| gap.table == "contacts").unwrap();
+            assert!(
+                !contacts.table_missing,
+                "contacts exists but lacks the tenancy column"
+            );
+            assert_eq!(contacts.created_by, Some("075_create_missing_tables.sql"));
+        }
+        MigrationCapabilityError::Inspection { source, .. } => {
+            panic!("canonical schema must be inspectable: {source}")
+        }
+    }
+
+    // The refusal must name every missing table/column and the migration it
+    // would need — a generic 4xx is the bug.
+    let message = error.to_string();
+    for needle in [
+        "public.emails",
+        "public.contacts",
+        "public.templates",
+        "public.campaigns",
+        "public.webhooks",
+        "workspace_id",
+        "075_create_missing_tables.sql",
+        "CREATE TABLE public.emails",
+        "ALTER TABLE public.contacts ADD COLUMN workspace_id",
+    ] {
+        assert!(
+            message.contains(needle),
+            "refusal must name {needle:?}: {message}"
+        );
+    }
+
+    // A refused migration must not create the dedicated schema, must not
+    // stamp the workspace, and must not change the isolation config.
+    let dest: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.ws_wsblocked')::text")
+            .fetch_one(&pool)
+            .await
+            .expect("regclass probe");
+    assert!(
+        dest.is_none(),
+        "refused migration must not create the dedicated schema"
+    );
+    let schema_name: Option<String> =
+        sqlx::query_scalar("SELECT schema_name FROM iso_workspaces WHERE id = 'ws-blocked'")
+            .fetch_one(&pool)
+            .await
+            .expect("workspace row");
+    assert!(
+        schema_name.is_none(),
+        "refused migration must leave schema_name untouched"
+    );
+    let (level, status): (String, String) = sqlx::query_as(
+        "SELECT current_level, migration_status FROM iso_isolation_configs \
+         WHERE workspace_id = 'ws-blocked'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("config row");
+    assert_eq!(level, "shared");
+    assert_eq!(status, "completed");
+
+    pool.close().await;
+}
+
+/// Assert the state after a successful Shared→DedicatedSchema migration from
+/// the scratch `migration_capable` schema: the workspace's rows moved to its
+/// dedicated schema, foreign rows stayed in the shared schema, and the
+/// workspace/config rows were stamped.
+async fn assert_migrated(pool: &PgPool, label: &str) {
+    let destination = "ws_wsmig";
+    for table in ["campaigns", "contacts", "emails", "templates", "webhooks"] {
+        let own: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM migration_capable.{table} WHERE workspace_id = 'ws-mig'"
+        ))
+        .fetch_one(pool)
+        .await
+        .expect("source count");
+        assert_eq!(
+            own, 0,
+            "{label}: own rows must leave the shared schema ({table})"
+        );
+        let foreign: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM migration_capable.{table} WHERE workspace_id = 'ws-other'"
+        ))
+        .fetch_one(pool)
+        .await
+        .expect("source count");
+        assert_eq!(foreign, 1, "{label}: foreign rows must stay ({table})");
+        let copied: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {destination}.{table} WHERE workspace_id = 'ws-mig'"
+        ))
+        .fetch_one(pool)
+        .await
+        .expect("destination count");
+        assert_eq!(copied, 1, "{label}: own row copied exactly once ({table})");
+        let destination_rows: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {destination}.{table}"))
+                .fetch_one(pool)
+                .await
+                .expect("destination count");
+        assert_eq!(
+            destination_rows, 1,
+            "{label}: only the migrated workspace may be copied ({table})"
+        );
+    }
+    let schema_name: Option<String> =
+        sqlx::query_scalar("SELECT schema_name FROM iso_workspaces WHERE id = 'ws-mig'")
+            .fetch_one(pool)
+            .await
+            .expect("workspace row");
+    assert_eq!(schema_name.as_deref(), Some(destination));
+    let (level, status): (String, String) = sqlx::query_as(
+        "SELECT current_level, migration_status FROM iso_isolation_configs \
+         WHERE workspace_id = 'ws-mig'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("config row");
+    assert_eq!(level, "dedicated_schema");
+    assert_eq!(status, "completed");
+}
+
+/// BUG 1 success path: when the shared schema really carries every required
+/// table + `workspace_id`, the migration proceeds, moves exactly the
+/// workspace's rows, and is idempotent on a re-run.
+#[tokio::test]
+async fn capable_shared_schema_migrates_and_is_idempotent() {
+    let Some(pool) = canonical_pool("migration_capable").await else {
+        return;
+    };
+    seed_org_and_workspace(&pool, "org-mig", "ws-mig")
+        .await
+        .expect("seed org/ws");
+    sqlx::query(
+        "INSERT INTO iso_isolation_configs (workspace_id, current_level, migration_status) \
+         VALUES ('ws-mig', 'shared', 'completed')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed config");
+
+    // A capable shared schema created in the test. The canonical public
+    // tables are deliberately NOT altered (no fake workspace_id column);
+    // the migration is driven through the same copy/delete path against
+    // this schema.
+    sqlx::query("CREATE SCHEMA migration_capable")
+        .execute(&pool)
+        .await
+        .expect("scratch schema");
+    for table in ["campaigns", "contacts", "emails", "templates", "webhooks"] {
+        sqlx::query(&format!(
+            "CREATE TABLE migration_capable.{table} \
+             (id text PRIMARY KEY, workspace_id text NOT NULL, note text)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("scratch table");
+        sqlx::query(&format!(
+            "INSERT INTO migration_capable.{table} (id, workspace_id, note) VALUES \
+             ($1, 'ws-mig', 'own'), ($2, 'ws-other', 'foreign')"
+        ))
+        .bind(format!("{table}-own"))
+        .bind(format!("{table}-foreign"))
+        .execute(&pool)
+        .await
+        .expect("seed scratch rows");
+    }
+
+    let service = DataIsolationService::new(pool.clone());
+    service
+        .migrate_isolation_level_in_schema(
+            "ws-mig",
+            &IsolationLevel::Shared,
+            &IsolationLevel::DedicatedSchema,
+            "migration_capable",
+        )
+        .await
+        .expect("a capable shared schema must migrate");
+    assert_migrated(&pool, "first run").await;
+
+    // Idempotent: re-running neither fails nor duplicates/loses rows.
+    service
+        .migrate_isolation_level_in_schema(
+            "ws-mig",
+            &IsolationLevel::Shared,
+            &IsolationLevel::DedicatedSchema,
+            "migration_capable",
+        )
+        .await
+        .expect("re-running the migration must stay idempotent");
+    assert_migrated(&pool, "second run").await;
 
     pool.close().await;
 }

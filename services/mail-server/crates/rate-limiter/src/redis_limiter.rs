@@ -805,8 +805,13 @@ mod tests {
     /// Helper to connect to Redis for integration tests.
     async fn test_redis_connection() -> Option<redis::aio::ConnectionManager> {
         // F6: no ambient 6379 default — the variable must name the Redis
-        // under test explicitly; unset means skip.
-        let url = std::env::var("REDIS_TEST_URL").ok()?;
+        // under test explicitly; unset means skip. A CI executor that
+        // provides Redis as a service exports TEST_REDIS_URL, which is the
+        // same instance, so it is the documented fallback: without it the
+        // pipeline could never exercise the real Redis limiter.
+        let url = std::env::var("REDIS_TEST_URL")
+            .ok()
+            .or_else(|| std::env::var("TEST_REDIS_URL").ok())?;
 
         let client = redis::Client::open(url.as_str()).ok()?;
         match redis::aio::ConnectionManager::new(client).await {
@@ -828,7 +833,6 @@ mod tests {
     ///
     /// Verifies that requests within the limit are allowed and requests
     /// exceeding the limit are denied.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_basic_allow_deny() {
         let cm = test_redis_connection()
@@ -868,7 +872,6 @@ mod tests {
     ///
     /// Verifies that requests outside the current window don't count
     /// against the limit. Uses a 1-second window.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_window_expiry() {
         let cm = test_redis_connection()
@@ -895,7 +898,6 @@ mod tests {
     }
 
     /// Integration test: multiple keys are independent.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_multiple_keys_independent() {
         let cm = test_redis_connection()
@@ -934,7 +936,6 @@ mod tests {
     /// Simulates a pod restart by creating a new `RedisLimiter` with a
     /// fresh connection and verifying that existing rate limit state
     /// is carried over.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_state_survives_restart() {
         let cm = test_redis_connection()
@@ -970,7 +971,6 @@ mod tests {
     }
 
     /// Integration test: check_n with batch cost.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_check_n() {
         let cm = test_redis_connection()
@@ -1000,7 +1000,6 @@ mod tests {
     /// `burst` tokens available immediately, continuous refill at `rps`
     /// tokens/second. The previous sliding window enforced `burst` per
     /// rolling second, so (rps=10, burst=100) admitted 100 req/s forever.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_token_bucket_burst_and_sustained_rate() {
         let cm = test_redis_connection()
@@ -1059,7 +1058,6 @@ mod tests {
     /// the future (skewed writer / manual seeding) must be clamped to now
     /// (no negative elapsed time), and a far-past timestamp must refill to
     /// at most capacity — never beyond it.
-    #[ignore]
     #[tokio::test]
     async fn test_redis_time_skew_tolerant() {
         let mut cm = test_redis_connection()
@@ -1129,7 +1127,6 @@ mod tests {
     /// Integration test (fix #3): concurrent checks must not serialize or
     /// deadlock — the ConnectionManager is multiplexed and the Lua script
     /// is the atomicity boundary (no connection-level mutex).
-    #[ignore]
     #[tokio::test]
     async fn test_redis_concurrent_checks_share_multiplexed_connection() {
         use std::sync::Arc;

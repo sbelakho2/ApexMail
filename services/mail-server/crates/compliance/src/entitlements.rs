@@ -177,7 +177,10 @@ const TENANT_USAGE_SQL: &str = r#"
 /// Mirrors billing-service `tenant_cycle_anchor` (usage.rs) verbatim so
 /// both paths resolve the same anchor for the same tenant.
 const TENANT_CYCLE_ANCHOR_SQL: &str = r#"
-        SELECT billing_cycle_start
+        -- `billing_cycle_start` is TIMESTAMPTZ in the canonical schema while
+        -- the anchor is consumed as a DATE: without the cast sqlx refuses the
+        -- row and every entitlement lookup for a subscribed tenant fails.
+        SELECT billing_cycle_start::date
         FROM stripe_subscriptions
         WHERE tenant_id = $1
           AND status IN ('active', 'trialing', 'past_due')
@@ -742,5 +745,214 @@ mod tests {
         );
         assert_eq!(response.batch_limit, 100);
         assert_eq!(response.attachment_limit_mb, 10);
+    }
+}
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// Entitlements are a billing promise: an unknown tenant is an error, a
+// suspended tenant still reports its plan, and usage is summed over the same
+// anchored window enforcement charges.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+    use serde_json::json;
+
+    async fn pool(suffix: &str) -> Option<PgPool> {
+        test_support::canonical_pool(&format!("ent_{suffix}"), &format!("ent_{suffix}")).await
+    }
+
+    fn features() -> serde_json::Value {
+        json!({
+            "max_sending_domains": 25,
+            "max_team_members": 10,
+            "max_retention_days": 90,
+            "sso_enabled": true,
+            "audit_logs": true,
+            "dedicated_ip_count": 2,
+            "max_subaccounts": 5,
+            "sla_guarantee": true,
+            "inbound_email": true
+        })
+    }
+
+    #[tokio::test]
+    async fn unknown_tenants_error_and_plans_drive_the_limits() {
+        let Some(pool) = pool("plans").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO plans (name, email_limit, api_call_limit, features)
+             VALUES ('pro', 50000, 100000, $1)
+             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+        )
+        .bind(features())
+        .execute(&pool)
+        .await
+        .expect("plan");
+
+        // An unknown tenant is an explicit error, never a defaulted plan.
+        let err = get_tenant_entitlements(&pool, "no-such-tenant")
+            .await
+            .expect_err("unknown tenant");
+        assert!(err.to_string().contains("not found"), "{err}");
+
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES
+               ('ent-pro', 'Pro Co', 'pro', 'active'),
+               ('ent-suspended', 'Suspended Co', 'pro', 'suspended')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("tenants");
+
+        let entitlements = get_tenant_entitlements(&pool, "ent-pro")
+            .await
+            .expect("entitlements");
+        assert_eq!(entitlements.active_plan, "pro");
+        assert_eq!(entitlements.monthly_message_allowance, 50000);
+        assert_eq!(entitlements.current_usage, 0);
+        assert_eq!(entitlements.sending_domain_limit, 25);
+        assert_eq!(entitlements.user_limit, 10);
+        assert_eq!(entitlements.event_retention_days, 90);
+        assert!(entitlements.sso_enabled);
+        assert!(entitlements.audit_logs);
+        assert_eq!(entitlements.dedicated_ip_entitlement, 2);
+        assert_eq!(entitlements.subaccount_limit, 5);
+        assert!(entitlements.sla_eligible);
+        assert!(entitlements.inbound_email);
+        assert_eq!(entitlements.support_target_hours, Some(24));
+        assert_eq!(entitlements.overage_rate_cents_per_1000, 60);
+        assert_eq!(entitlements.api_key_limit, 10);
+        assert_eq!(entitlements.smtp_credential_limit, 5);
+        assert_eq!(entitlements.template_limit, 100);
+        assert_eq!(entitlements.webhook_endpoint_limit, 5);
+        assert_eq!(entitlements.daily_send_limit, Some(15000));
+        assert_eq!(entitlements.hourly_burst_limit, Some(500));
+        assert!(!entitlements.suspended);
+        assert!(!entitlements.trial_or_beta);
+        assert!(entitlements.dpa_available);
+        assert!(!entitlements.contract_override);
+
+        // A suspended tenant reports the suspension instead of hiding it.
+        let suspended = get_tenant_entitlements(&pool, "ent-suspended")
+            .await
+            .expect("suspended");
+        assert!(suspended.suspended);
+        assert_eq!(suspended.active_plan, "pro");
+    }
+
+    #[tokio::test]
+    async fn usage_is_summed_over_the_anchored_billing_cycle() {
+        let Some(pool) = pool("usage").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO plans (name, email_limit, api_call_limit, features)
+             VALUES ('pro', 1000, 1000, $1)
+             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+        )
+        .bind(features())
+        .execute(&pool)
+        .await
+        .expect("plan");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status)
+             VALUES ('ent-usage', 'Usage Co', 'pro', 'active')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("tenant");
+
+        let today = Utc::now().date_naive();
+        // Anchor the cycle to today so the window starts today.
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+               (id, tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                created_at, updated_at)
+             VALUES (gen_random_uuid(), 'ent-usage', $1, 'pro', 'active', $2, NOW(), NOW())",
+        )
+        .bind(format!(
+            "sub_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ))
+        .bind(today)
+        .execute(&pool)
+        .await
+        .expect("subscription");
+        sqlx::query(
+            "INSERT INTO metering_events (tenant_id, event_type, quantity, timestamp)
+             VALUES ('ent-usage', 'emails_sent', 120, NOW()),
+                    ('ent-usage', 'emails_sent', 80, NOW()),
+                    ('ent-usage', 'emails_sent', 9999, NOW() - INTERVAL '90 days'),
+                    ('ent-usage', 'api_calls', 500, NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("usage");
+
+        let entitlements = get_tenant_entitlements(&pool, "ent-usage")
+            .await
+            .expect("entitlements");
+        assert_eq!(
+            entitlements.current_usage, 200,
+            "only in-window emails_sent"
+        );
+        assert_eq!(entitlements.monthly_message_allowance, 1000);
+        assert_eq!(entitlements.active_plan, "pro");
+        assert!(entitlements.monthly_message_allowance > entitlements.current_usage);
+    }
+
+    #[tokio::test]
+    async fn missing_plan_rows_fall_back_to_documented_defaults() {
+        let Some(pool) = pool("noplan").await else {
+            return;
+        };
+        // A tenant whose plan has no `plans` row: the code must not error,
+        // and must not invent paid features.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status)
+             VALUES ('ent-free', 'Free Co', 'free', 'active')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("tenant");
+        let entitlements = get_tenant_entitlements(&pool, "ent-free")
+            .await
+            .expect("entitlements");
+        assert_eq!(entitlements.active_plan, "free");
+        assert!(!entitlements.sso_enabled);
+        assert!(!entitlements.audit_logs);
+        assert_eq!(entitlements.dedicated_ip_entitlement, 0);
+        assert_eq!(entitlements.support_target_hours, Some(48));
+        assert_eq!(entitlements.overage_rate_cents_per_1000, 0);
+        assert_eq!(entitlements.api_key_limit, 2);
+        assert_eq!(entitlements.smtp_credential_limit, 1);
+        assert_eq!(entitlements.template_limit, 5);
+        assert_eq!(entitlements.webhook_endpoint_limit, 0);
+        assert_eq!(entitlements.daily_send_limit, Some(100));
+        assert_eq!(entitlements.hourly_burst_limit, Some(10));
+        assert_eq!(entitlements.sending_domain_limit, 1);
+        assert_eq!(entitlements.user_limit, 1);
+        // No fabricated features for a plan that has no row.
+        assert_eq!(entitlements.event_retention_days, 7);
+        assert!(!entitlements.sla_eligible);
+    }
+
+    #[test]
+    fn enforced_send_limits_are_positive_and_ordered() {
+        let limits = enforced_send_limits();
+        assert!(limits.batch_limit > 0);
+        assert!(limits.attachment_limit_mb > 0);
+        assert!(limits.max_attachments > 0);
+        assert!(
+            limits.aggregate_attachment_limit_mb >= limits.attachment_limit_mb,
+            "the aggregate ceiling must not be below the per-attachment ceiling"
+        );
     }
 }

@@ -913,14 +913,62 @@ mod tests {
         assert_eq!(p, vec![100.0, 0.0, 30.0]);
     }
 
+    /// Requires a running ClickHouse; soft-skips when it is absent. The URL is
+    /// configurable (`CLICKHOUSE_TEST_URL`, default localhost:8123) and the
+    /// database is CREATED here, because the engine assumes it exists — the
+    /// test used to be `#[ignore]`d and depended on someone having created
+    /// `apexmail_test` by hand.
+    /// Is a ClickHouse reachable at `url`? Used to soft-skip instead of
+    /// failing when no server is running (the workspace convention for
+    /// infrastructure-gated tests).
+    async fn clickhouse_reachable(url: &str, user: &str, password: &str) -> bool {
+        let client = clickhouse::Client::default()
+            .with_url(url)
+            .with_user(user)
+            .with_database("default");
+        let client = if password.is_empty() {
+            client
+        } else {
+            client.with_password(password)
+        };
+        client.query("SELECT 1").fetch_one::<u8>().await.is_ok()
+    }
+
     #[tokio::test]
-    #[ignore = "requires running ClickHouse"]
     async fn test_clickhouse_init() {
+        let url =
+            std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://localhost:8123".into());
+        let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
+        let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
+        if !clickhouse_reachable(&url, &user, &password).await {
+            eprintln!("skipping test_clickhouse_init: no ClickHouse at {url}");
+            return;
+        }
+        // The engine connects to an existing database; create the test one.
+        let bootstrap = clickhouse::Client::default()
+            .with_url(&url)
+            .with_user(&user)
+            .with_database("default");
+        if let Some(password) = (!password.is_empty()).then_some(password.clone()) {
+            let bootstrap = bootstrap.with_password(password);
+            bootstrap
+                .query("CREATE DATABASE IF NOT EXISTS apexmail_test")
+                .execute()
+                .await
+                .expect("create apexmail_test");
+        } else {
+            bootstrap
+                .query("CREATE DATABASE IF NOT EXISTS apexmail_test")
+                .execute()
+                .await
+                .expect("create apexmail_test");
+        }
+
         let config = ClickHouseConfig {
-            url: "http://localhost:8123".into(),
+            url,
             database: "apexmail_test".into(),
-            user: "default".into(),
-            password: "".into(),
+            user,
+            password,
             max_connections: 10,
             query_timeout_secs: 30,
             insert_timeout_seconds: 30,
@@ -941,8 +989,9 @@ mod tests {
     ///   docker exec -i <ctr> clickhouse-client --password testpass123 --multiquery < deploy/clickhouse/initdb/001_schema.sql
     ///   CLICKHOUSE_TEST_URL=http://127.0.0.1:8124 CLICKHOUSE_TEST_PASSWORD=testpass123 \
     ///       cargo test -p analytics -- --ignored --nocapture engine_e2e
+    /// Requires a running ClickHouse with the canonical schema applied
+    /// (`deploy/clickhouse/initdb/001_schema.sql`); soft-skips when absent.
     #[tokio::test]
-    #[ignore = "requires running ClickHouse"]
     async fn engine_e2e() {
         use chrono::{TimeZone, Utc};
 
@@ -950,6 +999,10 @@ mod tests {
             std::env::var("CLICKHOUSE_TEST_URL").unwrap_or_else(|_| "http://127.0.0.1:8124".into());
         let user = std::env::var("CLICKHOUSE_TEST_USER").unwrap_or_else(|_| "default".into());
         let password = std::env::var("CLICKHOUSE_TEST_PASSWORD").unwrap_or_default();
+        if !clickhouse_reachable(&url, &user, &password).await {
+            eprintln!("skipping engine_e2e: no ClickHouse at {url}");
+            return;
+        }
 
         let config = ClickHouseConfig {
             url,

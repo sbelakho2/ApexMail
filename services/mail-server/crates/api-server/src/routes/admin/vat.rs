@@ -717,3 +717,300 @@ mod tests {
         assert_eq!(vat_rates::EU_COUNTRIES.len(), 27);
     }
 }
+
+// ─── Adversarial VAT/KMD console tests ─────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    fn customer_auth(tenant: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    fn list_query(limit: i64, offset: i64) -> Query<KmdListQuery> {
+        Query(KmdListQuery { limit, offset })
+    }
+
+    #[test]
+    fn due_date_edges_are_month_end_aware() {
+        use chrono::Timelike as _;
+        // Leap-year February still resolves (not the fallback branch).
+        assert_eq!(compute_due_date(2024, 1).month(), 2);
+        assert_eq!(compute_due_date(2024, 1).day(), 20);
+        // December rolls into the next year.
+        let december = compute_due_date(2023, 12);
+        assert_eq!(
+            (december.year(), december.month(), december.day()),
+            (2024, 1, 20)
+        );
+        // Month end is always 20th 23:59:59 UTC.
+        let feb = compute_due_date(2026, 1);
+        assert_eq!(feb.hour(), 23);
+        assert_eq!(feb.minute(), 59);
+    }
+
+    #[test]
+    fn kmd_row_mapping_serializes_every_filing_field() {
+        let now = chrono::Utc::now();
+        let resp = map_kmd_row(
+            "kmd_1".into(),
+            2026,
+            6,
+            "filed".into(),
+            serde_json::json!({"rates": [{"rate": 24.0}]}),
+            3,
+            1_000,
+            240,
+            now,
+            Some(now),
+            Some("KMD-REF".into()),
+            Some("late warning".into()),
+            now,
+            now,
+        );
+        assert_eq!(resp.status, "filed");
+        assert_eq!(resp.filed_at.as_deref(), Some(now.to_rfc3339().as_str()));
+        assert_eq!(resp.filing_reference.as_deref(), Some("KMD-REF"));
+        assert_eq!(resp.filing_error.as_deref(), Some("late warning"));
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["taxYear"], 2026);
+        assert_eq!(json["totalVatCents"], 240);
+        assert!(json["filedAt"].is_string());
+    }
+
+    #[tokio::test]
+    async fn kmd_reads_are_system_only_and_period_validation_is_honest() {
+        let Some((state, pool)) = state_and_pool("adv_vat_access").await else {
+            return;
+        };
+        // Access gates: customer tenant and scope-less callers are refused
+        // before any query.
+        assert!(matches!(
+            list_kmd_returns(
+                State(state.clone()),
+                customer_auth("ten_customer_adv"),
+                list_query(12, 0)
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        let mut no_scope = admin_auth();
+        no_scope.scopes = vec![];
+        assert!(matches!(
+            get_latest_kmd(State(state.clone()), no_scope).await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            trigger_kmd_generation(
+                State(state.clone()),
+                customer_auth("ten_customer_adv"),
+                Json(GenerateKmdBody {
+                    tax_year: 2026,
+                    tax_month: 1
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // Period validation happens before generation.
+        for month in [0, 13, u32::MAX] {
+            let resp = trigger_kmd_generation(
+                State(state.clone()),
+                admin_auth(),
+                Json(GenerateKmdBody {
+                    tax_year: 2026,
+                    tax_month: month,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::Validation(_))),
+                "tax_month {month} must be refused"
+            );
+        }
+        for month in [0, 13] {
+            let resp =
+                get_kmd_by_period(State(state.clone()), admin_auth(), Path((2026, month))).await;
+            assert!(matches!(resp, Err(ApiError::Validation(_))));
+        }
+        let _ = pool;
+    }
+
+    #[tokio::test]
+    async fn kmd_list_latest_and_period_round_trip_with_seeded_returns() {
+        let Some((state, pool)) = state_and_pool("adv_vat_kmd").await else {
+            return;
+        };
+        // Far-past periods so "latest" in the shared DB is dominated by any
+        // real rows; the assertions only target our periods.
+        for (year, month, status) in [(1901, 1, "draft"), (1901, 2, "filed")] {
+            sqlx::query(
+                "INSERT INTO vat_kmd_returns (tax_year, tax_month, status, breakdown, invoice_count,
+                    total_taxable_cents, total_vat_cents)
+                 VALUES ($1, $2, $3, '{}'::jsonb, 0, 0, 0)
+                 ON CONFLICT (tax_year, tax_month) DO NOTHING",
+            )
+            .bind(year)
+            .bind(month)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed kmd");
+        }
+
+        // Pagination clamps: limit 0 → 1, negative offset → 0.
+        let Json(list) = list_kmd_returns(State(state.clone()), admin_auth(), list_query(0, -5))
+            .await
+            .expect("list kmd");
+        assert!(list["total"].as_i64().unwrap_or(0) >= 2);
+        assert_eq!(list["returns"].as_array().map(Vec::len), Some(1));
+
+        let Json(by_period) =
+            get_kmd_by_period(State(state.clone()), admin_auth(), Path((1901, 2)))
+                .await
+                .expect("period");
+        assert_eq!(by_period["taxYear"], 1901);
+        assert_eq!(by_period["status"], "filed");
+
+        // Unknown period is an explicit null, never a fabricated return.
+        let Json(absent) = get_kmd_by_period(State(state.clone()), admin_auth(), Path((1900, 12)))
+            .await
+            .expect("absent period");
+        assert!(absent.is_null());
+
+        // Latest is either null or a well-formed return.
+        let Json(latest) = get_latest_kmd(State(state.clone()), admin_auth())
+            .await
+            .expect("latest");
+        assert!(latest.is_null() || latest["taxYear"].is_number());
+
+        // Manual generation for a unique future period produces a draft row.
+        let Json(generated) = trigger_kmd_generation(
+            State(state.clone()),
+            admin_auth(),
+            Json(GenerateKmdBody {
+                tax_year: 2099,
+                tax_month: 7,
+            }),
+        )
+        .await
+        .expect("generate kmd");
+        assert_eq!(generated["success"], true);
+        assert_eq!(generated["taxYear"], 2099);
+        assert_eq!(generated["taxMonth"], 7);
+        let (status, count): (String, i32) =
+            sqlx::query_as("SELECT status, invoice_count FROM vat_kmd_returns WHERE tax_year = 2099 AND tax_month = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("generated row persisted");
+        assert_eq!(status, "draft");
+        assert_eq!(count, 0, "no recognition rows exist for 2099 → zero return");
+
+        // Cleanup so the shared fixture DB stays stable.
+        sqlx::query("DELETE FROM vat_kmd_returns WHERE tax_year IN (1901, 2099)")
+            .execute(&pool)
+            .await
+            .expect("cleanup kmd");
+    }
+
+    #[tokio::test]
+    async fn current_summary_classifies_seeded_invoice_rates() {
+        let Some((state, pool)) = state_and_pool("adv_vat_current").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'vat adversarial', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO billing_addresses (tenant_id, country, company_name, vat_number)
+             VALUES ($1, 'EE', 'Adv OÜ', NULL)
+             ON CONFLICT (tenant_id) DO UPDATE SET country = 'EE'",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed address");
+        sqlx::query(
+            "INSERT INTO invoices (tenant_id, status, issued_at, subtotal, vat_total, total)
+             VALUES ($1, 'paid', NOW(), 5000, 1200, 6200),
+                    ($1, 'pending', NOW(), 1000, 240, 1240)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed invoices");
+
+        // Tenant-scoped summary: exactly our two invoices.
+        let Json(scoped) = get_current_vat_summary(State(state.clone()), customer_auth(&tenant))
+            .await
+            .expect("scoped summary");
+        assert_eq!(scoped.invoice_count, 2);
+        assert_eq!(scoped.tenant_count, 1);
+        assert_eq!(scoped.total_taxable_cents, 6_000);
+        assert_eq!(scoped.total_vat_cents, 1_440);
+        assert_eq!(scoped.status, "live");
+        assert_eq!(scoped.rates.len(), 1);
+        assert_eq!(
+            scoped.rates[0]["reason"],
+            serde_json::Value::Null,
+            "EE domestic"
+        );
+        assert_eq!(scoped.rates[0]["rate"], vat_rates::ESTONIA_VAT_RATE,);
+        assert_eq!(
+            scoped.due_date,
+            compute_due_date(scoped.tax_year, scoped.tax_month).to_rfc3339()
+        );
+
+        // Global view counts at least our rows too.
+        let Json(global) = get_current_vat_summary(State(state.clone()), admin_auth())
+            .await
+            .expect("global summary");
+        assert!(global.invoice_count >= 2);
+
+        sqlx::query("DELETE FROM invoices WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup invoices");
+        sqlx::query("DELETE FROM billing_addresses WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup address");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+}

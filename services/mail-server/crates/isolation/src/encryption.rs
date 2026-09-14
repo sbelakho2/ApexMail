@@ -25,6 +25,7 @@ use crate::types::*;
 const ALGORITHM: &str = "aes-256-gcm";
 const KEY_LENGTH: usize = 32;
 const IV_LENGTH: usize = 12;
+const TAG_LENGTH: usize = 16;
 const LEGACY_DATA_KEY_SALT: &[u8] = b"apexmail-isolation-master";
 
 fn fill_os_random(bytes: &mut [u8]) -> anyhow::Result<()> {
@@ -34,6 +35,38 @@ fn fill_os_random(bytes: &mut [u8]) -> anyhow::Result<()> {
 }
 
 // ── Key Derivation ─────────────────────────────────────────
+
+/// Fail closed when no master key is configured: an empty/blank
+/// `TENANT_ENCRYPTION_KEY` must never silently yield a well-known HKDF key
+/// (all deployments would derive identical keys) and data must never be
+/// stored unencrypted as a fallback.
+fn ensure_master_key_configured(master_key: &str) -> anyhow::Result<()> {
+    if master_key.trim().is_empty() {
+        anyhow::bail!(
+            "Master encryption key is not configured — refusing to derive encryption keys"
+        );
+    }
+    Ok(())
+}
+
+/// Reject AEAD parts whose decoded lengths do not match AES-256-GCM before
+/// they reach `Nonce::from_slice` / `Tag::from_slice` (both panic on a wrong
+/// length).
+fn validate_aead_parts(iv: &[u8], tag: &[u8]) -> anyhow::Result<()> {
+    if iv.len() != IV_LENGTH {
+        anyhow::bail!(
+            "Invalid AES-GCM nonce length: expected {IV_LENGTH}, got {}",
+            iv.len()
+        );
+    }
+    if tag.len() != TAG_LENGTH {
+        anyhow::bail!(
+            "Invalid AES-GCM auth tag length: expected {TAG_LENGTH}, got {}",
+            tag.len()
+        );
+    }
+    Ok(())
+}
 
 fn derive_key(master_key: &str, salt: &[u8], info: &str) -> anyhow::Result<[u8; KEY_LENGTH]> {
     let hk = Hkdf::<Sha256>::new(Some(salt), master_key.as_bytes());
@@ -93,6 +126,7 @@ impl EncryptionService {
     // ── Data Key Encryption ────────────────────────────────
 
     fn encrypt_data_key(&self, organization_id: &str, raw_key: &[u8]) -> anyhow::Result<String> {
+        ensure_master_key_configured(&self.config.encryption_key)?;
         let salt = organization_data_key_salt(organization_id);
         let mut derived = derive_key(&self.config.encryption_key, &salt, "data-key-encryption")?;
 
@@ -123,6 +157,7 @@ impl EncryptionService {
     }
 
     fn decrypt_data_key_with_salt(&self, encrypted: &str, salt: &[u8]) -> anyhow::Result<Vec<u8>> {
+        ensure_master_key_configured(&self.config.encryption_key)?;
         let parts: Vec<&str> = encrypted.split(':').collect();
         if parts.len() != 3 {
             anyhow::bail!("Invalid encrypted key format");
@@ -130,6 +165,9 @@ impl EncryptionService {
         let iv = B64.decode(parts[0])?;
         let tag_bytes = B64.decode(parts[1])?;
         let mut buffer = B64.decode(parts[2])?;
+        // `Nonce::from_slice`/`Tag::from_slice` panic on a wrong length, so a
+        // crafted or corrupted key blob must be rejected before them.
+        validate_aead_parts(&iv, &tag_bytes)?;
 
         let mut derived = derive_key(&self.config.encryption_key, salt, "data-key-encryption")?;
 
@@ -220,6 +258,9 @@ impl EncryptionService {
         let iv = B64.decode(&encrypted.iv)?;
         let mut buffer = B64.decode(&encrypted.ciphertext)?;
         let tag_bytes = B64.decode(&encrypted.auth_tag)?;
+        // A stored ciphertext is attacker-influenced data: never let a wrong
+        // IV/tag length reach the panicking `from_slice` constructors.
+        validate_aead_parts(&iv, &tag_bytes)?;
 
         let nonce = Nonce::from_slice(&iv);
         let tag = Tag::from_slice(&tag_bytes);
@@ -717,6 +758,10 @@ impl EncryptionService {
                             continue;
                         }
                     };
+                    if let Err(e) = validate_aead_parts(&iv, &auth_tag) {
+                        warn!(record_id = record_id, error = %e, "Rejecting malformed encrypted field");
+                        continue;
+                    }
 
                     let nonce = Nonce::from_slice(&iv);
                     let tag = Tag::from_slice(&auth_tag);

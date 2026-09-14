@@ -66,12 +66,32 @@ const RESOLVE_FLAG_SQL: &str = "SELECT \
           ORDER BY created_at DESC LIMIT 1) AS override_value, \
         (SELECT enabled FROM feature_flags WHERE name = $2 LIMIT 1) AS global_enabled";
 
+/// An override that was IGNORED because its value was not a JSON boolean —
+/// the fact the `warn!` in [`FeatureFlagService::enabled`] reports, exposed as
+/// state as well.
+///
+/// Why both: tracing caches a callsite's interest PROCESS-WIDE, so once any
+/// subscriber that filters warnings out has registered the callsite (this
+/// crate's test binary installs a global `error`-level fmt subscriber), a
+/// subscriber installed later — a test's capture layer — can never receive the
+/// event. Asserting the behaviour through the log alone is therefore
+/// order-dependent; the record is the deterministic channel, the log line
+/// stays for operators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredOverride {
+    pub tenant_id: String,
+    pub flag: String,
+    pub value: String,
+}
+
 /// Read-side feature-flag service. Cheap to clone (PgPool + moka cache); one
 /// instance lives in [`crate::state::AppState`].
 #[derive(Clone)]
 pub struct FeatureFlagService {
     db: PgPool,
     cache: moka::sync::Cache<String, bool>,
+    /// Most recent ignored override (diagnostics + tests). Shared by clones.
+    ignored_override: std::sync::Arc<std::sync::Mutex<Option<IgnoredOverride>>>,
 }
 
 impl FeatureFlagService {
@@ -86,7 +106,20 @@ impl FeatureFlagService {
             .max_capacity(CACHE_MAX_ENTRIES)
             .time_to_live(ttl)
             .build();
-        Self { db, cache }
+        Self {
+            db,
+            cache,
+            ignored_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// The most recent override this service ignored because it was not a JSON
+    /// boolean, if any. See [`IgnoredOverride`].
+    pub fn last_ignored_override(&self) -> Option<IgnoredOverride> {
+        self.ignored_override
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Evaluate a flag for one tenant.
@@ -130,6 +163,14 @@ impl FeatureFlagService {
                     "feature flag override is not a JSON boolean; ignoring it and falling \
                      through to the global row"
                 );
+                *self
+                    .ignored_override
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(IgnoredOverride {
+                    tenant_id: tenant_id.to_string(),
+                    flag: flag.to_string(),
+                    value: other.to_string(),
+                });
                 global_enabled.unwrap_or(default)
             }
             None => global_enabled.unwrap_or(default),
@@ -166,8 +207,6 @@ impl FeatureFlagService {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::{Arc, Mutex};
 
     use axum::extract::State;
     use axum::Json;
@@ -293,17 +332,17 @@ mod tests {
     }
 
     /// Adversarial 7: a non-boolean override is IGNORED (the chosen failure
-    /// behaviour) and is logged at warn.
+    /// behaviour), the ignore is RECORDED, and the flag resolves exactly as if
+    /// the override did not exist.
     ///
-    /// `current_thread`: the capture subscriber is installed as the
-    /// THREAD-LOCAL default, and `enabled()` awaits database calls — on a
-    /// multi-thread runtime a task can resume on another worker after an
-    /// await, and the warn emitted there would never reach this subscriber
-    /// (observed as a load-dependent flake under a full-workspace run).
-    /// Pinning the runtime keeps every await on the test thread, so the
-    /// capture is deterministic.
-    #[tokio::test(flavor = "current_thread")]
-    async fn non_boolean_override_is_ignored_and_logged() {
+    /// The RECORD — not the log — is the assertion channel. tracing caches a
+    /// callsite's interest process-wide, so a capture subscriber installed
+    /// after another test's global `error`-level fmt subscriber can never
+    /// receive this warn event; asserting through the log alone is therefore
+    /// order-dependent and flaked exactly that way under a full-workspace run.
+    /// The warn stays for operators; the record is what code can observe.
+    #[tokio::test]
+    async fn non_boolean_override_is_ignored_recorded_and_logged() {
         let Some(pool) = crate::test_db::canonical_pool("feature_flag_bad_override").await else {
             return;
         };
@@ -319,34 +358,28 @@ mod tests {
         )
         .await;
 
-        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-        use tracing_subscriber::layer::SubscriberExt as _;
-        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
-            events: captured.clone(),
-        });
-        let guard = tracing::subscriber::set_default(subscriber);
-
         let service = FeatureFlagService::new(pool.clone());
-        let result = service
-            .enabled("tenant-bad-override", flag, false)
-            .await
-            .expect("evaluation succeeds");
-
-        drop(guard);
-
         assert!(
-            result,
+            service.last_ignored_override().is_none(),
+            "nothing has been ignored yet"
+        );
+        assert!(
+            service
+                .enabled("tenant-bad-override", flag, false)
+                .await
+                .expect("evaluation succeeds"),
             "an ignored override must fall through to the global row (true)"
         );
-        let events = captured.lock().expect("captured events").clone();
-        assert!(
-            events
-                .iter()
-                .any(|message| message.contains("not a JSON boolean")),
-            "the invalid override must be logged at warn: {events:?}"
-        );
+        let ignored = service
+            .last_ignored_override()
+            .expect("the ignored override must be recorded, not silently dropped");
+        assert_eq!(ignored.tenant_id, "tenant-bad-override");
+        assert_eq!(ignored.flag, flag);
+        assert_eq!(ignored.value, "\"true\"");
 
-        // Objects and numbers are equally non-boolean and equally ignored.
+        // Objects and numbers are equally non-boolean and equally ignored; the
+        // newest ignore replaces the record, and the cache is invalidated
+        // between cases because it is keyed (tenant, flag).
         upsert_override(
             &pool,
             "tenant-bad-override",
@@ -358,13 +391,39 @@ mod tests {
         assert!(service
             .enabled("tenant-bad-override", flag, false)
             .await
-            .unwrap());
-        upsert_override(&pool, "tenant-bad-override", flag, serde_json::json!(1)).await;
+            .expect("evaluation succeeds"));
+        assert_eq!(
+            service.last_ignored_override().map(|record| record.value),
+            Some("{\"enabled\":true}".to_string())
+        );
+
+        upsert_override(&pool, "tenant-bad-override", flag, serde_json::json!(7)).await;
         service.invalidate(flag);
         assert!(service
             .enabled("tenant-bad-override", flag, false)
             .await
-            .unwrap());
+            .expect("evaluation succeeds"));
+        assert_eq!(
+            service.last_ignored_override().map(|record| record.value),
+            Some("7".to_string())
+        );
+
+        // A well-formed override is NOT an ignore, and it wins in both
+        // directions — the failure mode must not shadow good data.
+        upsert_override(&pool, "tenant-bad-override", flag, serde_json::json!(false)).await;
+        service.invalidate(flag);
+        assert!(
+            !service
+                .enabled("tenant-bad-override", flag, true)
+                .await
+                .expect("evaluation succeeds"),
+            "a boolean override is authoritative in both directions"
+        );
+        assert_eq!(
+            service.last_ignored_override().map(|record| record.value),
+            Some("7".to_string()),
+            "a good override must not be recorded as ignored"
+        );
 
         cleanup(&pool, flag).await;
     }
@@ -536,40 +595,6 @@ mod tests {
         cleanup(&pool, AI_CHAT_FEATURE_FLAG).await;
     }
 
-    /// Minimal `tracing` layer that captures event messages for assertions.
-    #[derive(Clone, Default)]
-    struct CaptureLayer {
-        events: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CaptureLayer {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            struct Visitor<'a>(&'a mut String);
-            impl tracing::field::Visit for Visitor<'_> {
-                fn record_debug(
-                    &mut self,
-                    field: &tracing::field::Field,
-                    value: &dyn std::fmt::Debug,
-                ) {
-                    if field.name() == "message" {
-                        self.0.push_str(&format!("{value:?}"));
-                    }
-                }
-            }
-            let mut message = String::new();
-            event.record(&mut Visitor(&mut message));
-            if let Ok(mut events) = self.events.lock() {
-                events.push(message);
-            }
-        }
-    }
-
-    /// The SQL shape this module depends on: canonical `name` key (migration
-    /// 093), JSONB override value, and both layers read in one statement.
     #[test]
     fn resolve_sql_pins_the_canonical_key_and_jsonb_override() {
         assert!(RESOLVE_FLAG_SQL.contains("feature_flag_overrides"));

@@ -797,3 +797,459 @@ mod bot_detection_db_tests {
         pool.close().await;
     }
 }
+
+// ─── Adversarial AI-insights tests ─────────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'ai adversarial', $2, 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    #[test]
+    fn event_id_validation_matches_the_varchar64_column() {
+        assert!(is_valid_event_id("evt-1"));
+        assert!(is_valid_event_id(&"x".repeat(64)));
+        assert!(!is_valid_event_id(""));
+        assert!(!is_valid_event_id(&"x".repeat(65)));
+        assert!(!is_valid_event_id("bad\nid"));
+        assert!(!is_valid_event_id("bad\u{7}id"));
+        // Unicode is measured in BYTES (VARCHAR(64) semantics), not chars.
+        assert!(!is_valid_event_id(&"é".repeat(33)));
+        assert!(is_valid_event_id(&"é".repeat(32)));
+    }
+
+    #[tokio::test]
+    async fn subject_analysis_scores_spam_personalization_and_emoji() {
+        let Some((state, pool)) = state_and_pool("adv_ai_subject").await else {
+            return;
+        };
+        let auth = auth_for("ten_adv_ai", &["ai:read"]);
+
+        let Json(plain) = subject_analysis(
+            State(state.clone()),
+            auth.clone(),
+            Query(SubjectAnalysisQuery {
+                subject: "Quarterly product update".into(),
+            }),
+        )
+        .await
+        .expect("plain subject");
+        assert_eq!(plain.word_count, 3);
+        assert!(!plain.has_personalization);
+        assert!(!plain.has_emoji);
+        assert!(plain.spam_likelihood < 0.5);
+        assert_eq!(plain.predicted_open_rate, plain.score * 0.35);
+
+        let Json(personalized) = subject_analysis(
+            State(state.clone()),
+            auth.clone(),
+            Query(SubjectAnalysisQuery {
+                subject: "Hi {{name}}, your report is ready 🎉".into(),
+            }),
+        )
+        .await
+        .expect("personalized subject");
+        assert!(personalized.has_personalization);
+        assert!(personalized.has_emoji, "emoji range must be detected");
+        assert!(personalized.score > plain.score);
+
+        let Json(spammy) = subject_analysis(
+            State(state.clone()),
+            auth.clone(),
+            Query(SubjectAnalysisQuery {
+                subject: "FREE URGENT offer limited time act now right here for you today".into(),
+            }),
+        )
+        .await
+        .expect("spam subject");
+        assert_eq!(spammy.spam_likelihood, 0.6);
+        assert!(spammy.score < plain.score);
+        assert!(
+            spammy.suggestions.iter().any(|s| s.contains("shortening")),
+            "over-10-word subject gets a suggestion: {:?}",
+            spammy.suggestions
+        );
+
+        // Score always stays in 0..=1, even for hostile unicode.
+        let mut hostile = String::from("FREE urgent ");
+        hostile.push_str(&"🎉".repeat(50));
+        let Json(bounded) = subject_analysis(
+            State(state.clone()),
+            auth.clone(),
+            Query(SubjectAnalysisQuery { subject: hostile }),
+        )
+        .await
+        .expect("hostile subject");
+        assert!((0.0..=1.0).contains(&bounded.score));
+
+        // A scope-less caller is refused before any analysis.
+        assert!(matches!(
+            subject_analysis(
+                State(state.clone()),
+                auth_for("ten_adv_ai", &[]),
+                Query(SubjectAnalysisQuery {
+                    subject: "x".into()
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        let _ = pool;
+    }
+
+    #[tokio::test]
+    async fn churn_prediction_counts_only_unengaged_active_contacts() {
+        let Some((state, pool)) = state_and_pool("adv_ai_churn").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "free").await;
+        use uuid::Uuid;
+        for (email, status) in [
+            ("idle@example.com", "active"),
+            ("engaged@example.com", "active"),
+            ("unsub@example.com", "unsubscribed"),
+        ] {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, status, tags) VALUES ($1, $2, $3, $4, '[]'::jsonb)",
+            )
+            .bind(id)
+            .bind(&tenant)
+            .bind(email)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed contact");
+            if email.starts_with("engaged") {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+                     VALUES ($1, $2, 'opened', $3, NOW())",
+                )
+                .bind(format!("adv-evt-{}", uuid::Uuid::new_v4().simple()))
+                .bind(&tenant)
+                .bind(email)
+                .execute(&pool)
+                .await
+                .expect("seed event");
+            }
+        }
+
+        let Json(churn) = churn_prediction(State(state.clone()), auth_for(&tenant, &["ai:read"]))
+            .await
+            .expect("churn");
+        assert_eq!(churn.at_risk_contacts, 1, "only the idle active contact");
+        assert!(churn.churn_probability > 0.0 && churn.churn_probability <= 1.0);
+        assert_eq!(churn.top_risk_factors.len(), 2);
+        assert!(!churn.recommendations.is_empty());
+
+        // Empty tenant: total is clamped to 1 → probability 0.
+        let empty = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &empty, "free").await;
+        let Json(empty_churn) =
+            churn_prediction(State(state.clone()), auth_for(&empty, &["ai:read"]))
+                .await
+                .expect("empty churn");
+        assert_eq!(empty_churn.at_risk_contacts, 0);
+        assert_eq!(empty_churn.churn_probability, 0.0);
+
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM contacts WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup contacts");
+        sqlx::query("DELETE FROM tenants WHERE id = ANY($1)")
+            .bind(vec![tenant, empty])
+            .execute(&pool)
+            .await
+            .expect("cleanup tenants");
+    }
+
+    #[tokio::test]
+    async fn send_time_uses_history_entitlement_and_cache() {
+        let Some((state, pool)) = state_and_pool("adv_ai_send_time").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "free").await;
+
+        // Without the entitlement the endpoint refuses (403) after auth.
+        let denied = send_time_optimization(
+            State(state.clone()),
+            auth_for(&tenant, &["ai:read"]),
+            Query(SendTimeQuery {
+                recipient: None,
+                timezone: Some("Europe/Tallinn".into()),
+            }),
+        )
+        .await;
+        assert!(matches!(denied, Err(ApiError::Forbidden(_))));
+
+        // Grant the runtime override and seed 12 opens at 09:00 UTC.
+        sqlx::query(
+            "INSERT INTO feature_flag_overrides (flag_key, tenant_id, value)
+             VALUES ('send_time_optimization', $1, 'true'::jsonb)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("grant entitlement");
+        for i in 0..12 {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+                 VALUES ($1, $2, 'opened', 'reader@example.com', (CURRENT_DATE + TIME '09:00') + make_interval(secs => $3::int))",
+            )
+            .bind(format!("adv-st-{i}-{}", uuid::Uuid::new_v4().simple()))
+            .bind(&tenant)
+            .bind(i)
+            .execute(&pool)
+            .await
+            .expect("seed open");
+        }
+
+        let Json(first) = send_time_optimization(
+            State(state.clone()),
+            auth_for(&tenant, &["ai:read"]),
+            Query(SendTimeQuery {
+                recipient: Some("reader@example.com".into()),
+                timezone: Some("Europe/Tallinn".into()),
+            }),
+        )
+        .await
+        .expect("send-time with history");
+        assert_eq!(first.recommended_hour_utc, 9);
+        assert_eq!(first.timezone, "Europe/Tallinn");
+        assert!(first.confidence > 0.5);
+        assert!(first.reasoning.contains("opens analyzed"));
+
+        // The second call is served from the cache row written above.
+        let Json(second) = send_time_optimization(
+            State(state.clone()),
+            auth_for(&tenant, &["ai:read"]),
+            Query(SendTimeQuery {
+                recipient: Some("reader@example.com".into()),
+                timezone: Some("Europe/Tallinn".into()),
+            }),
+        )
+        .await
+        .expect("cached send-time");
+        assert!(second.reasoning.contains("cached"), "{}", second.reasoning);
+        assert_eq!(second.recommended_hour_utc, 9);
+
+        // Unknown recipient with no history falls back to the documented
+        // industry default (14:00) with low confidence.
+        let Json(fallback) = send_time_optimization(
+            State(state.clone()),
+            auth_for(&tenant, &["ai:read"]),
+            Query(SendTimeQuery {
+                recipient: Some("nobody@example.com".into()),
+                timezone: None,
+            }),
+        )
+        .await
+        .expect("fallback");
+        assert_eq!(fallback.recommended_hour_utc, 14);
+        assert_eq!(fallback.confidence, 0.5);
+        assert_eq!(fallback.timezone, "UTC");
+
+        cleanup_ai(&pool, &tenant).await;
+    }
+
+    async fn cleanup_ai(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query("DELETE FROM ai_send_time_cache WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup cache");
+        sqlx::query("DELETE FROM feature_flag_overrides WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup overrides");
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    #[tokio::test]
+    async fn bot_detection_flags_crawlers_prefetch_and_private_ips() {
+        let Some((state, pool)) = state_and_pool("adv_ai_bot").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "free").await;
+        let auth = auth_for(&tenant, &["ai:read"]);
+
+        // Invalid event id is a 400; unknown id is a benign empty verdict.
+        assert!(matches!(
+            bot_detection(
+                State(state.clone()),
+                auth.clone(),
+                Query(BotDetectionQuery {
+                    event_id: Some(String::new()),
+                    ip_address: None
+                })
+            )
+            .await,
+            Err(ApiError::BadRequest(_))
+        ));
+        let Json(unknown) = bot_detection(
+            State(state.clone()),
+            auth.clone(),
+            Query(BotDetectionQuery {
+                event_id: Some("never-seen".into()),
+                ip_address: None,
+            }),
+        )
+        .await
+        .expect("unknown event");
+        assert!(!unknown.is_bot);
+        assert_eq!(unknown.confidence, 0.0);
+
+        // A Googlebot user-agent is flagged.
+        let bot_event = format!("adv-bot-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, event_type, recipient, user_agent, ip_address, timestamp)
+             VALUES ($1, $2, 'opened', 'r@example.com', 'Mozilla/5.0 (compatible; Googlebot/2.1)', '203.0.113.7', NOW())",
+        )
+        .bind(&bot_event)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed bot event");
+        let Json(bot) = bot_detection(
+            State(state.clone()),
+            auth.clone(),
+            Query(BotDetectionQuery {
+                event_id: Some(bot_event.clone()),
+                ip_address: None,
+            }),
+        )
+        .await
+        .expect("bot verdict");
+        assert!(bot.is_bot);
+        assert!(bot.confidence >= 0.5);
+        assert!(bot.signals.iter().any(|s| s.contains("googlebot")));
+
+        // A private IP is itself a signal.
+        let Json(private) = bot_detection(
+            State(state.clone()),
+            auth.clone(),
+            Query(BotDetectionQuery {
+                event_id: None,
+                ip_address: Some("192.168.1.5".into()),
+            }),
+        )
+        .await
+        .expect("private ip");
+        assert!(private.signals.iter().any(|s| s.contains("private IP")));
+
+        // Prefetch: an open 200 ms after the message was sent is flagged.
+        let message_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, status, sent_at, created_at, updated_at)
+             VALUES ($1, $2, 'a@example.com', '[\"r@example.com\"]'::jsonb, 'sent', NOW(), NOW(), NOW())",
+        )
+        .bind(message_id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+        let fast_event = format!("adv-fast-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, user_agent, timestamp)
+             VALUES ($1, $2, $3, 'opened', 'r@example.com', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', NOW())",
+        )
+        .bind(&fast_event)
+        .bind(&tenant)
+        .bind(message_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("seed prefetch event");
+        let Json(prefetch) = bot_detection(
+            State(state.clone()),
+            auth.clone(),
+            Query(BotDetectionQuery {
+                event_id: Some(fast_event),
+                ip_address: None,
+            }),
+        )
+        .await
+        .expect("prefetch verdict");
+        assert!(
+            prefetch.signals.iter().any(|s| s.contains("prefetch")),
+            "signals: {:?}",
+            prefetch.signals
+        );
+
+        // Scope gate.
+        assert!(matches!(
+            bot_detection(
+                State(state.clone()),
+                auth_for(&tenant, &[]),
+                Query(BotDetectionQuery {
+                    event_id: None,
+                    ip_address: None
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM messages WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup messages");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+}

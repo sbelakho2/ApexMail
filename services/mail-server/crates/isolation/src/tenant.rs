@@ -543,12 +543,17 @@ impl TenantService {
         role: &TenantRole,
         inviter_id: &str,
     ) -> anyhow::Result<()> {
-        // Check member count
-        let count: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM iso_workspace_members WHERE workspace_id=$1")
-                .bind(workspace_id)
-                .fetch_one(&self.db)
-                .await?;
+        // Check member count. The target user is excluded: the INSERT below is
+        // an upsert, so re-adding an EXISTING member (e.g. a role change) must
+        // not be blocked by the cap — otherwise a full workspace could never
+        // change any member's role.
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM iso_workspace_members WHERE workspace_id=$1 AND user_id <> $2",
+        )
+        .bind(workspace_id)
+        .bind(user_id)
+        .fetch_one(&self.db)
+        .await?;
 
         if count.0 >= self.config.tenant.max_users_per_workspace as i64 {
             anyhow::bail!(

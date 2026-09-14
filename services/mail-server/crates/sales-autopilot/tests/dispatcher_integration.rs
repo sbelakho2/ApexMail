@@ -32,7 +32,8 @@
 //!   (live, ignored).
 //!
 //! Run against a real Postgres (soft-skip without one; the live tests are
-//! `#[ignore]`d so the default crate run stays database-free); see
+//! run against a provisioned canonical database, soft-skipping only when the
+//! database env is unset); see
 //! `common/mod.rs` for the canonical bootstrap and the sequence fixture.
 
 mod common;
@@ -407,7 +408,6 @@ struct QueuedEmailRow {
 /// the RESOLVED sender identity, never the deployment-wide
 /// `SALES_CAMPAIGN_FROM_EMAIL` (the defect the sequence path exists to fix).
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
     // The identity sends from a SECOND verified domain, distinct from the
     // dispatcher config's deployment-wide sender.
@@ -617,7 +617,6 @@ async fn sequence_step_send_enqueues_into_the_platform_pipeline() {
 /// and complaints into) recorded after the recipient was selected must stop
 /// the send at the Decision Packet.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn platform_suppression_after_selection_blocks_the_send() {
     let Some(fx) = fixture("sequence_suppression", fixture_options()).await else {
         return;
@@ -662,7 +661,6 @@ async fn platform_suppression_after_selection_blocks_the_send() {
 /// address must not refuse this tenant's send. (The old suite asserted tenant
 /// isolation on the campaign and inbox paths; this pins it on the send gate.)
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn suppression_is_tenant_scoped_for_the_send_recheck() {
     let Some(fx) = fixture("sequence_tenant_scope", fixture_options()).await else {
         return;
@@ -704,7 +702,6 @@ async fn suppression_is_tenant_scoped_for_the_send_recheck() {
 /// decision and the enqueue is still honoured, nothing is written, and the
 /// quota reservation is released.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn suppression_landing_between_decision_and_enqueue_is_refused() {
     let Some(fx) = fixture("sequence_suppression_race", fixture_options()).await else {
         return;
@@ -767,7 +764,6 @@ async fn suppression_landing_between_decision_and_enqueue_is_refused() {
 ///    does produce a second message — the regression the key change exists
 ///    for.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
     let Some(fx) = fixture("sequence_crash_replay", fixture_options()).await else {
         return;
@@ -922,7 +918,6 @@ async fn crash_replay_never_double_sends_but_a_second_step_is_a_new_send() {
 /// (`scheduler::process_campaign` is removed with the engine); the surviving
 /// caller contract is a retryable action — see the module docs.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn quota_exhaustion_refuses_the_send_and_recovers() {
     let Some(mut fx) = fixture("sequence_quota", fixture_options()).await else {
         return;
@@ -1005,7 +1000,6 @@ async fn quota_exhaustion_refuses_the_send_and_recovers() {
 /// failure, "completed" after the tick) belonged to the removed scheduler; the
 /// surviving equivalent is the idempotent action retry asserted here.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn transient_quota_failure_is_retried_without_duplicates() {
     let Some(mut fx) = fixture("sequence_quota_transient", fixture_options()).await else {
         return;
@@ -1100,7 +1094,6 @@ async fn transient_quota_failure_is_retried_without_duplicates() {
 /// sales send sees the decrement (it fits only because the shared limit is
 /// two), and once the sales unit is taken the REST-shaped gate is refused.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn sales_send_consumes_the_same_quota_the_rest_path_consumes() {
     let Some(mut fx) = fixture("sequence_shared_quota", fixture_options()).await else {
         return;
@@ -1164,7 +1157,6 @@ async fn sales_send_consumes_the_same_quota_the_rest_path_consumes() {
 /// sales send is refused as a RETRYABLE deferral: the worker's error path
 /// requeues the action, and NO message or queue row is written.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn sales_send_without_quota_defers_retryably_and_writes_no_message() {
     let Some(mut fx) = fixture("sequence_quota_defer", fixture_options()).await else {
         return;
@@ -1218,7 +1210,6 @@ async fn sales_send_without_quota_defers_retryably_and_writes_no_message() {
 /// action succeeds — it must never be requeued), no message, no queue row,
 /// no quota consumed.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn suppressed_recipient_is_refused_non_retryably_on_the_sales_path() {
     let Some(fx) = fixture("sequence_suppressed_admission", fixture_options()).await else {
         return;
@@ -1264,7 +1255,6 @@ async fn suppressed_recipient_is_refused_non_retryably_on_the_sales_path() {
 /// the enqueue transaction refuses; nothing is written and the reservation is
 /// released.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn unverified_sender_domain_refuses_dispatch() {
     let Some(fx) = fixture(
         "sequence_unverified_domain",
@@ -1329,7 +1319,6 @@ async fn unverified_sender_domain_refuses_dispatch() {
 /// campaign path raised an error out of `start_campaign`; on the canonical
 /// path a missing template is a per-step poison condition, so it skips.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn missing_template_is_a_recorded_skip_without_enqueueing() {
     let Some(fx) = fixture(
         "sequence_missing_template",
@@ -1378,7 +1367,6 @@ async fn missing_template_is_a_recorded_skip_without_enqueueing() {
 /// it renders and evaluates the legacy recipient funnel against the production
 /// dispatcher's sender config without enqueueing or stamping the ledger.
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn dry_run_renders_without_enqueueing() {
     let Some(db) = common::test_pool("dry_run").await else {
         return;
@@ -1477,7 +1465,6 @@ async fn dry_run_renders_without_enqueueing() {
 /// the sequence-path successor of "unsubscribed recipient is excluded from
 /// the next campaign dispatch".
 #[tokio::test]
-#[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
 async fn unsubscribed_recipient_is_excluded_from_the_sequence_send() {
     let Some(fx) = fixture("sequence_unsub_excluded", fixture_options()).await else {
         return;
@@ -1606,7 +1593,6 @@ mod unsub_http {
     }
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn get_unsubscribe_suppresses_and_renders_page() {
         let Some(db) = common::test_pool("unsub_get").await else {
             return;
@@ -1684,7 +1670,6 @@ mod unsub_http {
     }
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn get_unsubscribe_redirects_when_configured() {
         let Some(db) = common::test_pool("unsub_redirect").await else {
             return;
@@ -1750,7 +1735,6 @@ mod unsub_http {
     }
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn invalid_token_is_rejected() {
         let Some(db) = common::test_pool("unsub_invalid").await else {
             return;
@@ -1814,7 +1798,6 @@ mod unsub_http {
     }
 
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn rfc8058_post_requires_exact_body() {
         let Some(db) = common::test_pool("unsub_post_body").await else {
             return;
@@ -1966,7 +1949,6 @@ mod reply_http {
     /// Happy path: the reply is composed, escaped and enqueued through the
     /// platform pipeline; the replied flag flips atomically.
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_composes_and_enqueues_through_email_queue() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_happy").await else {
             return;
@@ -2040,7 +2022,6 @@ mod reply_http {
     /// Double-click / retry: the second POST is an idempotent no-op —
     /// exactly one queue row, one messages row, no double send.
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_double_post_is_idempotent_no_double_send() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_double").await else {
             return;
@@ -2090,7 +2071,6 @@ mod reply_http {
     /// A correspondent who hard-bounced (platform suppressions) never gets
     /// the reply — and the message stays visibly unanswered.
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_to_suppressed_correspondent_refused() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_suppressed").await else {
             return;
@@ -2127,7 +2107,6 @@ mod reply_http {
     /// Cross-tenant isolation: another tenant's reply to this message is a
     /// 404 and enqueues nothing.
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_cross_tenant_is_404() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_cross_tenant").await else {
             return;
@@ -2150,7 +2129,6 @@ mod reply_http {
 
     /// Unknown message id → 404, nothing enqueued.
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_to_missing_message_is_404() {
         let Some((app, db, tenant_id, _)) = reply_fixture("reply_missing").await else {
             return;
@@ -2176,7 +2154,6 @@ mod reply_http {
     /// Unverified sender domain: the pipeline gate refuses the reply
     /// (mirrors the REST send path's domain gate).
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn reply_refused_when_sender_domain_not_ready() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_no_domain").await else {
             return;
@@ -2218,7 +2195,6 @@ mod reply_http {
     /// A campaign opt-out (sales_unsubscribes only) deliberately does NOT
     /// block a 1:1 reply — documented decision in enqueue_reply.
     #[tokio::test]
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     async fn campaign_optout_does_not_block_personal_reply() {
         let Some((app, db, tenant_id, inbox_id)) = reply_fixture("reply_campaign_optout").await
         else {

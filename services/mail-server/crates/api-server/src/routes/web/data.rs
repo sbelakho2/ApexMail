@@ -457,8 +457,16 @@ impl WhereBuilder {
 
     /// Whitelisted status filter: unknown values never reach SQL.
     fn status_in(&mut self, allowed: &[&str], value: &str) -> &mut Self {
+        self.in_values("status", allowed, value)
+    }
+
+    /// Whitelisted equality filter on an arbitrary column: unknown values
+    /// never reach SQL. `status_in` is the `status`-column shorthand; the
+    /// alerts loader filters `severity` through this (the column that
+    /// actually exists — `system_alerts` has no `status`).
+    fn in_values(&mut self, column: &str, allowed: &[&str], value: &str) -> &mut Self {
         if !value.is_empty() && allowed.contains(&value) {
-            self.eq("status", value);
+            self.eq(column, value);
         }
         self
     }
@@ -2855,15 +2863,22 @@ const CP_LEADS_CANONICAL_CTE: &str = r#"
 
 async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     // Item M: the search widens to (action ILIKE OR user_id ILIKE OR
-    // resource_type ILIKE), with an optional recency window in days —
-    // the SAME clause the CSV export applies.
+    // resource ILIKE), with an optional recency window in days — the SAME
+    // clause the CSV export applies.
+    //
+    // Live audit_logs columns are created_at, action, resource, user_id:
+    // the canonical writer (audit_log.rs) inserts `resource`, and the
+    // legacy `resource_type` spelling was renamed by the fix migrations
+    // (it fails at runtime — see the export in web.rs). The query below
+    // must stay on the canonical column or the whole page degrades to
+    // "data unavailable".
     let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
     if !q.search.is_empty() {
         // Escaped + ESCAPE-claused like the CSV export (audit F7).
         binds.push(escape_like(&q.search));
         clauses.push(format!(
-            "(action ILIKE '%' || ${} || '%' ESCAPE '\\' OR user_id ILIKE '%' || ${} || '%' ESCAPE '\\' OR resource_type ILIKE '%' || ${} || '%' ESCAPE '\\')",
+            "(action ILIKE '%' || ${} || '%' ESCAPE '\\' OR user_id ILIKE '%' || ${} || '%' ESCAPE '\\' OR resource ILIKE '%' || ${} || '%' ESCAPE '\\')",
             binds.len(),
             binds.len(),
             binds.len()
@@ -2894,7 +2909,7 @@ async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
             cid,
             async {
             let q6 = format!(
-                "SELECT created_at, action, resource_type, user_id FROM audit_logs WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                "SELECT created_at, action, resource, user_id FROM audit_logs WHERE {where_clause} ORDER BY created_at DESC NULLS LAST LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
@@ -2948,7 +2963,7 @@ async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
             .into_iter()
             .enumerate()
             .map(
-                |(index, (created, action, resource_type, user_id))| DataRowData {
+                |(index, (created, action, resource, user_id))| DataRowData {
                     id: format!("audit-{index}"),
                     cells: vec![
                         DataCell::text(
@@ -2957,7 +2972,7 @@ async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
                                 .unwrap_or_else(|| "—".into()),
                         ),
                         DataCell::text(action),
-                        DataCell::text(resource_type.unwrap_or_else(|| "—".into())),
+                        DataCell::text(resource.unwrap_or_else(|| "—".into())),
                         DataCell::mono(user_id.unwrap_or_else(|| "system".into())),
                     ],
                 },
@@ -3231,7 +3246,14 @@ async fn cp_queues(state: &AppState, cid: &str) -> ListPageData {
 
 async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
-    where_sql.status_in(&["critical", "high", "medium", "low", "info"], &q.status);
+    // severity, not status: `system_alerts` has no `status` column, so the
+    // previous `status = 'critical'` predicate made every severity-filtered
+    // render fail closed to "data unavailable".
+    where_sql.in_values(
+        "severity",
+        &["critical", "high", "medium", "low", "info"],
+        &q.status,
+    );
     let where_clause = where_sql.build();
 
     let total = loaded_count(
@@ -3467,7 +3489,10 @@ async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData 
 async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
     let rows = load_query("cp.plans.list", cid, async {
         sqlx::query_as::<_, (String, Option<String>, i64)>(
-            "SELECT name, display_name, price_cents FROM plans ORDER BY price_cents ASC LIMIT 50",
+            // price_cents is INTEGER on the canonical schema; the row shape
+            // decodes i64, so cast in SQL (a bare INT4 fails ColumnDecode and
+            // made the whole catalog read as "data unavailable").
+            "SELECT name, display_name, COALESCE(price_cents, 0)::bigint FROM plans ORDER BY price_cents ASC LIMIT 50",
         )
         .fetch_all(&state.db)
         .await
@@ -5280,5 +5305,1446 @@ mod tests {
             assert_eq!(row.due_at, Some(shared_row.due_at.to_rfc3339()));
             assert_eq!(row.created_at, Some(shared_row.created_at.to_rfc3339()));
         }
+    }
+}
+
+// ─── Adversarial SSR coverage harness (shared with web.rs tests) ───
+//
+// These helpers live in the lib target on purpose: `cargo llvm-cov
+// -p api-server --lib` only instruments the lib, so the adversarial tests
+// that must move the number have to live in-file. Everything is scoped to
+// a unique tenant/tag per test so the shared canonical test database can be
+// used by parallel tests (and other agents) without interference.
+
+#[cfg(test)]
+pub(crate) mod coverage_support {
+    use super::*;
+    use crate::app::test_support::{test_config, test_state_over, test_state_over_with_config};
+    use crate::config::Config;
+    use sqlx::PgPool;
+    use std::time::Duration;
+
+    /// Shared canonical-schema test pool. Soft-skips (None) only when
+    /// TEST_DATABASE_URL is unset; a configured provisioning failure panics
+    /// inside the helper.
+    pub(crate) async fn pool(test_name: &str) -> Option<PgPool> {
+        crate::test_db::optional_pg_pool(test_name).await
+    }
+
+    pub(crate) async fn state(test_name: &str) -> Option<AppState> {
+        let pool = pool(test_name).await?;
+        Some(test_state_over(pool).await)
+    }
+
+    /// Real signing key so `session_cookie_for_user` can mint RS256 JWTs.
+    pub(crate) async fn rsa_config() -> Config {
+        static CONFIG: tokio::sync::OnceCell<Config> = tokio::sync::OnceCell::const_new();
+        CONFIG
+            .get_or_init(|| async {
+                use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+                let key_pair =
+                    apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+                let private_key =
+                    rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+                        .expect("valid PKCS8 private key");
+                let mut config = test_config();
+                config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+                config.jwt_public_key_pem = private_key
+                    .to_public_key()
+                    .to_public_key_pem(LineEnding::LF)
+                    .expect("SPKI PEM")
+                    .to_string();
+                config
+            })
+            .await
+            .clone()
+    }
+
+    pub(crate) async fn rsa_state(test_name: &str) -> Option<AppState> {
+        let pool = pool(test_name).await?;
+        Some(test_state_over_with_config(pool, rsa_config().await).await)
+    }
+
+    /// AppState over the shared canonical pool with a caller-supplied Config
+    /// (e.g. an unreachable sales-engine URL to exercise the fail-closed
+    /// branches without any real network).
+    pub(crate) async fn state_with_config(test_name: &str, config: Config) -> Option<AppState> {
+        let pool = pool(test_name).await?;
+        Some(test_state_over_with_config(pool, config).await)
+    }
+
+    /// AppState whose database is unreachable (port 1, lazy pool): every
+    /// loader must fail closed to the explicit unavailable state, never
+    /// fabricate an empty/zero page.
+    pub(crate) async fn dead_state() -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(200))
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/absent")
+            .expect("lazy dead pool");
+        test_state_over(db).await
+    }
+
+    pub(crate) fn user(tenant: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec![],
+        }
+    }
+
+    pub(crate) fn has(data: &ListPageData, needle: &str) -> bool {
+        format!("{data:?}").contains(needle)
+    }
+
+    pub(crate) fn unavailable_marked(data: &ListPageData) -> bool {
+        data.empty_title == "Data unavailable" || data.kpis.iter().any(|k| k.value == "unavailable")
+    }
+
+    pub(crate) fn unique_tag(prefix: &str) -> String {
+        format!(
+            "{prefix}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        )
+    }
+
+    /// Grant one runtime feature to a test tenant through the same override
+    /// table the admin feature-flag surface writes (e.g. "api_access",
+    /// "webhooks_enabled", "data_export", "custom_templates").
+    pub(crate) async fn grant_feature(pool: &PgPool, tenant: &str, flag_key: &str) {
+        sqlx::query(
+            "INSERT INTO feature_flag_overrides (flag_key, tenant_id, tenant_name, value, created_at)
+             VALUES ($1, $2, $3, 'true'::jsonb, NOW())",
+        )
+        .bind(flag_key)
+        .bind(tenant)
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("grant test feature override");
+    }
+
+    /// Tenant id (26-char canonical shape) + unique tag.
+    pub(crate) fn tenant_pair(prefix: &str) -> (String, String) {
+        let tag = unique_tag(prefix);
+        let tenant = format!("{tag}{}", "0".repeat(26 - tag.len()));
+        (tenant, tag)
+    }
+
+    pub(crate) struct Seeded {
+        pub tenant: String,
+        pub tag: String,
+        pub campaign_id: String,
+        pub domain_id: String,
+        pub domain_without_dkim: String,
+        pub list_id: String,
+        pub contact_id: String,
+        pub dedicated_ip: String,
+    }
+
+    /// Seed one fully-populated tenant for the web (tenant-scoped) loaders.
+    /// 27 campaigns: 20 "Alpha", 5 "Beta", 2 literal-`%`/`_` probes so LIKE
+    /// escaping is observable.
+    pub(crate) async fn seed_tenant(pool: &PgPool, tenant: &str, tag: &str) -> Seeded {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'pro', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!("Coverage Tenant {tag}"))
+        .bind(format!("cov-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+
+        for (index, role) in ["admin", "developer"].iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, mfa_enabled, email_verified, created_at, updated_at)
+                 VALUES ($1::uuid, $2, $3, $4, 'x', $5, 'active', false, true, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(tenant)
+            .bind(format!("member{index}-{tag}@example.test"))
+            .bind(format!("Member {index} {tag}"))
+            .bind(*role)
+            .execute(pool)
+            .await
+            .expect("seed user");
+        }
+
+        let mut campaign_id = String::new();
+        for index in 0..20 {
+            let id = uuid::Uuid::new_v4().to_string();
+            if index == 0 {
+                campaign_id = id.clone();
+            }
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status, sent_count, created_at, updated_at)
+                 VALUES ($1::uuid, $2, $3, $4, 'draft', 7, NOW(), NOW())",
+            )
+            .bind(&id)
+            .bind(tenant)
+            .bind(format!("Alpha {tag} {index:02}"))
+            .bind(format!("Alpha subject {tag}"))
+            .execute(pool)
+            .await
+            .expect("seed campaign alpha");
+        }
+        for index in 0..5 {
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status, sent_count, created_at, updated_at)
+                 VALUES ($1::uuid, $2, $3, $4, 'completed', 11, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(tenant)
+            .bind(format!("Beta {tag} {index:02}"))
+            .bind(format!("Beta subject {tag}"))
+            .execute(pool)
+            .await
+            .expect("seed campaign beta");
+        }
+        for name in [
+            format!("100% percent {tag}"),
+            format!("100X percent {tag}"),
+            format!("under_score {tag}"),
+        ] {
+            sqlx::query(
+                "INSERT INTO campaigns (id, tenant_id, name, subject, status, sent_count, created_at, updated_at)
+                 VALUES ($1::uuid, $2, $3, $4, 'draft', 1, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(tenant)
+            .bind(&name)
+            .bind(format!("literal subject {tag}"))
+            .execute(pool)
+            .await
+            .expect("seed campaign literal");
+        }
+
+        let mut contact_id = String::new();
+        for (index, status) in ["subscribed", "unsubscribed", "bounced"].iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            if index == 0 {
+                contact_id = id.clone();
+            }
+            sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
+                 VALUES ($1::uuid, $2, $3, $4, $5, NOW(), NOW())",
+            )
+            .bind(&id)
+            .bind(tenant)
+            .bind(format!("contact{index}-{tag}@example.test"))
+            .bind(format!("Contact {index} {tag}"))
+            .bind(*status)
+            .execute(pool)
+            .await
+            .expect("seed contact");
+        }
+
+        let list_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO lists (id, tenant_id, name, description, opt_in_mode, status, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'coverage list', 'single', 'active', NOW(), NOW())",
+        )
+        .bind(&list_id)
+        .bind(tenant)
+        .bind(format!("List {tag}"))
+        .execute(pool)
+        .await
+        .expect("seed list");
+        sqlx::query(
+            "INSERT INTO list_subscribers (id, list_id, contact_id, status, created_at)
+             VALUES ($1::uuid, $2::uuid, $3::uuid, 'subscribed', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&list_id)
+        .bind(&contact_id)
+        .execute(pool)
+        .await
+        .expect("seed subscriber");
+
+        for (index, status) in ["draft", "published"].iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO templates (id, tenant_id, name, slug, subject, html_body, version, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, '<p>hi</p>', $6, $7, NOW(), NOW())",
+            )
+            .bind(format!("tpl-{tag}-{index}"))
+            .bind(tenant)
+            .bind(format!("Template {index} {tag}"))
+            .bind(format!("template-{index}-{tag}"))
+            .bind(format!("Template subject {tag}"))
+            .bind(index as i32 + 1)
+            .bind(*status)
+            .execute(pool)
+            .await
+            .expect("seed template");
+        }
+
+        let domain_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, spf_verified, dkim_verified,
+                                  dmarc_verified, return_path_verified, dkim_selector, dkim_public_key, dkim_private_key,
+                                  created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'verified', true, true, true, true, true, 'apexmail',
+                     'MIIBpublickeycoverage', 'MIIBprivatekeycoverage', NOW(), NOW())",
+        )
+        .bind(&domain_id)
+        .bind(tenant)
+        .bind(format!("{tag}.example.test"))
+        .execute(pool)
+        .await
+        .expect("seed domain");
+        let domain_without_dkim = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'pending', false, NOW(), NOW())",
+        )
+        .bind(&domain_without_dkim)
+        .bind(tenant)
+        .bind(format!("bare-{tag}.example.test"))
+        .execute(pool)
+        .await
+        .expect("seed bare domain");
+
+        // Send-cohort semantics: sent/delivered/bounced for the SAME
+        // (message_id, recipient) form one cohort row, so the delivered and
+        // bounced numerators are non-zero. The complaint carries its own
+        // message id (an outcome for a send outside this tenant's sent set).
+        for (index, (event_type, message_suffix, hours_ago)) in [
+            ("sent", "a", 3_i64),
+            ("delivered", "a", 2),
+            ("bounced", "a", 1),
+            ("complained", "b", 1),
+        ]
+        .iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, NOW() - ($6 || ' hours')::interval)",
+            )
+            .bind(format!("evt-{tag}-{index}"))
+            .bind(tenant)
+            .bind(format!("msg-{tag}-{message_suffix}"))
+            .bind(*event_type)
+            .bind(format!("rcpt-{message_suffix}-{tag}@example.test"))
+            .bind(*hours_ago)
+            .execute(pool)
+            .await
+            .expect("seed event");
+        }
+
+        sqlx::query(
+            "INSERT INTO placement_tests (id, tenant_id, name, status, total_accounts, completed_accounts, from_email, subject, body_text, body_html, created_at)
+             VALUES ($1::uuid, $2, $3, 'completed', 5, 5, $4, $5, 'body', '<p>body</p>', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .bind(format!("Placement {tag}"))
+        .bind(format!("placement-{tag}@example.test"))
+        .bind(format!("Placement subject {tag}"))
+        .execute(pool)
+        .await
+        .expect("seed placement test");
+
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_hash, key_prefix, scopes, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, $4, 'am_cov', '[\"messages:send\"]'::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .bind(format!("Key {tag}"))
+        .bind(format!("hash-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed api key");
+
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, name, url, secret, enabled, events, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, true, '[\"bounce\"]'::jsonb, NOW(), NOW())",
+        )
+        .bind(format!("wh-{tag}"))
+        .bind(tenant)
+        .bind(format!("Hook {tag}"))
+        .bind(format!("https://{tag}.example.test/hook"))
+        .bind(format!("whsec-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed webhook");
+
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, total, currency, status, created_at, updated_at)
+             VALUES ($1::uuid, $2, 12345, 12345, 'EUR', 'open', NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed invoice");
+
+        // The active-IP unique index means the address must be unique across
+        // the whole shared test database — derive it from a fresh UUID.
+        let ip_bytes = uuid::Uuid::new_v4().into_bytes();
+        let dedicated_ip = format!("10.{}.{}.{}", ip_bytes[0], ip_bytes[1], ip_bytes[2]);
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, region, status, warmup_progress, created_at, updated_at)
+             VALUES ($1, $2, $3, 'fsn1', 'active', 0.5, NOW(), NOW())",
+        )
+        .bind(format!("dip-{tag}"))
+        .bind(tenant)
+        .bind(&dedicated_ip)
+        .execute(pool)
+        .await
+        .expect("seed dedicated ip");
+
+        sqlx::query(
+            "INSERT INTO dedicated_ip_provisioning_requests (id, tenant_id, requested_count, status, created_at, updated_at)
+             VALUES ($1::uuid, $2, 2, 'pending', NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed dedicated ip request");
+
+        sqlx::query(
+            "INSERT INTO audit_logs (id, tenant_id, action, resource, resource_id, user_id, details, outcome, signature, timestamp, created_at)
+             VALUES ($1, $2, 'tenant.update', $3, $4, $5, '{}'::jsonb, 'success', $6, NOW(), NOW())",
+        )
+        .bind(format!("aud-{tag}"))
+        .bind(tenant)
+        .bind(format!("audit-resource-{tag}"))
+        .bind(tenant)
+        .bind(format!("auditor-{tag}@example.test"))
+        .bind(format!("sig-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed audit log");
+
+        sqlx::query(
+            "INSERT INTO gdpr_requests (id, tenant_id, email, request_type, status, created_at, updated_at)
+             VALUES ($1, $2, $3, 'erasure', 'pending', NOW(), NOW())",
+        )
+        .bind(format!("gdpr-{tag}"))
+        .bind(tenant)
+        .bind(format!("gdpr-{tag}@example.test"))
+        .execute(pool)
+        .await
+        .expect("seed gdpr request");
+
+        // The campaign's wired audience: the detail loader resolves the
+        // latest `recipients:{list}:{segment}` job back to the list name.
+        sqlx::query(
+            "INSERT INTO campaign_jobs (id, tenant_id, campaign_id, job_type, status, created_at)
+             VALUES ($1::uuid, $2, $3::uuid, $4, 'completed', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(tenant)
+        .bind(&campaign_id)
+        .bind(format!("recipients:{list_id}:subscribed"))
+        .execute(pool)
+        .await
+        .expect("seed campaign job");
+
+        Seeded {
+            tenant: tenant.to_string(),
+            tag: tag.to_string(),
+            campaign_id,
+            domain_id,
+            domain_without_dkim,
+            list_id,
+            contact_id,
+            dedicated_ip,
+        }
+    }
+
+    /// Seed the system-scoped/global rows the control-plane loaders read.
+    /// Returns the unique node IP it inserted (the inet column is globally
+    /// unique, so it must be derived per call, not hardcoded).
+    pub(crate) async fn seed_global(pool: &PgPool, tag: &str) -> String {
+        sqlx::query(
+            // price_cents = -1 sorts this row first in the catalog's
+            // `ORDER BY price_cents ASC LIMIT 50`, so accumulated test plans
+            // can never crowd it out.
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, created_at, updated_at)
+             VALUES ($1, $2, $3, -1, 1000, true, 1, NOW(), NOW())",
+        )
+        .bind(format!("plan-{tag}"))
+        .bind(format!("plan-{tag}"))
+        .bind(format!("Plan {tag}"))
+        .execute(pool)
+        .await
+        .expect("seed plan");
+
+        // 10.x sorts before the 198.51.100.x fixtures in the nodes page's
+        // `ORDER BY ip_address LIMIT 100`.
+        let node_bytes = uuid::Uuid::new_v4().into_bytes();
+        let node_ip = format!("10.0.{}.{}", node_bytes[0], node_bytes[1]);
+        sqlx::query(
+            "INSERT INTO ip_pool_addresses (id, pool_id, ip_address, status, warmup_day, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3::inet, 'active', 3, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(format!("pool-{tag}"))
+        .bind(&node_ip)
+        .execute(pool)
+        .await
+        .expect("seed ip pool address");
+
+        sqlx::query(
+            "INSERT INTO queue_jobs (id, tenant_id, queue, status, attempts, max_attempts, priority, payload, created_at, updated_at)
+             VALUES ($1::uuid, $2::uuid, $3, 'pending', 0, 5, 1, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(format!("queue-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed queue job");
+
+        sqlx::query(
+            "INSERT INTO system_alerts (id, alert_type, message, severity, acknowledged, tenant_id, created_at)
+             VALUES ($1::uuid, $2, $3, 'critical', false, $4, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(format!("alert-{tag}"))
+        .bind(format!("Coverage alert {tag}"))
+        .bind(format!("alert-tenant-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed system alert");
+
+        // Sales-autopilot snapshot rows (system tenant) so the CP sales page
+        // renders real decisions/actions through the shared read model.
+        let account_id = uuid::Uuid::new_v4().to_string();
+        let contact_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, lifecycle, created_at, updated_at)
+             VALUES ($1::uuid, 'system', $2, $3, 'qualified', NOW(), NOW())",
+        )
+        .bind(&account_id)
+        .bind(format!("Acct {tag}"))
+        .bind(format!("{tag}.example.test"))
+        .execute(pool)
+        .await
+        .expect("seed sales account");
+        sqlx::query(
+            // sales_leads is a VIEW over sales_contacts' legacy_* columns
+            // (the discovery CTE joins it), so the lead row is created by
+            // populating those columns here — never by INSERTing the view.
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, lifecycle,
+                                         legacy_lead_id, legacy_lead_email, lead_source, lead_score,
+                                         created_at, updated_at)
+             VALUES ($1::uuid, 'system', $2::uuid, $3, 'replied', $4, $5, $6, 80, NOW(), NOW())",
+        )
+        .bind(&contact_id)
+        .bind(&account_id)
+        .bind(format!("Lead {tag}"))
+        .bind(format!("lead-{tag}"))
+        .bind(format!("lead-{tag}@example.test"))
+        .bind(format!("source-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed sales contact");
+        sqlx::query(
+            "INSERT INTO sales_contact_points (id, tenant_id, contact_id, channel, value, normalized_value, confidence, created_at, updated_at)
+             VALUES ($1::uuid, 'system', $2::uuid, 'email', $3, $3, 0.9, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&contact_id)
+        .bind(format!("lead-{tag}@example.test"))
+        .execute(pool)
+        .await
+        .expect("seed sales contact point");
+        let sequence_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, created_at, updated_at)
+             VALUES ($1::uuid, 'system', $2, NOW(), NOW())",
+        )
+        .bind(&sequence_id)
+        .bind(format!("Sequence {tag}"))
+        .execute(pool)
+        .await
+        .expect("seed sales sequence");
+        let sequence_version_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions (id, tenant_id, sequence_id, version, created_at)
+             VALUES ($1::uuid, 'system', $2::uuid, 1, NOW())",
+        )
+        .bind(&sequence_version_id)
+        .bind(&sequence_id)
+        .execute(pool)
+        .await
+        .expect("seed sales sequence version");
+        sqlx::query(
+            "INSERT INTO sales_enrollments (id, tenant_id, sequence_version_id, account_id, contact_id, state, enrolled_at, updated_at)
+             VALUES ($1::uuid, 'system', $2::uuid, $3::uuid, $4::uuid, 'active', NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&sequence_version_id)
+        .bind(&account_id)
+        .bind(&contact_id)
+        .execute(pool)
+        .await
+        .expect("seed sales enrollment");
+        sqlx::query(
+            "INSERT INTO sales_decisions (id, tenant_id, account_id, contact_id, action, expected_value_eur,
+                                          confidence, blocked, block_reasons, rationale, enforcement,
+                                          autonomy_mode, review_status, execute_after, created_at)
+             VALUES ($1::uuid, 'system', $2::uuid, $3::uuid, 'send_email', 150.5, 0.8, true,
+                     '[\"coverage\"]'::jsonb, $4, 'denied', 'shadow', 'pending', NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&account_id)
+        .bind(&contact_id)
+        .bind(format!("Rationale {tag}"))
+        .execute(pool)
+        .await
+        .expect("seed sales decision");
+        sqlx::query(
+            "INSERT INTO sales_actions (id, tenant_id, action_type, entity_type, entity_id, state, attempt,
+                                        max_attempts, last_error, idempotency_key, due_at, created_at)
+             VALUES ($1::uuid, 'system', 'send_email', 'contact', $2::uuid, 'dead_letter', 3, 5, $3, $4, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&contact_id)
+        .bind(format!("boom {tag}"))
+        .bind(format!("idem-{tag}"))
+        .execute(pool)
+        .await
+        .expect("seed sales action");
+        sqlx::query(
+            "INSERT INTO sales_autonomy_state (tenant_id, mode, kill_switch, experiments_enabled, updated_at)
+             VALUES ('system', 'shadow', false, true, NOW())
+             ON CONFLICT (tenant_id) DO NOTHING",
+        )
+        .execute(pool)
+        .await
+        .expect("seed sales autonomy state");
+        sqlx::query(
+            "INSERT INTO sales_outcomes (id, tenant_id, account_id, contact_id, outcome, value_eur, occurred_at, created_at)
+             VALUES ($1::uuid, 'system', $2::uuid, $3::uuid, 'meeting_booked', 250.0, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&account_id)
+        .bind(&contact_id)
+        .execute(pool)
+        .await
+        .expect("seed sales outcome");
+        sqlx::query(
+            "INSERT INTO sales_meetings (id, tenant_id, account_id, contact_id, provider, status, start_at, end_at, created_at, updated_at)
+             VALUES ($1::uuid, 'system', $2::uuid, $3::uuid, 'google', 'booked', NOW(), NOW() + '30 minutes'::interval, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&account_id)
+        .bind(&contact_id)
+        .execute(pool)
+        .await
+        .expect("seed sales meeting");
+
+        node_ip
+    }
+}
+
+#[cfg(test)]
+mod coverage_loader_tests {
+    use super::coverage_support::*;
+    use super::*;
+
+    fn kpi<'a>(data: &'a ListPageData, label: &str) -> &'a str {
+        data.kpis
+            .iter()
+            .find(|card| card.label == label)
+            .unwrap_or_else(|| panic!("KPI {label} missing from {:?}", data.kpis))
+            .value
+            .as_str()
+    }
+
+    fn table(data: &ListPageData) -> &TableData {
+        data.table
+            .as_ref()
+            .unwrap_or_else(|| panic!("table missing from {}", data.title))
+    }
+
+    async fn web(app: &AppState, path: &str, query: Option<&str>, user: &AuthUser) -> ListPageData {
+        load_page_data(app, "web", path, query, Some(user))
+            .await
+            .list
+            .unwrap_or_else(|| panic!("no web list data for {path}"))
+    }
+
+    async fn cp(app: &AppState, path: &str, query: Option<&str>, user: &AuthUser) -> ListPageData {
+        load_page_data(app, "control-plane", path, query, Some(user))
+            .await
+            .list
+            .unwrap_or_else(|| panic!("no CP list data for {path}"))
+    }
+
+    // ── Helpers with no database ───────────────────────────────────
+
+    #[test]
+    fn load_state_helpers_never_fabricate_values() {
+        let unknown = LoadState::<i64>::Unavailable;
+        assert!(unknown.is_unavailable());
+        assert_eq!(unknown.kpi_value(), "unavailable");
+        assert_eq!(unknown.total_or_zero(), 0);
+        let loaded = LoadState::Loaded(7_i64);
+        assert!(!loaded.is_unavailable());
+        assert_eq!(loaded.kpi_value(), "7");
+        assert_eq!(loaded.total_or_zero(), 7);
+        assert_eq!(LoadState::<i64>::Unavailable.unwrap_or_default(), 0_i64);
+        assert_eq!(LoadState::Loaded(3_i64).unwrap_or_default(), 3);
+
+        let (rows, flag) = LoadState::<Vec<i64>>::Unavailable.rows_or_unavailable();
+        assert!(rows.is_empty() && flag, "unavailable rows must be flagged");
+        let (rows, flag) = LoadState::Loaded(vec![1_i64, 2]).rows_or_unavailable();
+        assert_eq!(rows, vec![1, 2]);
+        assert!(!flag);
+    }
+
+    #[test]
+    fn aggregate_and_format_helpers_render_honestly() {
+        assert_eq!(aggregate_kpi(true, 0), "0");
+        assert_eq!(aggregate_kpi(false, 42), "unavailable");
+        assert_eq!(format_cents(12345, "EUR"), "123.45 EUR");
+        assert_eq!(rate(0, 0), "—");
+        assert_eq!(rate(1, 3), "33.3%");
+    }
+
+    #[test]
+    fn outstanding_kpis_cover_empty_loaded_and_unavailable() {
+        let empty = outstanding_kpis(LoadState::Loaded(vec![]));
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].label, "Outstanding");
+        assert_eq!(empty[0].value, "0.00");
+
+        let loaded = outstanding_kpis(LoadState::Loaded(vec![
+            ("EUR".to_string(), 999),
+            ("USD".to_string(), 100),
+        ]));
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].label, "Outstanding (EUR)");
+        assert_eq!(loaded[0].value, "9.99 EUR");
+
+        let unavailable = outstanding_kpis(LoadState::Unavailable);
+        assert_eq!(unavailable[0].value, "unavailable");
+    }
+
+    #[test]
+    fn api_key_state_classifies_revocation_and_expiry() {
+        let now = chrono::Utc::now();
+        assert_eq!(api_key_state(None, None, now), "active");
+        assert_eq!(
+            api_key_state(None, Some(now + chrono::Duration::hours(1)), now),
+            "active"
+        );
+        assert_eq!(
+            api_key_state(None, Some(now - chrono::Duration::hours(1)), now),
+            "expired"
+        );
+        assert_eq!(
+            api_key_state(Some(now - chrono::Duration::days(1)), None, now),
+            "revoked"
+        );
+        // Revocation wins over expiry.
+        assert_eq!(
+            api_key_state(Some(now), Some(now - chrono::Duration::days(1)), now),
+            "revoked"
+        );
+    }
+
+    #[test]
+    fn relative_time_boundaries_and_future_timestamps() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            relative_time(Some(now + chrono::Duration::hours(2))),
+            "just now"
+        );
+        assert_eq!(
+            relative_time(Some(now - chrono::Duration::minutes(59))),
+            "59 minutes ago"
+        );
+        assert_eq!(
+            relative_time(Some(now - chrono::Duration::minutes(60))),
+            "1 hour ago"
+        );
+        assert_eq!(
+            relative_time(Some(now - chrono::Duration::hours(48))),
+            "2 days ago"
+        );
+        assert_eq!(relative_time(None), "—");
+    }
+
+    #[test]
+    fn urlencode_and_filter_query_round_trip_hostile_values() {
+        assert_eq!(urlencode("AZaz09-_.~"), "AZaz09-_.~");
+        assert_eq!(urlencode("a b/é%&"), "a%20b%2F%C3%A9%25%26");
+        let q = ListQuery {
+            search: "100% & _x".into(),
+            status: "draft".into(),
+            sort: "name".into(),
+            stage: "proposal".into(),
+            page: 2,
+            days: Some(30),
+        };
+        assert_eq!(
+            filter_query(&q),
+            "query=100%25%20%26%20_x&status=draft&sort=name&stage=proposal&days=30"
+        );
+        // page is never part of the preserved filter string.
+        assert!(!filter_query(&q).contains("page="));
+        assert_eq!(filter_query(&ListQuery::default()), "");
+    }
+
+    #[test]
+    fn parse_list_query_rejects_hostile_values_and_duplicates() {
+        // Malformed percent-encodings never panic and stay literal.
+        let q = parse_list_query(Some("query=%zz&q=%"));
+        assert_eq!(q.search, "%"); // duplicate key: last wins (q=% → literal %)
+        let q = parse_list_query(Some("query=a+b%20c"));
+        assert_eq!(q.search, "a b c");
+        // Whitespace-only searches are cleared, not applied as a filter.
+        let q = parse_list_query(Some("query=%20%20"));
+        assert!(q.search.is_empty());
+        // Page hostile values.
+        for (raw, expected) in [
+            ("page=", 1_usize),
+            ("page=-1", 1),
+            ("page=0", 1),
+            ("page=3.5", 1),
+            ("page=NaN", 1),
+            ("page=99999", MAX_PAGE),
+        ] {
+            assert_eq!(parse_list_query(Some(raw)).page, expected, "raw={raw}");
+        }
+        // days window is clamped to 1..=3650, everything else ignored.
+        assert_eq!(parse_list_query(Some("days=1")).days, Some(1));
+        assert_eq!(parse_list_query(Some("days=3650")).days, Some(3650));
+        assert_eq!(parse_list_query(Some("days=0")).days, None);
+        assert_eq!(parse_list_query(Some("days=3651")).days, None);
+        assert_eq!(parse_list_query(Some("days=abc")).days, None);
+        assert_eq!(parse_list_query(Some("days=-5")).days, None);
+        // Unknown keys and bare fragments are ignored.
+        let q = parse_list_query(Some("garbage&unknown=1&=x"));
+        assert_eq!(q.page, 1);
+        assert!(q.search.is_empty() && q.status.is_empty());
+    }
+
+    #[test]
+    fn transfer_suggestion_page_renders_every_field() {
+        let suggestion = crate::routes::admin::domains::TransferSuggestionResponse {
+            domain: "move.example.test".into(),
+            domain_id: "dom-1".into(),
+            current_tenant_id: "tenant-1".into(),
+            owner_ever_verified: true,
+            dns_control: "verified via TXT".into(),
+            transfer_suggested: true,
+            note: String::new(),
+        };
+        let data = transfer_suggestion_page(&suggestion);
+        assert_eq!(kpi(&data, "Transfer suggested"), "yes");
+        assert_eq!(kpi(&data, "Owner ever verified"), "yes");
+        assert!(has(&data, "move.example.test"));
+        let rows = &table(&data).rows;
+        assert_eq!(rows.len(), 4);
+        // Empty note renders the honest default, not a blank cell.
+        assert!(format!("{rows:?}").contains("No transfer is suggested"));
+
+        let mut negative = suggestion;
+        negative.transfer_suggested = false;
+        negative.owner_ever_verified = false;
+        negative.note = "manual review".into();
+        let negative = transfer_suggestion_page(&negative);
+        assert_eq!(kpi(&negative, "Transfer suggested"), "no");
+        assert!(has(&negative, "manual review"));
+    }
+
+    // ── Database-backed loaders ────────────────────────────────────
+
+    #[tokio::test]
+    async fn web_loaders_render_seeded_rows_and_isolate_the_other_tenant() {
+        let Some(app) = state("cov_web_seeded").await else {
+            eprintln!("skipping web_loaders_render_seeded_rows_and_isolate_the_other_tenant: no TEST_DATABASE_URL");
+            return;
+        };
+        let (tenant_a, tag_a) = tenant_pair("weba");
+        let (tenant_b, tag_b) = tenant_pair("webb");
+        let seeded = seed_tenant(&app.db, &tenant_a, &tag_a).await;
+        assert_eq!(seeded.tenant, tenant_a);
+        assert_eq!(seeded.tag, tag_a);
+        seed_tenant(&app.db, &tenant_b, &tag_b).await;
+        let user_a = user(&tenant_a);
+
+        // KPI-only overviews: exact tenant-scoped counts.
+        let dashboard = web(&app, "/dashboard", None, &user_a).await;
+        assert_eq!(kpi(&dashboard, "Campaigns"), "28");
+        assert_eq!(kpi(&dashboard, "Contacts"), "3");
+        assert_eq!(kpi(&dashboard, "Domains"), "2");
+        assert_eq!(kpi(&dashboard, "Sent (30d)"), "1");
+
+        let analytics = web(&app, "/analytics", None, &user_a).await;
+        assert_eq!(kpi(&analytics, "Sent"), "1");
+        assert_eq!(kpi(&analytics, "Delivered"), "1");
+        assert_eq!(kpi(&analytics, "Opened"), "0");
+        assert!(!unavailable_marked(&analytics));
+
+        // Every table-backed loader: seeded rows visible, other tenant's
+        // marker absent (tenant isolation through the loader itself).
+        let cases: &[(&str, i64, usize)] = &[
+            ("/campaigns", 28, 20),
+            ("/contacts", 3, 3),
+            ("/lists", 1, 1),
+            ("/templates", 2, 2),
+            ("/domains", 2, 2),
+            ("/events", 4, 4),
+            ("/inbox-placement", 1, 1),
+            ("/settings/api-keys", 1, 1),
+            ("/settings/webhooks", 1, 1),
+            ("/settings/team", 2, 2),
+        ];
+        for (path, total, rows) in cases {
+            let data = web(&app, path, None, &user_a).await;
+            assert!(!unavailable_marked(&data), "{path} must be available");
+            assert_eq!(data.total_count, *total, "{path} total");
+            assert_eq!(table(&data).rows.len(), *rows, "{path} rows");
+            assert!(has(&data, &tag_a), "{path} must show tenant A rows");
+            assert!(!has(&data, &tag_b), "{path} must not leak tenant B rows");
+        }
+        // The seeded campaign id is what the edit loader resolves.
+        assert!(seeded.campaign_id.len() == 36);
+        assert!(seeded.list_id.len() == 36);
+        assert!(seeded.contact_id.len() == 36);
+
+        let billing = web(&app, "/settings/billing", None, &user_a).await;
+        assert_eq!(kpi(&billing, "Current plan"), "pro");
+        assert_eq!(kpi(&billing, "Invoices"), "1");
+        assert!(table(&billing).rows[0]
+            .cells
+            .iter()
+            .any(|cell| matches!(cell, DataCell::Text(value) if value == "123.45")));
+        assert!(!has(&billing, &tag_b));
+
+        let ips = web(&app, "/settings/dedicated-ips", None, &user_a).await;
+        assert_eq!(kpi(&ips, "Assigned"), "1");
+        assert_eq!(kpi(&ips, "Pending requests"), "1");
+        assert!(has(&ips, &seeded.dedicated_ip));
+
+        let reports = web(&app, "/reports", None, &user_a).await;
+        assert_eq!(kpi(&reports, "Campaigns"), "28");
+        assert!(has(&reports, &tag_a));
+        assert!(!has(&reports, &tag_b));
+
+        let deliverability = web(&app, "/reports/deliverability", None, &user_a).await;
+        assert_eq!(kpi(&deliverability, "Sent (30d)"), "1");
+        assert_eq!(table(&deliverability).rows.len(), 4);
+        assert!(!has(&deliverability, &tag_b));
+
+        // Campaign edit loader is tenant-scoped and UUID-scoped.
+        let edit = load_page_data(
+            &app,
+            "web",
+            &format!("/campaigns/{}/edit", seeded.campaign_id),
+            None,
+            Some(&user_a),
+        )
+        .await
+        .campaign_edit
+        .expect("campaign edit for owner");
+        assert!(edit.name.contains(&tag_a));
+        let leaked = load_page_data(
+            &app,
+            "web",
+            &format!("/campaigns/{}/edit", seeded.campaign_id),
+            None,
+            Some(&user(&tenant_b)),
+        )
+        .await;
+        assert!(
+            leaked.campaign_edit.is_none(),
+            "another tenant must not load the campaign editor"
+        );
+        let malformed = load_page_data(
+            &app,
+            "web",
+            "/campaigns/not-a-uuid/edit",
+            None,
+            Some(&user_a),
+        )
+        .await;
+        assert!(malformed.campaign_edit.is_none());
+    }
+
+    #[tokio::test]
+    async fn web_loader_query_attacks_are_clamped_escaped_and_never_injected() {
+        let Some(app) = state("cov_web_query").await else {
+            eprintln!(
+                "skipping web_loader_query_attacks_are_clamped_escaped_and_never_injected: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let (tenant, tag) = tenant_pair("webq");
+        seed_tenant(&app.db, &tenant, &tag).await;
+        let user = user(&tenant);
+
+        // Pagination: 0/-1/NaN/huge all stay inside 1..=total_pages.
+        for (query, expected_page, expected_rows) in [
+            ("page=0", 1_usize, 20_usize),
+            ("page=-1", 1, 20),
+            ("page=NaN", 1, 20),
+            ("page=", 1, 20),
+            ("page=99999", 2, 8),
+            ("page=2", 2, 8),
+        ] {
+            let data = web(&app, "/campaigns", Some(query), &user).await;
+            assert_eq!(data.page, expected_page, "{query}");
+            assert_eq!(table(&data).rows.len(), expected_rows, "{query}");
+            assert!(data.total_count == 28, "{query}");
+        }
+
+        // Whitelisted status filter: injection attempts are ignored, not
+        // concatenated into SQL.
+        for hostile in [
+            "status=%27%20OR%20%271%27%3D%271",
+            "status=draft%3B%20DROP%20TABLE%20campaigns",
+            "status=completed%27--",
+        ] {
+            let data = web(&app, "/campaigns", Some(hostile), &user).await;
+            assert_eq!(data.total_count, 28, "{hostile}");
+            assert!(!unavailable_marked(&data));
+        }
+        let completed = web(&app, "/campaigns", Some("status=completed"), &user).await;
+        assert_eq!(completed.total_count, 5);
+        assert!(table(&completed).rows.iter().all(|row| row
+            .cells
+            .iter()
+            .any(|cell| matches!(cell, DataCell::Status(s) if s == "completed"))));
+
+        // Unknown sort columns fall back to the fixed ORDER BY (no ORDER BY
+        // injection); the query still succeeds.
+        for hostile in [
+            "sort=name%3B%20DROP%20TABLE%20campaigns",
+            "sort=(SELECT%201)",
+            "sort=unknown_column",
+        ] {
+            let data = web(&app, "/campaigns", Some(hostile), &user).await;
+            assert_eq!(data.total_count, 28, "{hostile}");
+            assert_eq!(table(&data).rows.len(), 20, "{hostile}");
+        }
+
+        // LIKE metacharacters match literally (escape_like + ESCAPE).
+        let percent = web(&app, "/campaigns", Some("query=100%25"), &user).await;
+        assert_eq!(
+            percent.total_count, 1,
+            "%% must match the literal percent row"
+        );
+        assert!(has(&percent, &format!("100% percent {tag}")));
+        assert_eq!(
+            percent.filter_query, "query=100%25",
+            "preserved filter must round-trip the literal %"
+        );
+        let raw_percent = web(&app, "/campaigns", Some("query=%25zz"), &user).await;
+        assert_eq!(raw_percent.total_count, 0);
+        assert_eq!(raw_percent.empty_title, "No campaigns yet");
+        assert_eq!(table(&raw_percent).rows.len(), 0);
+        let underscore = web(&app, "/campaigns", Some("query=_"), &user).await;
+        assert_eq!(underscore.total_count, 1, "_ must match literally");
+        assert!(has(&underscore, &format!("under_score {tag}")));
+        let underscore_wildcard = web(&app, "/campaigns", Some("query=100_"), &user).await;
+        assert_eq!(underscore_wildcard.total_count, 0, "100_ is not a wildcard");
+
+        // Duplicate params: last one wins, still no injection.
+        let dup = web(&app, "/campaigns", Some("query=Beta&query=Alpha"), &user).await;
+        assert_eq!(dup.total_count, 20);
+
+        // Unknown keys / malformed fragments are ignored.
+        let junk = web(&app, "/campaigns", Some("&&=&x=1&page"), &user).await;
+        assert_eq!(junk.total_count, 28);
+
+        // Search is never rendered as raw HTML by the data layer.
+        let xss = web(
+            &app,
+            "/contacts",
+            Some("query=%3Cscript%3Ealert(1)%3C%2Fscript%3E"),
+            &user,
+        )
+        .await;
+        assert_eq!(xss.total_count, 0);
+        assert_eq!(xss.current_query, "<script>alert(1)</script>");
+    }
+
+    #[tokio::test]
+    async fn web_loaders_fail_closed_when_the_database_is_unavailable() {
+        let app = dead_state().await;
+        let user = user("tenant-down");
+        for path in [
+            "/dashboard",
+            "/campaigns",
+            "/contacts",
+            "/lists",
+            "/templates",
+            "/domains",
+            "/events",
+            "/analytics",
+            "/reports",
+            "/reports/deliverability",
+            "/inbox-placement",
+            "/settings/api-keys",
+            "/settings/webhooks",
+            "/settings/team",
+            "/settings/billing",
+            "/settings/dedicated-ips",
+        ] {
+            let data = web(&app, path, Some("page=2&query=x&status=active"), &user).await;
+            assert!(
+                unavailable_marked(&data),
+                "{path} must render the explicit unavailable state, got {data:?}"
+            );
+            if let Some(table) = &data.table {
+                assert!(
+                    table.rows.is_empty(),
+                    "{path} must not fabricate rows on DB failure"
+                );
+            }
+        }
+        // Detail loaders return None rather than a fabricated page.
+        assert!(load_domain_detail(
+            &app.db,
+            "t",
+            "00000000-0000-0000-0000-000000000000",
+            "us-east-1"
+        )
+        .await
+        .is_none());
+        assert!(
+            load_campaign_detail(&app.db, "t", "00000000-0000-0000-0000-000000000000")
+                .await
+                .is_none()
+        );
+        // Select helpers degrade to empty, never to invented names.
+        assert!(tenant_lists_for_select(&app.db, "t").await.is_empty());
+        assert!(tenant_plan_names(&app.db).await.is_empty());
+        assert_eq!(
+            count_list_recipients_filtered(
+                &app.db,
+                "t",
+                "00000000-0000-0000-0000-000000000000",
+                "all"
+            )
+            .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn cp_loaders_render_seeded_global_rows() {
+        let Some(app) = state("cov_cp_seeded").await else {
+            eprintln!("skipping cp_loaders_render_seeded_global_rows: no TEST_DATABASE_URL");
+            return;
+        };
+        let (tenant, tag) = tenant_pair("cpa");
+        seed_tenant(&app.db, &tenant, &tag).await;
+        let node_ip = seed_global(&app.db, &tag).await;
+        let operator = user("system");
+
+        // The CP home tenant table is the 10 most recent tenants platform-
+        // wide; parallel tests seed their own tenants, so assert the page
+        // loaded honestly rather than that this tenant is in the top 10.
+        let home = cp(&app, "/", None, &operator).await;
+        assert!(!unavailable_marked(&home));
+        assert!(home.kpis.iter().all(|kpi| kpi.value != "unavailable"));
+
+        let dashboard = cp(&app, "/cp", None, &operator).await;
+        assert!(!unavailable_marked(&dashboard));
+        let dashboard_alias = cp(&app, "/dashboard", None, &operator).await;
+        assert!(!unavailable_marked(&dashboard_alias));
+        assert_eq!(dashboard.kpis.len(), dashboard_alias.kpis.len());
+
+        for path in ["/cp/tenants", "/tenants"] {
+            let data = cp(&app, path, Some(&format!("query={tag}")), &operator).await;
+            assert_eq!(data.total_count, 1, "{path}");
+            assert!(has(&data, &tag));
+        }
+        let status_filtered = cp(&app, "/cp/tenants", Some("status=active"), &operator).await;
+        assert!(!unavailable_marked(&status_filtered));
+
+        let operators = cp(
+            &app,
+            "/operators",
+            Some(&format!("query=member0-{tag}")),
+            &operator,
+        )
+        .await;
+        assert_eq!(operators.total_count, 1);
+        assert!(has(&operators, &tag));
+
+        // cp_audit reads the CANONICAL audit_logs.resource column — the
+        // legacy resource_type spelling does not exist (see web.rs export).
+        let audit = cp(&app, "/cp/audit", None, &operator).await;
+        assert!(
+            !unavailable_marked(&audit),
+            "audit page must not be unavailable"
+        );
+        assert!(has(&audit, &format!("audit-resource-{tag}")));
+        let audit_alias = cp(&app, "/audit", None, &operator).await;
+        assert!(has(&audit_alias, &format!("audit-resource-{tag}")));
+        let audit_search = cp(&app, "/cp/audit", Some(&format!("query={tag}")), &operator).await;
+        assert!(has(&audit_search, &format!("audit-resource-{tag}")));
+        let audit_days = cp(&app, "/cp/audit", Some("days=30"), &operator).await;
+        assert!(!unavailable_marked(&audit_days));
+
+        let jobs = cp(&app, "/jobs", None, &operator).await;
+        assert!(has(&jobs, &format!("queue-{tag}")));
+        let nodes = cp(&app, "/infrastructure/nodes", None, &operator).await;
+        assert!(has(&nodes, &node_ip));
+        assert!(has(&nodes, &format!("pool-{tag}")));
+        let queues = cp(&app, "/infrastructure/queues", None, &operator).await;
+        assert!(has(&queues, &format!("queue-{tag}")));
+
+        let alerts = cp(&app, "/alerts", Some("status=critical"), &operator).await;
+        assert!(has(&alerts, &format!("Coverage alert {tag}")));
+        let alerts_all = cp(&app, "/alerts", None, &operator).await;
+        assert!(!unavailable_marked(&alerts_all));
+
+        let domains = cp(&app, "/domains", Some(&format!("query={tag}")), &operator).await;
+        assert!(has(&domains, &format!("{tag}.example.test")));
+
+        let plans = cp(&app, "/billing/plans", None, &operator).await;
+        assert!(has(&plans, &format!("Plan {tag}")));
+
+        let compliance = cp(&app, "/compliance", None, &operator).await;
+        assert!(!unavailable_marked(&compliance));
+        let gdpr = cp(&app, "/compliance/gdpr", None, &operator).await;
+        assert!(has(&gdpr, &format!("gdpr-{tag}@example.test")));
+        let gdpr_filtered = cp(
+            &app,
+            "/compliance/gdpr",
+            Some("status=pending&page=1"),
+            &operator,
+        )
+        .await;
+        assert!(has(&gdpr_filtered, &format!("gdpr-{tag}@example.test")));
+
+        // Discovery ranks sources by lead count with a LIMIT 25, so assert
+        // the page loaded honestly and counted real leads instead of that
+        // this run's single-lead source is in the top 25.
+        let discovery = cp(&app, "/discovery", None, &operator).await;
+        assert!(!unavailable_marked(&discovery));
+        assert!(
+            kpi(&discovery, "Leads").parse::<i64>().unwrap_or(0) >= 1,
+            "discovery must count the seeded lead"
+        );
+
+        let analytics = cp(&app, "/analytics", None, &operator).await;
+        assert!(!unavailable_marked(&analytics));
+
+        let sales = load_page_data(&app, "control-plane", "/cp/sales", None, Some(&operator)).await;
+        let sales = sales.sales.expect("sales page data");
+        assert!(format!("{sales:?}").contains(&format!("Rationale {tag}")));
+        assert!(format!("{sales:?}").contains(&format!("boom {tag}")));
+        let sales_alias = load_page_data(&app, "control-plane", "/sales", None, Some(&operator))
+            .await
+            .sales
+            .expect("sales alias page data");
+        assert!(format!("{sales_alias:?}").contains(&tag));
+    }
+
+    #[tokio::test]
+    async fn cp_loaders_fail_closed_when_the_database_is_unavailable() {
+        let app = dead_state().await;
+        let operator = user("system");
+        for path in [
+            "/",
+            "/cp",
+            "/cp/tenants",
+            "/tenants",
+            "/operators",
+            "/cp/audit",
+            "/audit",
+            "/jobs",
+            "/infrastructure/nodes",
+            "/infrastructure/queues",
+            "/alerts",
+            "/domains",
+            "/billing/plans",
+            "/compliance",
+            "/compliance/gdpr",
+            "/discovery",
+            "/analytics",
+        ] {
+            let data = cp(&app, path, Some("query=x&status=active&page=1"), &operator).await;
+            assert!(
+                unavailable_marked(&data),
+                "{path} must fail closed, got {data:?}"
+            );
+        }
+        let sales = load_page_data(&app, "control-plane", "/cp/sales", None, Some(&operator)).await;
+        let sales = sales.sales.expect("sales data even on failure");
+        assert!(
+            sales.overview.is_none() && sales.decisions.is_none(),
+            "failed sales snapshot must not fabricate a page"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_page_data_unknown_surfaces_paths_and_users_degrade_to_default() {
+        let app = dead_state().await;
+        let operator = user("system");
+        let web_user = user("tenant-x");
+        let unknown = load_page_data(&app, "marketing", "/dashboard", None, Some(&operator)).await;
+        assert!(unknown.list.is_none() && unknown.sales.is_none());
+        let unknown_path = load_page_data(&app, "web", "/nope", None, Some(&web_user)).await;
+        assert!(unknown_path.list.is_none());
+        let unknown_cp =
+            load_page_data(&app, "control-plane", "/nope", None, Some(&operator)).await;
+        assert!(unknown_cp.list.is_none() && unknown_cp.sales.is_none());
+        // Missing identity: no loaders run, no data is fabricated.
+        let anon = load_page_data(&app, "web", "/campaigns", None, None).await;
+        assert!(anon.list.is_none());
+        let anon_cp = load_page_data(&app, "control-plane", "/cp/tenants", None, None).await;
+        assert!(anon_cp.list.is_none());
+    }
+
+    #[tokio::test]
+    async fn detail_loaders_render_own_tenant_only() {
+        let Some(app) = state("cov_details").await else {
+            eprintln!("skipping detail_loaders_render_own_tenant_only: no TEST_DATABASE_URL");
+            return;
+        };
+        let (tenant_a, tag_a) = tenant_pair("deta");
+        let (tenant_b, tag_b) = tenant_pair("detb");
+        let seeded = seed_tenant(&app.db, &tenant_a, &tag_a).await;
+        seed_tenant(&app.db, &tenant_b, &tag_b).await;
+
+        // Domain detail: with DKIM material the DNS record table renders.
+        let detail = load_domain_detail(&app.db, &tenant_a, &seeded.domain_id, "us-east-1")
+            .await
+            .expect("domain detail for owner");
+        assert_eq!(kpi(&detail, "Domain"), format!("{tag_a}.example.test"));
+        assert!(table(&detail).rows.len() >= 4, "DNS records must render");
+        // Cross-tenant and malformed ids are refused.
+        assert!(
+            load_domain_detail(&app.db, &tenant_b, &seeded.domain_id, "us-east-1")
+                .await
+                .is_none()
+        );
+        assert!(
+            load_domain_detail(&app.db, &tenant_a, "not-a-uuid", "us-east-1")
+                .await
+                .is_none()
+        );
+        // DKIM-less domain: the page renders its headers with no record rows
+        // and the explicit "not generated yet" copy (never fabricated DNS).
+        let bare = load_domain_detail(&app.db, &tenant_a, &seeded.domain_without_dkim, "us-east-1")
+            .await
+            .expect("bare domain detail");
+        assert!(table(&bare).rows.is_empty());
+        assert!(bare.empty_title.contains("not generated"));
+        assert_eq!(kpi(&bare, "Verified records"), "0/4");
+
+        // Campaign detail: recipients job resolves back to the list name.
+        let campaign = load_campaign_detail(&app.db, &tenant_a, &seeded.campaign_id)
+            .await
+            .expect("campaign detail for owner");
+        let debug = format!("{campaign:?}");
+        assert!(debug.contains(&tag_a), "list name must resolve");
+        assert!(
+            load_campaign_detail(&app.db, &tenant_b, &seeded.campaign_id)
+                .await
+                .is_none()
+        );
+        assert!(load_campaign_detail(&app.db, &tenant_a, "not-a-uuid")
+            .await
+            .is_none());
+
+        // Select helpers return only this tenant's rows.
+        let lists = tenant_lists_for_select(&app.db, &tenant_a).await;
+        assert_eq!(lists.len(), 1);
+        assert!(lists[0].1.contains(&tag_a));
+        assert!(!lists[0].2, "nothing selected by default");
+        assert!(tenant_plan_names(&app.db)
+            .await
+            .iter()
+            .any(|name| !name.is_empty()));
+        assert_eq!(
+            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "all").await,
+            Some(1)
+        );
+        assert_eq!(
+            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "subscribed").await,
+            Some(1)
+        );
+        assert_eq!(
+            count_list_recipients_filtered(&app.db, &tenant_a, &seeded.list_id, "bounced").await,
+            Some(0)
+        );
+        // Another tenant asking for this list's counts sees nothing.
+        assert_eq!(
+            count_list_recipients_filtered(&app.db, &tenant_b, &seeded.list_id, "all").await,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn load_query_requirement_and_schema_probe_behave_honestly() {
+        let Some(app) = state("cov_schema_probe").await else {
+            eprintln!(
+                "skipping load_query_requirement_and_schema_probe_behave_honestly: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let (_tenant, tag) = tenant_pair("probe");
+
+        // 42P01 on a REQUIRED dataset is Unavailable (never a false empty).
+        let missing_required = load_query::<i64, _>("test.required", &tag, async {
+            sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM absent_{tag}"))
+                .fetch_one(&app.db)
+                .await
+        })
+        .await;
+        assert!(missing_required.is_unavailable());
+
+        // The same 42P01 on an OptionalDisabledComponent dataset is an
+        // honest empty payload.
+        let missing_optional = load_query_with_requirement::<i64, _>(
+            "test.optional",
+            &tag,
+            DatasetRequirement::OptionalDisabledComponent,
+            async {
+                sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM absent_{tag}"))
+                    .fetch_one(&app.db)
+                    .await
+            },
+        )
+        .await;
+        assert_eq!(missing_optional, LoadState::Loaded(0));
+
+        // Non-schema failures stay Unavailable even for optional datasets.
+        let division_by_zero = load_query_with_requirement::<i64, _>(
+            "test.optional.nonschema",
+            &tag,
+            DatasetRequirement::OptionalDisabledComponent,
+            async {
+                sqlx::query_scalar::<_, i64>("SELECT 1 / 0")
+                    .fetch_one(&app.db)
+                    .await
+            },
+        )
+        .await;
+        assert!(division_by_zero.is_unavailable());
+
+        // The canonical schema satisfies the console manifest exactly.
+        let missing = missing_required_console_schema(&app.db)
+            .await
+            .expect("schema probe must query");
+        assert!(
+            missing.is_empty(),
+            "canonical schema must satisfy the console manifest: {missing:?}"
+        );
+        // A dead connection surfaces the probe error instead of an empty
+        // "all good" verdict.
+        let dead = dead_state().await;
+        assert!(missing_required_console_schema(&dead.db).await.is_err());
     }
 }

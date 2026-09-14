@@ -243,7 +243,15 @@ impl MessagesRepo {
                 .push("'queued'")
                 .push("NOW()");
         });
-        query_builder.push(" RETURNING id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at");
+        // The RETURNING projection must cover EVERY column the `Message` row
+        // type requires: the old list stopped at created_at, so the derived
+        // `FromRow` decode failed with ColumnNotFound("cc_emails") on every
+        // non-empty batch. Columns the INSERT leaves at their default are
+        // selected explicitly here.
+        query_builder.push(
+            " RETURNING id, tenant_id, from_email, to_emails, cc_emails, bcc_emails, subject, \
+             html_body, text_body, status, tags, metadata, scheduled_at, sent_at, created_at",
+        );
 
         query_builder
             .build_query_as::<Message>()

@@ -101,14 +101,17 @@ async fn create_ticket(
         )]));
     }
 
-    let id = Uuid::new_v4();
+    // support_tickets.id is VARCHAR(26) (canonical migration chain): a
+    // 36-char hyphenated UUID overflows the column and turned every ticket
+    // creation into a database 500.
+    let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
 
     sqlx::query(
         "INSERT INTO support_tickets (id, tenant_id, subject, description, priority, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,'open',$6,$6)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&body.subject)
     .bind(&body.description)
@@ -120,7 +123,7 @@ async fn create_ticket(
     Ok((
         StatusCode::CREATED,
         Json(TicketResponse {
-            id: id.to_string(),
+            id,
             subject: body.subject,
             description: body.description,
             priority: body.priority,
@@ -156,15 +159,18 @@ async fn list_tickets(
 async fn get_ticket(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<TicketResponse>, ApiError> {
     require_scopes(&auth, &["support:read"])?;
 
+    // The id column is VARCHAR(26), not UUID: bind the raw string so
+    // malformed ids resolve to an honest 404 instead of a router-level
+    // rejection or a database type error.
     let row = sqlx::query_as::<_, TicketRow>(
         "SELECT id, subject, description, priority, status, assigned_to, created_at, updated_at
          FROM support_tickets WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -216,9 +222,11 @@ async fn update_ticket(
     }
     let assigned_to = body.assigned_to.or(existing.assigned_to);
     if let Some(ref assignee) = assigned_to {
-        if assignee.len() > 255 {
+        // support_tickets.assigned_to is VARCHAR(26) — validating against
+        // 255 let an over-long assignee reach the column and 500.
+        if assignee.len() > 26 {
             return Err(ApiError::Validation(vec![
-                "assigned_to must be 255 characters or fewer".into(),
+                "assigned_to must be 26 characters or fewer".into(),
             ]));
         }
     }
@@ -464,5 +472,449 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["priority"], "high");
+    }
+}
+
+// ─── Adversarial ticket CRUD tests ─────────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: Some("usr_adv_0000000000000001".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'support adversarial', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn create_ok(state: &AppState, tenant: &str, subject: &str) -> TicketResponse {
+        let (status, Json(ticket)) = create_ticket(
+            State(state.clone()),
+            auth_for(tenant, &["support:write"]),
+            Json(CreateTicketRequest {
+                subject: subject.into(),
+                description: "please help".into(),
+                priority: "high".into(),
+            }),
+        )
+        .await
+        .expect("create ticket");
+        assert_eq!(status, StatusCode::CREATED);
+        ticket
+    }
+
+    #[tokio::test]
+    async fn ticket_crud_is_tenant_scoped_and_ids_are_canonical_length() {
+        let Some((state, pool)) = state_and_pool("adv_support_tickets").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a).await;
+        seed_tenant(&pool, &tenant_b).await;
+
+        let ticket = create_ok(&state, &tenant_a, "Cannot send").await;
+        // support_tickets.id is VARCHAR(26): a 36-char hyphenated UUID would
+        // overflow the column and turn every create into a 500.
+        assert_eq!(
+            ticket.id.len(),
+            26,
+            "the persisted id must fit support_tickets.id: {}",
+            ticket.id
+        );
+        assert_eq!(ticket.status, "open");
+        assert_eq!(ticket.priority, "high");
+
+        // Validation edges.
+        for (subject, description, priority) in [
+            ("", "d", "normal"),
+            (&"s".repeat(501), "d", "normal"),
+            ("s", "", "normal"),
+            ("s", &"d".repeat(10_001), "normal"),
+            ("s", "d", "impossible"),
+            ("s", "d", ""),
+        ] {
+            let resp = create_ticket(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:write"]),
+                Json(CreateTicketRequest {
+                    subject: subject.to_string(),
+                    description: description.to_string(),
+                    priority: priority.to_string(),
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::Validation(_))),
+                "({subject:?},{priority:?}) must be refused"
+            );
+        }
+
+        // Own reads; other-tenant reads are 404 and leak nothing.
+        let Json(fetched) = get_ticket(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:read"]),
+            Path(ticket.id.clone()),
+        )
+        .await
+        .expect("own read");
+        assert_eq!(fetched.subject, "Cannot send");
+
+        let foreign = create_ok(&state, &tenant_b, "Tenant B secret").await;
+        let cross = get_ticket(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:read"]),
+            Path(foreign.id.clone()),
+        )
+        .await;
+        assert!(matches!(cross, Err(ApiError::NotFound(_))));
+
+        // Malformed / unknown / over-long ids are 404, never database 500s.
+        for bad in [
+            "",
+            "not-a-ticket-id",
+            &"z".repeat(400),
+            "00000000000000000000000000",
+        ] {
+            let resp = get_ticket(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:read"]),
+                Path(bad.to_string()),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::NotFound(_))),
+                "GET {bad:?} must be 404, got {resp:?}"
+            );
+            let resp = update_ticket(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:write"]),
+                Path(bad.to_string()),
+                Json(UpdateTicketRequest {
+                    status: None,
+                    priority: None,
+                    assigned_to: None,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::NotFound(_))),
+                "PUT {bad:?} must be 404, got {resp:?}"
+            );
+        }
+
+        // Listing is scoped and paginated.
+        let Json(list) = list_tickets(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:read"]),
+            Query(ListTicketsQuery {
+                limit: 1,
+                offset: 0,
+                cursor: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert_eq!(list.len(), 1);
+        assert!(list.iter().all(|t| t.id != foreign.id));
+        let Json(clamped) = list_tickets(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:read"]),
+            Query(ListTicketsQuery {
+                limit: -1,
+                offset: -9,
+                cursor: Some(-4),
+                status: Some("open".into()),
+            }),
+        )
+        .await
+        .expect("clamped");
+        assert_eq!(clamped.len(), 1);
+
+        // Valid transition; invalid enum values refused without touching the row.
+        let Json(updated) = update_ticket(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:write"]),
+            Path(ticket.id.clone()),
+            Json(UpdateTicketRequest {
+                status: Some("in_progress".into()),
+                priority: Some("urgent".into()),
+                assigned_to: Some("operator-1".into()),
+            }),
+        )
+        .await
+        .expect("update");
+        assert_eq!(updated.status, "in_progress");
+        assert_eq!(updated.priority, "urgent");
+        assert_eq!(updated.assigned_to.as_deref(), Some("operator-1"));
+
+        for (status, priority) in [
+            (Some("banana"), None),
+            (None, Some("banana")),
+            (Some("OPEN"), None),
+        ] {
+            let resp = update_ticket(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:write"]),
+                Path(ticket.id.clone()),
+                Json(UpdateTicketRequest {
+                    status: status.map(str::to_string),
+                    priority: priority.map(str::to_string),
+                    assigned_to: None,
+                }),
+            )
+            .await;
+            assert!(matches!(resp, Err(ApiError::Validation(_))));
+        }
+        // Over-long assignee is a validation error, not a column overflow 500.
+        let long_assignee = update_ticket(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:write"]),
+            Path(ticket.id.clone()),
+            Json(UpdateTicketRequest {
+                status: None,
+                priority: None,
+                assigned_to: Some("a".repeat(255)),
+            }),
+        )
+        .await;
+        assert!(matches!(long_assignee, Err(ApiError::Validation(_))));
+
+        // Cross-tenant update is a 404 and leaves the row untouched.
+        let cross_update = update_ticket(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:write"]),
+            Path(foreign.id.clone()),
+            Json(UpdateTicketRequest {
+                status: Some("closed".into()),
+                priority: None,
+                assigned_to: None,
+            }),
+        )
+        .await;
+        assert!(matches!(cross_update, Err(ApiError::NotFound(_))));
+        let (foreign_status,): (String,) =
+            sqlx::query_as("SELECT status FROM support_tickets WHERE id = $1 AND tenant_id = $2")
+                .bind(&foreign.id)
+                .bind(&tenant_b)
+                .fetch_one(&pool)
+                .await
+                .expect("foreign row");
+        assert_eq!(foreign_status, "open");
+
+        // Scope gates.
+        assert!(matches!(
+            create_ticket(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:read"]),
+                Json(CreateTicketRequest {
+                    subject: "s".into(),
+                    description: "d".into(),
+                    priority: "normal".into(),
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            get_ticket(
+                State(state.clone()),
+                auth_for(&tenant_a, &[]),
+                Path(ticket.id.clone())
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        for tenant in [&tenant_a, &tenant_b] {
+            sqlx::query("DELETE FROM ticket_messages WHERE ticket_id IN (SELECT id FROM support_tickets WHERE tenant_id = $1)")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup messages");
+            sqlx::query("DELETE FROM support_tickets WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup tickets");
+            sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup tenant");
+        }
+    }
+
+    #[tokio::test]
+    async fn ticket_messages_bound_bodies_and_tenant_guard() {
+        let Some((state, pool)) = state_and_pool("adv_support_messages").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a).await;
+        seed_tenant(&pool, &tenant_b).await;
+        let ticket = create_ok(&state, &tenant_a, "Thread").await;
+        let foreign = create_ok(&state, &tenant_b, "Foreign thread").await;
+
+        let (status, Json(message)) = create_ticket_message(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:write"]),
+            Path(ticket.id.clone()),
+            Json(CreateMessageRequest {
+                body: "first reply".into(),
+            }),
+        )
+        .await
+        .expect("create message");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(message.ticket_id, ticket.id);
+        assert_eq!(message.sender_type, "user");
+
+        // Empty / whitespace-only bodies and oversize bodies are refused.
+        for body in ["", "   ", "\n\t"] {
+            let resp = create_ticket_message(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:write"]),
+                Path(ticket.id.clone()),
+                Json(CreateMessageRequest { body: body.into() }),
+            )
+            .await;
+            assert!(matches!(resp, Err(ApiError::Validation(_))), "{body:?}");
+        }
+        let oversized = create_ticket_message(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:write"]),
+            Path(ticket.id.clone()),
+            Json(CreateMessageRequest {
+                body: "x".repeat(MAX_MESSAGE_BODY_BYTES + 1),
+            }),
+        )
+        .await;
+        assert!(matches!(oversized, Err(ApiError::BadRequest(_))));
+
+        // Cross-tenant and unknown tickets are 404 for both list and create.
+        for bad in [foreign.id.clone(), "unknown-ticket".into()] {
+            let resp = create_ticket_message(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:write"]),
+                Path(bad.clone()),
+                Json(CreateMessageRequest {
+                    body: "sneaky".into(),
+                }),
+            )
+            .await;
+            assert!(matches!(resp, Err(ApiError::NotFound(_))), "{bad:?}");
+            let resp = list_ticket_messages(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:read"]),
+                Path(bad.clone()),
+                Query(ListTicketsQuery {
+                    limit: 10,
+                    offset: 0,
+                    cursor: None,
+                    status: None,
+                }),
+            )
+            .await;
+            assert!(matches!(resp, Err(ApiError::NotFound(_))), "{bad:?}");
+        }
+
+        let Json(messages) = list_ticket_messages(
+            State(state.clone()),
+            auth_for(&tenant_a, &["support:read"]),
+            Path(ticket.id.clone()),
+            Query(ListTicketsQuery {
+                limit: 50,
+                offset: 0,
+                cursor: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("list messages");
+        assert_eq!(messages["total"], 1);
+        assert_eq!(messages["data"][0]["body"], "first reply");
+        // The 201 id must be the persisted row id.
+        assert_eq!(messages["data"][0]["id"], message.id);
+
+        // Scope gates on both message routes.
+        assert!(matches!(
+            create_ticket_message(
+                State(state.clone()),
+                auth_for(&tenant_a, &["support:read"]),
+                Path(ticket.id.clone()),
+                Json(CreateMessageRequest { body: "x".into() })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            list_ticket_messages(
+                State(state.clone()),
+                auth_for(&tenant_a, &[]),
+                Path(ticket.id.clone()),
+                Query(ListTicketsQuery {
+                    limit: 1,
+                    offset: 0,
+                    cursor: None,
+                    status: None
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        for tenant in [&tenant_a, &tenant_b] {
+            sqlx::query("DELETE FROM ticket_messages WHERE ticket_id IN (SELECT id FROM support_tickets WHERE tenant_id = $1)")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup messages");
+            sqlx::query("DELETE FROM support_tickets WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup tickets");
+            sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup tenant");
+        }
+    }
+
+    #[test]
+    fn unknown_fields_and_default_priority_deserialize() {
+        assert!(serde_json::from_str::<CreateTicketRequest>(
+            r#"{"subject":"s","description":"d","tenant_id":"other"}"#
+        )
+        .is_err());
+        let req: CreateTicketRequest =
+            serde_json::from_str(r#"{"subject":"s","description":"d"}"#).unwrap();
+        assert_eq!(req.priority, "normal");
     }
 }

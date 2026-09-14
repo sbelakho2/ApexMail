@@ -1,7 +1,5 @@
 //! Invoice management – create, list, get by ID.
 
-use std::sync::LazyLock;
-
 use chrono::{DateTime, Datelike, Utc};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -30,32 +28,48 @@ type HmacSha256 = Hmac<Sha256>;
 // PDF Renderer client config
 // ---------------------------------------------------------------------------
 
-/// Base URL for the pdf-renderer service.
-static PDF_RENDERER_URL: LazyLock<String> = LazyLock::new(|| {
+/// Base URL for the pdf-renderer service. Read per call rather than cached in
+/// a `LazyLock` so a long-lived process follows a re-pointed renderer and
+/// tests can drive a local mock deterministically.
+fn pdf_renderer_url() -> String {
     std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".into())
-});
+}
 
 // ---------------------------------------------------------------------------
 // S3/R2 object storage config
 // ---------------------------------------------------------------------------
 
-/// S3-compatible endpoint (e.g. `https://s3.eu-central-1.amazonaws.com` or R2 endpoint).
-static S3_ENDPOINT: LazyLock<String> = LazyLock::new(|| {
-    std::env::var("S3_ENDPOINT").unwrap_or_else(|_| "https://s3.eu-central-1.amazonaws.com".into())
-});
+/// Default AWS S3 host used when `S3_ENDPOINT` is not configured.
+const S3_DEFAULT_HOST: &str = "s3.eu-central-1.amazonaws.com";
+
+/// S3-compatible endpoint (e.g. `https://s3.eu-central-1.amazonaws.com`, an
+/// R2 endpoint, or a local mock at `http://127.0.0.1:9000`).
+///
+/// `None` (unset or blank) means NO endpoint is configured and the historical
+/// AWS virtual-hosted behaviour is used. When set, its scheme, host (with
+/// port) and path prefix are honoured — see [`s3_object_target`].
+fn s3_endpoint() -> Option<String> {
+    std::env::var("S3_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
 /// S3 bucket for invoice PDFs.
-static S3_BUCKET: LazyLock<String> =
-    LazyLock::new(|| std::env::var("S3_BUCKET").unwrap_or_else(|_| "apexmail-invoices".into()));
+fn s3_bucket() -> String {
+    std::env::var("S3_BUCKET").unwrap_or_else(|_| "apexmail-invoices".into())
+}
 
 /// AWS region for Sig V4 signing.
-static S3_REGION: LazyLock<String> =
-    LazyLock::new(|| std::env::var("S3_REGION").unwrap_or_else(|_| "eu-central-1".into()));
+fn s3_region() -> String {
+    std::env::var("S3_REGION").unwrap_or_else(|_| "eu-central-1".into())
+}
 
 /// Optional public URL prefix for the bucket (e.g. `https://storage.apexmail.ee`).
 /// When set, returned URLs use this base instead of the raw S3 endpoint.
-static S3_PUBLIC_URL: LazyLock<Option<String>> =
-    LazyLock::new(|| std::env::var("S3_PUBLIC_URL").ok());
+fn s3_public_url() -> Option<String> {
+    std::env::var("S3_PUBLIC_URL").ok()
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -608,10 +622,22 @@ where
 /// subtracts confirmed payment allocations, then the debt-reduction part
 /// of credit notes (legacy NULL split rows count their full amount, the
 /// pre-183 behaviour), and clamps at zero.
+///
+/// `status = 'paid'` short-circuits to zero, exactly like
+/// [`TENANT_OUTSTANDING_SQL`]: `paid` is the authority for FULL settlement,
+/// so a paid invoice whose allocation rows are missing or partial has no
+/// outstanding remainder. Without the short-circuit a settled invoice could
+/// still report a balance on this surface while the tenant total said zero —
+/// two answers to one question.
 const OUTSTANDING_ONE_SQL: &str = r#"
-    SELECT COALESCE(i.total, i.amount, 0)::bigint
-         - COALESCE(p.payments, 0)
-         - COALESCE(c.credit_debt, 0)
+    SELECT CASE
+               WHEN i.status::text = 'paid' THEN 0
+               ELSE GREATEST(
+                   COALESCE(i.total, i.amount, 0)::bigint
+                   - COALESCE(p.payments, 0)
+                   - COALESCE(c.credit_debt, 0),
+                   0)
+           END
     FROM invoices i
     LEFT JOIN (
         SELECT invoice_id, SUM(amount_cents)::bigint AS payments
@@ -631,18 +657,25 @@ const OUTSTANDING_ONE_SQL: &str = r#"
 "#;
 
 /// Per-currency outstanding buckets for a tenant's WHOLE eligible invoice
-/// set (audit F04): obligation minus allocations and debt-reduction
-/// credits, aggregated independently of any list pagination. This is the
-/// same accounting model as [`invoice_outstanding_cents`].
+/// set (audit F04): every invoice contributes its UNPAID REMAINDER —
+/// `paid` is the authority for FULL settlement (a paid invoice with no
+/// allocation rows still contributes zero), otherwise the obligation minus
+/// the allocation ledger minus debt-reduction credits, clamped per invoice.
+/// Allocations remain the authority for PARTIAL settlement, and the
+/// aggregation is independent of any list pagination. Both
+/// surfaces apply the same `paid -> 0` rule.
 const TENANT_OUTSTANDING_SQL: &str = r#"
     SELECT i.currency,
            COALESCE(SUM(
-               GREATEST(
-                   COALESCE(i.total, i.amount, 0)::bigint
-                   - COALESCE(p.payments, 0)
-                   - COALESCE(c.credit_debt, 0),
-                   0
-               )
+               CASE
+                   WHEN i.status::text = 'paid' THEN 0
+                   ELSE GREATEST(
+                       COALESCE(i.total, i.amount, 0)::bigint
+                       - COALESCE(p.payments, 0)
+                       - COALESCE(c.credit_debt, 0),
+                       0
+                   )
+               END
            ), 0)::bigint
     FROM invoices i
     LEFT JOIN (
@@ -798,7 +831,7 @@ pub async fn generate_invoice_pdf(
 
     // Call pdf-renderer service
     let mut request = http_client
-        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
+        .post(format!("{}/v1/pdf/render", pdf_renderer_url()))
         .json(&render_request)
         .timeout(std::time::Duration::from_secs(30));
     // pdf-renderer requires the shared internal service token; only attach
@@ -1052,6 +1085,68 @@ fn new_hmac_sha256(key: &[u8]) -> Result<HmacSha256, InvoiceError> {
 // S3-compatible upload (AWS Signature V4)
 // ---------------------------------------------------------------------------
 
+/// The HTTP target for one S3 object PUT: the URL to call, the `Host` header
+/// value (which must match the URL authority for Sig V4) and the canonical
+/// URI that gets signed.
+#[derive(Debug, PartialEq, Eq)]
+struct S3ObjectTarget {
+    url: String,
+    host: String,
+    canonical_uri: String,
+}
+
+/// Resolve the request target for `bucket`/`key`.
+///
+/// * No configured endpoint (the historical default): AWS virtual-hosted
+///   style, `https://{bucket}.{S3_DEFAULT_HOST}/{key}`.
+/// * A configured endpoint: its scheme, host (including port) and path
+///   prefix are honoured verbatim and `bucket`/`key` are appended path-style —
+///   `{scheme}://{host}{prefix}/{bucket}/{key}`. The old code hard-coded
+///   `https://` and dropped any path prefix, so a local HTTP S3-compatible
+///   mock was unreachable (and untestable) even though it was configured.
+fn s3_object_target(
+    endpoint: Option<&str>,
+    bucket: &str,
+    key: &str,
+) -> Result<S3ObjectTarget, InvoiceError> {
+    let Some(endpoint) = endpoint.map(str::trim).filter(|value| !value.is_empty()) else {
+        let host = format!("{bucket}.{S3_DEFAULT_HOST}");
+        return Ok(S3ObjectTarget {
+            url: format!("https://{host}/{key}"),
+            host,
+            canonical_uri: format!("/{key}"),
+        });
+    };
+
+    let (scheme, remainder) = endpoint.split_once("://").ok_or_else(|| {
+        InvoiceError::PdfGeneration(format!(
+            "S3_ENDPOINT {endpoint:?} must include an explicit scheme (http:// or https://)"
+        ))
+    })?;
+    if scheme != "http" && scheme != "https" {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "S3_ENDPOINT {endpoint:?} uses unsupported scheme {scheme:?} (expected http or https)"
+        )));
+    }
+    let remainder = remainder.trim_end_matches('/');
+    let (authority, prefix) = match remainder.split_once('/') {
+        Some((authority, prefix)) => (authority, format!("/{}", prefix.trim_matches('/'))),
+        None => (remainder, String::new()),
+    };
+    if authority.is_empty() {
+        return Err(InvoiceError::PdfGeneration(format!(
+            "S3_ENDPOINT {endpoint:?} has an empty host"
+        )));
+    }
+
+    let canonical_uri = format!("{prefix}/{bucket}/{key}");
+    Ok(S3ObjectTarget {
+        url: format!("{scheme}://{authority}{canonical_uri}"),
+        host: authority.to_string(),
+        canonical_uri,
+    })
+}
+
 /// Upload bytes to S3-compatible object storage using AWS Signature V4.
 async fn s3_put_object(
     http_client: &reqwest::Client,
@@ -1059,10 +1154,13 @@ async fn s3_put_object(
     body: &[u8],
     content_type: &str,
 ) -> Result<String, InvoiceError> {
-    let endpoint = &*S3_ENDPOINT;
-    let bucket = &*S3_BUCKET;
-    let region = &*S3_REGION;
+    let bucket = s3_bucket();
+    let region = s3_region();
     let (access_key, secret_key) = s3_credentials()?;
+    let endpoint = s3_endpoint();
+    let target = s3_object_target(endpoint.as_deref(), &bucket, key)?;
+    let host = &target.host;
+    let canonical_uri = &target.canonical_uri;
 
     let now = Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
@@ -1070,13 +1168,6 @@ async fn s3_put_object(
 
     // SHA-256 of request body
     let payload_hash = hex_encode(&Sha256::digest(body));
-
-    // Host:virtual-hosted style for broad S3 compatibility
-    let raw_host = endpoint
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    let host = format!("{bucket}.{raw_host}");
-    let canonical_uri = format!("/{key}");
 
     // Canonical headers (must be sorted)
     let canonical_headers = format!(
@@ -1125,11 +1216,11 @@ async fn s3_put_object(
          SignedHeaders={signed_headers}, Signature={signature}"
     );
 
-    let url = format!("https://{host}{canonical_uri}");
+    let url = target.url;
 
     let resp = http_client
         .put(&url)
-        .header("Host", &host)
+        .header("Host", host)
         .header("Content-Type", content_type)
         .header("x-amz-date", &amz_date)
         .header("x-amz-content-sha256", &payload_hash)
@@ -1149,7 +1240,7 @@ async fn s3_put_object(
     }
 
     // Return public URL
-    let public_url = match &*S3_PUBLIC_URL {
+    let public_url = match s3_public_url() {
         Some(base) => format!("{}/{key}", base.trim_end_matches('/')),
         None => url,
     };
@@ -1382,6 +1473,66 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // Bug 3 — the object target follows the CONFIGURED endpoint.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn s3_target_defaults_to_aws_virtual_hosted_style() {
+        // No endpoint configured: the historical behaviour is preserved —
+        // virtual-hosted AWS over https.
+        let target = s3_object_target(None, "apexmail-invoices", "invoices/t/2026-000001.pdf")
+            .expect("default target");
+
+        assert_eq!(
+            target.url,
+            "https://apexmail-invoices.s3.eu-central-1.amazonaws.com/invoices/t/2026-000001.pdf"
+        );
+        assert_eq!(
+            target.host,
+            "apexmail-invoices.s3.eu-central-1.amazonaws.com"
+        );
+        assert_eq!(target.canonical_uri, "/invoices/t/2026-000001.pdf");
+    }
+
+    #[test]
+    fn s3_target_honours_configured_endpoint_scheme_host_and_prefix() {
+        // A local http mock: the scheme and the port must survive verbatim,
+        // and bucket/key are appended path-style.
+        let target = s3_object_target(Some("http://127.0.0.1:9000"), "bucket", "k/a.pdf")
+            .expect("local endpoint");
+        assert_eq!(target.url, "http://127.0.0.1:9000/bucket/k/a.pdf");
+        assert_eq!(target.host, "127.0.0.1:9000");
+        assert_eq!(target.canonical_uri, "/bucket/k/a.pdf");
+
+        // A path prefix on the endpoint is preserved (trailing slash and
+        // all), never dropped on the floor.
+        let target = s3_object_target(
+            Some("https://storage.example.com/prefix/"),
+            "bucket",
+            "k/a.pdf",
+        )
+        .expect("prefixed endpoint");
+        assert_eq!(
+            target.url,
+            "https://storage.example.com/prefix/bucket/k/a.pdf"
+        );
+        assert_eq!(target.host, "storage.example.com");
+        assert_eq!(target.canonical_uri, "/prefix/bucket/k/a.pdf");
+    }
+
+    #[test]
+    fn s3_target_refuses_endpoints_without_a_usable_scheme() {
+        for endpoint in ["127.0.0.1:9000", "ftp://storage.example.com", "http://"] {
+            let error = s3_object_target(Some(endpoint), "bucket", "k/a.pdf")
+                .expect_err("unusable endpoint must be refused");
+            assert!(
+                error.to_string().contains("S3_ENDPOINT"),
+                "{endpoint}: {error}"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Audits F60/F04/F73 — ONE outstanding derivation, allocation-ledger
     // aware, subtracting only the DEBT-REDUCTION part of credit notes and
     // resolving legacy nullable totals canonically.
@@ -1411,11 +1562,16 @@ mod tests {
         assert!(TENANT_OUTSTANDING_SQL.contains("invoice_payment_allocations"));
         assert!(TENANT_OUTSTANDING_SQL.contains("debt_reduction_cents"));
         assert!(TENANT_OUTSTANDING_SQL.contains("GREATEST("));
-        // Draft/void/uncollectible invoices are not collectible debt;
-        // paid invoices remain in the set with a zero balance by
-        // construction rather than by exclusion.
+        // Draft/void/uncollectible invoices are not collectible debt.
         assert!(TENANT_OUTSTANDING_SQL.contains("NOT IN ('draft', 'void', 'uncollectible')"));
-        assert!(!TENANT_OUTSTANDING_SQL.contains("'paid'"));
+        // An invoice is outstanding by its UNPAID remainder. Allocations are
+        // the authority for PARTIAL settlement (total − allocated), but a
+        // `paid` invoice is fully settled by its status: a paid invoice that
+        // carries NO allocation rows (e.g. settled out-of-band) contributes
+        // zero, not its full total. The earlier assertion that the SQL must
+        // NOT mention 'paid' pinned the defect this test now guards.
+        assert!(TENANT_OUTSTANDING_SQL.contains("i.status::text = 'paid'"));
+        assert!(TENANT_OUTSTANDING_SQL.contains("THEN 0"));
     }
 
     /// Verify that all 27 EU member states have a defined VAT rate in
@@ -1471,5 +1627,843 @@ mod tests {
                 "Country {code} should have VAT rate {expected_rate}"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial coverage tests (DB backed) for invoice writing: VAT evidence,
+// numbering, outstanding aggregation, address requirements, and the PDF
+// pipeline's escaping + failure reporting.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod coverage_adversarial {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct Env {
+        pool: PgPool,
+        db_name: String,
+        admin_url: String,
+    }
+
+    impl Env {
+        async fn finish(self) {
+            self.pool.close().await;
+            if let Ok(admin) = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&self.admin_url)
+                .await
+            {
+                let _ = sqlx::query(&format!(
+                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                    self.db_name
+                ))
+                .execute(&admin)
+                .await;
+                admin.close().await;
+            }
+        }
+    }
+
+    async fn provision(test_name: &str) -> Option<Env> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let (server_part, db_part) = url.rsplit_once('/').expect("db segment");
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in test_name.bytes() {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let db_name = format!("{db_only}_ivcov_{:08x}", digest & 0xffff_ffff);
+
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{server_part}/postgres"));
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+
+        let migrations_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut count = 0_usize;
+        let mut newest = 0_i64;
+        for entry in std::fs::read_dir(&migrations_dir).expect("migrations dir") {
+            let name = entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            if let Some(prefix) = name.split('_').next() {
+                if let Ok(version) = prefix.parse::<i64>() {
+                    count += 1;
+                    newest = newest.max(version);
+                }
+            }
+        }
+        let template: Option<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
+        )
+        .bind(format!("apexmail_canonical_tpl_{count}_{newest}_%"))
+        .fetch_optional(&admin)
+        .await
+        .expect("template lookup");
+        let template = template.expect("canonical template database must exist");
+
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            db_name
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop test db");
+        sqlx::query(&format!(
+            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+            db_name, template
+        ))
+        .execute(&admin)
+        .await
+        .expect("clone test db");
+        admin.close().await;
+
+        let database_url = format!("{server_part}/{db_name}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&database_url)
+            .await
+            .expect("connect test db");
+        Some(Env {
+            pool,
+            db_name,
+            admin_url,
+        })
+    }
+
+    macro_rules! env_test {
+        ($name:ident, |$e:ident| $body:block) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(owned) = provision(stringify!($name)).await else {
+                    return;
+                };
+                let $e = &owned;
+                $body
+                owned.finish().await;
+            }
+        };
+    }
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[derive(Clone, Debug)]
+    struct RecordedCall {
+        method: String,
+        path: String,
+        headers: std::collections::HashMap<String, String>,
+        body: String,
+    }
+
+    #[derive(Clone, Default)]
+    struct Mock {
+        responses: Arc<std::sync::Mutex<std::collections::HashMap<String, (u16, String)>>>,
+        calls: Arc<std::sync::Mutex<Vec<RecordedCall>>>,
+    }
+
+    impl Mock {
+        fn route(&self, path: &str, status: u16, body: impl Into<String>) {
+            self.responses
+                .lock()
+                .expect("lock")
+                .insert(path.to_string(), (status, body.into()));
+        }
+
+        fn last_call(&self, path: &str) -> Option<RecordedCall> {
+            self.calls
+                .lock()
+                .expect("lock")
+                .iter()
+                .rev()
+                .find(|call| call.path == path)
+                .cloned()
+        }
+
+        fn last_body(&self, path: &str) -> Option<String> {
+            self.last_call(path).map(|call| call.body)
+        }
+    }
+
+    async fn mock_handler(
+        axum::extract::State(mock): axum::extract::State<Mock>,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let method = request.method().to_string();
+        let path = request.uri().path().to_string();
+        let headers = request
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_string(),
+                    value.to_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .unwrap_or_default();
+        let (status, response_body) = mock
+            .responses
+            .lock()
+            .expect("lock")
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| (404, "{}".to_string()));
+        mock.calls.lock().expect("lock").push(RecordedCall {
+            method,
+            path,
+            headers,
+            body: String::from_utf8_lossy(&body).to_string(),
+        });
+        (
+            axum::http::StatusCode::from_u16(status).expect("status"),
+            [(axum::http::header::CONTENT_TYPE, "application/pdf")],
+            response_body,
+        )
+            .into_response()
+    }
+
+    async fn spawn_mock(mock: Mock) -> String {
+        let app = axum::Router::new().fallback(mock_handler).with_state(mock);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    async fn seed_tenant(env: &Env, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, 'growth', 'active')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("Coverage {tenant}"))
+        .execute(&env.pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_address(env: &Env, tenant: &str, country: &str, vat: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO billing_addresses (tenant_id, country, vat_number) VALUES ($1, $2, $3)
+             ON CONFLICT (tenant_id) DO UPDATE SET country = EXCLUDED.country,
+                 vat_number = EXCLUDED.vat_number",
+        )
+        .bind(tenant)
+        .bind(country)
+        .bind(vat)
+        .execute(&env.pool)
+        .await
+        .expect("seed address");
+    }
+
+    async fn insert_evidence(
+        env: &Env,
+        tenant: &str,
+        vat: &str,
+        valid: bool,
+        outage: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO vat_validation_evidence
+                 (tenant_id, vat_number, country, source, requested_at, valid,
+                  response_hash, valid_from, valid_until, outage_state)
+             VALUES ($1, $2, 'DE', 'VIES', NOW(), $3, 'hash-cov', CURRENT_DATE, NULL, $4)",
+        )
+        .bind(tenant)
+        .bind(vat)
+        .bind(valid)
+        .bind(outage)
+        .execute(&env.pool)
+        .await
+        .expect("seed evidence");
+    }
+
+    fn line(description: &str, quantity: i64, unit_price: i64) -> NewLineItem {
+        NewLineItem {
+            description: description.to_string(),
+            quantity,
+            unit_price,
+        }
+    }
+
+    fn input(tenant: &str) -> CreateInvoiceInput {
+        let now = Utc::now();
+        CreateInvoiceInput {
+            tenant_id: tenant.to_string(),
+            stripe_invoice_id: None,
+            line_items: vec![line("Coverage line", 1, 10_000)],
+            period_start: now,
+            period_end: now,
+            due_at: None,
+            currency: Some("eur".into()),
+            overage_period: None,
+        }
+    }
+
+    env_test!(vat_evidence_lookup_normalizes_and_fails_closed, |env| {
+        let tenant = "ivcov_evidence";
+        seed_tenant(env, tenant).await;
+        insert_evidence(env, tenant, "DE123 456 789", true, None).await;
+
+        // Spacing/case-insensitive match on the authoritative row.
+        let evidence = load_vat_evidence_for_tenant(&env.pool, tenant, "de123456789")
+            .await
+            .expect("evidence");
+        assert_eq!(evidence.country, "DE");
+        assert_eq!(
+            evidence.outcome,
+            billing_common::vat_rates::VatValidationOutcome::Valid
+        );
+
+        // Unknown number/tenant: no evidence, so normal VAT is charged.
+        assert!(
+            load_vat_evidence_for_tenant(&env.pool, tenant, "DE999999999")
+                .await
+                .is_none()
+        );
+        assert!(
+            load_vat_evidence_for_tenant(&env.pool, "ivcov_absent", "DE123456789")
+                .await
+                .is_none()
+        );
+
+        // An outage is recorded as evidence but never as validity.
+        let outage_tenant = "ivcov_evidence_outage";
+        seed_tenant(env, outage_tenant).await;
+        insert_evidence(env, outage_tenant, "DE555555555", false, Some("VIES down")).await;
+        let evidence = load_vat_evidence_for_tenant(&env.pool, outage_tenant, "DE555555555")
+            .await
+            .expect("outage evidence");
+        assert_eq!(
+            evidence.outcome,
+            billing_common::vat_rates::VatValidationOutcome::Outage
+        );
+    });
+
+    env_test!(invoice_numbers_are_monotonic_and_zero_padded, |env| {
+        let first = generate_invoice_number(&env.pool).await.expect("first");
+        let second = generate_invoice_number(&env.pool).await.expect("second");
+        let year = Utc::now().format("%Y").to_string();
+        assert!(first.starts_with(&format!("{year}-")), "{first}");
+        assert_eq!(first.len(), year.len() + 7);
+        let first_seq: i64 = first.split('-').nth(1).expect("seq").parse().expect("num");
+        let second_seq: i64 = second.split('-').nth(1).expect("seq").parse().expect("num");
+        assert_eq!(second_seq, first_seq + 1, "numbers never repeat");
+    });
+
+    env_test!(
+        tenant_outstanding_groups_by_currency_and_ignores_settled,
+        |env| {
+            let tenant = "ivcov_outstanding";
+            seed_tenant(env, tenant).await;
+            // Pending EUR and USD invoices plus a draft and a paid one. The
+            // paid row deliberately has NO allocation rows: `paid` is the
+            // authority for FULL settlement, so it must net to zero through
+            // its status alone (the previous campaign's defect was this row
+            // inflating the bucket by its full total).
+            for (status, currency, total) in [
+                ("pending", "EUR", 5000_i64),
+                ("pending", "EUR", 2500),
+                ("overdue", "USD", 700),
+                ("draft", "EUR", 9999),
+                ("paid", "EUR", 1111),
+                ("void", "USD", 4444),
+            ] {
+                sqlx::query(
+                    "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                       subtotal, vat_total, total, issued_at, due_at,
+                                       period_start, period_end, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, $2, $3, $4,
+                         'IVCOV-' || gen_random_uuid()::text, $2, 0, $2, NOW(), NOW(),
+                         NOW(), NOW(), NOW(), NOW())",
+                )
+                .bind(tenant)
+                .bind(total)
+                .bind(currency)
+                .bind(status)
+                .execute(&env.pool)
+                .await
+                .expect("invoice");
+            }
+
+            // The allocation ledger is authoritative for PARTIAL settlement
+            // while status='paid' is the authority for full settlement: a
+            // pending invoice with a recorded 500-unit payment contributes
+            // total − 500.
+            sqlx::query(
+                "INSERT INTO invoice_payment_allocations
+                     (id, tenant_id, invoice_id, operation_id, source, amount_cents, currency)
+                 SELECT gen_random_uuid(), $1, id, 'ivcov:' || id::text || ':wallet', 'wallet',
+                        500, 'EUR'
+                 FROM invoices WHERE tenant_id = $1 AND status = 'pending' AND total = 2500",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("allocation");
+
+            let outstanding = tenant_outstanding_by_currency(&env.pool, tenant)
+                .await
+                .expect("outstanding");
+            assert_eq!(
+                outstanding,
+                vec![("EUR".to_string(), 7000), ("USD".to_string(), 700)],
+                "draft/void invoices are excluded; the settled invoice nets to zero by STATUS, \
+                 and the partially paid invoice nets to zero by its allocation"
+            );
+            let none = tenant_outstanding_by_currency(&env.pool, "ivcov_absent")
+                .await
+                .expect("absent");
+            assert!(none.is_empty());
+        }
+    );
+
+    // The three remainder cases, each proven with its own row (audit F04
+    // regression): a paid invoice with NO allocations is fully settled and
+    // contributes zero; an unpaid invoice with no allocations contributes
+    // its full total; an invoice with allocations contributes
+    // total − allocated (and the debt-reduction part of credit notes still
+    // reduces it).
+    env_test!(
+        tenant_outstanding_uses_each_invoices_unpaid_remainder,
+        |env| {
+            async fn insert_invoice(
+                env: &Env,
+                tenant: &str,
+                status: &str,
+                currency: &str,
+                total: i64,
+            ) -> Uuid {
+                sqlx::query_scalar(
+                    "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                           subtotal, vat_total, total, issued_at, due_at,
+                                           period_start, period_end, created_at, updated_at)
+                     VALUES (gen_random_uuid(), $1, $2, $3, $4,
+                             'IVCOV-' || gen_random_uuid()::text, $2, 0, $2, NOW(), NOW(),
+                             NOW(), NOW(), NOW(), NOW())
+                     RETURNING id",
+                )
+                .bind(tenant)
+                .bind(total)
+                .bind(currency)
+                .bind(status)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice")
+            }
+
+            async fn allocate(env: &Env, tenant: &str, invoice: Uuid, amount_cents: i64) {
+                sqlx::query(
+                    "INSERT INTO invoice_payment_allocations
+                         (id, tenant_id, invoice_id, operation_id, source, amount_cents, currency)
+                     VALUES (gen_random_uuid(), $1, $2, $3, 'wallet', $4, 'EUR')",
+                )
+                .bind(tenant)
+                .bind(invoice)
+                .bind(format!("ivcov-rem:{invoice}:{amount_cents}"))
+                .bind(amount_cents)
+                .execute(&env.pool)
+                .await
+                .expect("allocation");
+            }
+
+            let tenant = "ivcov_remainder";
+            seed_tenant(env, tenant).await;
+
+            // Case 1 — PAID with no allocation rows: zero.
+            let _paid_plain = insert_invoice(env, tenant, "paid", "EUR", 1111).await;
+            // Case 2 — UNPAID (pending/overdue) with no allocation rows: the
+            // full total.
+            let _pending_plain = insert_invoice(env, tenant, "pending", "EUR", 5000).await;
+            let _overdue_usd = insert_invoice(env, tenant, "overdue", "USD", 700).await;
+            // Case 3 — WITH allocations: total − allocated.
+            let pending_partial = insert_invoice(env, tenant, "pending", "EUR", 4000).await;
+            allocate(env, tenant, pending_partial, 1500).await;
+            // A PAID invoice with a PARTIAL allocation is still fully settled
+            // by its status, not by its unallocated nominal remainder.
+            let paid_partial = insert_invoice(env, tenant, "paid", "EUR", 900).await;
+            allocate(env, tenant, paid_partial, 400).await;
+            // Debt-reduction credit notes reduce an unpaid remainder.
+            let credited = insert_invoice(env, tenant, "overdue", "EUR", 2000).await;
+            sqlx::query(
+                "INSERT INTO credit_notes
+                     (invoice_id, tenant_id, amount, currency, reason, idempotency_key,
+                      operation_id, debt_reduction_cents, refunded_cents)
+                 VALUES ($1, $2, 500, 'EUR', 'remainder coverage', 'ivcov-remainder-credit',
+                         'ivcov-remainder-credit-op', 500, 0)",
+            )
+            .bind(credited)
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("credit note");
+            // Not collectible: excluded from the aggregation entirely.
+            insert_invoice(env, tenant, "draft", "EUR", 9999).await;
+            insert_invoice(env, tenant, "void", "EUR", 4444).await;
+            insert_invoice(env, tenant, "uncollectible", "EUR", 8888).await;
+
+            let outstanding = tenant_outstanding_by_currency(&env.pool, tenant)
+                .await
+                .expect("outstanding");
+            assert_eq!(
+                outstanding,
+                vec![
+                    // 0 (paid, no allocations) + 5000 (unpaid, none)
+                    // + 2500 (partially paid) + 0 (paid, partial)
+                    // + 1500 (credit-note debt reduction).
+                    ("EUR".to_string(), 9000),
+                    ("USD".to_string(), 700),
+                ],
+                "each invoice contributes exactly its unpaid remainder"
+            );
+
+            // The allocation ledger still matters for PARTIAL settlement: a
+            // second 1500 payment zeroes the partially-paid invoice.
+            allocate(env, tenant, pending_partial, 2500).await;
+            let outstanding = tenant_outstanding_by_currency(&env.pool, tenant)
+                .await
+                .expect("outstanding");
+            assert_eq!(
+                outstanding,
+                vec![("EUR".to_string(), 6500), ("USD".to_string(), 700)],
+                "allocations remain the authority for partial settlement"
+            );
+        }
+    );
+
+    env_test!(
+        create_invoice_requires_address_and_respects_vies_evidence,
+        |env| {
+            // No billing address at all: refused, nothing written.
+            let bare = "ivcov_bare";
+            seed_tenant(env, bare).await;
+            let error = create_invoice(&env.pool, input(bare))
+                .await
+                .expect_err("address required");
+            assert!(matches!(error, InvoiceError::NoBillingAddress), "{error:?}");
+            let rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM invoices WHERE tenant_id = $1")
+                    .bind(bare)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("rows");
+            assert_eq!(rows, 0, "a rejected write changes nothing");
+
+            // DE customer WITHOUT evidence: destination VAT, no reverse charge.
+            let de_no_evidence = "ivcov_de_plain";
+            seed_tenant(env, de_no_evidence).await;
+            seed_address(env, de_no_evidence, "DE", Some("DE123456789")).await;
+            let invoice = create_invoice(&env.pool, input(de_no_evidence))
+                .await
+                .expect("invoice");
+            assert_eq!(invoice.subtotal, 10_000);
+            assert_eq!(invoice.vat_total, 1_900, "German 19% destination VAT");
+            assert_eq!(invoice.total, 11_900);
+            let (country, rate): (Option<String>, Option<f64>) =
+                sqlx::query_as("SELECT billing_country, vat_rate FROM invoices WHERE id = $1")
+                    .bind(invoice.id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("snapshot");
+            assert_eq!(
+                country.as_deref(),
+                Some("DE"),
+                "the billing country is snapshotted"
+            );
+            assert_eq!(rate, Some(19.0), "the charged rate is frozen on the row");
+
+            // The same customer WITH in-force VIES evidence: reverse charge.
+            let de_vies = "ivcov_de_vies";
+            seed_tenant(env, de_vies).await;
+            seed_address(env, de_vies, "DE", Some("DE123456789")).await;
+            insert_evidence(env, de_vies, "DE123456789", true, None).await;
+            let invoice = create_invoice(&env.pool, input(de_vies))
+                .await
+                .expect("reverse-charge invoice");
+            assert_eq!(invoice.vat_total, 0, "VIES evidence authorises 0% VAT");
+            assert_eq!(invoice.total, 10_000);
+            let evidence_id: Option<Uuid> =
+                sqlx::query_scalar("SELECT vat_evidence_id FROM invoices WHERE id = $1")
+                    .bind(invoice.id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("evidence id");
+            assert!(evidence_id.is_some(), "the authorising evidence is frozen");
+
+            // An EXPIRED evidence row cannot authorise the reverse charge.
+            let expired = "ivcov_de_expired";
+            seed_tenant(env, expired).await;
+            seed_address(env, expired, "DE", Some("DE123456789")).await;
+            insert_evidence(env, expired, "DE123456789", true, None).await;
+            sqlx::query(
+                "UPDATE vat_validation_evidence SET valid_from = CURRENT_DATE - 400,
+                    valid_until = CURRENT_DATE - 10 WHERE tenant_id = $1",
+            )
+            .bind(expired)
+            .execute(&env.pool)
+            .await
+            .expect("expire evidence");
+            let invoice = create_invoice(&env.pool, input(expired))
+                .await
+                .expect("expired evidence invoice");
+            assert_eq!(
+                invoice.vat_total, 1_900,
+                "an out-of-force validation charges normal VAT"
+            );
+        }
+    );
+
+    env_test!(
+        invoice_pdf_escapes_input_and_reports_renderer_failures,
+        |env| {
+            let mock = Mock::default();
+            mock.route("/v1/pdf/render", 500, "renderer exploded");
+            let base = spawn_mock(mock.clone()).await;
+            let guard = ENV_LOCK.lock().await;
+            let previous = (
+                std::env::var("PDF_RENDERER_URL").ok(),
+                std::env::var("S3_ACCESS_KEY_ID").ok(),
+                std::env::var("INTERNAL_SERVICE_TOKEN").ok(),
+            );
+            std::env::set_var("PDF_RENDERER_URL", &base);
+            std::env::remove_var("S3_ACCESS_KEY_ID");
+            std::env::set_var("INTERNAL_SERVICE_TOKEN", "cov-internal-token");
+
+            let tenant = "ivcov_pdf";
+            seed_tenant(env, tenant).await;
+            seed_address(env, tenant, "EE", None).await;
+            sqlx::query("UPDATE tenants SET settings = '{\"registryCode\":\"16588745\"}'::jsonb WHERE id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("registry code");
+            let mut request = input(tenant);
+            request.line_items = vec![line("<script>&\"'evil", 2, 1_500)];
+            let invoice = create_invoice(&env.pool, request).await.expect("invoice");
+
+            let client = reqwest::Client::new();
+            let error = generate_invoice_pdf(&env.pool, &client, &invoice)
+                .await
+                .expect_err("renderer 500");
+            assert!(error.to_string().contains("500"), "{error}");
+
+            // The renderer request carries the escaped description and the
+            // frozen billing identity — never raw user markup.
+            let body = mock.last_body("/v1/pdf/render").expect("render call");
+            assert!(
+                body.contains("&lt;script&gt;&amp;&quot;&#39;evil"),
+                "escaped description: {body}"
+            );
+            assert!(!body.contains("<script>"), "raw markup must never be sent");
+            assert!(body.contains("16588745"), "registry code is rendered");
+
+            // A successful render still cannot silently drop the PDF: with no
+            // S3 credentials configured the upload refuses loudly.
+            mock.route("/v1/pdf/render", 200, "%PDF-1.4 coverage");
+            let error = generate_invoice_pdf(&env.pool, &client, &invoice)
+                .await
+                .expect_err("no storage credentials");
+            let message = error.to_string();
+            assert!(
+                message.contains("S3_ACCESS_KEY_ID"),
+                "upload config is reported: {message}"
+            );
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT pdf_url FROM invoices WHERE id = $1")
+                    .bind(invoice.id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
+            assert!(stored.is_none(), "no URL is recorded without an upload");
+
+            match previous {
+                (Some(url), Some(key), Some(token)) => {
+                    std::env::set_var("PDF_RENDERER_URL", url);
+                    std::env::set_var("S3_ACCESS_KEY_ID", key);
+                    std::env::set_var("INTERNAL_SERVICE_TOKEN", token);
+                }
+                _ => {
+                    std::env::remove_var("PDF_RENDERER_URL");
+                    std::env::remove_var("S3_ACCESS_KEY_ID");
+                    std::env::remove_var("INTERNAL_SERVICE_TOKEN");
+                }
+            }
+            drop(guard);
+        }
+    );
+
+    // Bug 3 regression: the upload must follow the CONFIGURED endpoint —
+    // scheme (a local http mock is reachable), host/port and path prefix —
+    // sign the request it actually sends, persist the resulting URL, and
+    // refuse loudly without persisting anything when the endpoint is
+    // unreachable.
+    env_test!(
+        invoice_pdf_upload_honours_the_configured_s3_endpoint,
+        |env| {
+            let renderer = Mock::default();
+            renderer.route("/v1/pdf/render", 200, "%PDF-1.4 s3-endpoint");
+            let renderer_base = spawn_mock(renderer.clone()).await;
+
+            // The local S3-compatible mock, reached over PLAIN HTTP with a
+            // path prefix — both of which the old `https://{host}/…` builder
+            // discarded.
+            let storage = Mock::default();
+            let storage_base = spawn_mock(storage.clone()).await;
+            let endpoint = format!("{storage_base}/v1");
+
+            let guard = ENV_LOCK.lock().await;
+            let previous = [
+                "PDF_RENDERER_URL",
+                "S3_ENDPOINT",
+                "S3_BUCKET",
+                "S3_ACCESS_KEY_ID",
+                "S3_SECRET_ACCESS_KEY",
+                "S3_PUBLIC_URL",
+            ]
+            .map(|name| (name, std::env::var(name).ok()));
+            std::env::set_var("PDF_RENDERER_URL", &renderer_base);
+            std::env::set_var("S3_ENDPOINT", &endpoint);
+            std::env::set_var("S3_BUCKET", "s3-endpoint-bucket");
+            std::env::set_var("S3_ACCESS_KEY_ID", "coverage-access");
+            std::env::set_var("S3_SECRET_ACCESS_KEY", "coverage-secret");
+            std::env::remove_var("S3_PUBLIC_URL");
+
+            let tenant = "ivcov_s3_endpoint";
+            seed_tenant(env, tenant).await;
+            seed_address(env, tenant, "EE", None).await;
+            let invoice = create_invoice(&env.pool, input(tenant))
+                .await
+                .expect("invoice");
+            let key = format!("invoices/{}/{}.pdf", tenant, invoice.invoice_number);
+            let object_path = format!("/s3-endpoint-bucket/{key}");
+            let signed_path = format!("/v1{object_path}");
+            storage.route(&signed_path, 200, "");
+
+            let client = reqwest::Client::new();
+            let url = generate_invoice_pdf(&env.pool, &client, &invoice)
+                .await
+                .expect("upload against the local http mock");
+            assert_eq!(
+                url,
+                format!("{endpoint}{object_path}"),
+                "the http scheme, port and endpoint prefix must survive"
+            );
+            assert!(url.starts_with("http://"), "{url}");
+
+            let call = storage.last_call(&signed_path).expect("PUT recorded");
+            assert_eq!(call.method, "PUT");
+            let authority = storage_base
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .expect("authority");
+            assert_eq!(
+                call.headers.get("host").map(String::as_str),
+                Some(authority),
+                "Host must match the signed authority"
+            );
+            assert_eq!(
+                call.headers.get("content-type").map(String::as_str),
+                Some("application/pdf")
+            );
+            let payload_hash = call
+                .headers
+                .get("x-amz-content-sha256")
+                .expect("payload hash signed");
+            assert_eq!(
+                payload_hash,
+                &hex_encode(&Sha256::digest(call.body.as_bytes())),
+                "the signed payload hash matches the uploaded bytes"
+            );
+            assert!(call.headers.contains_key("x-amz-date"));
+            let authorization = call.headers.get("authorization").expect("signed");
+            assert!(
+                authorization.starts_with("AWS4-HMAC-SHA256 Credential=coverage-access/"),
+                "{authorization}"
+            );
+
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT pdf_url FROM invoices WHERE id = $1")
+                    .bind(invoice.id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
+            assert_eq!(stored.as_deref(), Some(url.as_str()));
+
+            // An UNREACHABLE configured endpoint: loud typed error, and the
+            // invoice keeps no pdf_url (no phantom "stored" artifact).
+            let unreachable = "ivcov_s3_unreachable";
+            seed_tenant(env, unreachable).await;
+            seed_address(env, unreachable, "EE", None).await;
+            let invoice = create_invoice(&env.pool, input(unreachable))
+                .await
+                .expect("invoice");
+            std::env::set_var("S3_ENDPOINT", "http://127.0.0.1:1");
+            let error = generate_invoice_pdf(&env.pool, &client, &invoice)
+                .await
+                .expect_err("unreachable endpoint must fail the upload");
+            assert!(
+                error.to_string().contains("S3 upload failed"),
+                "the error must name the failed upload: {error}"
+            );
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT pdf_url FROM invoices WHERE id = $1")
+                    .bind(invoice.id)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("invoice");
+            assert!(
+                stored.is_none(),
+                "a failed upload persists no pdf_url: {stored:?}"
+            );
+
+            for (name, value) in previous {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            drop(guard);
+        }
+    );
+
+    #[test]
+    fn vat_rounding_and_line_allocation_reconcile() {
+        assert_eq!(round_vat(0, 22.0), 0);
+        assert_eq!(round_vat(1000, 22.0), 220);
+        assert_eq!(round_vat(1, 25.5), 0);
+        assert_eq!(round_vat(2, 25.5), 1);
+        // Per-line allocations sum exactly to the headline VAT.
+        let allocations = allocate_vat_across_lines(&[333, 333, 334], 22.0);
+        assert_eq!(allocations.iter().sum::<i64>(), round_vat(1000, 22.0));
+        let allocations = allocate_vat_across_lines(&[0, 0], 22.0);
+        assert_eq!(allocations, vec![0, 0]);
+        assert_eq!(allocate_vat_across_lines(&[], 22.0), Vec::<i64>::new());
     }
 }

@@ -441,3 +441,204 @@ mod tests {
         assert!(is_private_ip(&"fd00::1".parse::<IpAddr>().unwrap()));
     }
 }
+
+// ─── Adversarial control-plane proxy tests ─────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    fn with_allowlist<F: FnOnce() -> R, R>(allowlist: &str, body: F) -> R {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("CONTROL_PLANE_PROXY_ALLOWLIST").ok();
+        std::env::set_var("CONTROL_PLANE_PROXY_ALLOWLIST", allowlist);
+        let result = body();
+        match previous {
+            Some(value) => std::env::set_var("CONTROL_PLANE_PROXY_ALLOWLIST", value),
+            None => std::env::remove_var("CONTROL_PLANE_PROXY_ALLOWLIST"),
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn get_is_explicitly_unsupported() {
+        let (status, Json(body)) = proxy_disabled().await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert!(body["error"].as_str().unwrap_or_default().contains("GET"));
+    }
+
+    #[tokio::test]
+    async fn invalid_urls_are_refused_before_any_network() {
+        let Some((state, _pool)) = state_and_pool("adv_proxy_urls").await else {
+            return;
+        };
+        for url in ["not a url", "://missing-scheme", ""] {
+            let resp = proxy_request(
+                State(state.clone()),
+                admin_auth(),
+                Json(ProxyRequest {
+                    url: url.into(),
+                    method: None,
+                    headers: None,
+                    body: None,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::Validation(_))),
+                "{url:?} must be refused, got {resp:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_disables_proxying_entirely() {
+        let Some((state, _pool)) = state_and_pool("adv_proxy_allowlist").await else {
+            return;
+        };
+        if std::env::var("CONTROL_PLANE_PROXY_ALLOWLIST").is_ok() {
+            eprintln!("skipping: CONTROL_PLANE_PROXY_ALLOWLIST is set in this environment");
+            return;
+        }
+        let resp = proxy_request(
+            State(state.clone()),
+            admin_auth(),
+            Json(ProxyRequest {
+                url: "https://example.com/x".into(),
+                method: None,
+                headers: None,
+                body: None,
+            }),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn ssrf_and_allowlist_guards_block_literal_private_targets() {
+        let Some((state, _pool)) = state_and_pool("adv_proxy_ssrf").await else {
+            return;
+        };
+        // The allowlist admits the host but the SSRF guard still blocks it.
+        for (allowlist, url) in [
+            ("127.0.0.1", "http://127.0.0.1:8080/admin"),
+            ("localhost", "http://localhost:9000/"),
+            ("10.0.0.5", "http://10.0.0.5/"),
+            ("192.168.1.10", "http://192.168.1.10/"),
+            ("172.16.5.4", "http://172.16.5.4/"),
+            (
+                "169.254.169.254",
+                "http://169.254.169.254/latest/meta-data/",
+            ),
+            (
+                "metadata.google.internal",
+                "http://metadata.google.internal/",
+            ),
+        ] {
+            let resp = with_allowlist(allowlist, || {
+                futures::executor::block_on(proxy_request(
+                    State(state.clone()),
+                    admin_auth(),
+                    Json(ProxyRequest {
+                        url: url.into(),
+                        method: None,
+                        headers: None,
+                        body: None,
+                    }),
+                ))
+            });
+            // Either the host is not in the allowlist or the SSRF guard
+            // refuses it — never a successful forward to a private target.
+            assert!(
+                matches!(resp, Err(ApiError::Validation(_))),
+                "{url} (allowlist {allowlist}) must be refused, got {resp:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_methods_are_refused_after_ssrf_validation() {
+        let Some((state, _pool)) = state_and_pool("adv_proxy_method").await else {
+            return;
+        };
+        // A public literal IP needs no DNS and passes the SSRF guard, so the
+        // method check is reached before any socket is opened.
+        let resp = with_allowlist("93.184.216.34", || {
+            futures::executor::block_on(proxy_request(
+                State(state.clone()),
+                admin_auth(),
+                Json(ProxyRequest {
+                    url: "http://93.184.216.34/".into(),
+                    method: Some("TRACE".into()),
+                    headers: None,
+                    body: None,
+                }),
+            ))
+        });
+        assert!(matches!(resp, Err(ApiError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn scope_less_callers_are_refused() {
+        let Some((state, _pool)) = state_and_pool("adv_proxy_scope").await else {
+            return;
+        };
+        let mut auth = admin_auth();
+        auth.scopes = vec![];
+        let resp = proxy_request(
+            State(state.clone()),
+            auth,
+            Json(ProxyRequest {
+                url: "https://example.com".into(),
+                method: None,
+                headers: None,
+                body: None,
+            }),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::Forbidden(_))));
+    }
+
+    #[test]
+    fn audit_metadata_never_contains_caller_supplied_credentials() {
+        let metadata = build_proxy_audit_metadata(
+            &ProxyRequest {
+                url: "https://example.com/".into(),
+                method: Some("POST".into()),
+                headers: Some(serde_json::json!({"authorization": "Bearer secret"})),
+                body: None,
+            },
+            "POST",
+            "example.com",
+            200,
+        );
+        let text = metadata.to_string();
+        assert!(
+            !text.to_lowercase().contains("bearer"),
+            "credentials must never enter the audit trail: {text}"
+        );
+        assert_eq!(metadata["method"], "POST");
+        assert_eq!(metadata["host"], "example.com");
+        assert_eq!(metadata["responseStatus"], 200);
+    }
+}

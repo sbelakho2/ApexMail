@@ -950,3 +950,386 @@ mod tests {
         assert_eq!(clean_domain_input("   "), "");
     }
 }
+
+// ─── Adversarial sandbox / calculator / grader tests ───────────
+//
+// The sandbox provisions a REAL DKIM-encrypted domain, so these tests hold
+// the process-global `DKIM_ENV_MUTEX` (like admin/domains.rs) and pin the
+// test key. They also share ONE runtime + AppState: the explorer dispatches
+// through a process-wide cached router (`API_ROUTER`), and a pool created on
+// a runtime that has since shut down cannot be driven from a new one — a
+// per-test runtime therefore starved the cached router's pool (5 s acquire
+// timeout → 500). One long-lived runtime removes that failure mode.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    /// Same constant the admin-domain tests use.
+    const TEST_DKIM_KEY: &str = "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8";
+
+    struct SharedState {
+        runtime: tokio::runtime::Runtime,
+        state: AppState,
+    }
+
+    /// One runtime + AppState for every dispatch test in this module.
+    fn shared() -> Option<&'static SharedState> {
+        static ONCE: std::sync::OnceLock<Option<SharedState>> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("shared test runtime");
+            let pool = runtime.block_on(crate::test_db::optional_pg_pool(
+                "adv_explorer_shared_state",
+            ))?;
+            let state = runtime.block_on(crate::app::test_support::test_state_over(pool));
+            Some(SharedState { runtime, state })
+        })
+        .as_ref()
+    }
+
+    /// Serialise on the process-global DKIM env var, pin the test key, run
+    /// the body on the shared runtime, and restore the previous value.
+    fn with_dkim_env(body: impl FnOnce(AppState) -> futures::future::BoxFuture<'static, ()>) {
+        let _guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            TEST_DKIM_KEY,
+        );
+        match shared() {
+            Some(shared) => {
+                let state = shared.state.clone();
+                shared.runtime.block_on(body(state));
+            }
+            None => eprintln!("skipping explorer test: set TEST_DATABASE_URL"),
+        }
+        match previous {
+            Some(value) => std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                value,
+            ),
+            None => std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV),
+        }
+    }
+
+    /// A per-CALL client address so the shared per-IP Redis bucket cannot
+    /// leak between test calls (each gets its own 12/min window).
+    fn unique_peer() -> Option<ConnectInfo<SocketAddr>> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let addr: SocketAddr = format!("198.18.{}.{}:41234", (n / 250) % 250, n % 250 + 1)
+            .parse()
+            .unwrap();
+        Some(ConnectInfo(addr))
+    }
+
+    async fn html(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    async fn exec_lane(state: &AppState, lane: &str, body: &str) -> Response {
+        exec(
+            State(state.clone()),
+            unique_peer(),
+            axum::http::HeaderMap::new(),
+            Form(ExplorerForm {
+                lane: lane.to_string(),
+                body: body.to_string(),
+            }),
+        )
+        .await
+    }
+
+    #[test]
+    fn unknown_lane_is_400_and_never_dispatches() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let resp = exec_lane(&state, "drop_tables", "{}").await;
+                // The public page always renders 200; the DOCUMENTED refusal
+                // is the lane error inside the page.
+                assert_eq!(resp.status(), StatusCode::OK);
+                let page = html(resp).await;
+                assert!(page.contains("unknown_lane"), "page: {page}");
+                assert!(!page.contains("internal_error"), "page: {page}");
+            })
+        });
+    }
+
+    #[test]
+    fn malformed_json_on_json_lanes_is_400_without_internal_detail() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                for lane in ["send", "add_domain"] {
+                    let resp = exec_lane(&state, lane, "{not json").await;
+                    assert_eq!(resp.status(), StatusCode::OK, "{lane}");
+                    let page = html(resp).await;
+                    assert!(page.contains("invalid_json"), "{lane}: {page}");
+                    assert!(!page.contains("internal_error"), "{lane}: {page}");
+                }
+            })
+        });
+    }
+
+    #[test]
+    fn send_lane_enforces_the_example_com_recipient_policy() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                // cc/bcc attacks and non-string entries.
+                for body in [
+                    r#"{"to":["victim@real-person.example"]}"#,
+                    r#"{"to":["ok@example.com"],"cc":["bad@other.org"]}"#,
+                    r#"{"to":["ok@example.com"],"bcc":["bad@other.org"]}"#,
+                    r#"{"to":[42]}"#,
+                    r#"{"to":{"email":"a@example.com"}}"#,
+                ] {
+                    let resp = exec_lane(&state, "send", body).await;
+                    assert_eq!(resp.status(), StatusCode::OK, "body {body}");
+                    let page = html(resp).await;
+                    assert!(
+                        page.contains("sandbox_recipient_policy"),
+                        "body {body}: {page}"
+                    );
+                    assert!(!page.contains("internal_error"), "body {body}: {page}");
+                }
+                // A clean example.com payload really dispatches through the router.
+                let resp = exec_lane(
+                    &state,
+                    "send",
+                    r#"{"to":["friend@example.com"],"subject":"hi","text":"hello"}"#,
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let page = html(resp).await;
+                assert!(
+                    page.contains("/v1/messages"),
+                    "page should render the dispatched route: {page}"
+                );
+                assert!(!page.contains("internal_error"), "{page}");
+            })
+        });
+    }
+
+    #[test]
+    fn add_domain_lane_only_accepts_example_com_subdomains() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                for body in [
+                    r#"{"name":"evil.com"}"#,
+                    r#"{"name":"evilexample.com"}"#,
+                    r#"{"domain":"example.com.evil.net"}"#,
+                    r#"{}"#,
+                ] {
+                    let resp = exec_lane(&state, "add_domain", body).await;
+                    assert_eq!(resp.status(), StatusCode::OK, "body {body}");
+                    let page = html(resp).await;
+                    assert!(page.contains("sandbox_domain_policy"), "body {body}");
+                    assert!(!page.contains("internal_error"), "body {body}");
+                }
+                // A legitimate subdomain reaches the real handler (created or
+                // already-exists), never a 500.
+                let resp = exec_lane(
+                    &state,
+                    "add_domain",
+                    &format!(
+                        r#"{{"name":"adv-{}.example.com"}}"#,
+                        uuid::Uuid::new_v4().simple()
+                    ),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let page = html(resp).await;
+                assert!(!page.contains("internal_error"), "{page}");
+            })
+        });
+    }
+
+    #[test]
+    fn read_lanes_dispatch_real_get_requests() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                for lane in ["messages", "domains"] {
+                    let resp = exec_lane(&state, lane, "").await;
+                    assert_eq!(resp.status(), StatusCode::OK, "{lane}");
+                    let page = html(resp).await;
+                    assert!(page.contains("200"), "{lane}: {page}");
+                    assert!(!page.contains("internal_error"), "{lane}: {page}");
+                }
+            })
+        });
+    }
+
+    #[test]
+    fn oversized_textarea_is_413_before_any_provisioning() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let resp = exec_lane(&state, "send", &"x".repeat(MAX_BODY_BYTES + 1)).await;
+                assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            })
+        });
+    }
+
+    #[test]
+    fn redis_rate_limit_fails_closed_at_the_bucket_and_open_without_redis() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let key = format!("adv_explorer_rl:{}", uuid::Uuid::new_v4());
+                for _ in 0..RATE_LIMIT_PER_MINUTE {
+                    assert!(
+                        redis_rate_limit(&state, &key).await,
+                        "requests within the budget pass"
+                    );
+                }
+                assert!(
+                    !redis_rate_limit(&state, &key).await,
+                    "the 13th request in the window must be refused"
+                );
+                // Cleanup so a rerun starts clean even before the TTL.
+                let mut conn = state.redis.get().await.expect("redis");
+                let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                    .arg(&key)
+                    .query_async(&mut *conn)
+                    .await;
+
+                // Redis unavailable → fail OPEN (a public playground must not
+                // hard-fail on a cache blip).
+                let dead = crate::app::test_support::test_state_over_with_config_and_redis(
+                    state.db.clone(),
+                    crate::app::test_support::test_config(),
+                    "redis://127.0.0.1:1",
+                )
+                .await;
+                assert!(redis_rate_limit(&dead, "adv_explorer_dead").await);
+            })
+        });
+    }
+
+    #[test]
+    fn calculate_renders_clamped_inputs_and_support_line() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let resp = calculate(
+                    State(state.clone()),
+                    Form(CalculatorForm {
+                        volume: i64::MAX,
+                        peak_daily: -1,
+                        domains: -10,
+                        team_users: i64::MIN,
+                        dedicated_ips: 3,
+                        support: Some("priority".into()),
+                        billing_cycle: "annual".into(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let page = html(resp).await;
+                assert!(page.contains("priority"), "support line rendered: {page}");
+                assert!(page.contains("Annual total"), "annual branch: {page}");
+                assert!(page.contains("Dedicated IP"), "ip add-on line: {page}");
+
+                // Serde defaults path (missing fields) and the monthly branch.
+                let defaults: CalculatorForm = serde_json::from_value(serde_json::json!({}))
+                    .expect("empty form uses the serde defaults");
+                let resp = calculate(State(state.clone()), Form(defaults)).await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let page = html(resp).await;
+                assert!(page.contains("Monthly total"), "{page}");
+                assert!(page.contains("50,000"), "{page}");
+            })
+        });
+    }
+
+    #[test]
+    fn grader_is_explicitly_disabled_without_state_and_validates_input() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                // Too-short / punctuation-only inputs are rejected before any engine.
+                for bad in ["", "   ", "nodot", &"x".repeat(254), "has space.com"] {
+                    let resp = grade_domain(
+                        State(state.clone()),
+                        unique_peer(),
+                        axum::http::HeaderMap::new(),
+                        Form(GradeDomainForm {
+                            domain: bad.to_string(),
+                        }),
+                    )
+                    .await;
+                    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "input {bad:?}");
+                    let page = html(resp).await;
+                    assert!(page.contains("INVALID_INPUT"), "{page}");
+                }
+                // Valid domain, no grader configured → honest 503 refusal.
+                let resp = grade_domain(
+                    State(state.clone()),
+                    unique_peer(),
+                    axum::http::HeaderMap::new(),
+                    Form(GradeDomainForm {
+                        domain: "example.com".into(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+                let page = html(resp).await;
+                assert!(page.contains("GRADER_DISABLED"), "{page}");
+            })
+        });
+    }
+
+    #[test]
+    fn grader_rate_limit_returns_429_page_for_the_bucket() {
+        with_dkim_env(|state| {
+            Box::pin(async move {
+                let ip = format!("203.0.113.{}", (std::process::id() % 200 + 1).min(254));
+                let peer: SocketAddr = format!("{ip}:5555").parse().unwrap();
+                // Fill the bucket directly (12/min) then grade once.
+                for _ in 0..RATE_LIMIT_PER_MINUTE {
+                    assert!(rate_limit(&state, &ip).await);
+                }
+                let resp = grade_domain(
+                    State(state.clone()),
+                    Some(ConnectInfo(peer)),
+                    axum::http::HeaderMap::new(),
+                    Form(GradeDomainForm {
+                        domain: "example.com".into(),
+                    }),
+                )
+                .await;
+                assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+                let page = html(resp).await;
+                assert!(page.contains("RATE_LIMITED"), "{page}");
+
+                let mut conn = state.redis.get().await.expect("redis");
+                let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                    .arg(format!("explorer_rl:{ip}"))
+                    .query_async(&mut *conn)
+                    .await;
+            })
+        });
+    }
+
+    #[test]
+    fn example_com_domain_matcher_is_host_boundary_aware() {
+        for (json, expected) in [
+            (serde_json::json!({"name": "example.com"}), true),
+            (serde_json::json!({"domain": "sub.example.com"}), true),
+            (serde_json::json!({"name": "notexample.com"}), false),
+            (serde_json::json!({"name": "example.com.evil.io"}), false),
+            (serde_json::json!({"name": "EXAMPLE.COM"}), true),
+            (serde_json::json!({"name": 7}), false),
+            (serde_json::json!({}), false),
+        ] {
+            assert_eq!(is_example_com_domain(&json), expected, "{json}");
+        }
+    }
+}

@@ -27,6 +27,78 @@ static SAFETY_CHECK_INTERVAL_MS: std::sync::LazyLock<u64> = std::sync::LazyLock:
 /// Hard ceiling for a single experiment runtime.
 const MAX_EXPERIMENT_DURATION_MS: u64 = 60 * 60 * 1000;
 
+/// Documented absolute upper bound for every numeric experiment-config field
+/// (safety thresholds, target percentage, intensity, resource limit).
+///
+/// Anything larger is already "effectively unlimited", and values such as
+/// `f64::MAX` cannot survive a PostgreSQL JSONB round trip: JSONB normalizes
+/// the float to its full decimal expansion (`f64::MAX` becomes a 309-digit
+/// integer), which `serde_json` refuses to read back ("number out of range"),
+/// permanently bricking the experiment row. Values outside
+/// ±`MAX_ABS_EXPERIMENT_NUMERIC` are therefore rejected on write.
+pub const MAX_ABS_EXPERIMENT_NUMERIC: f64 = 1.0e15;
+
+/// Typed validation failure for experiment-config numbers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExperimentValidationError {
+    /// NaN or ±infinity — not representable in JSON at all.
+    NonFinite { field: String },
+    /// Finite, but outside the documented ±`MAX_ABS_EXPERIMENT_NUMERIC`.
+    OutOfRange { field: String, value: f64, max: f64 },
+}
+
+impl std::fmt::Display for ExperimentValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFinite { field } => {
+                write!(f, "{field} must be a finite number")
+            }
+            Self::OutOfRange { field, value, max } => write!(
+                f,
+                "{field} must be within ±{max} — larger values are not JSONB-representable (got {value:e})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExperimentValidationError {}
+
+fn validate_experiment_number(field: &str, value: f64) -> Result<(), ExperimentValidationError> {
+    if !value.is_finite() {
+        return Err(ExperimentValidationError::NonFinite {
+            field: field.to_string(),
+        });
+    }
+    if value.abs() > MAX_ABS_EXPERIMENT_NUMERIC {
+        return Err(ExperimentValidationError::OutOfRange {
+            field: field.to_string(),
+            value,
+            max: MAX_ABS_EXPERIMENT_NUMERIC,
+        });
+    }
+    Ok(())
+}
+
+/// Validate every numeric field of an experiment configuration before it is
+/// serialized into `ha_chaos_experiments` (see
+/// [`MAX_ABS_EXPERIMENT_NUMERIC`] for why).
+pub fn validate_experiment_numbers(
+    config: &ExperimentConfig,
+) -> Result<(), ExperimentValidationError> {
+    validate_experiment_number("target percentage", config.target.percentage)?;
+    validate_experiment_number("intensity", config.parameters.intensity)?;
+    if let Some(resource_limit) = config.parameters.resource_limit {
+        validate_experiment_number("resource_limit", resource_limit)?;
+    }
+    for check in &config.safety_checks {
+        validate_experiment_number(
+            &format!("safety check '{}' threshold", check.name),
+            check.threshold,
+        )?;
+    }
+    Ok(())
+}
+
 /// ChaosEngineeringService manages chaos experiments.
 pub struct ChaosEngineeringService {
     pool: PgPool,
@@ -85,6 +157,11 @@ impl ChaosEngineeringService {
                 MAX_EXPERIMENT_DURATION_MS
             ));
         }
+
+        // Root-cause guard for the JSONB round-trip: non-finite or absurd
+        // numeric fields would be stored in a form serde_json cannot read
+        // back (see MAX_ABS_EXPERIMENT_NUMERIC).
+        validate_experiment_numbers(&experiment_config).map_err(|error| error.to_string())?;
 
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -333,17 +410,23 @@ impl ChaosEngineeringService {
     // ── Query ──────────────────────────────────────────────
 
     pub async fn get_experiment(&self, id: Uuid) -> Result<Option<Experiment>, String> {
+        // JSONB columns are fetched as text and decoded tolerantly so legacy
+        // rows with unrepresentable numbers (see parse_jsonb_tolerant) stay
+        // readable instead of failing the whole query.
         let row: Option<ExperimentRow> = sqlx::query_as::<_, ExperimentRow>(
-            "SELECT id, name, experiment_type, status, config, target, parameters,
-                    safety_checks, started_at, completed_at, duration_ms, results, created_by, created_at
-             FROM ha_chaos_experiments WHERE id = $1"
+            "SELECT id, name, experiment_type, status,
+                    config::text AS config, target::text AS target,
+                    parameters::text AS parameters, safety_checks::text AS safety_checks,
+                    started_at, completed_at, duration_ms, results::text AS results,
+                    created_by, created_at
+             FROM ha_chaos_experiments WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| format!("Get experiment: {e}"))?;
 
-        Ok(row.map(|r| r.into_experiment()))
+        row.map(|r| r.into_experiment()).transpose()
     }
 
     pub async fn list_experiments(
@@ -353,14 +436,20 @@ impl ChaosEngineeringService {
     ) -> Result<Vec<Experiment>, String> {
         let (sql, bind_status) = match status {
             Some(s) => (
-                "SELECT id, name, experiment_type, status, config, target, parameters,
-                        safety_checks, started_at, completed_at, duration_ms, results, created_by, created_at
+                "SELECT id, name, experiment_type, status,
+                        config::text AS config, target::text AS target,
+                        parameters::text AS parameters, safety_checks::text AS safety_checks,
+                        started_at, completed_at, duration_ms, results::text AS results,
+                        created_by, created_at
                  FROM ha_chaos_experiments WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
                 Some(s.to_string()),
             ),
             None => (
-                "SELECT id, name, experiment_type, status, config, target, parameters,
-                        safety_checks, started_at, completed_at, duration_ms, results, created_by, created_at
+                "SELECT id, name, experiment_type, status,
+                        config::text AS config, target::text AS target,
+                        parameters::text AS parameters, safety_checks::text AS safety_checks,
+                        started_at, completed_at, duration_ms, results::text AS results,
+                        created_by, created_at
                  FROM ha_chaos_experiments ORDER BY created_at DESC LIMIT $1",
                 None,
             ),
@@ -381,7 +470,7 @@ impl ChaosEngineeringService {
                 .map_err(|e| format!("List experiments: {e}"))?
         };
 
-        Ok(rows.into_iter().map(|r| r.into_experiment()).collect())
+        rows.into_iter().map(|r| r.into_experiment()).collect()
     }
 
     /// Delete an experiment record.
@@ -733,6 +822,82 @@ mod tests {
             let svc = ChaosEngineeringService::new(test_pool(), test_config());
             let res = svc.abort_experiment(Uuid::new_v4()).await;
             assert!(res.is_err());
+        });
+    }
+
+    fn config_with_threshold(threshold: f64) -> ExperimentConfig {
+        ExperimentConfig {
+            experiment_type: "process_kill".into(),
+            target: ExperimentTarget {
+                service: "api".into(),
+                instances: vec![],
+                percentage: 100.0,
+            },
+            parameters: ExperimentParameters {
+                duration_ms: 1000,
+                intensity: 0.5,
+                error_codes: None,
+                latency_ms: None,
+                resource_type: None,
+                resource_limit: None,
+            },
+            safety_checks: vec![SafetyCheck {
+                name: "unlimited".into(),
+                check_type: "cpu_usage".into(),
+                threshold,
+                operator: "<".into(),
+                abort_on_failure: true,
+            }],
+            rollback_on_failure: true,
+        }
+    }
+
+    /// A threshold of `f64::MAX` (or any non-finite / absurd value) is stored
+    /// by PostgreSQL as a 309-digit integer inside JSONB, which serde_json
+    /// then refuses to parse back — permanently bricking the experiment row.
+    /// Such values must be refused on write with a clear, typed error.
+    #[test]
+    fn test_chaos_rejects_non_finite_and_absurd_safety_thresholds() {
+        test_runtime().block_on(async {
+            let mut cfg = Config::from_env();
+            cfg.chaos.enabled = true;
+            let svc = ChaosEngineeringService::new(test_pool(), Arc::new(cfg));
+
+            for threshold in [
+                f64::MAX,
+                f64::MIN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                MAX_ABS_EXPERIMENT_NUMERIC * 10.0,
+            ] {
+                let error = svc
+                    .start_experiment("bad-threshold", config_with_threshold(threshold))
+                    .await
+                    .expect_err("unrepresentable threshold must be refused");
+                assert!(
+                    error.contains("threshold")
+                        && (error.contains("finite") || error.contains("±")),
+                    "refusal must name the field and reason: {error}"
+                );
+            }
+
+            // The typed validator distinguishes non-finite from out-of-range.
+            let mut nan = config_with_threshold(f64::NAN);
+            assert!(matches!(
+                validate_experiment_numbers(&nan),
+                Err(ExperimentValidationError::NonFinite { .. })
+            ));
+            nan.safety_checks[0].threshold = MAX_ABS_EXPERIMENT_NUMERIC * 2.0;
+            assert!(matches!(
+                validate_experiment_numbers(&nan),
+                Err(ExperimentValidationError::OutOfRange { .. })
+            ));
+
+            // The largest documentation-blessed "effectively unlimited" value
+            // passes validation (it then fails only on the unreachable DB).
+            let ok = config_with_threshold(MAX_ABS_EXPERIMENT_NUMERIC);
+            validate_experiment_numbers(&ok).expect("documented maximum must be accepted");
         });
     }
 }

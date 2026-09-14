@@ -523,3 +523,47 @@ async fn main() -> Result<()> {
     info!("Worker stopped");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! The supervisor is the only piece of the worker binary that can be
+    //! exercised without a live broker: a clean shutdown must end supervision,
+    //! and a failing processor must be restarted under a capped backoff.
+
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test(start_paused = true)]
+    async fn supervise_returns_on_a_clean_shutdown_without_restarting() {
+        let calls = AtomicUsize::new(0);
+        supervise("clean", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "Ok(()) ends supervision");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervise_restarts_a_failed_processor_with_backoff() {
+        let calls = AtomicUsize::new(0);
+        supervise("flaky", || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt < 2 {
+                    Err(worker_processors::ProcessorError::Job(format!(
+                        "transient failure {attempt}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "each failure must restart the processor until it shuts down cleanly"
+        );
+    }
+}

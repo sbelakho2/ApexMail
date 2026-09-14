@@ -199,6 +199,17 @@ fn generate_secret_value() -> String {
     hex::encode(buf)
 }
 
+/// Secrets are unique per (tenant_id, name): a duplicate is an honest 409,
+/// never a database 500.
+fn map_secret_write_error(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(ref db_error) = error {
+        if db_error.code().as_deref() == Some("23505") {
+            return ApiError::Conflict("a secret with this name already exists".into());
+        }
+    }
+    ApiError::from(error)
+}
+
 async fn create_secret(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -296,7 +307,8 @@ async fn create_secret(
     .bind(next_rotation_at)
     .bind(&created_by)
     .fetch_one(&state.db)
-    .await?;
+    .await
+    .map_err(map_secret_write_error)?;
 
     log_secret_audit(
         &state,
@@ -492,5 +504,405 @@ mod tests {
             Some(chrono::Duration::days(30))
         );
         assert_eq!(next_rotation_offset("manual"), None);
+    }
+}
+
+// ─── Adversarial secret-vault tests ────────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: Some("usr_adv_secrets_0001".into()),
+            api_key_id: None,
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'secrets adversarial', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query("DELETE FROM secret_versions WHERE secret_id IN (SELECT id FROM secrets WHERE tenant_id = $1)")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM secrets WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup secrets");
+        sqlx::query("DELETE FROM secrets_archive WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup archive");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    #[test]
+    fn generated_secret_values_are_unique_hex_and_never_echoed_by_the_type() {
+        let a = generate_secret_value();
+        let b = generate_secret_value();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "each secret gets fresh entropy");
+        // The response type carries NO value/plaintext field at all.
+        let response = SecretResponse {
+            id: "sec_1".into(),
+            name: "n".into(),
+            secret_type: "api_key".into(),
+            description: None,
+            rotation_policy: "manual".into(),
+            status: None,
+            access_count: None,
+            last_accessed: None,
+            last_rotated: None,
+            expires_at: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        for forbidden in ["value", "secret", "encryptedValue", "plaintext"] {
+            assert!(
+                json.get(forbidden).is_none(),
+                "{forbidden} must never be serialized"
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_policies_move_next_rotation_or_stay_none() {
+        assert_eq!(next_rotation_offset("manual"), None);
+        assert_eq!(next_rotation_offset("yearly"), None);
+        assert_eq!(next_rotation_offset(""), None);
+        assert_eq!(
+            next_rotation_offset("daily"),
+            Some(chrono::Duration::days(1))
+        );
+        assert_eq!(
+            next_rotation_offset("weekly"),
+            Some(chrono::Duration::weeks(1))
+        );
+        assert_eq!(
+            next_rotation_offset("monthly"),
+            Some(chrono::Duration::days(30))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_list_rotate_archive_with_tenant_isolation_and_redaction() {
+        let Some((state, pool)) = state_and_pool("adv_secrets_crud").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a).await;
+        seed_tenant(&pool, &tenant_b).await;
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let name = format!("adv-key-{tag}");
+
+        // Validation: name shape, type, policy.
+        for (bad_name, bad_type, bad_policy) in [
+            ("", "api_key", "manual"),
+            (&"x".repeat(101), "api_key", "manual"),
+            ("has space", "api_key", "manual"),
+            ("semi;colon", "api_key", "manual"),
+            ("ok", "not_a_type", "manual"),
+            ("ok", "api_key", "hourly"),
+        ] {
+            let resp = create_secret(
+                State(state.clone()),
+                auth_for(&tenant_a, &["*"]),
+                Json(CreateSecretRequest {
+                    name: bad_name.to_string(),
+                    secret_type: bad_type.to_string(),
+                    description: String::new(),
+                    rotation_policy: bad_policy.to_string(),
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::Validation(_))),
+                "({bad_name:?},{bad_type:?},{bad_policy:?}) must be refused"
+            );
+        }
+
+        let (status, Json(created)) = create_secret(
+            State(state.clone()),
+            auth_for(&tenant_a, &["*"]),
+            Json(CreateSecretRequest {
+                name: name.clone(),
+                secret_type: "api_key".into(),
+                description: "adv fixture".into(),
+                rotation_policy: "monthly".into(),
+            }),
+        )
+        .await
+        .expect("create secret");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.name, name);
+        assert_eq!(created.rotation_policy, "monthly");
+        assert_eq!(created.description.as_deref(), Some("adv fixture"));
+        assert!(created.status.is_none(), "no fabricated lifecycle status");
+        assert!(created.access_count.is_none(), "no fabricated access count");
+        // The generated plaintext never appears in any response.
+        let response_json = serde_json::to_string(&created).unwrap();
+        let stored_value: String =
+            sqlx::query_scalar("SELECT encrypted_value FROM secrets WHERE id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored value");
+        assert!(!response_json.contains(&stored_value));
+
+        // Duplicate names for one tenant are an honest 409.
+        let duplicate = create_secret(
+            State(state.clone()),
+            auth_for(&tenant_a, &["*"]),
+            Json(CreateSecretRequest {
+                name: name.clone(),
+                secret_type: "api_key".into(),
+                description: String::new(),
+                rotation_policy: "manual".into(),
+            }),
+        )
+        .await;
+        assert!(
+            matches!(duplicate, Err(ApiError::Conflict(_))),
+            "duplicate secret name must conflict, got {duplicate:?}"
+        );
+
+        // The SAME name under another tenant is allowed (per-tenant uniqueness).
+        let (_, Json(other)) = create_secret(
+            State(state.clone()),
+            auth_for(&tenant_b, &["*"]),
+            Json(CreateSecretRequest {
+                name: name.clone(),
+                secret_type: "custom".into(),
+                description: String::new(),
+                rotation_policy: "manual".into(),
+            }),
+        )
+        .await
+        .expect("other tenant same name");
+
+        // Listing is scoped: tenant A never sees tenant B's secret.
+        let Json(list_a) = list_secrets(
+            State(state.clone()),
+            auth_for(&tenant_a, &["*"]),
+            Query(SecretListQuery {
+                limit: 200,
+                offset: 0,
+            }),
+        )
+        .await
+        .expect("list a");
+        assert!(list_a.iter().any(|s| s.id == created.id));
+        assert!(
+            list_a.iter().all(|s| s.id != other.id),
+            "cross-tenant secret leaked"
+        );
+        // Pagination clamps are honoured.
+        let Json(clamped) = list_secrets(
+            State(state.clone()),
+            auth_for(&tenant_a, &["*"]),
+            Query(SecretListQuery {
+                limit: i64::MIN,
+                offset: -5,
+            }),
+        )
+        .await
+        .expect("clamped list");
+        assert!(clamped.len() <= 1);
+
+        // Rotate: version snapshot lands in secret_versions.
+        let Json(rotated) = update_secret(
+            State(state.clone()),
+            auth_for(&tenant_a, &["*"]),
+            Json(UpdateSecretRequest {
+                id: created.id.clone(),
+                action: "rotate".into(),
+            }),
+        )
+        .await
+        .expect("rotate");
+        assert_eq!(rotated["success"], true);
+        let (version,): (i32,) = sqlx::query_as("SELECT version FROM secrets WHERE id = $1")
+            .bind(&created.id)
+            .fetch_one(&pool)
+            .await
+            .expect("version");
+        assert_eq!(version, 2);
+        let snapshots: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM secret_versions WHERE secret_id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshots");
+        assert!(snapshots >= 1);
+
+        // Invalid action and cross-tenant rotation.
+        assert!(matches!(
+            update_secret(
+                State(state.clone()),
+                auth_for(&tenant_a, &["*"]),
+                Json(UpdateSecretRequest {
+                    id: created.id.clone(),
+                    action: "explode".into()
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        let cross_rotate = update_secret(
+            State(state.clone()),
+            auth_for(&tenant_b, &["*"]),
+            Json(UpdateSecretRequest {
+                id: created.id.clone(),
+                action: "rotate".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(cross_rotate, Err(ApiError::NotFound(_))));
+
+        // Revoke archives AND removes the live row; a second revoke is 404.
+        let Json(revoked) = update_secret(
+            State(state.clone()),
+            auth_for(&tenant_a, &["*"]),
+            Json(UpdateSecretRequest {
+                id: created.id.clone(),
+                action: "revoke".into(),
+            }),
+        )
+        .await
+        .expect("revoke");
+        assert_eq!(revoked["status"], "revoked");
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM secrets WHERE id = $1")
+            .bind(&created.id)
+            .fetch_one(&pool)
+            .await
+            .expect("live count");
+        assert_eq!(live, 0);
+        let archived: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM secrets_archive WHERE id = $1")
+                .bind(&created.id)
+                .fetch_one(&pool)
+                .await
+                .expect("archive count");
+        assert_eq!(archived, 1);
+        assert!(matches!(
+            update_secret(
+                State(state.clone()),
+                auth_for(&tenant_a, &["*"]),
+                Json(UpdateSecretRequest {
+                    id: created.id.clone(),
+                    action: "revoke".into()
+                })
+            )
+            .await,
+            Err(ApiError::NotFound(_))
+        ));
+
+        // Delete via query param and via body; missing id is a validation error.
+        let Json(deleted) = delete_secret(
+            State(state.clone()),
+            auth_for(&tenant_b, &["*"]),
+            Query(DeleteSecretQuery {
+                id: Some(other.id.clone()),
+            }),
+            None,
+        )
+        .await
+        .expect("delete by query");
+        assert_eq!(deleted["status"], "deleted");
+        assert!(matches!(
+            delete_secret(
+                State(state.clone()),
+                auth_for(&tenant_b, &["*"]),
+                Query(DeleteSecretQuery { id: None }),
+                None
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        let (_, Json(extra)) = create_secret(
+            State(state.clone()),
+            auth_for(&tenant_b, &["*"]),
+            Json(CreateSecretRequest {
+                name: format!("body-delete-{tag}"),
+                secret_type: "custom".into(),
+                description: String::new(),
+                rotation_policy: "manual".into(),
+            }),
+        )
+        .await
+        .expect("create for body delete");
+        let Json(body_deleted) = delete_secret(
+            State(state.clone()),
+            auth_for(&tenant_b, &["*"]),
+            Query(DeleteSecretQuery { id: None }),
+            Some(Json(DeleteSecretBody {
+                id: Some(extra.id.clone()),
+            })),
+        )
+        .await
+        .expect("delete by body");
+        assert_eq!(body_deleted["success"], true);
+
+        // Scope gate.
+        assert!(matches!(
+            list_secrets(
+                State(state.clone()),
+                auth_for(&tenant_a, &[]),
+                Query(SecretListQuery {
+                    limit: 10,
+                    offset: 0
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        cleanup(&pool, &tenant_a).await;
+        cleanup(&pool, &tenant_b).await;
+    }
+
+    #[test]
+    fn unknown_fields_are_refused_on_secret_payloads() {
+        assert!(serde_json::from_str::<CreateSecretRequest>(
+            r#"{"name":"n","type":"api_key","tenantId":"other"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<UpdateSecretRequest>(
+            r#"{"id":"x","action":"rotate","extra":1}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SecretListQuery>(r#"{"limit":1,"evil":true}"#).is_err());
+        assert!(serde_json::from_str::<DeleteSecretQuery>(r#"{"id":"x","evil":1}"#).is_err());
     }
 }

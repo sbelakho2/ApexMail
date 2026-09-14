@@ -279,9 +279,35 @@ fn truthy_json(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Normalise a feature spelling to the payload's camelCase keys:
+/// `advanced_analytics` and `advancedAnalytics` both resolve. Route
+/// callers historically passed the snake_case field name, which the
+/// camelCase feature map could never match, so every probe returned false.
+fn normalize_feature_key(feature: &str) -> String {
+    let mut normalized = String::with_capacity(feature.len());
+    let mut uppercase_next = false;
+    for character in feature.chars() {
+        if character == '_' || character == '-' {
+            uppercase_next = true;
+            continue;
+        }
+        if uppercase_next {
+            normalized.extend(character.to_uppercase());
+            uppercase_next = false;
+        } else {
+            normalized.push(character);
+        }
+    }
+    normalized
+}
+
 fn feature_has_access(features: &LegacyPlanFeaturesPayload, feature: &str) -> bool {
-    feature_map(features)
-        .get(feature)
+    let map = feature_map(features);
+    map.get(feature)
+        .or_else(|| {
+            let normalized = normalize_feature_key(feature);
+            map.get(&normalized)
+        })
         .map(truthy_json)
         .unwrap_or(false)
 }
@@ -829,14 +855,28 @@ struct LegacyInvoiceLineItemDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyBillingAddressDto {
+    // The snapshot writers store snake_case keys (billing-service
+    // `invoices.rs` and the admin writer in this file); the API contract
+    // serializes camelCase. Without the aliases every real snapshot
+    // decoded to the empty address (the billing-service readers already
+    // accept both dialects — this DTO is the api-server one that did not).
+    #[serde(alias = "company_name")]
     company_name: String,
+    #[serde(alias = "vat_number")]
     vat_number: Option<String>,
+    #[serde(alias = "address_line1")]
     address_line1: String,
+    #[serde(alias = "address_line2")]
     address_line2: Option<String>,
+    #[serde(alias = "city")]
     city: String,
+    #[serde(alias = "state")]
     state: Option<String>,
+    #[serde(alias = "postal_code")]
     postal_code: String,
+    #[serde(alias = "country")]
     country: String,
+    #[serde(alias = "email")]
     email: String,
 }
 
@@ -1459,8 +1499,8 @@ async fn get_dunning_state(
         ),
     >(
         r#"
-        SELECT tenant_id, status, failed_payment_count, first_failed_at, last_failed_at,
-               next_retry_at, suspended_at, grace_period_ends_at
+        SELECT tenant_id, status, failed_payment_count::bigint, first_failed_at,
+               last_failed_at, next_retry_at, suspended_at, grace_period_ends_at
         FROM dunning_records WHERE tenant_id = $1
         "#,
     )
@@ -3724,15 +3764,59 @@ async fn admin_apply_credit(
         }
     }
 
+    // The wallet must exist BEFORE the crediting statement: data-modifying
+    // CTEs share one snapshot, so an `ensure_wallet` CTE that inserts the
+    // row in the SAME statement is invisible to a sibling `UPDATE wallets`
+    // CTE — the first credit of a wallet-less tenant matched zero rows,
+    // returned `RowNotFound` (404) and left a 0-balance wallet behind.
+    // The `reference` column is GLOBALLY unique
+    // (`uq_wallet_transactions_reference`), while the Redis claim above is
+    // per (tenant, key): a key already recorded against ANOTHER tenant passed
+    // the claim and then died on the INSERT as a 500. Money-minting must fail
+    // closed with an explicit conflict instead.
+    let reference_owner: Option<String> = sqlx::query_scalar(
+        "SELECT tenant_id FROM wallet_transactions WHERE reference = $1 LIMIT 1",
+    )
+    .bind(idempotency_key)
+    .fetch_optional(&state.db)
+    .await?;
+    if let Some(owner) = reference_owner {
+        let same_tenant = owner == tenant_id;
+        tracing::warn!(
+            idempotency_key = %hash_token(idempotency_key),
+            owner_tenant = %owner,
+            request_tenant = %tenant_id,
+            "admin wallet credit refused: the Idempotency-Key is already recorded"
+        );
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": if same_tenant {
+                    "This Idempotency-Key has already been used for a credit on this tenant"
+                } else {
+                    "This Idempotency-Key is already recorded against a credit for another tenant"
+                }
+            })),
+        )
+            .into_response());
+    }
+
+    let mut credit_tx = state.db.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+        VALUES ($1, 0, 0, $2, NOW(), NOW())
+        ON CONFLICT (tenant_id) DO NOTHING
+        "#,
+    )
+    .bind(&tenant_id)
+    .bind(&billing_currency)
+    .execute(&mut *credit_tx)
+    .await?;
+
     let transaction = sqlx::query_as::<_, LegacyWalletTransactionRow>(
         r#"
-        WITH ensure_wallet AS (
-            INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-            VALUES ($2, 0, 0, $5, NOW(), NOW())
-            ON CONFLICT (tenant_id) DO UPDATE SET updated_at = wallets.updated_at
-            RETURNING id AS wallet_id, tenant_id
-        ),
-        updated_wallet AS (
+        WITH updated_wallet AS (
             UPDATE wallets
             SET balance = balance + $1::int8, updated_at = NOW()
             WHERE tenant_id = $2
@@ -3765,9 +3849,27 @@ async fn admin_apply_credit(
     .bind(&tenant_id)
     .bind(format!("Admin credit: {}", body.reason))
     .bind(idempotency_key)
-    .bind(&billing_currency)
-    .fetch_one(&state.db)
-    .await?;
+    .fetch_one(&mut *credit_tx)
+    .await
+    .map_err(|error| {
+        // Defense in depth: two concurrent requests can both pass the
+        // pre-check above; the unique index is the arbiter and its violation
+        // is a conflict, never an internal error.
+        if matches!(&error, sqlx::Error::Database(db_error)
+            if db_error.code().as_deref() == Some("23505"))
+        {
+            tracing::warn!(
+                tenant_id = %tenant_id,
+                "admin wallet credit lost the idempotency race; refusing the duplicate"
+            );
+            crate::error::ApiError::Conflict(
+                "This Idempotency-Key has already been recorded for a credit".into(),
+            )
+        } else {
+            crate::error::ApiError::from(error)
+        }
+    })?;
+    credit_tx.commit().await?;
 
     crate::audit_log::insert_audit_log(
         &state.db,
@@ -5715,5 +5817,3383 @@ mod tests {
             wrong_prev_hash, hashes[2],
             "wrong previous hash must produce different hash"
         );
+    }
+}
+
+// ─── Adversarial DB-backed router tests ────────────────────────
+//
+// Every test drives the REAL router (`build_app`) with a real API key and
+// asserts status codes, response bodies AND database effects. Each test
+// owns a freshly provisioned canonical database, so rows are private and
+// parallel runs cannot interfere.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{header, HeaderMap, Request, StatusCode};
+    use serde_json::json;
+    use sqlx::PgPool;
+    use tower::ServiceExt;
+
+    use crate::app::build_app;
+    use crate::config::Environment;
+
+    async fn pool_for(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_pool(&format!("adv_billing_{test_name}")).await
+    }
+
+    fn unique_id() -> String {
+        uuid::Uuid::new_v4().simple().to_string()[..26].to_string()
+    }
+
+    fn tenant_features() -> serde_json::Value {
+        let mut features =
+            serde_json::to_value(billing_service::types::PlanFeatures::default()).unwrap();
+        features["advanced_analytics"] = json!(true);
+        features["data_export"] = json!(true);
+        features["dedicated_ip"] = json!(true);
+        features["dedicated_ip_count"] = json!(2);
+        features
+    }
+
+    async fn seed_plan(
+        pool: &PgPool,
+        name: &str,
+        price_monthly: i64,
+        price_yearly: i64,
+        email_limit: i64,
+        api_limit: i64,
+        features: &serde_json::Value,
+        stripe_monthly: Option<&str>,
+        stripe_yearly: Option<&str>,
+        is_active: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
+                                email_limit, api_call_limit, features, is_active, sort_order,
+                                stripe_price_id_monthly, stripe_price_id_yearly, created_at, updated_at)
+             VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $2, '', $3, $4,
+                     $5, $6, $7, $8, 0, $9, $10, NOW(), NOW())
+             ON CONFLICT (name) DO UPDATE SET
+                 price_monthly = EXCLUDED.price_monthly,
+                 price_yearly = EXCLUDED.price_yearly,
+                 email_limit = EXCLUDED.email_limit,
+                 api_call_limit = EXCLUDED.api_call_limit,
+                 features = EXCLUDED.features,
+                 is_active = EXCLUDED.is_active,
+                 stripe_price_id_monthly = EXCLUDED.stripe_price_id_monthly,
+                 stripe_price_id_yearly = EXCLUDED.stripe_price_id_yearly",
+        )
+        .bind(name)
+        .bind(format!("{name} display"))
+        .bind(price_monthly)
+        .bind(price_yearly)
+        .bind(email_limit)
+        .bind(api_limit)
+        .bind(features)
+        .bind(is_active)
+        .bind(stripe_monthly)
+        .bind(stripe_yearly)
+        .execute(pool)
+        .await
+        .expect("seed plan");
+    }
+
+    async fn seed_tenant(pool: &PgPool, tenant_id: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, 'adversarial billing', $2, $3, 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(format!("advb-{tenant_id}"))
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_key(pool: &PgPool, tenant_id: &str, scopes: &[&str]) -> String {
+        let key = format!("am_advb_{}", uuid::Uuid::new_v4().simple());
+        let secret = crate::app::test_support::test_config().api_key_hash_secret;
+        let hash = apexmail_lib::hash_api_key_with_secret(&key, &secret);
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_hash, key_prefix, scopes, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, 'adversarial', $2, $3, $4, NOW(), NOW())",
+        )
+        .bind(tenant_id)
+        .bind(&hash)
+        .bind(&key[..8])
+        .bind(serde_json::to_value(scopes).unwrap())
+        .execute(pool)
+        .await
+        .expect("seed api key");
+        key
+    }
+
+    /// Seed a tenant on `plan` with a key carrying `scopes`.
+    async fn tenant_with_key(pool: &PgPool, plan: &str, scopes: &[&str]) -> (String, String) {
+        let tenant_id = unique_id();
+        seed_tenant(pool, &tenant_id, plan).await;
+        let key = seed_key(pool, &tenant_id, scopes).await;
+        (tenant_id, key)
+    }
+
+    async fn admin_key(pool: &PgPool) -> String {
+        seed_key(pool, "system", &["*"]).await
+    }
+
+    struct Env {
+        app: Router,
+        key: String,
+    }
+
+    async fn env_for(pool: PgPool, key: String) -> Env {
+        let state = crate::app::test_support::test_state_over(pool).await;
+        Env {
+            app: build_app(state),
+            key,
+        }
+    }
+
+    async fn send(env: &Env, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = env.app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    async fn get(env: &Env, uri: &str) -> (StatusCode, serde_json::Value) {
+        send(
+            env,
+            Request::get(uri)
+                .header("x-api-key", &env.key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn get_with_key(env: &Env, uri: &str, key: &str) -> (StatusCode, serde_json::Value) {
+        send(
+            env,
+            Request::get(uri)
+                .header("x-api-key", key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn post_json(env: &Env, uri: &str, body: &str) -> (StatusCode, serde_json::Value) {
+        post_json_with_key(env, uri, &env.key, body).await
+    }
+
+    async fn post_json_with_key(
+        env: &Env,
+        uri: &str,
+        key: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        send(
+            env,
+            Request::post(uri)
+                .header("x-api-key", key)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn get_raw(env: &Env, uri: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let response = env
+            .app
+            .clone()
+            .oneshot(
+                Request::get(uri)
+                    .header("x-api-key", &env.key)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body")
+            .to_vec();
+        (status, headers, bytes)
+    }
+
+    async fn seed_metering(pool: &PgPool, tenant: &str, event_type: &str, quantity: i64) {
+        sqlx::query(
+            "INSERT INTO metering_events (id, tenant_id, event_type, timestamp, quantity)
+             VALUES (gen_random_uuid(), $1, $2, NOW(), $3)",
+        )
+        .bind(tenant)
+        .bind(event_type)
+        .bind(quantity)
+        .execute(pool)
+        .await
+        .expect("seed metering event");
+    }
+
+    // ── authentication / admin gate ─────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_billing_auth_and_admin_gate() {
+        let Some(pool) = pool_for("auth_gate").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advfree",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, key) = tenant_with_key(&pool, "advfree", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        // Missing credential on a representative endpoint.
+        let response = env
+            .app
+            .clone()
+            .oneshot(
+                Request::get("/v1/billing/plans")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // A customer tenant key — even one carrying "*" and "billing:admin"
+        // — must NOT reach the platform billing-admin surface (audit A).
+        for scopes in [vec!["*"], vec!["billing:admin"]] {
+            let customer_key = seed_key(&pool, &tenant, &scopes).await;
+            let (status, body) =
+                get_with_key(&env, "/v1/billing/admin/tenants", &customer_key).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "scopes {scopes:?}: {body}");
+        }
+
+        // The system tenant with an admin scope passes; without one it does not.
+        let system_admin = admin_key(&pool).await;
+        let (status, _) = get_with_key(&env, "/v1/billing/admin/tenants", &system_admin).await;
+        assert_eq!(status, StatusCode::OK);
+        let system_non_admin = seed_key(&pool, "system", &["billing:read"]).await;
+        let (status, _) = get_with_key(&env, "/v1/billing/admin/tenants", &system_non_admin).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ── plans surface ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_plans_surface() {
+        let Some(pool) = pool_for("plans_surface").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advpro",
+            4900,
+            49000,
+            50_000,
+            100_000,
+            &tenant_features(),
+            Some("price_pro_m"),
+            Some("price_pro_y"),
+            true,
+        )
+        .await;
+        seed_plan(
+            &pool,
+            "advlegacy",
+            1900,
+            19000,
+            10_000,
+            10_000,
+            &tenant_features(),
+            None,
+            None,
+            false,
+        )
+        .await;
+        let (_tenant, key) = tenant_with_key(&pool, "advpro", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        // Catalog lists ACTIVE plans only.
+        let (status, body) = get(&env, "/v1/billing/plans").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let plans = body["data"]["plans"].as_array().unwrap();
+        assert!(plans.iter().any(|plan| plan["name"] == "advpro"));
+        assert!(
+            !plans.iter().any(|plan| plan["name"] == "advlegacy"),
+            "inactive plans must not be sold: {body}"
+        );
+        let pro = plans.iter().find(|plan| plan["name"] == "advpro").unwrap();
+        assert_eq!(pro["priceMonthly"], 4900);
+        assert_eq!(pro["emailLimit"], 50_000);
+        assert_eq!(pro["features"]["advancedAnalytics"], true);
+
+        // Direct fetch: found, then not-found for both unknown and inactive.
+        let (status, body) = get(&env, "/v1/billing/plans/advpro").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["name"], "advpro");
+        assert_eq!(body["data"]["stripePriceIdMonthly"], "price_pro_m");
+        // An inactive plan is still readable by name (legacy clients need
+        // it for renewal copy) but is never in the catalog — asserted above.
+        let (status, body) = get(&env, "/v1/billing/plans/advlegacy").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["isActive"], false);
+        for missing in ["no_such_plan", "", "%27%3B--"] {
+            let (status, body) = get(&env, &format!("/v1/billing/plans/{missing}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "plan {missing:?}: {body}");
+        }
+
+        // Tenant-scoped views.
+        let (status, body) = get(&env, "/v1/billing/plans/tenant/current").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["emailLimit"], 50_000);
+        assert_eq!(body["data"]["features"]["dedicatedIp"], true);
+
+        // The STATIC `/plans/tenant/features` and `/plans/tenant/limits`
+        // routes are reachable by an ordinary tenant key: the path-tenant
+        // parser no longer mistakes the sub-resource word for a tenant id
+        // (fixed 2026-09-13 — every real key used to get a 403 here).
+        for path in [
+            "/v1/billing/plans/tenant/features",
+            "/v1/billing/plans/tenant/limits",
+        ] {
+            let (status, body) = get(&env, path).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            assert!(
+                body["data"].is_object() || body["data"].is_array(),
+                "{path} must return the tenant's own data: {body}"
+            );
+        }
+
+        // The handler itself is correct: a tenant whose ID is the literal
+        // path word reaches the route and gets its real features.
+        for (literal, uri, field, expected) in [
+            (
+                "features",
+                "/v1/billing/plans/tenant/features",
+                "advancedAnalytics",
+                json!(true),
+            ),
+            (
+                "limits",
+                "/v1/billing/plans/tenant/limits",
+                "apiCallLimit",
+                json!(100_000),
+            ),
+        ] {
+            seed_tenant(&pool, literal, "advpro").await;
+            let literal_key = seed_key(&pool, literal, &["billing:read"]).await;
+            let (status, body) = get_with_key(&env, uri, &literal_key).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+            assert_eq!(body["data"][field], expected, "{uri}: {body}");
+        }
+
+        // Feature probe: known true, unknown false, SQL-ish false.
+        let (status, body) = get(&env, "/v1/billing/plans/features/advanced_analytics").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["feature"], "advanced_analytics");
+        assert_eq!(body["data"]["hasAccess"], true);
+        for feature in [
+            "not_a_feature",
+            "advancedAnalyticsExtension",
+            "%27%3B%20OR%201%3D1",
+        ] {
+            let (status, body) = get(&env, &format!("/v1/billing/plans/features/{feature}")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["hasAccess"], false, "feature {feature:?}");
+        }
+
+        // Comparison: price delta + per-feature differences.
+        let (status, body) = get(&env, "/v1/billing/plans/compare/advpro/advlegacy").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["differences"]["priceDifference"], 1900 - 4900);
+        assert!(body["data"]["differences"]["featureDifferences"].is_array());
+        let (status, _) = get(&env, "/v1/billing/plans/compare/advpro/missing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, body) = get(&env, "/v1/billing/plans/compare/advpro/advpro").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"]["differences"]["priceDifference"], 0,
+            "same plan must have no price delta"
+        );
+
+        // Tenant on a plan row that vanished: null-current semantics, not 500.
+        let orphan = unique_id();
+        seed_tenant(&pool, &orphan, "ghost_plan").await;
+        let orphan_key = seed_key(&pool, &orphan, &["billing:read"]).await;
+        let (status, body) =
+            get_with_key(&env, "/v1/billing/plans/tenant/current", &orphan_key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"].is_null(), "{body}");
+        let (status, body) = get_with_key(
+            &env,
+            "/v1/billing/plans/features/advanced_analytics",
+            &orphan_key,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["hasAccess"], false);
+
+        // PAYG pricing is public catalog data: last tier is open-ended.
+        let (status, body) = get(&env, "/v1/billing/payg/pricing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let tiers = body["data"]["emailPricing"].as_array().unwrap();
+        assert!(tiers.last().unwrap()["upTo"].is_null());
+        assert_eq!(body["data"]["apiPricing"]["freeCallsPerMonth"], 100_000);
+    }
+
+    // ── usage reporting / realtime counters ─────────────────────
+
+    #[tokio::test]
+    async fn adversarial_usage_reporting_and_realtime_counter() {
+        let Some(pool) = pool_for("usage_reporting").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advusage",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, key) = tenant_with_key(&pool, "advusage", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        seed_metering(&pool, &tenant, "emails_sent", 500).await;
+        seed_metering(&pool, &tenant, "api_calls", 200).await;
+        // Another tenant's usage must not leak.
+        let (other, other_key) = tenant_with_key(&pool, "advusage", &["billing:read"]).await;
+        seed_metering(&pool, &other, "emails_sent", 999).await;
+
+        let (status, body) = get(&env, "/v1/billing/usage").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let billing = &body["data"]["billingCycleUsage"];
+        assert_eq!(billing["emailsSent"], 500);
+        assert_eq!(billing["emailsLimit"], 1000);
+        assert_eq!(billing["apiCalls"], 200);
+        assert_eq!(billing["percentUsed"], 50);
+        assert_eq!(body["data"]["metrics"]["emails_sent"], 500);
+
+        // Isolation: the other tenant sees only its own 999.
+        let (status, body) = get_with_key(&env, "/v1/billing/usage", &other_key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["billingCycleUsage"]["emailsSent"], 999);
+
+        // PAYG view: 500 emails in tier 1 = 50 000 millicents = 50 cents;
+        // 200 API calls are under the free allowance.
+        let (status, body) = get(&env, "/v1/billing/payg/usage").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["usage"]["emailsSent"], 500);
+        assert_eq!(body["data"]["cost"]["emailCostCents"], 50);
+        assert_eq!(body["data"]["cost"]["apiCostCents"], 0);
+        assert_eq!(body["data"]["cost"]["totalCostCents"], 50);
+        assert_eq!(body["data"]["cost"]["totalCostUsd"], "€0.50");
+
+        // Quota view.
+        let (status, body) = get(&env, "/v1/billing/quota").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body["data"].is_null());
+
+        // Entitlement presentation comes from the same snapshot the gates
+        // use (this handler returns the presentation directly, unwrapped).
+        let (status, body) = get(&env, "/v1/billing/entitlements").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["plan"], "advusage");
+        assert_eq!(body["tenant_id"], tenant);
+        let features = body["features"].as_array().unwrap();
+        let advanced = features
+            .iter()
+            .find(|feature| feature["key"] == "advanced_analytics")
+            .expect("advanced_analytics presented");
+        assert_eq!(advanced["granted"], true);
+
+        // Realtime counter: invalid metric is a 400, never a DB/Redis probe.
+        let (status, body) = get(&env, "/v1/billing/usage/realtime/storage_gb").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["message"], "Invalid metric");
+
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        if redis_url.trim().is_empty() {
+            return;
+        }
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        // Write through the SAME key the quota gate enforces.
+        let meter_key = billing_service::usage::enforced_counter_key(
+            &pool,
+            &tenant,
+            MeterEventType::EmailsSent,
+            Utc::now(),
+        )
+        .await;
+        let mut conn = redis.get().await.expect("redis connection");
+        let _: () = deadpool_redis::redis::cmd("SET")
+            .arg(&meter_key)
+            .arg(7)
+            .query_async(&mut conn)
+            .await
+            .expect("set counter");
+
+        let (status, body) = get(&env, "/v1/billing/usage/realtime/emails_sent").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["metric"], "emails_sent");
+        assert_eq!(body["data"]["count"], 7);
+        assert_eq!(
+            body["data"]["period"],
+            format!("{}-{:02}", Utc::now().year(), Utc::now().month())
+        );
+
+        // A missing counter reads 0 (not an error).
+        let (status, body) = get(&env, "/v1/billing/usage/realtime/api_calls").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["count"], 0);
+
+        let _: () = deadpool_redis::redis::cmd("DEL")
+            .arg(&meter_key)
+            .query_async(&mut conn)
+            .await
+            .expect("del counter");
+    }
+
+    // ── estimates ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_payg_and_overage_estimate_edges() {
+        let Some(pool) = pool_for("estimates").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advest",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (_tenant, key) = tenant_with_key(&pool, "advest", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        // Negative usage is rejected with the field named in details.
+        for body in [r#"{"emailsSent":-1}"#, r#"{"emailsSent":1,"apiCalls":-1}"#] {
+            let (status, response) = post_json(&env, "/v1/billing/payg/estimate", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+            assert_eq!(response["error"]["code"], "VALIDATION_ERROR");
+            assert!(
+                response["error"]["details"][0]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("must be non-negative"),
+                "{response}"
+            );
+        }
+
+        // PAYG tier math at the boundary: 10 000 emails spill 1 into tier 2.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/payg/estimate",
+            r#"{"emailsSent":10001,"apiCalls":101000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // 10 000 * 100 + 1 * 80 = 1 000 080 millicents -> 1000 cents (half-up).
+        assert_eq!(body["data"]["cost"]["emailCostCents"], 1000);
+        // 101 000 - 100 000 free = 1 000 billable -> 1 * 10 cents.
+        assert_eq!(body["data"]["cost"]["apiCostCents"], 10);
+        assert_eq!(body["data"]["cost"]["totalCostCents"], 1010);
+        assert_eq!(body["data"]["usage"]["emailsSent"], 10001);
+
+        // Overflow-sized but non-negative input is refused, not wrapped.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/payg/estimate",
+            &json!({"emailsSent": i64::MAX, "apiCalls": i64::MAX}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Zero usage never produces a fee above the configured minimum (0).
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/payg/estimate",
+            r#"{"emailsSent":0,"apiCalls":0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["cost"]["totalCostCents"], 0);
+        assert_eq!(body["data"]["cost"]["totalCostUsd"], "€0.00");
+
+        // Unknown fields / malformed JSON are refused before any math.
+        let (status, _) = post_json(
+            &env,
+            "/v1/billing/payg/estimate",
+            r#"{"emailsSent":1,"bogus":2}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = post_json(&env, "/v1/billing/payg/estimate", "{oops").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Overage: negative limit refused; the authenticated tenant's plan
+        // limit wins over the client-supplied value.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/overage/estimate",
+            r#"{"emailsSent":1,"emailLimit":-1}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/overage/estimate",
+            r#"{"emailsSent":1500,"emailLimit":999999}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["usage"]["emailLimit"], 1000,
+            "server-side plan limit must override the client value"
+        );
+        // (1500 - 1000) * 40 millicents = 20 000 -> 20 cents.
+        assert_eq!(body["data"]["overageCostCents"], 20);
+        assert_eq!(body["data"]["overageCostUsd"], "€0.20");
+
+        // Under-limit and exactly-at-limit produce zero overage.
+        for emails in [0_i64, 999, 1000] {
+            let (status, body) = post_json(
+                &env,
+                "/v1/billing/overage/estimate",
+                &json!({"emailsSent": emails, "emailLimit": 1000}).to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["overageCostCents"], 0, "emails {emails}");
+        }
+
+        // Naming a DIFFERENT tenant is an admin action (audit F64): the
+        // customer key is refused; the platform key resolves that tenant's
+        // real plan limit.
+        let (other, _other_key) = tenant_with_key(&pool, "advest", &["billing:read"]).await;
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/overage/estimate",
+            &json!({"emailsSent": 5, "emailLimit": 10, "tenantId": other}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let platform = admin_key(&pool).await;
+        let (status, body) = post_json_with_key(
+            &env,
+            "/v1/billing/overage/estimate",
+            &platform,
+            &json!({"emailsSent": 5, "emailLimit": 10, "tenantId": other}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["usage"]["emailLimit"], 1000);
+
+        // Unknown tenant falls back to the validated client limit.
+        let (status, body) = post_json_with_key(
+            &env,
+            "/v1/billing/overage/estimate",
+            &platform,
+            &json!({"emailsSent": 5, "emailLimit": 3, "tenantId": unique_id()}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["usage"]["emailLimit"], 3);
+    }
+
+    // ── usage alerts ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_usage_alerts_validation_and_upsert() {
+        let Some(pool) = pool_for("alerts").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advalert",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, read_key) = tenant_with_key(&pool, "advalert", &["billing:read"]).await;
+        let write_key = seed_key(&pool, &tenant, &["billing:write"]).await;
+        let env = env_for(pool.clone(), write_key).await;
+
+        // Read-only key cannot mutate alert config.
+        let (status, body) = post_json_with_key(
+            &env,
+            "/v1/billing/alerts",
+            &read_key,
+            r#"{"thresholds":[{"metricType":"emails","thresholdPercent":50,"notificationChannel":"email"}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Empty list, invalid metric, out-of-range percent, invalid channel.
+        for (body, needle) in [
+            (r#"{"thresholds":[]}"#, "At least one threshold is required"),
+            (
+                r#"{"thresholds":[{"metricType":"sms","thresholdPercent":50,"notificationChannel":"email"}]}"#,
+                "Invalid metricType",
+            ),
+            (
+                r#"{"thresholds":[{"metricType":"emails","thresholdPercent":0,"notificationChannel":"email"}]}"#,
+                "thresholdPercent must be between 1 and 100",
+            ),
+            (
+                r#"{"thresholds":[{"metricType":"emails","thresholdPercent":101,"notificationChannel":"email"}]}"#,
+                "thresholdPercent must be between 1 and 100",
+            ),
+            (
+                r#"{"thresholds":[{"metricType":"emails","thresholdPercent":50,"notificationChannel":"carrier-pigeon"}]}"#,
+                "Invalid notificationChannel",
+            ),
+        ] {
+            let (status, response) = post_json(&env, "/v1/billing/alerts", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(needle),
+                "{body}: {response}"
+            );
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_alert_configs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "rejected alert batches must not write rows");
+
+        // Valid single threshold creates a row.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/alerts",
+            r#"{"thresholds":[{"metricType":"emails","thresholdPercent":80,"notificationChannel":"email"}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["data"][0]["metricType"], "emails");
+        assert_eq!(body["data"][0]["isEnabled"], true);
+
+        // Re-posting the same (tenant, metric, percent) is an idempotent
+        // upsert: one row, channel updated — not a duplicate.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/alerts",
+            r#"{"thresholds":[{"metricType":"emails","thresholdPercent":80,"notificationChannel":"webhook"}]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (rows, channel): (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint,
+                    COALESCE(MAX(notification_channel), '')
+             FROM usage_alert_configs WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "upsert must not duplicate the threshold row");
+        assert_eq!(channel, "webhook");
+
+        // Multi-threshold batches are all created; one bad entry rejects the
+        // WHOLE batch (the loop returns before writing later entries).
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/alerts",
+            r#"{"thresholds":[
+                {"metricType":"emails","thresholdPercent":10,"notificationChannel":"email"},
+                {"metricType":"api_calls","thresholdPercent":20,"notificationChannel":"both"},
+                {"metricType":"storage","thresholdPercent":30,"notificationChannel":"webhook"}
+            ]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["data"].as_array().unwrap().len(), 3);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_alert_configs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 4);
+    }
+
+    // ── direct plan transition / cancellation refusal ───────────
+
+    #[tokio::test]
+    async fn adversarial_direct_plan_change_and_cancel_are_checkout_gated() {
+        let Some(pool) = pool_for("checkout_gate").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advgate",
+            0,
+            0,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, read_key) = tenant_with_key(&pool, "advgate", &["billing:read"]).await;
+        let write_key = seed_key(&pool, &tenant, &["billing:write"]).await;
+        let env = env_for(pool.clone(), write_key).await;
+
+        // Read-only key is refused before the body is considered.
+        let (status, _) = post_json_with_key(
+            &env,
+            "/v1/billing/switch-plan",
+            &read_key,
+            r#"{"planName":"advgate"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = post_json_with_key(
+            &env,
+            "/v1/billing/cancel",
+            &read_key,
+            r#"{"reason":"too expensive"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Writable key gets the deterministic migration signal, with NO
+        // subscription row written.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/switch-plan",
+            r#"{"planName":"advgate","billingInterval":"yearly"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "CHECKOUT_REQUIRED");
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/cancel",
+            r#"{"reason":"reason","feedback":"feedback","cancelImmediately":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "BILLING_PORTAL_REQUIRED");
+        let subscriptions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(subscriptions, 0, "no local subscription may be created");
+
+        // Unknown fields are refused (deny_unknown_fields) — 422, no write.
+        let (status, _) = post_json(
+            &env,
+            "/v1/billing/switch-plan",
+            r#"{"planName":"x","stripeKey":"sk_live_leak"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        // Missing required planName is refused too.
+        let (status, _) = post_json(&env, "/v1/billing/switch-plan", "{}").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── subscription view ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_subscription_view_and_tenant_isolation() {
+        let Some(pool) = pool_for("subscription_view").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advsub",
+            1000,
+            10000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, key) = tenant_with_key(&pool, "advsub", &["billing:read"]).await;
+        let (_other, other_key) = tenant_with_key(&pool, "advsub", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        // No row: explicit null with a message (never a 404 that clients
+        // misread as an outage).
+        let (status, body) = get(&env, "/v1/billing/subscription").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["subscription"].is_null());
+        assert_eq!(body["data"]["message"], "No active subscription");
+
+        // Seed one active + one canceled row: the active one wins.
+        for (status, stripe_id) in [("canceled", "sub_old"), ("active", "sub_live")] {
+            sqlx::query(
+                "INSERT INTO stripe_subscriptions
+                 (id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+                  status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
+                  cancel_at_period_end, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, 'advsub', 'monthly',
+                         NOW() - INTERVAL '5 days', NOW() + INTERVAL '25 days', false, NOW(), NOW())",
+            )
+            .bind(&tenant)
+            .bind(stripe_id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let (status, body) = get(&env, "/v1/billing/subscription").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["data"]["subscription"]["stripeSubscriptionId"],
+            "sub_live"
+        );
+        assert_eq!(body["data"]["subscription"]["status"], "active");
+        assert_eq!(body["data"]["subscription"]["cancelAtPeriodEnd"], false);
+
+        // Tenant isolation: the other tenant sees nothing.
+        let (status, body) = get_with_key(&env, "/v1/billing/subscription", &other_key).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"]["subscription"].is_null());
+    }
+
+    // ── invoices: list/detail/PDF/XML ───────────────────────────
+
+    async fn seed_invoice(
+        pool: &PgPool,
+        tenant: &str,
+        number: &str,
+        status: &str,
+        total: i64,
+        line_items: serde_json::Value,
+        billing_address: Option<serde_json::Value>,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices
+             (id, tenant_id, stripe_invoice_id, invoice_number, status, currency, amount,
+              subtotal, vat_total, total, line_items, billing_address, issued_at, due_at,
+              paid_at, period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, NULL, $3, $4, 'USD', $5, $5, 0, $5, $6, $7,
+                     NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', NULL,
+                     NOW() - INTERVAL '11 days', NOW() + INTERVAL '19 days', NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(number)
+        .bind(status)
+        .bind(total)
+        .bind(line_items)
+        .bind(billing_address.map(|value| value.to_string()))
+        .execute(pool)
+        .await
+        .expect("seed invoice");
+        id
+    }
+
+    fn sample_line_items() -> serde_json::Value {
+        json!([{
+            "description": "Pro plan",
+            "quantity": 1,
+            "unitPrice": 10000,
+            "amount": 10000,
+            "vatRate": 22.0,
+            "vatAmount": 2200
+        }])
+    }
+
+    #[tokio::test]
+    async fn adversarial_invoice_list_detail_and_documents() {
+        let Some(pool) = pool_for("invoices").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advinv",
+            1000,
+            10000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, key) = tenant_with_key(&pool, "advinv", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        let hostile_addr = json!({
+            "company_name": "Acme <script>alert(1)</script> & Co",
+            "vat_number": "EE123456789",
+            "address_line1": "Main & 1",
+            "address_line2": null,
+            "city": "Tallinn",
+            "state": null,
+            "postal_code": "10111",
+            "country": "EE",
+            "email": "billing@example.com"
+        });
+        let invoice_id = seed_invoice(
+            &pool,
+            &tenant,
+            "2026-000001",
+            "paid",
+            12_200,
+            sample_line_items(),
+            Some(hostile_addr.clone()),
+        )
+        .await;
+        // A Stripe-era row with NULL billing_address and non-array line_items
+        // must still list (audit F05).
+        seed_invoice(
+            &pool,
+            &tenant,
+            "2026/000002<script>",
+            "open",
+            100,
+            json!({"not": "an array"}),
+            None,
+        )
+        .await;
+        let (other, _other_key) = tenant_with_key(&pool, "advinv", &["billing:read"]).await;
+        seed_invoice(
+            &pool,
+            &other,
+            "2026-999999",
+            "paid",
+            999_999,
+            sample_line_items(),
+            Some(hostile_addr),
+        )
+        .await;
+
+        // Default listing: own tenant only, camelCase DTO, both rows decode.
+        let (status, body) = get(&env, "/v1/billing/invoices").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["totalCount"], 2);
+        assert_eq!(body["data"]["limit"], 50);
+        assert_eq!(body["data"]["offset"], 0);
+        let invoices = body["data"]["invoices"].as_array().unwrap();
+        assert_eq!(invoices.len(), 2);
+        assert!(
+            !invoices
+                .iter()
+                .any(|invoice| invoice["invoiceNumber"] == "2026-999999"),
+            "cross-tenant invoice leaked"
+        );
+        let paid = invoices
+            .iter()
+            .find(|invoice| invoice["invoiceNumber"] == "2026-000001")
+            .unwrap();
+        assert_eq!(paid["total"], 12_200);
+        assert_eq!(paid["currency"], "USD");
+        assert_eq!(paid["lineItems"][0]["description"], "Pro plan");
+        // NULL billing_address decodes to the empty address, never a 500.
+        assert_eq!(
+            paid["billingAddress"]["companyName"],
+            "Acme <script>alert(1)</script> & Co"
+        );
+
+        // Pagination clamps: 0/negative limit -> 1, huge -> 200, negative
+        // offset -> 0; offset past the end -> empty page, same total.
+        for (query, expected_limit, expected_offset, expected_rows) in [
+            ("?limit=0", 1, 0, 1),
+            ("?limit=-5", 1, 0, 1),
+            ("?limit=100000", 200, 0, 2),
+            ("?offset=-3", 50, 0, 2),
+            ("?offset=100000", 50, 100000, 0),
+        ] {
+            let (status, body) = get(&env, &format!("/v1/billing/invoices{query}")).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            assert_eq!(body["data"]["limit"], expected_limit, "{query}");
+            assert_eq!(body["data"]["offset"], expected_offset, "{query}");
+            assert_eq!(
+                body["data"]["invoices"].as_array().unwrap().len(),
+                expected_rows,
+                "{query}: {body}"
+            );
+        }
+        // Unknown query field is refused.
+        let (status, _) = get(&env, "/v1/billing/invoices?cursor=abc").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Detail by id: found; other tenant's id -> 404; garbage id -> 404.
+        let (status, body) = get(&env, &format!("/v1/billing/invoices/{invoice_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["id"], invoice_id.to_string());
+        assert_eq!(body["data"]["invoiceNumber"], "2026-000001");
+        let leaked: uuid::Uuid =
+            sqlx::query_scalar("SELECT id FROM invoices WHERE invoice_number = '2026-999999'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let (status, _) = get(&env, &format!("/v1/billing/invoices/{leaked}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get(&env, "/v1/billing/invoices/not-a-uuid").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // HTML document: escaped, self-contained CSP, no scripts.
+        let (status, headers, bytes) =
+            get_raw(&env, &format!("/v1/billing/invoices/{invoice_id}/pdf")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        let csp = headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.starts_with("default-src 'none'"));
+        assert!(csp.contains("style-src 'nonce-"));
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(html.contains("Invoice 2026-000001"));
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "stored XSS must be escaped in the invoice document"
+        );
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("<style nonce=\""));
+        assert!(!html.contains("<script"));
+        let (status, _, _) = get_raw(&env, &format!("/v1/billing/invoices/{leaked}/pdf")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // XML e-invoice: correct content type, sanitized attachment filename,
+        // escaped buyer fields and a real paid/payable split.
+        let (status, headers, bytes) =
+            get_raw(&env, &format!("/v1/billing/invoices/{invoice_id}/xml")).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            headers[header::CONTENT_TYPE].to_str().unwrap(),
+            "application/xml"
+        );
+        assert_eq!(
+            headers[header::CONTENT_DISPOSITION].to_str().unwrap(),
+            "attachment; filename=\"invoice-2026-000001.xml\""
+        );
+        let xml = String::from_utf8_lossy(&bytes);
+        assert!(xml.contains("<Name>Acme &lt;script&gt;alert(1)&lt;/script&gt; &amp; Co</Name>"));
+        assert!(xml.contains("<PaidAmount>122.00</PaidAmount>"));
+        assert!(xml.contains("<PayableAmount>0.00</PayableAmount>"));
+
+        // A hostile invoice number cannot break out of the filename header
+        // (safe_invoice_filename strips everything but [A-Za-z0-9._-]).
+        let hostile_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM invoices WHERE tenant_id = $1 AND invoice_number LIKE '2026/000002%'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (status, headers, _) =
+            get_raw(&env, &format!("/v1/billing/invoices/{hostile_id}/xml")).await;
+        assert_eq!(status, StatusCode::OK);
+        let disposition = headers[header::CONTENT_DISPOSITION].to_str().unwrap();
+        assert!(
+            disposition.contains("2026000002script"),
+            "filename must be sanitized: {disposition}"
+        );
+        assert!(!disposition.contains('\r') && !disposition.contains('\n'));
+
+        let (status, _, _) = get_raw(&env, &format!("/v1/billing/invoices/{leaked}/xml")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    // ── Stripe checkout / portal (against a local mock) ─────────
+
+    /// Serialises tests that mutate Stripe process env vars.
+    static STRIPE_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Held across awaits on purpose (serialises Stripe env mutation for the
+    /// duration of the request) — async-aware so the guard is legitimate.
+    async fn lock_stripe_env() -> tokio::sync::MutexGuard<'static, ()> {
+        STRIPE_ENV_MUTEX.lock().await
+    }
+
+    /// RAII restore for one env var.
+    struct EnvRestore {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var_os(key);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct MockStripeState {
+        customer_calls: usize,
+        checkout_calls: usize,
+        portal_calls: usize,
+        observed: Vec<serde_json::Value>,
+        checkout_without_url: bool,
+        fail_checkout: bool,
+    }
+
+    type MockStripe = Arc<std::sync::Mutex<MockStripeState>>;
+
+    fn record_call(state: &MockStripe, kind: &str, headers: &HeaderMap) {
+        let observed = json!({
+            "kind": kind,
+            "authorization": headers.get("authorization").and_then(|v| v.to_str().ok()),
+            "idempotencyKey": headers.get("idempotency-key").and_then(|v| v.to_str().ok()),
+            "stripeVersion": headers.get("stripe-version").and_then(|v| v.to_str().ok()),
+        });
+        state.lock().unwrap().observed.push(observed);
+    }
+
+    async fn mock_create_customer(
+        State(state): State<MockStripe>,
+        headers: HeaderMap,
+    ) -> axum::Json<serde_json::Value> {
+        record_call(&state, "customers", &headers);
+        let mut guard = state.lock().unwrap();
+        guard.customer_calls += 1;
+        let id = format!("cus_mock_{}", guard.customer_calls);
+        drop(guard);
+        axum::Json(json!({ "id": id }))
+    }
+
+    async fn mock_checkout_session(
+        State(state): State<MockStripe>,
+        headers: HeaderMap,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        record_call(&state, "checkout", &headers);
+        let mut guard = state.lock().unwrap();
+        guard.checkout_calls += 1;
+        let fail = guard.fail_checkout;
+        let no_url = guard.checkout_without_url;
+        drop(guard);
+        if fail {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "stripe exploded").into_response();
+        }
+        if no_url {
+            return axum::Json(json!({ "id": "cs_mock_no_url" })).into_response();
+        }
+        axum::Json(json!({
+            "id": "cs_mock_1",
+            "url": "https://checkout.stripe.com/pay/cs_mock_1",
+        }))
+        .into_response()
+    }
+
+    async fn mock_portal_session(
+        State(state): State<MockStripe>,
+        headers: HeaderMap,
+    ) -> axum::Json<serde_json::Value> {
+        record_call(&state, "portal", &headers);
+        state.lock().unwrap().portal_calls += 1;
+        axum::Json(json!({ "url": "https://billing.stripe.com/p/session_mock" }))
+    }
+
+    async fn start_mock_stripe() -> (String, MockStripe) {
+        let state: MockStripe = Arc::new(std::sync::Mutex::new(MockStripeState::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let mock = Router::new()
+            .route("/v1/customers", post(mock_create_customer))
+            .route("/v1/checkout/sessions", post(mock_checkout_session))
+            .route("/v1/billing_portal/sessions", post(mock_portal_session))
+            .with_state(state.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock).await;
+        });
+        (base_url, state)
+    }
+
+    async fn set_billing_email(pool: &PgPool, tenant: &str, settings: serde_json::Value) {
+        sqlx::query("UPDATE tenants SET settings = $2 WHERE id = $1")
+            .bind(tenant)
+            .bind(settings)
+            .execute(pool)
+            .await
+            .expect("set tenant settings");
+    }
+
+    async fn seed_checkout_plan(pool: &PgPool, name: &str) {
+        seed_plan(
+            pool,
+            name,
+            4900,
+            49000,
+            50_000,
+            100_000,
+            &tenant_features(),
+            Some("price_ck_m"),
+            Some("price_ck_y"),
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adversarial_checkout_validation_without_stripe_credentials() {
+        let Some(pool) = pool_for("checkout_validation").await else {
+            return;
+        };
+        let _guard = lock_stripe_env().await;
+        let _key = EnvRestore::set("STRIPE_SECRET_KEY", None);
+        let _allow = EnvRestore::set("STRIPE_ALLOW_TEST_KEY", None);
+        seed_checkout_plan(&pool, "pro").await;
+        let (tenant, read_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
+        set_billing_email(&pool, &tenant, json!({"billingEmail": "billing@acme.test"})).await;
+        let write_key = seed_key(&pool, &tenant, &["billing:write"]).await;
+        let env = env_for(pool.clone(), write_key).await;
+
+        let valid_url = "https://app.apexmail.ee/billing/complete";
+        let checkout_body = |price: &str, success: &str, cancel: &str| {
+            json!({"priceId": price, "successUrl": success, "cancelUrl": cancel}).to_string()
+        };
+
+        // Missing billing:write scope.
+        let (status, body) = post_json_with_key(
+            &env,
+            "/v1/billing/checkout",
+            &read_key,
+            &checkout_body("price_ck_m", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Price id shape: empty, oversized, and not-in-catalog.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/checkout",
+            &checkout_body("", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let oversized = "p".repeat(129);
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/checkout",
+            &checkout_body(&oversized, valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        // Exactly 128 chars passes the length gate but must still be in the
+        // active catalog (never forwarded to Stripe).
+        let max_len = format!("price_{}", "x".repeat(122));
+        assert_eq!(max_len.len(), 128);
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/checkout",
+            &checkout_body(&max_len, valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["message"], "Unsupported priceId");
+        // A price belonging to an INACTIVE plan is not purchasable.
+        seed_plan(
+            &pool,
+            "advckold",
+            100,
+            1000,
+            10,
+            10,
+            &tenant_features(),
+            Some("price_ck_old"),
+            None,
+            false,
+        )
+        .await;
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/checkout",
+            &checkout_body("price_ck_old", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["message"], "Unsupported priceId");
+
+        // Redirect URLs are pinned to the apexmail.ee domain.
+        for (success, cancel) in [
+            ("https://evil.example.com/steal", valid_url),
+            ("https://evil-apexmail.ee/x", valid_url),
+            (valid_url, "javascript:alert(1)"),
+            (valid_url, "https://app.apexmail.ee.evil.com/"),
+        ] {
+            let (status, body) = post_json(
+                &env,
+                "/v1/billing/checkout",
+                &checkout_body("price_ck_m", success, cancel),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{success} / {cancel}: {body}"
+            );
+        }
+
+        // Happy metadata but Stripe is not configured: fail closed with the
+        // generic operation-failed body and NO stripe customer row.
+        let (status, body) = post_json(
+            &env,
+            "/v1/billing/checkout",
+            &checkout_body("price_ck_m", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        // The request-logger middleware normalizes the legacy raw body into
+        // the standard error envelope; the message is preserved.
+        assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
+        assert_eq!(body["error"]["message"], "Operation failed");
+        let customers: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM stripe_customers WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(customers, 0);
+
+        // Tenant without any billing email: refused before Stripe.
+        let (_no_email_tenant, no_email_key) =
+            tenant_with_key(&pool, "pro", &["billing:write"]).await;
+        let no_email = env_for(pool.clone(), no_email_key).await;
+        let (status, _) = post_json(
+            &no_email,
+            "/v1/billing/checkout",
+            &checkout_body("price_ck_m", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // defaultFromEmail is the documented fallback.
+        let (fallback_tenant, fallback_key) =
+            tenant_with_key(&pool, "pro", &["billing:write"]).await;
+        set_billing_email(
+            &pool,
+            &fallback_tenant,
+            json!({"defaultFromEmail": "fallback@acme.test"}),
+        )
+        .await;
+        let fallback = env_for(pool.clone(), fallback_key).await;
+        let (status, _) = post_json(
+            &fallback,
+            "/v1/billing/checkout",
+            &checkout_body("price_ck_m", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "still Stripe-unconfigured, but the email fallback must be reached first"
+        );
+
+        // The `system` sentinel has no tenants row: Tenant-not-found arm.
+        let platform = admin_key(&pool).await;
+        let (status, _) = post_json_with_key(
+            &env,
+            "/v1/billing/checkout",
+            &platform,
+            &checkout_body("price_ck_m", valid_url, valid_url),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn adversarial_checkout_and_portal_against_stripe_mock() {
+        let Some(pool) = pool_for("checkout_mock").await else {
+            return;
+        };
+        let _guard = lock_stripe_env().await;
+        let (base_url, mock) = start_mock_stripe().await;
+        let _key = EnvRestore::set("STRIPE_SECRET_KEY", Some("sk_test_mock"));
+        let _allow = EnvRestore::set("STRIPE_ALLOW_TEST_KEY", Some("true"));
+        let _base = EnvRestore::set("STRIPE_API_BASE_URL", Some(&base_url));
+
+        seed_checkout_plan(&pool, "pro").await;
+        let (tenant, write_key) = tenant_with_key(&pool, "pro", &["billing:write"]).await;
+        set_billing_email(&pool, &tenant, json!({"billingEmail": "billing@acme.test"})).await;
+        let env = env_for(pool.clone(), write_key).await;
+        let valid_url = "https://app.apexmail.ee/billing/complete";
+        let body =
+            json!({"priceId": "price_ck_m", "successUrl": valid_url, "cancelUrl": valid_url})
+                .to_string();
+
+        // First checkout: creates the customer then the session.
+        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{body_resp} observed={:?}",
+            mock.lock().unwrap().observed
+        );
+        assert_eq!(body_resp["data"]["sessionId"], "cs_mock_1");
+        assert_eq!(
+            body_resp["data"]["url"],
+            "https://checkout.stripe.com/pay/cs_mock_1"
+        );
+        let (customer_id, name, email): (String, String, String) = sqlx::query_as(
+            "SELECT stripe_customer_id, name, email FROM stripe_customers WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(customer_id, "cus_mock_1");
+        assert_eq!(name, "adversarial billing");
+        assert_eq!(email, "billing@acme.test");
+        {
+            let state = mock.lock().unwrap();
+            assert_eq!(state.customer_calls, 1);
+            assert_eq!(state.checkout_calls, 1);
+            let create = state
+                .observed
+                .iter()
+                .find(|call| call["kind"] == "customers")
+                .unwrap();
+            assert_eq!(
+                create["idempotencyKey"],
+                format!("customer_create_{tenant}")
+            );
+            assert!(
+                create["authorization"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("Bearer "),
+                "Stripe call must be authenticated: {create}"
+            );
+            assert_eq!(create["stripeVersion"], DEFAULT_STRIPE_API_VERSION);
+            let checkout = state
+                .observed
+                .iter()
+                .find(|call| call["kind"] == "checkout")
+                .unwrap();
+            assert_eq!(
+                checkout["idempotencyKey"],
+                format!("checkout_{tenant}_pro_price_ck_m"),
+                "deterministic dedupe key"
+            );
+        }
+
+        // Retry: the SAME customer is reused, never recreated.
+        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
+        assert_eq!(status, StatusCode::OK, "{body_resp}");
+        assert_eq!(mock.lock().unwrap().customer_calls, 1);
+        assert_eq!(mock.lock().unwrap().checkout_calls, 2);
+
+        // Stripe session without a URL: fail closed, no fake redirect.
+        mock.lock().unwrap().checkout_without_url = true;
+        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
+        mock.lock().unwrap().checkout_without_url = false;
+
+        // Stripe 5xx: fail closed with the generic body.
+        mock.lock().unwrap().fail_checkout = true;
+        let (status, body_resp) = post_json(&env, "/v1/billing/checkout", &body).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
+        mock.lock().unwrap().fail_checkout = false;
+
+        // A test-mode key without the explicit opt-in must not drive
+        // checkout (the scope restores the opt-in on exit).
+        {
+            let _opt_out = EnvRestore::set("STRIPE_ALLOW_TEST_KEY", None);
+            let (status, _) = post_json(&env, "/v1/billing/checkout", &body).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        // Portal: an existing Stripe customer is required.
+        let (portal_tenant, portal_key) = tenant_with_key(&pool, "pro", &["billing:read"]).await;
+        let portal = env_for(pool.clone(), portal_key).await;
+        let portal_body = json!({"returnUrl": valid_url}).to_string();
+        let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body_resp}");
+
+        // Bad return URL is rejected before any Stripe call.
+        let (status, _) = post_json(
+            &env,
+            "/v1/billing/portal",
+            &json!({"returnUrl": "https://evil.example.com/"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // With a customer row the portal session is created.
+        sqlx::query(
+            "INSERT INTO stripe_customers (id, tenant_id, stripe_customer_id, created_at)
+             VALUES (gen_random_uuid(), $1, 'cus_portal', NOW())",
+        )
+        .bind(&portal_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, body_resp) = post_json(&portal, "/v1/billing/portal", &portal_body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{body_resp} observed={:?} stripe_key={:?} allow={:?} base={:?}",
+            mock.lock().unwrap().observed,
+            std::env::var("STRIPE_SECRET_KEY").ok(),
+            std::env::var("STRIPE_ALLOW_TEST_KEY").ok(),
+            std::env::var("STRIPE_API_BASE_URL").ok(),
+        );
+        assert_eq!(
+            body_resp["data"]["url"],
+            "https://billing.stripe.com/p/session_mock"
+        );
+        assert_eq!(mock.lock().unwrap().portal_calls, 1);
+    }
+
+    // ── proration preview ───────────────────────────────────────
+
+    async fn seed_subscription(
+        pool: &PgPool,
+        tenant: &str,
+        plan: &str,
+        interval: &str,
+        start_days_ago: i64,
+        period_days: i64,
+        status: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+             (id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+              status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
+              cancel_at_period_end, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, 'cus_x', 'price_x', $3, $4, $5,
+                     NOW() - make_interval(days => $6::int), NOW() + make_interval(days => $7::int),
+                     false, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!(
+            "sub_{}_{}_{}",
+            plan,
+            interval,
+            uuid::Uuid::new_v4().simple()
+        ))
+        .bind(status)
+        .bind(plan)
+        .bind(interval)
+        .bind(start_days_ago as i32)
+        .bind((period_days - start_days_ago) as i32)
+        .execute(pool)
+        .await
+        .expect("seed subscription");
+    }
+
+    #[tokio::test]
+    async fn adversarial_proration_preview() {
+        let Some(pool) = pool_for("proration").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advstarter",
+            1000,
+            12000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        seed_plan(
+            &pool,
+            "advpro2",
+            5000,
+            60000,
+            5000,
+            5000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        seed_plan(
+            &pool,
+            "advmax",
+            10_000_000,
+            120_000_000,
+            1,
+            1,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, key) = tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
+        let env = env_for(pool.clone(), key).await;
+
+        // No subscription -> deterministic 400, not a fabricated preview.
+        let (status, body) = get(&env, "/v1/billing/proration/advpro2").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("subscription status is unknown"),
+            "{body}"
+        );
+
+        // Unknown target plan -> 404.
+        seed_subscription(&pool, &tenant, "advstarter", "monthly", 10, 30, "active").await;
+        let (status, body) = get(&env, "/v1/billing/proration/ghost").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // 30-day period, 10 elapsed -> 20 remaining:
+        // credit = 1000 * 20/30 = 666.67 -> 667; charge = 5000 * 20/30 =
+        // 3333.33 -> 3333; net = 2666.
+        let (status, body) = get(&env, "/v1/billing/proration/advpro2").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["creditAmount"], 667, "{body}");
+        assert_eq!(data["chargeAmount"], 3333, "{body}");
+        assert_eq!(data["netAmount"], 2666, "{body}");
+        assert_eq!(data["currentPlanDaysRemaining"], 20);
+        assert_eq!(data["newPlanDaysInPeriod"], 20);
+        assert!(data["explanation"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("advstarter"));
+        assert!(data["effectiveDate"].is_string(), "{body}");
+
+        // Yearly pricing uses price_yearly for both sides.
+        let (yearly_tenant, yearly_key) =
+            tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
+        seed_subscription(
+            &pool,
+            &yearly_tenant,
+            "advstarter",
+            "yearly",
+            10,
+            30,
+            "active",
+        )
+        .await;
+        let yearly = env_for(pool.clone(), yearly_key).await;
+        let (status, body) = get(&yearly, "/v1/billing/proration/advpro2").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        // 12000 * 20/30 = 8000; 60000 * 20/30 = 40000; net 32000.
+        assert_eq!(data["creditAmount"], 8000, "{body}");
+        assert_eq!(data["chargeAmount"], 40000, "{body}");
+        assert_eq!(data["netAmount"], 32000, "{body}");
+
+        // Above the configured maximum charge: refused, not silently quoted.
+        let (max_tenant, max_key) = tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
+        seed_subscription(
+            &pool,
+            &max_tenant,
+            "advstarter",
+            "monthly",
+            10,
+            30,
+            "active",
+        )
+        .await;
+        let max_env = env_for(pool.clone(), max_key).await;
+        let (status, body) = get(&max_env, "/v1/billing/proration/advmax").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("exceeds maximum allowed"),
+            "{body}"
+        );
+
+        // A canceled subscription is not a base for proration.
+        let (canceled_tenant, canceled_key) =
+            tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
+        seed_subscription(
+            &pool,
+            &canceled_tenant,
+            "advstarter",
+            "monthly",
+            10,
+            30,
+            "canceled",
+        )
+        .await;
+        let canceled = env_for(pool.clone(), canceled_key).await;
+        let (status, _) = get(&canceled, "/v1/billing/proration/advpro2").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Legacy `subscriptions` table is the documented fallback when the
+        // live stripe_subscriptions row is absent.
+        let (legacy_tenant, legacy_key) =
+            tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
+        sqlx::query(
+            "INSERT INTO subscriptions (id, tenant_id, plan_name, status, billing_interval,
+                                        current_period_start, current_period_end, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, 'advstarter', 'active', 'monthly',
+                     NOW() - INTERVAL '10 days', NOW() + INTERVAL '20 days', NOW(), NOW())",
+        )
+        .bind(&legacy_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let legacy = env_for(pool.clone(), legacy_key).await;
+        let (status, body) = get(&legacy, "/v1/billing/proration/advpro2").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["netAmount"], 2666);
+    }
+    // ── admin tenant list / details ─────────────────────────────
+
+    async fn seed_admin_subscription(pool: &PgPool, tenant: &str, plan: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+             (id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
+              status, plan, billing_interval, billing_cycle_start, billing_cycle_end,
+              cancel_at_period_end, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, 'cus_admin', 'price_admin', $3, $4, 'monthly',
+                     NOW() - INTERVAL '5 days', NOW() + INTERVAL '25 days', false, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!("sub_admin_{}", uuid::Uuid::new_v4().simple()))
+        .bind(status)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed admin subscription");
+    }
+
+    #[tokio::test]
+    async fn adversarial_admin_tenant_list_and_details() {
+        let Some(pool) = pool_for("admin_tenants").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advadmin",
+            1000,
+            10000,
+            1111,
+            2222,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (active_tenant, _active_key) =
+            tenant_with_key(&pool, "advadmin", &["billing:read"]).await;
+        let (past_due_tenant, _pd_key) =
+            tenant_with_key(&pool, "advadmin", &["billing:read"]).await;
+        seed_admin_subscription(&pool, &active_tenant, "advadmin", "active").await;
+        seed_admin_subscription(&pool, &past_due_tenant, "advadmin", "past_due").await;
+        // Wallet + dunning + one invoice for the active tenant.
+        sqlx::query(
+            "INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+             VALUES ($1, 4200, 200, 'EUR', NOW(), NOW())",
+        )
+        .bind(&active_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count, first_failed_at, last_failed_at, next_retry_at)
+             VALUES ($1, $2, 'retrying', 2, NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day', NOW() + INTERVAL '1 day')",
+        )
+        .bind(unique_id())
+        .bind(&active_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_invoice(
+            &pool,
+            &active_tenant,
+            "2026-ADM-1",
+            "paid",
+            12200,
+            sample_line_items(),
+            None,
+        )
+        .await;
+
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+
+        // List with pagination clamps and status filter.
+        let (status, body) = get(&env, "/v1/billing/admin/tenants").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["tenants"].as_array().unwrap().len() >= 2);
+        assert_eq!(body["data"]["limit"], 50);
+        let (status, body) = get(&env, "/v1/billing/admin/tenants?status=past_due").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let filtered = body["data"]["tenants"].as_array().unwrap();
+        assert!(filtered
+            .iter()
+            .all(|tenant| tenant["subscription_status"] == "past_due"));
+        assert!(filtered
+            .iter()
+            .any(|tenant| tenant["id"] == past_due_tenant));
+        // An unknown status is discarded (no 400), not injected into SQL.
+        let (status, body) = get(
+            &env,
+            "/v1/billing/admin/tenants?status=bogus%27%20OR%201%3D1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["data"]["tenants"].as_array().unwrap().len() >= 2);
+        for (query, expected_limit, expected_offset) in [
+            ("?limit=0", 1, 0),
+            ("?limit=-3", 1, 0),
+            ("?limit=999999", 200, 0),
+            ("?offset=-1", 50, 0),
+        ] {
+            let (status, body) = get(&env, &format!("/v1/billing/admin/tenants{query}")).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            assert_eq!(body["data"]["limit"], expected_limit, "{query}");
+            assert_eq!(body["data"]["offset"], expected_offset, "{query}");
+        }
+
+        // Details: subscription, plan, dunning, wallet and invoice rollup.
+        let (status, body) = get(&env, &format!("/v1/billing/admin/tenants/{active_tenant}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["tenantId"], active_tenant);
+        assert_eq!(body["data"]["subscription"]["status"], "active");
+        assert_eq!(body["data"]["plan"]["emailLimit"], 1111);
+        assert_eq!(body["data"]["dunning"]["status"], "retrying");
+        assert_eq!(body["data"]["dunning"]["failedPaymentCount"], 2);
+        assert_eq!(body["data"]["wallet"]["balance"], 4200);
+        assert_eq!(body["data"]["wallet"]["availableBalance"], 4000);
+        assert_eq!(body["data"]["recentInvoices"]["totalCount"], 1);
+
+        // Wallet is created on demand for tenants that have none.
+        let (status, body) = get(
+            &env,
+            &format!("/v1/billing/admin/tenants/{past_due_tenant}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["wallet"]["balance"], 0);
+        assert!(body["data"]["dunning"].is_null());
+        let wallet_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM wallets WHERE tenant_id = $1)")
+                .bind(&past_due_tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            wallet_exists,
+            "details view must persist the default wallet"
+        );
+
+        // `billing:admin` alone grants access to every tenant
+        // (`has_tenant_access` accepts it), as does an explicit tenant scope
+        // — while a non-admin scope is still refused by the first gate.
+        let scoped_admin = seed_key(&pool, "system", &["billing:admin"]).await;
+        let (status, body) = get_with_key(
+            &env,
+            &format!("/v1/billing/admin/tenants/{active_tenant}"),
+            &scoped_admin,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let tenant_scoped = seed_key(&pool, "system", &[&format!("tenant:{active_tenant}")]).await;
+        let (status, _) = get_with_key(
+            &env,
+            &format!("/v1/billing/admin/tenants/{active_tenant}"),
+            &tenant_scoped,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let any_scope = seed_key(&pool, "system", &["billing:read"]).await;
+        let (status, _) = get_with_key(
+            &env,
+            &format!("/v1/billing/admin/tenants/{active_tenant}"),
+            &any_scope,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ── admin wallet credits: idempotency + currency guard ──────
+
+    async fn redis_del(key: &str) {
+        let Ok(url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        if url.trim().is_empty() {
+            return;
+        }
+        let pool = deadpool_redis::Config::from_url(&url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let mut conn = pool.get().await.expect("redis connection");
+        let _: () = deadpool_redis::redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .expect("redis DEL");
+    }
+
+    async fn post_credit(
+        env: &Env,
+        tenant: &str,
+        key: Option<&str>,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::post(format!("/v1/billing/admin/tenants/{tenant}/credits"))
+            .header("x-api-key", &env.key)
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            builder = builder.header("idempotency-key", key);
+        }
+        send(env, builder.body(Body::from(body.to_string())).unwrap()).await
+    }
+
+    #[tokio::test]
+    async fn adversarial_admin_credit_idempotency_and_currency_guard() {
+        let Some(pool) = pool_for("admin_credits").await else {
+            return;
+        };
+        // Credits hard-require Redis for the idempotency claim.
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        if redis_url.trim().is_empty() {
+            return;
+        }
+        seed_plan(
+            &pool,
+            "advcredit",
+            1000,
+            10000,
+            1000,
+            1000,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, _key) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+
+        // Customer keys never reach the money-minting endpoint.
+        let (customer_tenant, customer_key) = tenant_with_key(&pool, "advcredit", &["*"]).await;
+        let customer = env_for(pool.clone(), customer_key).await;
+        let (status, _) = post_credit(
+            &customer,
+            &tenant,
+            Some("k1"),
+            json!({"amount": 100, "reason": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let _ = customer_tenant;
+
+        // Amount must be strictly positive (unique keys: the idempotency
+        // middleware binds each key to its first payload).
+        for (label, amount) in [("zero", 0_i64), ("neg", -5), ("min", i64::MIN)] {
+            let (status, body) = post_credit(
+                &env,
+                &tenant,
+                Some(&format!("validate-{label}")),
+                json!({"amount": amount, "reason": "x"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "amount {amount}: {body}");
+        }
+        // Idempotency-Key is REQUIRED and bounded.
+        let (status, body) =
+            post_credit(&env, &tenant, None, json!({"amount": 100, "reason": "x"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Idempotency-Key"));
+        let (status, body) = post_credit(
+            &env,
+            &tenant,
+            Some("   "),
+            json!({"amount": 100, "reason": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let long_key = "k".repeat(256);
+        let (status, body) = post_credit(
+            &env,
+            &tenant,
+            Some(&long_key),
+            json!({"amount": 100, "reason": "x"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        // Exactly 255 characters is accepted.
+        let max_key = "k".repeat(255);
+        let (status, body) = post_credit(
+            &env,
+            &tenant,
+            Some(&max_key),
+            json!({"amount": 100, "reason": "at the boundary"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["data"]["amount"], 100);
+        assert_eq!(body["data"]["balance"], 100);
+        assert_eq!(body["data"]["type"], "credit");
+        assert_eq!(body["data"]["reference"], max_key);
+
+        // Exact replay: the edge idempotency cache returns the stored first
+        // response and the wallet does NOT move twice.
+        let (status, body) = post_credit(
+            &env,
+            &tenant,
+            Some(&max_key),
+            json!({"amount": 100, "reason": "at the boundary"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["data"]["balance"], 100);
+        // Same key with DIFFERENT content is refused (conflicting reuse).
+        let (status, _) = post_credit(
+            &env,
+            &tenant,
+            Some(&max_key),
+            json!({"amount": 999999, "reason": "different body"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        // With the edge cache dropped, the retry reaches the handler's own
+        // fail-closed Redis claim — still 409, still no money movement.
+        // The edge cache is scoped to the AUTHENTICATED principal (the
+        // platform admin's "system" tenant), not the path tenant.
+        let route = format!("/v1/billing/admin/tenants/{tenant}/credits");
+        redis_del(&format!(
+            "apexmail:idempotency:system:POST:{route}:{max_key}"
+        ))
+        .await;
+        let (status, body) = post_credit(
+            &env,
+            &tenant,
+            Some(&max_key),
+            json!({"amount": 100, "reason": "at the boundary"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already been used"));
+        let (balance, transactions): (i64, i64) = sqlx::query_as(
+            "SELECT w.balance,
+                    (SELECT COUNT(*) FROM wallet_transactions t WHERE t.tenant_id = $1)
+             FROM wallets w WHERE w.tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(balance, 100, "rejected replay must not move money");
+        assert_eq!(transactions, 1);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'wallet.credit'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 1, "exactly one audit entry for one credited key");
+
+        // A fresh key credits again; reasons are stored verbatim.
+        let (status, body) = post_credit(
+            &env,
+            &tenant,
+            Some("second-key"),
+            json!({"amount": 50, "reason": "goodwill <script> & 100% 'refund'"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["data"]["balance"], 150);
+        assert!(body["data"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("<script>"));
+
+        // The same key against ANOTHER tenant collides on the durable
+        // ledger's global unique reference (`uq_wallet_transactions_reference`).
+        // The handler now REFUSES it as a conflict with a message naming the
+        // reason, instead of letting the unique violation surface as a 500
+        // (fixed 2026-09-13 — a 500 lied about both the cause and the
+        // retryability), and the loser tenant's wallet stays untouched.
+        let (other_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        let (status, body) = post_credit(
+            &env,
+            &other_tenant,
+            Some(&max_key),
+            json!({"amount": 7, "reason": "same key, other tenant"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body.to_string().contains("another tenant"),
+            "the refusal must name the cross-tenant cause: {body}"
+        );
+        let other_state: (Option<i64>, i64) = sqlx::query_as(
+            "SELECT (SELECT balance FROM wallets WHERE tenant_id = $1),
+                    (SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1)",
+        )
+        .bind(&other_tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            other_state,
+            (None, 0),
+            "failed cross-tenant credit must leave no wallet or ledger row"
+        );
+
+        // Concurrent duplicate requests for one key: exactly one winner,
+        // and the wallet is credited exactly once.
+        let (race_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        let race_payload = json!({"amount": 33, "reason": "race"}).to_string();
+        let race_request = |env: &Env| {
+            Request::post(format!("/v1/billing/admin/tenants/{race_tenant}/credits"))
+                .header("x-api-key", &env.key)
+                .header("content-type", "application/json")
+                .header("idempotency-key", "race-key")
+                .body(Body::from(race_payload.clone()))
+                .unwrap()
+        };
+        let (first, second) = futures::join!(
+            env.app.clone().oneshot(race_request(&env)),
+            env.app.clone().oneshot(race_request(&env))
+        );
+        let race_statuses = [first.unwrap().status(), second.unwrap().status()];
+        assert_eq!(
+            race_statuses
+                .iter()
+                .filter(|status| **status == StatusCode::CREATED)
+                .count(),
+            1,
+            "exactly one concurrent credit may win: {race_statuses:?}"
+        );
+        let (race_balance, race_transactions): (i64, i64) = sqlx::query_as(
+            "SELECT w.balance,
+                    (SELECT COUNT(*) FROM wallet_transactions t WHERE t.tenant_id = $1)
+             FROM wallets w WHERE w.tenant_id = $1",
+        )
+        .bind(&race_tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(race_balance, 33);
+        assert_eq!(race_transactions, 1);
+
+        // Currency guard: a wallet in a different currency than the tenant's
+        // billing currency refuses the credit (phantom-money prevention).
+        let (mismatch_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        sqlx::query(
+            "INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+             VALUES ($1, 0, 0, 'USD', NOW(), NOW())",
+        )
+        .bind(&mismatch_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, body) = post_credit(
+            &env,
+            &mismatch_tenant,
+            Some("currency-key"),
+            json!({"amount": 10_000, "reason": "refund"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("does not match"),
+            "{body}"
+        );
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(&mismatch_tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(balance, 0, "refused credit must not move the balance");
+
+        // An explicit matching billingCurrency (any case) is accepted…
+        let (usd_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        set_billing_email(&pool, &usd_tenant, json!({"billingCurrency": "usd"})).await;
+        sqlx::query(
+            "INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+             VALUES ($1, 0, 0, 'USD', NOW(), NOW())",
+        )
+        .bind(&usd_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, _) = post_credit(
+            &env,
+            &usd_tenant,
+            Some("usd-key"),
+            json!({"amount": 25, "reason": "ok"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // …while an invalid currency code falls back to EUR and mismatches.
+        let (bad_ccy_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        set_billing_email(&pool, &bad_ccy_tenant, json!({"billingCurrency": "US"})).await;
+        sqlx::query(
+            "INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+             VALUES ($1, 0, 0, 'USD', NOW(), NOW())",
+        )
+        .bind(&bad_ccy_tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (status, _) = post_credit(
+            &env,
+            &bad_ccy_tenant,
+            Some("bad-ccy-key"),
+            json!({"amount": 25, "reason": "ok"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        // Overflow-sized credit: the DB refuses; state stays consistent.
+        let (max_tenant, _) = tenant_with_key(&pool, "advcredit", &["billing:read"]).await;
+        let (status, body) = post_credit(
+            &env,
+            &max_tenant,
+            Some("max-key"),
+            json!({"amount": i64::MAX, "reason": "max"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, _) = post_credit(
+            &env,
+            &max_tenant,
+            Some("max-key-2"),
+            json!({"amount": 1, "reason": "overflow"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let balance: i64 = sqlx::query_scalar("SELECT balance FROM wallets WHERE tenant_id = $1")
+            .bind(&max_tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            balance,
+            i64::MAX,
+            "failed overflow must not corrupt balance"
+        );
+
+        // A credit to a tenant that does not exist is refused by the wallet
+        // FK — no orphan wallet or ledger row may be created.
+        let ghost = unique_id();
+        let (status, body) = post_credit(
+            &env,
+            &ghost,
+            Some("ghost-key"),
+            json!({"amount": 5, "reason": "ghost"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        let ghost_rows: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM wallets WHERE tenant_id = $1),
+                    (SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1)",
+        )
+        .bind(&ghost)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ghost_rows, (0, 0));
+    }
+
+    // ── plan override / subscription status / dunning reset ─────
+
+    #[tokio::test]
+    async fn adversarial_admin_plan_override_is_audited_and_effective() {
+        let Some(pool) = pool_for("plan_override").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advbase",
+            1000,
+            10000,
+            100,
+            100,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        seed_plan(
+            &pool,
+            "advboost",
+            9000,
+            90000,
+            7777,
+            8888,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, tenant_key) = tenant_with_key(&pool, "advbase", &["billing:read"]).await;
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+        let customer = env_for(pool.clone(), tenant_key).await;
+
+        let url = format!("/v1/billing/admin/tenants/{tenant}/plan-override");
+        // Required fields.
+        for payload in [
+            json!({"planId": "", "reason": "x"}),
+            json!({"planId": "advboost", "reason": "   "}),
+        ] {
+            let (status, body) = post_json(&env, &url, &payload.to_string()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}: {body}");
+        }
+        // Unknown or inactive plan.
+        let (status, body) = post_json(
+            &env,
+            &url,
+            &json!({"planId": "ghost", "reason": "x"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["message"], "Unknown or inactive planId");
+        // A malformed expiry is REJECTED, never silently "no expiry" (F06).
+        for expiry in ["tomorrow", "2026-13-45", "12/31/2030"] {
+            let (status, body) = post_json(
+                &env,
+                &url,
+                &json!({"planId": "advboost", "reason": "x", "expiresAt": expiry}).to_string(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "expiresAt {expiry:?}: {body}"
+            );
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Invalid expiresAt"));
+        }
+        // Nothing above may have written an override.
+        let overrides: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM plan_overrides WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(overrides, 0, "rejected overrides must not persist");
+
+        // Valid override takes effect for the tenant's own view + entitlements.
+        let (status, body) = post_json(
+            &env,
+            &url,
+            &json!({
+                "planId": "advboost",
+                "reason": "goodwill upgrade <audit>",
+                "expiresAt": "2030-01-01"
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["success"], true);
+        let (status, body) = get(&customer, "/v1/billing/plans/tenant/current").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["emailLimit"], 7777);
+        let (reason, plan): (Option<String>, String) =
+            sqlx::query_as("SELECT reason, plan FROM plan_overrides WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(plan, "advboost");
+        assert_eq!(reason.as_deref(), Some("goodwill upgrade <audit>"));
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_audit_log WHERE tenant_id = $1 AND action = 'plan_override'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 1, "override and audit commit together");
+
+        // Re-applying updates in place (unique tenant upsert).
+        let (status, _) = post_json(
+            &env,
+            &url,
+            &json!({"planId": "advbase", "reason": "reverted"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (rows, plan): (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, COALESCE(MAX(plan), '') FROM plan_overrides WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(plan, "advbase");
+
+        // An override that already expired is not effective.
+        let (status, _) = post_json(
+            &env,
+            &url,
+            &json!({"planId": "advboost", "reason": "expired", "expiresAt": "2020-01-01"})
+                .to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = get(&customer, "/v1/billing/plans/tenant/current").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"]["emailLimit"], 100,
+            "expired override must not change the plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn adversarial_admin_subscription_status_override() {
+        let Some(pool) = pool_for("sub_status").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advstatus",
+            1000,
+            10000,
+            100,
+            100,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, _) = tenant_with_key(&pool, "advstatus", &["billing:read"]).await;
+        let (no_sub_tenant, _) = tenant_with_key(&pool, "advstatus", &["billing:read"]).await;
+        seed_admin_subscription(&pool, &tenant, "advstatus", "active").await;
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+
+        let url = format!("/v1/billing/admin/tenants/{tenant}/subscription-status");
+        // Status vocabulary is closed.
+        for status in [
+            "",
+            "ACTIVE",
+            "deleted",
+            "suspended'; DROP TABLE stripe_subscriptions;--",
+        ] {
+            let (status_code, body) = post_json(
+                &env,
+                &url,
+                &json!({"status": status, "reason": "x"}).to_string(),
+            )
+            .await;
+            assert_eq!(status_code, StatusCode::BAD_REQUEST, "{status:?}: {body}");
+        }
+        // Unknown subscription -> 404, not a silent no-op.
+        let (status, body) = post_json(
+            &env,
+            &format!("/v1/billing/admin/tenants/{no_sub_tenant}/subscription-status"),
+            &json!({"status": "active", "reason": "x"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Valid override updates the row and records the audit fields.
+        let (status, body) = post_json(
+            &env,
+            &url,
+            &json!({"status": "suspended", "reason": "abuse investigation"}).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (row_status, override_by, override_reason): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, admin_override_by, admin_override_reason
+                 FROM stripe_subscriptions WHERE tenant_id = $1",
+            )
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row_status, "suspended");
+        assert_eq!(override_by.as_deref(), Some("system"));
+        assert_eq!(override_reason.as_deref(), Some("abuse investigation"));
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_audit_log WHERE tenant_id = $1 AND action = 'subscription_status_override'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 1);
+    }
+
+    #[tokio::test]
+    async fn adversarial_admin_dunning_reset_is_restriction_aware() {
+        let Some(pool) = pool_for("dunning_reset").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advdun",
+            1000,
+            10000,
+            100,
+            100,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, _) = tenant_with_key(&pool, "advdun", &["billing:read"]).await;
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count, first_failed_at, last_failed_at, next_retry_at)
+             VALUES ($1, $2, 'retrying', 3, NOW() - INTERVAL '3 days', NOW() - INTERVAL '1 day', NOW())",
+        )
+        .bind(unique_id())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+
+        let url = format!("/v1/billing/admin/tenants/{tenant}/dunning/reset");
+        let (status, body) =
+            post_json(&env, &url, &json!({"reason": "paid offline"}).to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["success"], true);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_audit_log WHERE tenant_id = $1 AND action = 'dunning_reset'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audits, 1);
+        // Idempotent second reset is still 200 with a second audit entry.
+        let (status, body) = post_json(&env, &url, &json!({"reason": "again"}).to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // A customer key cannot reset dunning.
+        let (_, customer_key) = tenant_with_key(&pool, "advdun", &["*"]).await;
+        let customer = env_for(pool.clone(), customer_key).await;
+        let (status, _) = post_json(&customer, &url, &json!({"reason": "nope"}).to_string()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ── admin invoice creation ──────────────────────────────────
+
+    async fn seed_billing_address(pool: &PgPool, tenant: &str, country: &str, vat: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO billing_addresses
+             (id, tenant_id, company_name, vat_number, address_line1, address_line2, city, state,
+              postal_code, country, email, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, 'Invoice Buyer <&>', $2, 'Main 1', NULL, 'Tallinn',
+                     NULL, '10111', $3, 'ap@example.com', NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(vat)
+        .bind(country)
+        .execute(pool)
+        .await
+        .expect("seed billing address");
+    }
+
+    #[tokio::test]
+    async fn adversarial_admin_create_invoice_validation_and_concurrency() {
+        let Some(pool) = pool_for("admin_invoice").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advinvadm",
+            1000,
+            10000,
+            100,
+            100,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, _) = tenant_with_key(&pool, "advinvadm", &["billing:read"]).await;
+        seed_billing_address(&pool, &tenant, "EE", Some("EE100591102")).await;
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+        let url = format!("/v1/billing/admin/tenants/{tenant}/invoices");
+        let item = |description: &str, quantity: i64, unit_price: i64| json!({"description": description, "quantity": quantity, "unitPrice": unit_price});
+
+        // Bad periods.
+        for payload in [
+            json!({"periodStart": "nope", "periodEnd": "2026-02-01", "lineItems": []}),
+            json!({"periodStart": "2026-01-01", "periodEnd": "", "lineItems": []}),
+        ] {
+            let (status, body) = post_json(&env, &url, &payload.to_string()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}: {body}");
+        }
+        // Line-item validation: quantity > 0, unit price >= 0, overflow checked.
+        let base = |items: serde_json::Value| {
+            json!({"periodStart": "2026-01-01", "periodEnd": "2026-02-01", "lineItems": items})
+                .to_string()
+        };
+        let (status, body) = post_json(&env, &url, &base(json!([item("x", 0, 100)]))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = post_json(&env, &url, &base(json!([item("x", -1, 100)]))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = post_json(&env, &url, &base(json!([item("x", 1, -1)]))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) =
+            post_json(&env, &url, &base(json!([item("x", i64::MAX, i64::MAX)]))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+
+        // Tenant without a billing address is refused.
+        let (no_addr_tenant, _) = tenant_with_key(&pool, "advinvadm", &["billing:read"]).await;
+        let (status, body) = post_json(
+            &env,
+            &format!("/v1/billing/admin/tenants/{no_addr_tenant}/invoices"),
+            &base(json!([item("Service", 1, 100)])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["message"], "Billing address not found");
+
+        // Unknown tenant -> 404.
+        let (status, body) = post_json(
+            &env,
+            &format!("/v1/billing/admin/tenants/{}/invoices", unique_id()),
+            &base(json!([item("Service", 1, 100)])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Happy path: VAT for an Estonian buyer, snapshot address, notes.
+        let payload = json!({
+            "periodStart": "2026-01-01",
+            "periodEnd": "2026-02-01",
+            "lineItems": [item("Consulting", 2, 5000), item("Support", 1, 1000)],
+            "notes": "Pay within terms <&>"
+        })
+        .to_string();
+        let (status, body) = post_json(&env, &url, &payload).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["subtotal"], 11_000);
+        assert_eq!(data["vatTotal"], 2_640, "24% EE VAT: {body}");
+        assert_eq!(data["total"], 13_640);
+        assert_eq!(data["status"], "draft");
+        assert_eq!(data["currency"], "EUR");
+        assert_eq!(data["billingAddress"]["companyName"], "Invoice Buyer <&>");
+        assert_eq!(data["notes"], "Pay within terms <&>");
+        let invoice_id: uuid::Uuid = data["id"].as_str().unwrap().parse().unwrap();
+        let (db_total, db_number, db_notes): (i64, String, Option<String>) =
+            sqlx::query_as("SELECT total, invoice_number, notes FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(db_total, 13_640);
+        assert!(
+            db_number.starts_with("2026-"),
+            "sequential number: {db_number}"
+        );
+        assert_eq!(db_notes.as_deref(), Some("Pay within terms <&>"));
+        // The stored snapshot round-trips through the API reader (snake_case
+        // writer keys must decode into the camelCase DTO).
+        let (status, listed) = get(&env, "/v1/billing/admin/tenants").await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = listed;
+        let customer_key_seed = seed_key(&pool, &tenant, &["billing:read"]).await;
+        let customer = env_for(pool.clone(), customer_key_seed).await;
+        let (status, detail) = get(&customer, &format!("/v1/billing/invoices/{invoice_id}")).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(
+            detail["data"]["billingAddress"]["companyName"],
+            "Invoice Buyer <&>"
+        );
+
+        // Duplicate period -> 409 with the existing invoice reference.
+        let (status, body) = post_json(&env, &url, &payload).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "Invoice already exists for this period"
+        );
+        let same_period: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoices WHERE tenant_id = $1 AND period_start = '2026-01-01'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(same_period, 1);
+
+        // Concurrent duplicates: the advisory lock makes exactly one win.
+        let payload_race = json!({
+            "periodStart": "2026-03-01",
+            "periodEnd": "2026-04-01",
+            "lineItems": [item("Race", 1, 100)]
+        })
+        .to_string();
+        let first = env.app.clone().oneshot(
+            Request::post(&url)
+                .header("x-api-key", &env.key)
+                .header("content-type", "application/json")
+                .body(Body::from(payload_race.clone()))
+                .unwrap(),
+        );
+        let second = env.app.clone().oneshot(
+            Request::post(&url)
+                .header("x-api-key", &env.key)
+                .header("content-type", "application/json")
+                .body(Body::from(payload_race))
+                .unwrap(),
+        );
+        let (first, second) = futures::join!(first, second);
+        let statuses = [first.unwrap().status(), second.unwrap().status()];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::CREATED)
+                .count(),
+            1,
+            "exactly one concurrent create may win: {statuses:?}"
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::CONFLICT)
+                .count(),
+            1,
+            "the loser must see the conflict: {statuses:?}"
+        );
+        let race_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoices WHERE tenant_id = $1 AND period_start = '2026-03-01'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(race_rows, 1);
+
+        // A foreign buyer with a VAT number but NO VIES evidence is charged
+        // destination VAT: reverse charge requires evidence, never the
+        // number's shape alone (tax-truth).
+        let (fi_tenant, _) = tenant_with_key(&pool, "advinvadm", &["billing:read"]).await;
+        seed_billing_address(&pool, &fi_tenant, "FI", Some("FI12345678")).await;
+        let (status, body) = post_json(
+            &env,
+            &format!("/v1/billing/admin/tenants/{fi_tenant}/invoices"),
+            &base(json!([item("Consulting", 1, 5000)])),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["data"]["vatTotal"], 1275, "FI 25.5% without evidence");
+        assert_eq!(body["data"]["total"], 6275);
+    }
+
+    // ── admin reports and exports ───────────────────────────────
+
+    #[tokio::test]
+    async fn adversarial_admin_reports_and_export() {
+        let Some(pool) = pool_for("admin_reports").await else {
+            return;
+        };
+        seed_plan(
+            &pool,
+            "advrep",
+            1000,
+            12000,
+            100,
+            100,
+            &tenant_features(),
+            None,
+            None,
+            true,
+        )
+        .await;
+        let (tenant, _) = tenant_with_key(&pool, "advrep", &["billing:read"]).await;
+        // One paid invoice in range, one unpaid out of range, one hostile
+        // invoice number for CSV injection.
+        seed_invoice(
+            &pool,
+            &tenant,
+            "2026-R-1",
+            "paid",
+            12_200,
+            sample_line_items(),
+            None,
+        )
+        .await;
+        sqlx::query("UPDATE invoices SET paid_at = NOW() - INTERVAL '2 days' WHERE invoice_number = '2026-R-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_invoice(
+            &pool,
+            &tenant,
+            "=cmd|' /C calc'!A0",
+            "open",
+            500,
+            sample_line_items(),
+            None,
+        )
+        .await;
+        seed_admin_subscription(&pool, &tenant, "advrep", "active").await;
+        sqlx::query(
+            "INSERT INTO wallet_transactions (id, tenant_id, wallet_id, type, amount, balance_after, description, reference, created_at)
+             SELECT gen_random_uuid(), $1, w.id, 'credit', 100, 100, 'test credit', 'ref', NOW()
+             FROM wallets w WHERE w.tenant_id = $1
+             LIMIT 1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
+             VALUES ($1, $2, 'retrying', 1)",
+        )
+        .bind(unique_id())
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tenant_costs (id, tenant_id, recorded_at, storage_cost, bandwidth_cost, compute_cost, dedicated_ip_cost, total_cost, revenue)
+             VALUES (gen_random_uuid(), $1, CURRENT_DATE, 100, 50, 25, 10, 185, 1000)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let admin = admin_key(&pool).await;
+        let env = env_for(pool.clone(), admin).await;
+        let (from, to) = ("2020-01-01", "2030-01-01");
+
+        // Revenue report: dates required and validated; paid invoices bucketed.
+        let (status, _) = get(&env, "/v1/billing/admin/reports/revenue").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = get(
+            &env,
+            "/v1/billing/admin/reports/revenue?startDate=nope&endDate=2030-01-01",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, body) = get(
+            &env,
+            &format!("/v1/billing/admin/reports/revenue?startDate={from}&endDate={to}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let report = body["data"]["report"].as_array().unwrap();
+        let revenue: i64 = report
+            .iter()
+            .map(|row| row["total_revenue"].as_i64().unwrap_or(0))
+            .sum();
+        assert_eq!(revenue, 12_200, "only PAID invoices count: {body}");
+        assert_eq!(report[0]["invoice_count"], 1);
+
+        // MRR / churn / dunning reports are report-only endpoints.
+        let (status, body) = get(&env, "/v1/billing/admin/reports/mrr").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["report"].is_array());
+        let (status, body) = get(&env, "/v1/billing/admin/reports/churn").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"]["report"].is_array());
+        let (status, body) = get(&env, "/v1/billing/admin/reports/dunning").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let dunning = body["data"]["report"].as_array().unwrap();
+        assert!(dunning.iter().any(|row| row["dunning_state"] == "retrying"));
+
+        // Cost report: dates required; margin math over tenant_costs.
+        let (status, _) = get(&env, "/v1/billing/admin/reports/costs").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, body) = get(
+            &env,
+            &format!("/v1/billing/admin/reports/costs?startDate={from}&endDate={to}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let costs = body["data"]["report"].as_array().unwrap();
+        assert_eq!(costs[0]["total_cost"], 185);
+
+        // Export: parameter validation.
+        for uri in [
+            "/v1/billing/admin/export",
+            "/v1/billing/admin/export?type=invoices",
+            "/v1/billing/admin/export?type=bogus&startDate=2020-01-01&endDate=2030-01-01",
+            "/v1/billing/admin/export?type=invoices&startDate=nope&endDate=2030-01-01",
+        ] {
+            let (status, _) = get(&env, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        }
+
+        // JSON export of invoices.
+        let uri = format!(
+            "/v1/billing/admin/export?type=invoices&startDate={from}&endDate={to}&format=json"
+        );
+        let (status, body) = get(&env, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let rows = body["data"].as_array().unwrap();
+        assert!(rows.iter().any(|row| row["invoice_number"] == "2026-R-1"));
+
+        // CSV export neutralises a formula-like invoice number.
+        let uri = format!("/v1/billing/admin/export?type=invoices&startDate={from}&endDate={to}");
+        let (status, headers, bytes) = get_raw(&env, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE].to_str().unwrap(), "text/csv");
+        assert!(headers[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment; filename=\"invoices_2020-01-01_2030-01-01"));
+        let csv = String::from_utf8_lossy(&bytes);
+        let header = csv.lines().next().unwrap_or_default();
+        for column in [
+            "invoice_number",
+            "tenant_id",
+            "tenant_name",
+            "subtotal",
+            "vat_total",
+            "total",
+            "currency",
+            "status",
+            "issued_at",
+            "paid_at",
+            "due_at",
+        ] {
+            assert!(
+                header.contains(column),
+                "CSV header {header:?} missing {column}"
+            );
+        }
+        assert!(
+            csv.contains("'=cmd|' /C calc'!A0"),
+            "formula text must be prefixed: {csv}"
+        );
+
+        // Subscriptions and transactions exports have their own shapes.
+        for (export_type, needle) in [
+            ("subscriptions", "plan_name"),
+            ("transactions", "balance_after"),
+        ] {
+            let uri = format!(
+                "/v1/billing/admin/export?type={export_type}&startDate={from}&endDate={to}&format=json"
+            );
+            let (status, body) = get(&env, &uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+            let rows = body["data"].as_array().unwrap();
+            if !rows.is_empty() {
+                assert!(
+                    rows[0].get(needle).is_some(),
+                    "{uri} row missing {needle}: {body}"
+                );
+            }
+        }
+
+        // A customer key can reach none of it.
+        let (_, customer_key) = tenant_with_key(&pool, "advrep", &["*"]).await;
+        let customer = env_for(pool.clone(), customer_key).await;
+        let (status, _) = get(&customer, "/v1/billing/admin/reports/mrr").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = get_raw(&customer, &uri).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ── pure helpers: every arm, hostile values ─────────────────
+
+    fn sample_dto_for_helpers() -> LegacyInvoiceDto {
+        let issued_at = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 3, 9, 12, 30, 0)
+            .single()
+            .unwrap();
+        LegacyInvoiceDto {
+            id: "inv".into(),
+            tenant_id: "t".into(),
+            stripe_invoice_id: None,
+            invoice_number: "2026-1".into(),
+            status: "open".into(),
+            currency: "EUR".into(),
+            subtotal: 1000,
+            vat_total: 220,
+            total: 1220,
+            line_items: vec![LegacyInvoiceLineItemDto {
+                description: "One".into(),
+                quantity: 1,
+                unit_price: 1000,
+                amount: 1000,
+                vat_rate: 22.0,
+                vat_amount: 220,
+            }],
+            billing_address: empty_billing_address(),
+            issued_at,
+            due_at: issued_at,
+            paid_at: None,
+            period_start: issued_at,
+            period_end: issued_at,
+            purchase_order_number: None,
+            notes: None,
+            pdf_url: None,
+            xml_url: None,
+            created_at: issued_at,
+            updated_at: issued_at,
+        }
+    }
+
+    #[test]
+    fn adversarial_billing_pure_helper_edges() {
+        // truthy_json: every JSON kind, including 0 / empty / null.
+        assert!(truthy_json(&json!(1)));
+        assert!(!truthy_json(&json!(0)));
+        assert!(truthy_json(&json!(1.5)));
+        assert!(!truthy_json(&json!(-0.0)));
+        assert!(truthy_json(&json!("x")));
+        assert!(!truthy_json(&json!("")));
+        assert!(!truthy_json(&serde_json::Value::Null));
+        assert!(truthy_json(&json!([0])));
+        assert!(!truthy_json(&json!([])));
+        assert!(truthy_json(&json!({"a": false})));
+        assert!(!truthy_json(&json!({})));
+        // An i64-overflowing u64 still resolves non-zero via the u64 arm.
+        assert!(truthy_json(&serde_json::json!(u64::MAX)));
+
+        // Feature-name normalisation accepts both spellings.
+        assert_eq!(
+            normalize_feature_key("advanced_analytics"),
+            "advancedAnalytics"
+        );
+        assert_eq!(
+            normalize_feature_key("advancedAnalytics"),
+            "advancedAnalytics"
+        );
+        assert_eq!(normalize_feature_key("a-b_c"), "aBC");
+        assert_eq!(normalize_feature_key(""), "");
+        assert!(!feature_has_access(
+            &LegacyPlanFeaturesPayload::from(PlanFeatures::default()),
+            "no_such_feature"
+        ));
+
+        // Money formatting is integer math, including i64::MIN.
+        assert_eq!(cents_to_decimal_string(0), "0.00");
+        assert_eq!(cents_to_decimal_string(-1), "-0.01");
+        assert_eq!(cents_to_decimal_string(i64::MIN), "-92233720368547758.08");
+        assert_eq!(cents_to_decimal_string(i64::MAX), "92233720368547758.07");
+        assert_eq!(format_invoice_currency_with(-5, "usd"), "$-0.05");
+        assert_eq!(format_invoice_currency_with(5, "gbp"), "£0.05");
+        assert_eq!(format_invoice_currency_with(5, "eur"), "€0.05");
+        assert_eq!(format_invoice_currency_with(5, "jpy"), "€0.05");
+
+        // Pagination clamps at both extremes.
+        assert_eq!(clamp_limit(i64::MIN, 200), 1);
+        assert_eq!(clamp_limit(0, 200), 1);
+        assert_eq!(clamp_limit(i64::MAX, 200), 200);
+        assert_eq!(clamp_offset(-1, 100), 0);
+        assert_eq!(clamp_offset(i64::MIN, 100), 0);
+        assert_eq!(clamp_offset(i64::MAX, 100), 100);
+
+        // Invoice filenames never yield an empty header or a traversal.
+        assert_eq!(safe_invoice_filename(""), "invoice");
+        assert_eq!(safe_invoice_filename("...."), "....");
+        assert_eq!(safe_invoice_filename("../../etc/passwd"), "....etcpasswd");
+        assert_eq!(safe_invoice_filename("a\u{0}b"), "ab");
+
+        // CSV: empty/non-array/non-object input, and every sanitising arm.
+        assert_eq!(json_rows_to_csv(&json!({ "not": "array" })), "");
+        assert_eq!(json_rows_to_csv(&json!([1, 2])), "\n\n");
+        assert_eq!(sanitize_csv_value(&serde_json::Value::Null), "");
+        assert_eq!(sanitize_csv_value(&json!(true)), "true");
+        assert_eq!(sanitize_csv_value(&json!(1.5)), "1.5");
+        assert_eq!(sanitize_csv_value(&json!("line\nbreak")), "\"line\nbreak\"");
+        assert_eq!(sanitize_csv_value(&json!("quote\"d")), "\"quote\"\"d\"");
+        assert_eq!(sanitize_csv_value(&json!("+1")), "'+1");
+        assert_eq!(sanitize_csv_value(&json!("@x")), "'@x");
+        assert_eq!(sanitize_csv_value(&json!("\tlead")), "'\tlead");
+        assert_eq!(sanitize_csv_value(&json!("\rlead")), "'\rlead");
+        let csv = json_rows_to_csv(&json!([
+            {"b": "x,y", "a": "=cmd", "n": 1.5, "z": null, "o": {"k": 1}}
+        ]));
+        assert_eq!(csv.lines().next().unwrap(), "a,b,n,o,z");
+        assert!(csv.contains("'=cmd"), "{csv}");
+        assert!(csv.contains("\"x,y\""), "{csv}");
+        assert!(csv.contains("\"{\"\"k\"\":1}\""), "{csv}");
+
+        // Export date sanitising keeps only digits and dashes.
+        // Every digit survives (no truncation at the time separator) — the
+        // filter is a character whitelist, not a date parser.
+        assert_eq!(safe_export_date("2026-01-02T03:04:05Z"), "2026-01-02030405");
+        assert_eq!(safe_export_date("abc"), "");
+        assert_eq!(safe_export_date("' OR 1=1 --"), "11--");
+
+        // Interval parsing is exact ("yearly" only).
+        assert_eq!(parse_billing_interval("yearly"), BillingInterval::Yearly);
+        assert_eq!(parse_billing_interval("Yearly"), BillingInterval::Monthly);
+        assert_eq!(parse_billing_interval(""), BillingInterval::Monthly);
+
+        // Redirect URL policy: malformed and non-ASCII inputs fail closed.
+        for hostile in [
+            "",
+            "not a url",
+            "mailto:billing@apexmail.ee",
+            "//app.apexmail.ee/x",
+            "https://exämple.apexmail.ee/",
+            "https://xn--app-9la.apexmail.ee/complete",
+            "https://apexmail.ee.evil.example/",
+            "http://apexmail.ee/",
+        ] {
+            assert!(
+                !is_allowed_billing_redirect_url(hostile, Environment::Development),
+                "{hostile:?} must be refused"
+            );
+        }
+        assert!(is_allowed_billing_redirect_url(
+            "https://billing.apexmail.ee:8443/complete",
+            Environment::Development
+        ));
+        assert!(is_allowed_billing_redirect_url(
+            "https://APEXMAIL.EE/complete",
+            Environment::Production
+        ));
+
+        // Realtime period label: malformed suffixes fall back to this month.
+        let now = Utc::now();
+        let current = format!("{}-{:02}", now.year(), now.month());
+        for malformed in [
+            "",
+            "meter:rt:t:m",
+            "meter:rt:t:m:c2026-3",
+            "meter:rt:t:m:2026-13x",
+            "meter:rt:t:m:c",
+        ] {
+            assert_eq!(
+                usage_counter_period_label(malformed),
+                current,
+                "{malformed}"
+            );
+        }
+        assert_eq!(usage_counter_period_label("k:c2026-12"), "2026-12");
+        assert_eq!(usage_counter_period_label("k:1999-01"), "1999-01");
+
+        // Postgres error classification never mistakes an unrelated error
+        // for a schema fallback.
+        assert!(!is_postgres_error_code(&sqlx::Error::RowNotFound, "42P01"));
+        assert!(!is_expected_schema_fallback_error(
+            &sqlx::Error::RowNotFound,
+            &["42703", "42P01"]
+        ));
+        assert!(missing_column_name(&sqlx::Error::RowNotFound).is_none());
+        assert!(!is_missing_column_error_for(
+            &sqlx::Error::RowNotFound,
+            &INVOICE_FALLBACK_OPTIONAL_COLUMNS
+        ));
+
+        // VAT labels: empty line items and mixed rates.
+        let empty_invoice = LegacyInvoiceDto {
+            line_items: Vec::new(),
+            ..sample_dto_for_helpers()
+        };
+        assert_eq!(invoice_vat_label(&empty_invoice), "VAT (0%)");
+        let mut mixed = sample_dto_for_helpers();
+        mixed.line_items.push(LegacyInvoiceLineItemDto {
+            description: "Second".into(),
+            quantity: 1,
+            unit_price: 100,
+            amount: 100,
+            vat_rate: 9.0,
+            vat_amount: 9,
+        });
+        let label = invoice_vat_label(&mixed);
+        assert!(label.starts_with("VAT (Mixed: "), "{label}");
+        assert!(label.contains("22%") && label.contains("9%"), "{label}");
     }
 }

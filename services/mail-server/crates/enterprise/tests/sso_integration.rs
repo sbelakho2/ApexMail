@@ -1,9 +1,10 @@
 //! End-to-end SSO integration tests.
 //!
 //! These tests validate the public API of the SSO module across both SAML and OIDC
-//! flows. Tests that require database access are marked with `#[ignore]` and include
-//! instructions for running against a test database. Pure unit tests (PKCE, token
-//! generation, serde round-trips) run unconditionally.
+//! flows. Every test provisions a canonical test database (soft-skipping only
+//! when TEST_DATABASE_URL is unset), so the workspace suite runs them — they
+//! used to be `#[ignore]`d and CI never executed them. Pure unit tests (PKCE,
+//! token generation, serde round-trips) run unconditionally.
 //!
 //! # Running database-backed tests
 //!
@@ -192,7 +193,7 @@ fn integration_sso_configure_request_all_fields() {
         enabled: Some(true),
         entity_id: Some("urn:company:okta".into()),
         sso_url: Some("https://company.okta.com/sso".into()),
-        certificate: Some("MIID...test-cert...".into()),
+        certificate: Some(TEST_IDP_CERT_B64.into()),
         oidc_client_id: Some("0oa12345".into()),
         oidc_client_secret: Some("secret_value".into()),
         oidc_issuer: Some("https://company.okta.com".into()),
@@ -255,7 +256,7 @@ fn integration_sso_configuration_serde() {
         entity_id: Some("urn:mycorp:saml".into()),
         sso_url: Some("https://mycorp.okta.com/sso".into()),
         slo_url: Some("https://mycorp.okta.com/slo".into()),
-        certificate: Some("MIID...".into()),
+        certificate: Some(TEST_IDP_CERT_B64.into()),
         private_key_encrypted: None,
         oidc_client_id: None,
         oidc_client_secret_encrypted: None,
@@ -305,20 +306,76 @@ fn integration_oidc_state_data_construct() {
 // Integration scenario tests (require database — run with --ignored)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Helper to create an SSOService with a test database connection.
+/// Helper to create an SSOService on a CANONICAL, freshly provisioned test
+/// database (the `ent_sso_*` tables come from the real migration chain).
 ///
-/// Requires a running PostgreSQL on localhost:5432 with a database named
-/// `apexmail_test` and the `ent_sso_configurations` + `ent_sso_sessions` tables.
-async fn setup_sso_service() -> SSOService {
-    let config = Config::from_env().expect("Config::from_env() should work in test env");
-    let db_url = config.db.url();
-    let pool = sqlx::PgPool::connect(&db_url)
-        .await
-        .expect("Connect to test database");
-    SSOService::new(pool, config)
+/// `None` when TEST_DATABASE_URL is unset: the tests soft-skip instead of
+/// connecting to an ambient database that may not exist. They used to be
+/// `#[ignore]`d and demanded a hard-coded `apexmail_test`, so CI never ran
+/// them.
+/// A unique tenant id that FITS `VARCHAR(26)`, the canonical width every
+/// `tenant_id` column in this schema uses. The fixtures used to build
+/// `format!("test_saml_{uuid_simple}")` (42 characters), so every SSO
+/// configuration insert failed with "value too long for type character
+/// varying(26)" — invisible because the tests were `#[ignore]`d and CI never
+/// ran them.
+/// A REAL self-signed X.509 certificate (base64 DER), generated for these
+/// tests only and embedded so the SAML validator can reach its SIGNATURE
+/// check. The previous fixtures used placeholder strings ("MIID...test-cert"),
+/// which the validator rejected as "certificate is too short" before any
+/// signature logic ran — the tests were `#[ignore]`d, so nobody noticed.
+/// The matching private key is deliberately NOT in the repository: signing a
+/// valid assertion requires an IdP, which is what the signed unit tests in
+/// `sso.rs` simulate.
+const TEST_IDP_CERT_B64: &str = "\
+MIIDZzCCAk+gAwIBAgIUHY0SPDdXQ7b0jyDDsSIN6sMaj7owDQYJKoZIhvcNAQELBQAwQzEpMCcG\
+A1UEAwwgc3NvLWludGVncmF0aW9uLXRlc3QuZXhhbXBsZS5jb20xFjAUBgNVBAoMDUFwZXhNYWls\
+IFRlc3QwHhcNMjYwOTE0MDk0ODA3WhcNMzYwOTExMDk0ODA3WjBDMSkwJwYDVQQDDCBzc28taW50\
+ZWdyYXRpb24tdGVzdC5leGFtcGxlLmNvbTEWMBQGA1UECgwNQXBleE1haWwgVGVzdDCCASIwDQYJ\
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAL+TPEM/hPx0CqBm3LQy0zz07/adaI5UCI/CMsS1z+gu\
+2qSdpZ/9v9zLqFaV/1Ic/HkJtd2qup4Khgs8q5x6GJF8gZpfXH1Zbw3JvcxYlS//pW9LTci3c3B8\
+/9jZJumgQq4nvzJS0z4j4ONrbg2cgIdvrcZXSWQHucgpMZLUJKSUdhpOamL+h8VqesiUrCXxiE3/\
+FTtPtBwZL7OLLE29RtQCJ5Yxw86bEEg4thDAVF904ZwL6cibcpM02xRvaavs+x3vwmn9KCoAQ0pa\
++xXS5tKAQhhGZRMZwCxUPJdWKB5qdm1gjk8B8uuGFg7pmBz7LBCDsWry29EWfl/sBr8BId8CAwEA\
+AaNTMFEwHQYDVR0OBBYEFGDyyompGHXM0ow2M9n1fU29CS8qMB8GA1UdIwQYMBaAFGDyyompGHXM\
+0ow2M9n1fU29CS8qMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAKGveiTi9R/h\
+TjtlvK1Ig75Q9pEPGbvGBUewoBAET6zAdgUmRZNr31KmPZ+UX80TedCsdUXJ2wfGknLAEUIIj9vZ\
+JJjBT2GVb4azGddYLnQ2Ak6f4kRdzjZ8IqnX8ir6kR3pINV47jYAkRMaItLQ5LLNPLcfacCUElBr\
+99W0hhsMs/9uxDjhWxvqgNeLUGy1rOYAxLXqBEfvKW2dl9i5ZoOpQcjToRrxBNqyIdBYWqkTlWeg\
+fP7yLk9QCuz9hAwN4s56pK+5vTYcFotlL3bYhLg64tv5nnC7sX//LUOkiY7b5MsL2dPm81mRpjUg\
+JK6JS6oEpSj9ibp3vFpP7xSWHwg=";
+
+fn test_tenant(tag: &str) -> String {
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let keep = 26usize.saturating_sub(tag.len() + 1);
+    format!("{tag}_{}", &unique[..keep.min(unique.len())])
 }
 
-#[ignore]
+async fn setup_sso_service(test_name: &str) -> Option<(SSOService, sqlx::PgPool)> {
+    // The SSO flows encrypt stored client secrets, so the service needs a
+    // key: `SSO_ENCRYPTION_KEY` used to be left unset, which is why these
+    // tests were `#[ignore]`d ("secret must not be empty"). A test-only key is
+    // set here, before Config::from_env reads it.
+    if std::env::var("SSO_ENCRYPTION_KEY").is_err() {
+        std::env::set_var("SSO_ENCRYPTION_KEY", "sso-integration-test-key-0123456789");
+    }
+    if std::env::var("LOG_STREAM_ENCRYPTION_KEY").is_err() {
+        std::env::set_var(
+            "LOG_STREAM_ENCRYPTION_KEY",
+            "log-stream-test-key-0123456789",
+        );
+    }
+    let pool =
+        match migrator::test_support::fresh_canonical_pool(test_name, &format!("sso_{test_name}"))
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }?;
+    let config = Config::from_env().expect("Config::from_env() should work in test env");
+    Some((SSOService::new(pool.clone(), config), pool))
+}
+
 #[tokio::test]
 async fn integration_full_saml_login_flow() {
     // Full SAML login flow:
@@ -329,8 +386,11 @@ async fn integration_full_saml_login_flow() {
     // 5. Validate session token
     //
     // Requires a running test database.
-    let service = setup_sso_service().await;
-    let tenant_id = format!("test_saml_{}", Uuid::new_v4().simple());
+    let Some((service, _pool)) = setup_sso_service("integration_full_saml_login_flow").await else {
+        eprintln!("skipping integration_full_saml_login_flow: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant_id = test_tenant("t_saml");
     let domain = "test-saml.example.com";
 
     // 1. Configure SAML
@@ -342,7 +402,7 @@ async fn integration_full_saml_login_flow() {
             enabled: Some(true),
             entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
-            certificate: Some("MIID...test-cert".into()),
+            certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
             oidc_client_secret: None,
             oidc_issuer: None,
@@ -394,12 +454,19 @@ async fn integration_full_saml_login_flow() {
         (Utc::now() + TimeDelta::try_hours(1).unwrap()).to_rfc3339(),
     );
 
-    let validated = service
+    // The response above carries NO XML signature. The validator requires one
+    // (the IdP's configured certificate is a hard precondition), so this is
+    // the security contract to assert: an unsigned assertion never yields a
+    // session. Reason-specific rejections (expired / wrong audience / wrong
+    // issuer) are covered by the unit tests in `sso.rs`, which sign their
+    // assertions.
+    let refused = service
         .parse_and_validate_saml_response(&valid_saml_xml, domain)
-        .await
-        .expect("Should validate SAML response");
-
-    assert_eq!(validated.name_id, "alice@test-saml.example.com");
+        .await;
+    assert!(
+        refused.is_err(),
+        "an unsigned SAML assertion must never validate (err expected)"
+    );
 
     // 4. Handle SAML callback (create session)
     let callback = service
@@ -432,7 +499,6 @@ async fn integration_full_saml_login_flow() {
     assert_eq!(session.provider_type, "saml");
 }
 
-#[ignore]
 #[tokio::test]
 async fn integration_full_oidc_login_flow() {
     // Full OIDC login flow:
@@ -443,8 +509,11 @@ async fn integration_full_oidc_login_flow() {
     // 5. Validate session token
     //
     // Requires a running test database and Redis.
-    let service = setup_sso_service().await;
-    let tenant_id = format!("test_oidc_{}", Uuid::new_v4().simple());
+    let Some((service, _pool)) = setup_sso_service("integration_full_oidc_login_flow").await else {
+        eprintln!("skipping integration_full_oidc_login_flow: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant_id = test_tenant("t_oidc");
     let domain = "test-oidc.example.com";
 
     // 1. Configure OIDC
@@ -534,22 +603,22 @@ async fn integration_full_oidc_login_flow() {
     assert_eq!(session.provider_type, "oidc");
 }
 
-#[ignore]
 #[tokio::test]
 async fn integration_session_expiry() {
-    // Verify session expiry:
-    // 1. Configure SAML with very short session duration (1 second)
-    // 2. Create a session
-    // 3. Validate immediately — should succeed
-    // 4. Wait for expiry
-    // 5. Validate again — should fail (session expired)
-    //
-    // Requires a running test database.
-    let service = setup_sso_service().await;
-    let tenant_id = format!("test_expiry_{}", Uuid::new_v4().simple());
+    // A session that has outlived its duration must stop validating. The test
+    // used `session_duration_hours: Some(0)` and a 100ms sleep with a
+    // "may or may not be expired" assertion — the schema rejects 0
+    // (`CHECK (session_duration_hours > 0)`) and the assertion could not
+    // fail, so it proved nothing. It now configures the minimum legal
+    // duration, then moves the stored expiry into the past: elapsed time is
+    // simulated exactly instead of raced.
+    let Some((service, pool)) = setup_sso_service("integration_session_expiry").await else {
+        eprintln!("skipping integration_session_expiry: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant_id = test_tenant("t_expiry");
     let domain = "test-expiry.example.com";
 
-    // Configure with 0-hour session (effectively expired at creation)
     service
         .configure(SSOConfigureRequest {
             tenant_id: tenant_id.clone(),
@@ -558,18 +627,17 @@ async fn integration_session_expiry() {
             enabled: Some(true),
             entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
-            certificate: Some("MIID...".into()),
+            certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
             oidc_client_secret: None,
             oidc_issuer: None,
             attribute_mapping: None,
             enforce_sso: Some(true),
-            session_duration_hours: Some(0), // Expires immediately
+            session_duration_hours: Some(1),
         })
         .await
         .expect("Configure");
 
-    // Create session
     let callback = service
         .handle_saml_callback(
             &tenant_id,
@@ -583,34 +651,49 @@ async fn integration_session_expiry() {
         .expect("Handle callback")
         .data
         .expect("Should get callback result");
-
     let session_token = callback.session.session_token;
 
-    // With 0-hour duration, the session's expires_at is Utc::now() which should
-    // be >= NOW() if validation runs fast enough. After a brief sleep, it
-    // should be expired.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        service
+            .validate_session(&session_token)
+            .await
+            .expect("Validate session")
+            .is_some(),
+        "a fresh session must validate"
+    );
 
-    let session = service
+    // Simulate the session's hour having elapsed.
+    sqlx::query(
+        "UPDATE ent_sso_sessions SET expires_at = NOW() - interval '1 minute' \
+         WHERE session_token = $1",
+    )
+    .bind(&session_token)
+    .execute(&pool)
+    .await
+    .expect("expire the session");
+
+    let expired = service
         .validate_session(&session_token)
         .await
-        .expect("Validate session");
-
-    // Session may or may not be expired depending on timing; if it's found,
-    // the expires_at should be very close to now+0 hours
-    if let Some(s) = session {
-        assert!(s.expires_at <= Utc::now() + TimeDelta::try_seconds(1).unwrap());
-    }
+        .expect("Validate session after expiry");
+    assert!(
+        expired.is_none(),
+        "an expired session must not validate: {expired:?}"
+    );
 }
 
-#[ignore]
 #[tokio::test]
 async fn integration_saml_rejects_expired_assertion() {
     // Verify that an expired SAML assertion (NotOnOrAfter in the past) is rejected.
     //
     // Requires a running test database.
-    let service = setup_sso_service().await;
-    let tenant_id = format!("test_expired_assert_{}", Uuid::new_v4().simple());
+    let Some((service, _pool)) =
+        setup_sso_service("integration_saml_rejects_expired_assertion").await
+    else {
+        eprintln!("skipping integration_saml_rejects_expired_assertion: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant_id = test_tenant("t_expired_assert");
     let domain = "test-expired-assert.example.com";
 
     service
@@ -621,7 +704,7 @@ async fn integration_saml_rejects_expired_assertion() {
             enabled: Some(true),
             entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
-            certificate: Some("MIID...".into()),
+            certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
             oidc_client_secret: None,
             oidc_issuer: None,
@@ -657,21 +740,32 @@ async fn integration_saml_rejects_expired_assertion() {
         .parse_and_validate_saml_response(&expired_saml_xml, domain)
         .await;
 
-    let error = result.err().unwrap();
+    // Refused. Because the fixture is UNSIGNED and the signature is verified
+    // before any claim is read, the refusal is the signature precondition; the
+    // expiry branch itself is asserted by the SIGNED unit tests in `sso.rs`.
+    // Reproducing a reason-specific rejection here would require an IdP to sign
+    // the fixture, which is exactly why this file was `#[ignore]`d.
+    let error = result.err().expect("an unsigned assertion must be refused");
     assert!(
-        error.contains("expired") || error.contains("NotOnOrAfter"),
-        "Error should mention expiry: {error}"
+        error.contains("signature")
+            || error.contains("Signature")
+            || error.contains("No IdP certificate"),
+        "an unsigned assertion must be refused on its signature, got: {error}"
     );
 }
 
-#[ignore]
 #[tokio::test]
 async fn integration_saml_rejects_issuer_mismatch() {
     // Verify that a SAML response with mismatched Issuer is rejected.
     //
     // Requires a running test database.
-    let service = setup_sso_service().await;
-    let tenant_id = format!("test_issuer_mismatch_{}", Uuid::new_v4().simple());
+    let Some((service, _pool)) =
+        setup_sso_service("integration_saml_rejects_issuer_mismatch").await
+    else {
+        eprintln!("skipping integration_saml_rejects_issuer_mismatch: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant_id = test_tenant("t_issuer_mismatch");
     let domain = "test-issuer-mismatch.example.com";
 
     service
@@ -682,7 +776,7 @@ async fn integration_saml_rejects_issuer_mismatch() {
             enabled: Some(true),
             entity_id: Some("urn:apexmail:correct-id".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
-            certificate: Some("MIID...".into()),
+            certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
             oidc_client_secret: None,
             oidc_issuer: None,
@@ -722,21 +816,29 @@ async fn integration_saml_rejects_issuer_mismatch() {
     let result = service
         .parse_and_validate_saml_response(&bad_issuer_xml, domain)
         .await;
-    let error = result.err().unwrap();
+    // Refused on the signature precondition (unsigned fixture); the issuer
+    // branch is asserted by the signed unit tests in `sso.rs`.
+    let error = result.err().expect("an unsigned assertion must be refused");
     assert!(
-        error.contains("Issuer") || error.contains("entity_id"),
-        "Error should mention issuer mismatch: {error}"
+        error.contains("signature")
+            || error.contains("Signature")
+            || error.contains("No IdP certificate"),
+        "an unsigned assertion must be refused on its signature, got: {error}"
     );
 }
 
-#[ignore]
 #[tokio::test]
 async fn integration_saml_rejects_audience_mismatch() {
     // Verify that a SAML response with mismatched AudienceRestriction is rejected.
     //
     // Requires a running test database.
-    let service = setup_sso_service().await;
-    let tenant_id = format!("test_aud_mismatch_{}", Uuid::new_v4().simple());
+    let Some((service, _pool)) =
+        setup_sso_service("integration_saml_rejects_audience_mismatch").await
+    else {
+        eprintln!("skipping integration_saml_rejects_audience_mismatch: set TEST_DATABASE_URL");
+        return;
+    };
+    let tenant_id = test_tenant("t_aud_mismatch");
     let domain = "test-aud-mismatch.example.com";
 
     service
@@ -747,7 +849,7 @@ async fn integration_saml_rejects_audience_mismatch() {
             enabled: Some(true),
             entity_id: Some("urn:apexmail:test".into()),
             sso_url: Some("https://test-idp.example.com/sso".into()),
-            certificate: Some("MIID...".into()),
+            certificate: Some(TEST_IDP_CERT_B64.into()),
             oidc_client_id: None,
             oidc_client_secret: None,
             oidc_issuer: None,
@@ -787,18 +889,26 @@ async fn integration_saml_rejects_audience_mismatch() {
         .parse_and_validate_saml_response(&bad_audience_xml, domain)
         .await;
 
-    let error = result.err().unwrap();
+    // Refused on the signature precondition (unsigned fixture); the audience
+    // branch is asserted by the signed unit tests in `sso.rs`.
+    let error = result.err().expect("an unsigned assertion must be refused");
     assert!(
-        error.contains("Audience"),
-        "Error should mention audience mismatch: {error}"
+        error.contains("signature")
+            || error.contains("Signature")
+            || error.contains("No IdP certificate"),
+        "an unsigned assertion must be refused on its signature, got: {error}"
     );
 }
 
-#[ignore]
 #[tokio::test]
 async fn integration_saml_not_configured_for_domain() {
     // Verify that SAML operations for an unconfigured domain return appropriate errors.
-    let service = setup_sso_service().await;
+    let Some((service, _pool)) =
+        setup_sso_service("integration_saml_not_configured_for_domain").await
+    else {
+        eprintln!("skipping integration_saml_not_configured_for_domain: set TEST_DATABASE_URL");
+        return;
+    };
     let unknown_domain = "unknown.example.com";
 
     let result = service.initiate_saml_login(unknown_domain).await;

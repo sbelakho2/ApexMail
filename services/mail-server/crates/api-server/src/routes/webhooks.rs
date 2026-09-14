@@ -11,7 +11,6 @@ use mail_common::{is_localhost, is_private_or_reserved_host};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use url::Url;
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
@@ -330,7 +329,9 @@ async fn create_webhook(
         )));
     }
 
-    let id = Uuid::new_v4();
+    // webhooks.id is VARCHAR(26): a 36-char hyphenated UUID overflows the
+    // column and turned every create into a database 500.
+    let id = apexmail_lib::id::generate_id("", 26);
     let now = Utc::now();
     let secret = apexmail_lib::id::generate_webhook_secret();
 
@@ -338,7 +339,7 @@ async fn create_webhook(
         "INSERT INTO webhooks (id, tenant_id, url, events, secret, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,'active',$6,$6)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .bind(&body.url)
     .bind(serde_json::json!(body.events))
@@ -350,7 +351,7 @@ async fn create_webhook(
     Ok((
         StatusCode::CREATED,
         Json(WebhookResponse {
-            id: id.to_string(),
+            id,
             url: body.url,
             events: serde_json::json!(body.events),
             // Only return secret at creation time
@@ -980,5 +981,514 @@ mod tests {
             1,
             "exactly one hop — the Location target must never be requested"
         );
+    }
+}
+
+// ─── Adversarial webhook CRUD / secret tests ───────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'webhooks adversarial', $2, 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    #[test]
+    fn url_validation_rejects_every_non_https_and_private_shape() {
+        // Plain HTTP is refused without the explicit loopback override.
+        for bad in [
+            "http://example.com/hook",
+            "http://127.0.0.1:9000/hook",
+            "http://localhost/hook",
+            "ftp://example.com/hook",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "not a url",
+            "",
+            "https://",
+        ] {
+            assert!(
+                validate_webhook_url_with(bad, false).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        // Private / metadata / reserved hosts are refused even over HTTPS.
+        for bad in [
+            "https://10.0.0.1/hook",
+            "https://192.168.0.10/hook",
+            "https://172.20.3.4/hook",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/hook",
+            "https://host.docker.internal/hook",
+        ] {
+            assert!(
+                validate_webhook_url_with(bad, false).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        // Public HTTPS targets are accepted.
+        assert!(validate_webhook_url_with("https://example.com/hook", false).is_ok());
+        assert!(validate_webhook_url_with("https://hooks.example.org:8443/x?y=1", false).is_ok());
+        // Loopback HTTP is admitted ONLY under the explicit override.
+        assert!(validate_webhook_url_with("http://127.0.0.1:8081/hook", true).is_ok());
+        assert!(validate_webhook_url_with("http://localhost/hook", true).is_ok());
+        // The override never admits non-loopback private ranges.
+        assert!(validate_webhook_url_with("http://10.0.0.1/hook", true).is_err());
+    }
+
+    #[test]
+    fn pinned_addr_selection_rejects_mixed_public_private_sets() {
+        let public_a: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let public_b: SocketAddr = "93.184.216.35:443".parse().unwrap();
+        let private: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+        assert!(select_pinned_addr(&[], false).is_err());
+        assert_eq!(
+            select_pinned_addr(&[public_a, public_b], false).unwrap(),
+            public_a
+        );
+        // ANY private answer poisons the whole set (DNS rebinding guard).
+        assert!(select_pinned_addr(&[public_a, private], false).is_err());
+        // Loopback is only tolerated with the explicit override, and the
+        // first non-loopback address is preferred when both are present.
+        assert!(select_pinned_addr(&[loopback], false).is_err());
+        assert_eq!(
+            select_pinned_addr(&[loopback, public_a], true).unwrap(),
+            public_a
+        );
+        assert_eq!(select_pinned_addr(&[loopback], true).unwrap(), loopback);
+    }
+
+    #[test]
+    fn webhook_secret_is_never_serialized_when_absent() {
+        let row = WebhookRow {
+            id: "wh_1".into(),
+            url: "https://example.com/hook".into(),
+            events: serde_json::json!(["message.delivered"]),
+            secret: "super-secret-signing-key".into(),
+            status: "active".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let response: WebhookResponse = row.into();
+        assert!(response.secret.is_none());
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(
+            !json.contains("super-secret-signing-key"),
+            "the stored secret must never leak through the list/get shape: {json}"
+        );
+        assert!(!json.contains("\"secret\""));
+    }
+
+    #[tokio::test]
+    async fn crud_flow_returns_secret_once_and_stays_tenant_scoped() {
+        let Some((state, pool)) = state_and_pool("adv_webhooks_crud").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a, "starter").await;
+        seed_tenant(&pool, &tenant_b, "starter").await;
+        let read = auth_for(&tenant_a, &["webhooks:read"]);
+        let write = auth_for(&tenant_a, &["webhooks:write"]);
+
+        // Validation errors on create: bad URL and bad events.
+        for (url, events) in [
+            (
+                "http://example.com/hook",
+                vec!["message.delivered".to_string()],
+            ),
+            ("", vec!["message.delivered".to_string()]),
+            ("https://example.com/hook", vec![]),
+            ("https://example.com/hook", vec!["delivred".to_string()]),
+            ("https://10.0.0.1/hook", vec!["*".to_string()]),
+        ] {
+            let resp = create_webhook(
+                State(state.clone()),
+                write.clone(),
+                Json(CreateWebhookRequest {
+                    url: url.into(),
+                    events,
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::Validation(_))),
+                "({url:?}) must be refused"
+            );
+        }
+
+        let (status, Json(created)) = create_webhook(
+            State(state.clone()),
+            write.clone(),
+            Json(CreateWebhookRequest {
+                url: format!(
+                    "https://hooks-{}.example.com/deliver",
+                    uuid::Uuid::new_v4().simple()
+                ),
+                events: vec!["message.delivered".into(), "message.bounced".into()],
+            }),
+        )
+        .await
+        .expect("create webhook");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.id.len(), 26, "id fits webhooks.id VARCHAR(26)");
+        let secret = created.secret.clone().expect("secret returned once");
+        assert!(!secret.is_empty());
+
+        // List/get never return the secret; another tenant never sees the row.
+        let Json(list) = list_webhooks(
+            State(state.clone()),
+            read.clone(),
+            Query(ListWebhooksQuery {
+                limit: 200,
+                offset: 0,
+                cursor: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert!(list.iter().any(|w| w.id == created.id));
+        assert!(list.iter().all(|w| w.secret.is_none()));
+        let list_json = serde_json::to_string(&list).unwrap();
+        assert!(!list_json.contains(&secret));
+
+        let Json(fetched) =
+            get_webhook(State(state.clone()), read.clone(), Path(created.id.clone()))
+                .await
+                .expect("own get");
+        assert!(fetched.secret.is_none());
+
+        // Cross-tenant access is 404, malformed ids are 404 (VARCHAR ids).
+        for id in [
+            foreign_webhook_id(&state, &write, &tenant_b).await,
+            "not-a-real-webhook".into(),
+            "".into(),
+        ] {
+            assert!(matches!(
+                get_webhook(State(state.clone()), read.clone(), Path(id.clone())).await,
+                Err(ApiError::NotFound(_))
+            ));
+            assert!(matches!(
+                delete_webhook(State(state.clone()), write.clone(), Path(id.clone())).await,
+                Err(ApiError::NotFound(_))
+            ));
+            assert!(matches!(
+                update_webhook(
+                    State(state.clone()),
+                    write.clone(),
+                    Path(id.clone()),
+                    Json(UpdateWebhookRequest {
+                        url: None,
+                        events: None,
+                        status: Some("paused".into())
+                    })
+                )
+                .await,
+                Err(ApiError::NotFound(_))
+            ));
+            assert!(matches!(
+                rotate_webhook_secret(State(state.clone()), write.clone(), Path(id.clone())).await,
+                Err(ApiError::NotFound(_))
+            ));
+        }
+
+        // Update: invalid status / URL / events refused; valid update lands.
+        assert!(matches!(
+            update_webhook(
+                State(state.clone()),
+                write.clone(),
+                Path(created.id.clone()),
+                Json(UpdateWebhookRequest {
+                    url: None,
+                    events: None,
+                    status: Some("exploded".into())
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            update_webhook(
+                State(state.clone()),
+                write.clone(),
+                Path(created.id.clone()),
+                Json(UpdateWebhookRequest {
+                    url: Some("http://insecure.example.com/hook".into()),
+                    events: None,
+                    status: None
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            update_webhook(
+                State(state.clone()),
+                write.clone(),
+                Path(created.id.clone()),
+                Json(UpdateWebhookRequest {
+                    url: None,
+                    events: Some(vec![]),
+                    status: None
+                })
+            )
+            .await,
+            Err(ApiError::Validation(_))
+        ));
+        let Json(updated) = update_webhook(
+            State(state.clone()),
+            write.clone(),
+            Path(created.id.clone()),
+            Json(UpdateWebhookRequest {
+                url: Some(format!(
+                    "https://hooks-{}.example.com/v2",
+                    uuid::Uuid::new_v4().simple()
+                )),
+                events: Some(vec!["message.opened".into()]),
+                status: Some("paused".into()),
+            }),
+        )
+        .await
+        .expect("update");
+        assert_eq!(updated.status, "paused");
+        assert!(updated.secret.is_none(), "update never exposes the secret");
+
+        // Rotate: a fresh secret is returned and persisted atomically.
+        let Json(rotated) = rotate_webhook_secret(
+            State(state.clone()),
+            write.clone(),
+            Path(created.id.clone()),
+        )
+        .await
+        .expect("rotate");
+        let rotated_secret = rotated.secret.clone().expect("new secret returned");
+        assert_ne!(rotated_secret, secret);
+        let stored: String =
+            sqlx::query_scalar("SELECT secret FROM webhooks WHERE id = $1 AND tenant_id = $2")
+                .bind(&created.id)
+                .bind(&tenant_a)
+                .fetch_one(&pool)
+                .await
+                .expect("stored secret");
+        assert_eq!(stored, rotated_secret);
+
+        // Inbound subscription needs the inbound_email entitlement (starter
+        // does not have it).
+        let inbound = create_webhook(
+            State(state.clone()),
+            write.clone(),
+            Json(CreateWebhookRequest {
+                url: "https://hooks.example.com/inbound".into(),
+                events: vec!["inbound".into()],
+            }),
+        )
+        .await;
+        assert!(
+            matches!(inbound, Err(ApiError::Forbidden(_))),
+            "inbound subscription must require the entitlement, got {inbound:?}"
+        );
+
+        // Delete → 204 then 404.
+        let deleted = delete_webhook(
+            State(state.clone()),
+            write.clone(),
+            Path(created.id.clone()),
+        )
+        .await
+        .expect("delete");
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+        assert!(matches!(
+            delete_webhook(State(state.clone()), write.clone(), Path(created.id)).await,
+            Err(ApiError::NotFound(_))
+        ));
+
+        // Scope gates.
+        assert!(matches!(
+            create_webhook(
+                State(state.clone()),
+                read.clone(),
+                Json(CreateWebhookRequest {
+                    url: "https://example.com/hook".into(),
+                    events: vec!["*".into()]
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            list_webhooks(
+                State(state.clone()),
+                auth_for(&tenant_a, &[]),
+                Query(ListWebhooksQuery {
+                    limit: 1,
+                    offset: 0,
+                    cursor: None
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // Cleanup (tenant B's webhook is removed by its id).
+        sqlx::query("DELETE FROM webhooks WHERE tenant_id = ANY($1)")
+            .bind(vec![tenant_a.clone(), tenant_b.clone()])
+            .execute(&pool)
+            .await
+            .expect("cleanup webhooks");
+        sqlx::query("DELETE FROM tenants WHERE id = ANY($1)")
+            .bind(vec![tenant_a, tenant_b])
+            .execute(&pool)
+            .await
+            .expect("cleanup tenants");
+    }
+
+    async fn foreign_webhook_id(state: &AppState, _auth: &AuthUser, tenant_b: &str) -> String {
+        // Create directly in the DB for tenant B (create_webhook would need
+        // B's entitlement-scoped auth; the point here is the cross-tenant 404).
+        let id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, events, secret, status, created_at, updated_at)
+             VALUES ($1, $2, 'https://foreign.example.com/hook', '[\"*\"]'::jsonb, 'foreign-secret', 'active', NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(tenant_b)
+        .execute(&state.db)
+        .await
+        .expect("seed foreign webhook");
+        id
+    }
+
+    #[tokio::test]
+    async fn free_plan_webhook_create_is_403_not_500() {
+        let Some((state, pool)) = state_and_pool("adv_webhooks_entitlement").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant, "free").await;
+        let resp = create_webhook(
+            State(state.clone()),
+            auth_for(&tenant, &["webhooks:write"]),
+            Json(CreateWebhookRequest {
+                url: "https://example.com/hook".into(),
+                events: vec!["*".into()],
+            }),
+        )
+        .await;
+        assert!(matches!(resp, Err(ApiError::Forbidden(_))));
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+}
+
+// ─── Local-network only test of the delivery probe ─────────────
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Sync wrapper: the env guard is process-global and must not be held
+    /// across an await (clippy `await_holding_lock`).
+    #[test]
+    fn test_probe_refuses_to_reach_unreachable_loopback_and_reports_cleanly() {
+        let _guard = ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS").ok();
+        std::env::set_var("APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS", "true");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(probe_loopback());
+
+        match previous {
+            Some(value) => std::env::set_var("APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS", value),
+            None => std::env::remove_var("APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS"),
+        }
+    }
+
+    async fn probe_loopback() {
+        let Some(pool) = crate::test_db::optional_pg_pool("adv_webhook_probe").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'probe', 'starter', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        // Port 1 on loopback: deterministic connection refusal, no external
+        // network, no listener to reach.
+        let id = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO webhooks (id, tenant_id, url, events, secret, status, created_at, updated_at)
+             VALUES ($1, $2, 'http://127.0.0.1:1/hook', '[\"*\"]'::jsonb, 'probe-secret', 'active', NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed probe webhook");
+        let auth = AuthUser {
+            tenant_id: tenant.clone(),
+            user_id: None,
+            api_key_id: Some("key_probe".into()),
+            session_id: None,
+            scopes: vec!["webhooks:write".into()],
+        };
+        let Json(result) = test_webhook(State(state.clone()), auth, Path(id.clone()))
+            .await
+            .expect("the probe must report, not fail the request");
+        assert!(!result.success);
+        assert!(result.status_code.is_none());
+        assert!(result.error.is_some(), "connection refusal is reported");
+
+        sqlx::query("DELETE FROM webhooks WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup webhooks");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
     }
 }

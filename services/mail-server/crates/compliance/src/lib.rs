@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+
 pub mod admin_routes;
 pub mod annual_report;
 pub mod audit_logger;
@@ -37,6 +38,9 @@ pub mod types;
 pub mod vat_oss;
 pub mod vat_vies;
 pub mod xbrl_taxonomy;
+
+#[cfg(test)]
+pub mod test_support;
 
 /// Existence probe for optional source tables (estonia_ou queries payroll /
 /// dividend / operating-cost stores that may be absent on a deployment).

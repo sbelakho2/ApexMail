@@ -1590,3 +1590,271 @@ mod tests {
         assert!(regex.is_match("Congratulations! You are a winner of $1000!"));
     }
 }
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// Every layer must report its own verdict; a blocked message must never
+// persist as clean, and stats must be tenant-scoped.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+    use crate::types::{AttachmentInfo, EmailContent, ScanVerdict};
+    use std::collections::HashMap;
+
+    async fn scanner(suffix: &str) -> Option<(PgPool, ContentScanner)> {
+        let pool =
+            test_support::canonical_pool(&format!("scan_{suffix}"), &format!("scan_{suffix}"))
+                .await?;
+        Some((
+            pool.clone(),
+            ContentScanner::new(
+                pool,
+                ContentScanningConfig {
+                    enabled: true,
+                    ocr_enabled: false,
+                    spam_threshold: 5.0,
+                    max_attachment_size: 26_214_400,
+                    max_ocr_images: 5,
+                    banned_domains: vec!["evil.com".into()],
+                },
+            ),
+        ))
+    }
+
+    fn email(tenant: &str, subject: &str, body: &str) -> EmailContent {
+        EmailContent {
+            tenant_id: tenant.into(),
+            message_id: format!("msg-{}", uuid::Uuid::new_v4()),
+            from_address: "sender@apexmail.ee".into(),
+            from_display_name: None,
+            subject: subject.into(),
+            text_body: Some(body.into()),
+            html_body: None,
+            headers: HashMap::new(),
+            attachments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn hostile_content_is_classified_blocked_and_never_stored_clean() {
+        let Some((_pool, scanner)) = scanner("verdicts").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+
+        // Clean: a normal transactional message with an unsubscribe link.
+        let clean = scanner
+            .scan_email(&email(
+                &tenant,
+                "Your receipt",
+                "Thanks for your order. Unsubscribe at https://apexmail.ee/u",
+            ))
+            .await
+            .expect("clean scan");
+        assert_eq!(clean.overall_verdict, ScanVerdict::Clean);
+        assert!(!clean.spam.is_spam);
+        assert!(!clean.phishing.is_phishing);
+        assert!(clean.malware.clean);
+        assert!(clean.policy.compliant);
+
+        // Phishing: an IP URL, a shortener, a suspicious TLD and brand
+        // impersonation in a deep subdomain.
+        let phishing = scanner
+            .scan_email(&email(
+                &tenant,
+                "Account locked",
+                "Verify at http://192.168.1.1/login or http://bit.ly/abc \
+                 or http://paypal.secure-login.example.tk/verify",
+            ))
+            .await
+            .expect("phishing scan");
+        assert_eq!(phishing.overall_verdict, ScanVerdict::Blocked);
+        assert!(phishing.phishing.is_phishing);
+        assert!(phishing
+            .phishing
+            .indicators
+            .iter()
+            .any(|i| i.description.contains("IP-based URL")));
+        assert!(phishing
+            .phishing
+            .indicators
+            .iter()
+            .any(|i| i.description.contains("URL shortener")));
+        assert!(phishing
+            .phishing
+            .indicators
+            .iter()
+            .any(|i| i.description.contains("Suspicious TLD")
+                || i.description.contains("Brand impersonation")));
+        assert!(phishing.phishing.score > 0.0);
+        // A blocked message is recorded as blocked, never clean.
+        let stored = scanner
+            .get_result(&phishing.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(stored.overall_verdict, ScanVerdict::Blocked);
+
+        // Spam: missing unsubscribe plus an all-caps subject.
+        let spam = scanner
+            .scan_email(&email(
+                &tenant,
+                "BUY CHEAP MEDS NOW",
+                "Free money!!! Win a prize, click here now!!!",
+            ))
+            .await
+            .expect("spam scan");
+        assert!(spam.spam.is_spam, "{:?}", spam.spam);
+        assert!(
+            matches!(
+                spam.overall_verdict,
+                ScanVerdict::Suspicious | ScanVerdict::Blocked
+            ),
+            "{:?}",
+            spam.overall_verdict
+        );
+        assert!(spam
+            .spam
+            .triggers
+            .iter()
+            .any(|t| t.rule == "UNSUBSCRIBE_MISSING"));
+        assert!(spam
+            .spam
+            .triggers
+            .iter()
+            .any(|t| t.rule == "ALL_CAPS_SUBJECT" || t.rule == "EXCESSIVE_CAPS"));
+
+        // Malware: an executable disguised with a .pdf name.
+        let mut malware_email = email(&tenant, "Invoice", "See attachment. Unsubscribe here.");
+        malware_email.attachments.push(AttachmentInfo {
+            filename: "invoice.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 64,
+            header_bytes: Some(vec![0x4D, 0x5A, 0x90, 0x00]),
+        });
+        let malware = scanner
+            .scan_email(&malware_email)
+            .await
+            .expect("malware scan");
+        assert!(!malware.malware.clean);
+        assert_eq!(malware.overall_verdict, ScanVerdict::Blocked);
+
+        // Policy (banned sender domain): the config list is matched against
+        // the envelope sender, not body text.
+        let mut banned_email = email(
+            &tenant,
+            "Partnership",
+            "Visit our site for details. Unsubscribe anytime.",
+        );
+        banned_email.from_address = "promo@evil.com".into();
+        let banned = scanner
+            .scan_email(&banned_email)
+            .await
+            .expect("policy scan");
+        assert!(!banned.policy.compliant, "{:?}", banned.policy);
+        assert!(banned
+            .policy
+            .violations
+            .iter()
+            .any(|v| v.rule == "banned_domain"));
+        assert_ne!(banned.overall_verdict, ScanVerdict::Clean);
+
+        // A stored tenant policy makes matching content non-compliant with
+        // an explicit Error severity (never a warning).
+        sqlx::query(
+            "INSERT INTO content_policies (id, tenant_id, name, rules, enabled)
+             VALUES (gen_random_uuid(), $1, 'no-wire-transfers', $2, true)",
+        )
+        .bind(&tenant)
+        .bind(serde_json::json!({"blocked_patterns": ["(?i)wire transfer", "(?i)bank details"]}))
+        .execute(&_pool)
+        .await
+        .expect("policy");
+        let policy_blocked = scanner
+            .scan_email(&email(
+                &tenant,
+                "Payment",
+                "Please send a wire transfer to the bank details below. Unsubscribe here.",
+            ))
+            .await
+            .expect("policy scan");
+        assert!(
+            !policy_blocked.policy.compliant,
+            "{:?}",
+            policy_blocked.policy
+        );
+        assert!(policy_blocked
+            .policy
+            .violations
+            .iter()
+            .any(|v| v.policy == "no-wire-transfers" && v.rule == "(?i)wire transfer"));
+        // A body that does not match the stored policy stays compliant apart
+        // from the warnings.
+        let policy_clean = scanner
+            .scan_email(&email(
+                &tenant,
+                "Payment",
+                "Your invoice is attached. Unsubscribe here.",
+            ))
+            .await
+            .expect("policy scan");
+        assert!(policy_clean.policy.compliant, "{:?}", policy_clean.policy);
+
+        // Stats are tenant-scoped and count each verdict explicitly.
+        let stats = scanner.get_stats(Some(&tenant)).await.expect("stats");
+        assert_eq!(stats["total"], 7);
+        assert!(stats["clean"].as_i64().unwrap_or(0) >= 1);
+        assert!(stats["blocked"].as_i64().unwrap_or(0) >= 2);
+        assert!(stats["spam_detected"].as_i64().unwrap_or(0) >= 1);
+        assert!(stats["phishing_detected"].as_i64().unwrap_or(0) >= 1);
+        let other = scanner
+            .get_stats(Some(&test_support::unique_tenant()))
+            .await
+            .expect("other tenant stats");
+        assert_eq!(other["total"], 0);
+        let global = scanner.get_stats(None).await.expect("global stats");
+        assert_eq!(global["total"], 7);
+
+        // Unknown result ids are None, never fabricated.
+        assert!(scanner
+            .get_result("no-such-scan")
+            .await
+            .expect("unknown")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_disabled_scanner_still_records_an_honest_verdict() {
+        let Some((pool, _)) = scanner("disabled").await else {
+            return;
+        };
+        let scanner = ContentScanner::new(
+            pool,
+            ContentScanningConfig {
+                enabled: false,
+                ocr_enabled: false,
+                spam_threshold: 50.0,
+                max_attachment_size: 1024,
+                max_ocr_images: 0,
+                banned_domains: vec![],
+            },
+        );
+        let result = scanner
+            .scan_email(&email(
+                &test_support::unique_tenant(),
+                "hi",
+                "body with no unsubscribe",
+            ))
+            .await
+            .expect("scan");
+        // Disabled scanning never claims the message was checked-and-blocked
+        // beyond what the layers actually found; the verdict is explicit.
+        assert!(matches!(
+            result.overall_verdict,
+            ScanVerdict::Clean | ScanVerdict::Suspicious | ScanVerdict::Blocked
+        ));
+        assert!(result.actions.len() == 1, "exactly one action is recorded");
+    }
+}

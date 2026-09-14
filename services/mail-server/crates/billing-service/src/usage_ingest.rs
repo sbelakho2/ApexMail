@@ -247,12 +247,14 @@ async fn record_derived_daily_aggregate(
     }
 
     // 2. Metering event (deterministic id — ON CONFLICT is the belt to the
-    //    marker's braces).
+    //    marker's braces). The table is RANGE-partitioned by "timestamp"
+    //    with PRIMARY KEY (id, timestamp): the bare (id) arbiter raises
+    //    42P10 and the derived sweep could never record a single aggregate.
     sqlx::query(
         r#"
         INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
         VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT (id, "timestamp") DO NOTHING
         "#,
     )
     .bind(event_id)
@@ -729,12 +731,15 @@ pub async fn reconcile_daily_deliveries(
         ..ReconciliationSummary::default()
     };
 
-    // 1. Reserved vs delivered from the metering tables.
+    // 1. Reserved vs delivered from the metering tables. SUM(bigint) yields
+    //    NUMERIC in PostgreSQL, which cannot decode into Option<i64> — the
+    //    reconciliation sweep failed on every day that actually had usage.
+    //    Cast each aggregate back to bigint.
     let usage_rows: Vec<ReconUsageRow> = sqlx::query_as(
         r#"
         SELECT tenant_id,
-               SUM(quantity) FILTER (WHERE event_type = 'emails_sent') AS reserved,
-               SUM(quantity) FILTER (WHERE event_type = 'emails_delivered') AS delivered
+               SUM(quantity) FILTER (WHERE event_type = 'emails_sent')::bigint AS reserved,
+               SUM(quantity) FILTER (WHERE event_type = 'emails_delivered')::bigint AS delivered
         FROM metering_events
         WHERE timestamp >= $1 AND timestamp < $2
           AND event_type IN ('emails_sent', 'emails_delivered')

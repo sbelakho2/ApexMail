@@ -14,7 +14,9 @@
 //!     EUR total — without a persisted conversion source/rate/date there is
 //!     no reporting-currency figure at all;
 //!   * revenue categories come from the actual `line_items` JSONB, not
-//!     fixed percentages;
+//!     fixed percentages; a missing or non-reconciling snapshot is uniformly
+//!     one-time (unallocated) revenue in every surface (see
+//!     `categorize_invoice_net`);
 //!   * VAT output comes from the invoice tax snapshots (`vat_total`,
 //!     `vat_rate`, `billing_country`) with domestic / reverse-charge /
 //!     outside-scope classification and the date-effective standard rate
@@ -311,6 +313,65 @@ fn categorize_line(description: &str) -> RevenueCategory {
     }
 }
 
+/// Revenue-category split of one invoice's NET subtotal, in cents.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct InvoiceCategorySplit {
+    subscription_cents: i64,
+    usage_cents: i64,
+    one_time_cents: i64,
+}
+
+/// The ONE categorization rule shared by the period revenue-recognition view
+/// (inside [`generate_financial_compliance_report`]) and the monthly revenue
+/// stream ([`monthly_revenue_stream`]).
+///
+/// The split comes from the invoice's actual `line_items` JSONB only when the
+/// snapshot exists AND its line amounts reconcile exactly with the headline
+/// net subtotal. Whenever that is not the case — no snapshot at all (a legacy
+/// or hand-written invoice), an empty array, or line items that do not add up
+/// — the entire net is unallocated and reported as ONE-TIME revenue. A
+/// snapshot-less invoice is therefore never counted in the total of one
+/// surface while silently vanishing from the categories of the other: both
+/// legally reported surfaces call this function, so their arithmetic is
+/// identical by construction and no subscription/usage split is ever
+/// invented.
+fn categorize_invoice_net(inv: &InvoiceRow) -> InvoiceCategorySplit {
+    let net = invoice_subtotal_cents(inv);
+    let Some(items) = inv.line_items.as_ref().and_then(|v| v.as_array()) else {
+        return InvoiceCategorySplit {
+            one_time_cents: net,
+            ..Default::default()
+        };
+    };
+    let line_sum: i64 = items
+        .iter()
+        .filter_map(|item| item.get("amount").and_then(|a| a.as_i64()))
+        .sum();
+    if net <= 0 || line_sum != net {
+        // Unreconciled (including an empty snapshot): visibly unallocated
+        // rather than force-split.
+        return InvoiceCategorySplit {
+            one_time_cents: net,
+            ..Default::default()
+        };
+    }
+    let mut split = InvoiceCategorySplit::default();
+    for item in items {
+        let units = item.get("amount").and_then(|a| a.as_i64()).unwrap_or(0);
+        match item
+            .get("description")
+            .and_then(|d| d.as_str())
+            .map(categorize_line)
+            .unwrap_or(RevenueCategory::OneTime)
+        {
+            RevenueCategory::Subscription => split.subscription_cents += units,
+            RevenueCategory::Usage => split.usage_cents += units,
+            RevenueCategory::OneTime => split.one_time_cents += units,
+        }
+    }
+    split
+}
+
 /// VAT classification for one invoice from its immutable billing snapshot
 /// and tax columns (KMS §14): EE → domestic; non-EE EU with a valid VAT
 /// number in the snapshot → reverse charge; non-EE EU without → EE VAT due;
@@ -360,8 +421,59 @@ fn classify_vat(inv: &InvoiceRow) -> VatClassification {
     }
 }
 
+/// One exact calendar-month revenue stream (EUR) for the window
+/// `[month_start_ts, next_month_start)`.
+///
+/// Categorization rule (monthly view): identical to the period view — this
+/// function calls [`categorize_invoice_net`], the single shared rule, so an
+/// invoice without a `line_items` snapshot is one-time (unallocated) revenue
+/// in BOTH surfaces and the monthly total (subscription + usage + one_time)
+/// still covers every invoice in its window. Non-EUR invoices are excluded
+/// (nominal amounts are never converted), and an empty window is explicit
+/// zeros.
+fn monthly_revenue_stream(
+    invoices: &[InvoiceRow],
+    month_start_ts: DateTime<Utc>,
+) -> MonthlyRevenueStream {
+    let window_end = next_month_start(month_start_ts);
+    let mut subscription_cents = 0i64;
+    let mut usage_cents = 0i64;
+    let mut one_time_cents = 0i64;
+
+    for inv in invoices {
+        if inv.currency.to_uppercase() != "EUR" {
+            continue;
+        }
+        let Some(issued) = inv.issued_at else {
+            continue;
+        };
+        if issued >= month_start_ts && issued < window_end {
+            let split = categorize_invoice_net(inv);
+            subscription_cents += split.subscription_cents;
+            usage_cents += split.usage_cents;
+            one_time_cents += split.one_time_cents;
+        }
+    }
+
+    MonthlyRevenueStream {
+        month: format!("{:04}-{:02}", month_start_ts.year(), month_start_ts.month()),
+        subscription_eur: cents_to_units(subscription_cents),
+        usage_eur: cents_to_units(usage_cents),
+        one_time_eur: cents_to_units(one_time_cents),
+        total_eur: cents_to_units(subscription_cents + usage_cents + one_time_cents),
+    }
+}
+
 /// Generate a full Estonian OÜ financial compliance analytics report from
 /// the canonical model. Errors propagate — unavailable data is visible.
+///
+/// Categorization rule (period view): the `subscription`/`usage`/`one_time`
+/// split of each currency is assigned by `categorize_invoice_net` — an
+/// invoice whose `line_items` snapshot is missing or does not reconcile with
+/// its net subtotal is one-time (unallocated) revenue, never silently
+/// uncategorized while still counted in the total. The monthly stream
+/// (`monthly_revenue_stream`) applies the identical rule through the same
+/// function, so the two legally reported surfaces cannot contradict.
 pub async fn generate_financial_compliance_report(
     db: &PgPool,
     period_months: i64,
@@ -407,36 +519,13 @@ pub async fn generate_financial_compliance_report(
             _ => {}
         }
 
-        // F80: categorize ACTUAL line items. When the snapshot has no
-        // line_items the amounts land in one_time only if the invoice is
-        // not usage/subscription-shaped; the split is never invented.
-        if let Some(items) = inv.line_items.as_ref().and_then(|v| v.as_array()) {
-            let net = invoice_subtotal_cents(inv);
-            let line_sum: i64 = items
-                .iter()
-                .filter_map(|item| item.get("amount").and_then(|a| a.as_i64()))
-                .sum();
-            if net > 0 && line_sum == net {
-                for item in items {
-                    let line_amount = item.get("amount").and_then(|a| a.as_i64()).unwrap_or(0);
-                    let units = cents_to_units(line_amount);
-                    match item
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .map(categorize_line)
-                        .unwrap_or(RevenueCategory::OneTime)
-                    {
-                        RevenueCategory::Subscription => entry.subscription += units,
-                        RevenueCategory::Usage => entry.usage += units,
-                        RevenueCategory::OneTime => entry.one_time += units,
-                    }
-                }
-            } else {
-                // Line items do not reconcile with the headline subtotal —
-                // visibly un-categorized rather than force-split.
-                entry.one_time += cents_to_units(net);
-            }
-        }
+        // F80: categorize ACTUAL line items through the single rule shared
+        // with the monthly stream — a snapshot-less or non-reconciling
+        // invoice's net is one-time (unallocated) revenue here too.
+        let split = categorize_invoice_net(inv);
+        entry.subscription += cents_to_units(split.subscription_cents);
+        entry.usage += cents_to_units(split.usage_cents);
+        entry.one_time += cents_to_units(split.one_time_cents);
     }
     for entry in by_currency.values_mut() {
         entry.net = entry.recognized - entry.refunds;
@@ -644,50 +733,7 @@ pub async fn generate_financial_compliance_report(
         let window_start = month_start(now)
             .checked_sub_months(Months::new(offset as u32))
             .expect("month subtraction cannot overflow");
-        let window_end = next_month_start(window_start);
-
-        let mut subscription = 0.0;
-        let mut usage = 0.0;
-        let mut one_time = 0.0;
-        for inv in &invoices {
-            if inv.currency.to_uppercase() != "EUR" {
-                continue;
-            }
-            let issued = match inv.issued_at {
-                Some(ts) => ts,
-                None => continue,
-            };
-            if issued >= window_start && issued < window_end {
-                let net = cents_to_units(invoice_subtotal_cents(inv));
-                if let Some(items) = inv.line_items.as_ref().and_then(|v| v.as_array()) {
-                    for item in items {
-                        let units = cents_to_units(
-                            item.get("amount").and_then(|a| a.as_i64()).unwrap_or(0),
-                        );
-                        match item
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .map(categorize_line)
-                            .unwrap_or(RevenueCategory::OneTime)
-                        {
-                            RevenueCategory::Subscription => subscription += units,
-                            RevenueCategory::Usage => usage += units,
-                            RevenueCategory::OneTime => one_time += units,
-                        }
-                    }
-                } else {
-                    one_time += net;
-                }
-            }
-        }
-
-        monthly_revenue_streams.push(MonthlyRevenueStream {
-            month: format!("{:04}-{:02}", window_start.year(), window_start.month()),
-            subscription_eur: subscription,
-            usage_eur: usage,
-            one_time_eur: one_time,
-            total_eur: subscription + usage + one_time,
-        });
+        monthly_revenue_streams.push(monthly_revenue_stream(&invoices, window_start));
     }
 
     Ok(FinancialComplianceReport {
@@ -980,5 +1026,624 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+    }
+}
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// Every figure must come from the canonical invoices; nominal amounts in
+// different currencies are never summed, line items that do not reconcile are
+// visibly uncategorized, and an empty period is explicit zeros.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+
+    fn close(left: f64, right: f64) {
+        assert!((left - right).abs() < 0.005, "expected {right}, got {left}");
+    }
+
+    async fn pool(suffix: &str) -> Option<sqlx::PgPool> {
+        let pool = test_support::canonical_pool(&format!("fin_{suffix}"), &format!("fin_{suffix}"))
+            .await?;
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES
+               ('t-dom', 'Domestic', 'pro', 'active'),
+               ('t-eu', 'EU Customer', 'pro', 'active')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed tenants");
+        Some(pool)
+    }
+
+    struct InvoiceSeed<'a> {
+        tenant: &'a str,
+        currency: &'a str,
+        status: &'a str,
+        subtotal: i64,
+        vat: i64,
+        total: i64,
+        country: &'a str,
+        vat_number: Option<&'a str>,
+        line_items: Option<serde_json::Value>,
+        due_at: Option<DateTime<Utc>>,
+    }
+
+    impl<'a> InvoiceSeed<'a> {
+        fn paid(tenant: &'a str, subtotal: i64, vat: i64, country: &'a str) -> Self {
+            Self {
+                tenant,
+                currency: "EUR",
+                status: "paid",
+                subtotal,
+                vat,
+                total: subtotal + vat,
+                country,
+                vat_number: None,
+                line_items: None,
+                due_at: None,
+            }
+        }
+    }
+
+    async fn insert_invoice(pool: &sqlx::PgPool, invoice: InvoiceSeed<'_>) {
+        let snapshot = serde_json::json!({
+            "country": invoice.country,
+            "vat_number": invoice.vat_number,
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO invoices
+               (id, tenant_id, amount, currency, status, issued_at, due_at, created_at, updated_at,
+                subtotal, vat_total, total, line_items, billing_country, billing_address)
+             VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), $5, NOW(), NOW(),
+                     $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(invoice.tenant)
+        .bind(invoice.total)
+        .bind(invoice.currency)
+        .bind(invoice.status)
+        .bind(invoice.due_at)
+        .bind(invoice.subtotal)
+        .bind(invoice.vat)
+        .bind(invoice.total)
+        .bind(&invoice.line_items)
+        .bind(invoice.country)
+        .bind(&snapshot)
+        .execute(pool)
+        .await
+        .expect("seed invoice");
+    }
+
+    #[test]
+    fn amount_and_subtotal_resolvers_prefer_the_most_specific_column() {
+        let mut inv = InvoiceRow {
+            id: "i".into(),
+            tenant_id: "t".into(),
+            amount: Some(1000),
+            subtotal: Some(800),
+            vat_total: Some(200),
+            total: Some(1000),
+            currency: "EUR".into(),
+            status: "paid".into(),
+            issued_at: None,
+            due_at: None,
+            paid_at: None,
+            line_items: None,
+            billing_country: None,
+            billing_address: None,
+        };
+        assert_eq!(invoice_amount_cents(&inv), 1000, "total wins");
+        assert_eq!(invoice_subtotal_cents(&inv), 800, "subtotal wins");
+        // Legacy row with only `amount` + VAT.
+        inv.total = None;
+        inv.subtotal = None;
+        assert_eq!(invoice_amount_cents(&inv), 1000);
+        assert_eq!(invoice_subtotal_cents(&inv), 800);
+        // Legacy row with only amount (VAT included).
+        inv.vat_total = None;
+        assert_eq!(invoice_amount_cents(&inv), 1000);
+        assert_eq!(invoice_subtotal_cents(&inv), 1000);
+        // Reconstruct from subtotal + VAT when nothing else exists.
+        inv.amount = None;
+        inv.subtotal = Some(500);
+        inv.vat_total = Some(120);
+        assert_eq!(invoice_amount_cents(&inv), 620);
+        // Nothing at all is zero, not a panic.
+        inv.subtotal = None;
+        inv.vat_total = None;
+        assert_eq!(invoice_amount_cents(&inv), 0);
+        assert_eq!(invoice_subtotal_cents(&inv), 0);
+    }
+
+    #[test]
+    fn classifications_are_case_and_snapshot_driven() {
+        assert!(is_eu_country("DE"));
+        assert!(is_eu_country("FR"));
+        assert!(!is_eu_country("US"));
+        assert!(!is_eu_country("de"), "lowercase is not a canonical code");
+
+        let invoice = |country: Option<&str>, vat_number: Option<&str>| InvoiceRow {
+            id: "i".into(),
+            tenant_id: "t".into(),
+            amount: None,
+            subtotal: Some(100),
+            vat_total: Some(24),
+            total: Some(124),
+            currency: "EUR".into(),
+            status: "paid".into(),
+            issued_at: None,
+            due_at: None,
+            paid_at: None,
+            line_items: None,
+            billing_country: country.map(str::to_string),
+            billing_address: vat_number.map(|number| {
+                serde_json::json!({"country": "DE", "vat_number": number}).to_string()
+            }),
+        };
+        assert_eq!(
+            classify_vat(&invoice(Some("ee"), None)),
+            VatClassification::Domestic,
+            "case-insensitive country"
+        );
+        assert_eq!(
+            classify_vat(&invoice(Some("DE"), Some("DE123456789"))),
+            VatClassification::ReverseCharge
+        );
+        assert_eq!(
+            classify_vat(&invoice(Some("DE"), Some("   "))),
+            VatClassification::EuVatDue,
+            "a blank VAT number is not a valid one"
+        );
+        assert_eq!(
+            classify_vat(&invoice(Some("US"), None)),
+            VatClassification::ZeroRatedExport
+        );
+        // Missing billing_country falls back to the immutable snapshot.
+        assert_eq!(
+            classify_vat(&invoice(None, Some("DE123456789"))),
+            VatClassification::ReverseCharge
+        );
+        // A malformed snapshot never fabricates a VAT number or a country.
+        let mut malformed = invoice(None, None);
+        malformed.billing_address = Some("{not json".into());
+        assert_eq!(classify_vat(&malformed), VatClassification::ZeroRatedExport);
+
+        assert_eq!(
+            categorize_line("Subscription – Pro"),
+            RevenueCategory::Subscription
+        );
+        assert_eq!(
+            categorize_line("subscription"),
+            RevenueCategory::Subscription
+        );
+        assert_eq!(
+            categorize_line("Overage: 12k emails"),
+            RevenueCategory::Usage
+        );
+        assert_eq!(categorize_line("PAYG usage: April"), RevenueCategory::Usage);
+        assert_eq!(categorize_line("Setup fee"), RevenueCategory::OneTime);
+        assert_eq!(categorize_line(""), RevenueCategory::OneTime);
+    }
+
+    #[test]
+    fn month_arithmetic_is_exact_across_year_boundaries() {
+        let start = NaiveDate::from_ymd_opt(2025, 11, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        assert_eq!(months_between(start, end), 3);
+
+        let december = NaiveDate::from_ymd_opt(2026, 12, 15)
+            .unwrap()
+            .and_time(NaiveTime::MIN)
+            .and_utc();
+        assert_eq!(
+            month_start(december).to_rfc3339(),
+            "2026-12-01T00:00:00+00:00"
+        );
+        let january = next_month_start(month_start(december));
+        assert_eq!(january.to_rfc3339(), "2027-01-01T00:00:00+00:00");
+        assert_eq!(
+            next_month_start(january).to_rfc3339(),
+            "2027-02-01T00:00:00+00:00"
+        );
+        // Leap-year February has 29 days; March starts on the 1st.
+        let feb = month_start(
+            NaiveDate::from_ymd_opt(2028, 2, 29)
+                .unwrap()
+                .and_time(NaiveTime::MIN)
+                .and_utc(),
+        );
+        assert_eq!(
+            next_month_start(feb).to_rfc3339(),
+            "2028-03-01T00:00:00+00:00"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_derives_every_figure_from_the_live_invoices() {
+        let Some(pool) = pool("report").await else {
+            return;
+        };
+        let now = Utc::now();
+
+        // Domestic EUR paid invoice with reconciling line items.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                line_items: Some(serde_json::json!([
+                    {"description": "Subscription – Pro", "amount": 10000},
+                    {"description": "Overage: 5k emails", "amount": 2500},
+                    {"description": "Setup fee", "amount": 500}
+                ])),
+                ..InvoiceSeed::paid("t-dom", 13000, 3120, "EE")
+            },
+        )
+        .await;
+        // Non-EUR invoice: counted per currency, excluded from EUR VAT/AR.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                currency: "USD",
+                line_items: Some(serde_json::json!([
+                    {"description": "Subscription", "amount": 7000}
+                ])),
+                ..InvoiceSeed::paid("t-eu", 7000, 0, "US")
+            },
+        )
+        .await;
+        // Reverse-charge EU invoice (valid VAT number in the snapshot).
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                vat_number: Some("DE811234567"),
+                ..InvoiceSeed::paid("t-eu", 20000, 0, "DE")
+            },
+        )
+        .await;
+        // EU B2C invoice without a VAT number: EE VAT is due.
+        insert_invoice(&pool, InvoiceSeed::paid("t-eu", 5000, 1200, "FR")).await;
+        // Outside the EU: zero-rated export.
+        insert_invoice(&pool, InvoiceSeed::paid("t-eu", 3000, 0, "US")).await;
+        // Refunded invoice: recognized is not affected, refunds are.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                status: "refunded",
+                ..InvoiceSeed::paid("t-dom", 4000, 960, "EE")
+            },
+        )
+        .await;
+        // Open invoice, 45 days overdue → 31-60 day bucket.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                status: "open",
+                due_at: Some(now - chrono::Duration::days(45)),
+                ..InvoiceSeed::paid("t-dom", 8000, 1920, "EE")
+            },
+        )
+        .await;
+        // Open invoice, not yet due → current bucket.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                status: "open",
+                due_at: Some(now + chrono::Duration::days(10)),
+                ..InvoiceSeed::paid("t-dom", 2000, 480, "EE")
+            },
+        )
+        .await;
+        // Line items that do NOT reconcile with the subtotal: visibly
+        // one-time, never force-split.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                line_items: Some(serde_json::json!([
+                    {"description": "Subscription", "amount": 1}
+                ])),
+                ..InvoiceSeed::paid("t-dom", 9000, 2160, "EE")
+            },
+        )
+        .await;
+
+        let report = generate_financial_compliance_report(&pool, 3)
+            .await
+            .expect("report");
+        assert_eq!(
+            report.report_period.months, 2,
+            "3-month window spans 2 boundaries"
+        );
+        assert!(!report.report_period.start_date.is_empty());
+
+        // Per-currency revenue: EUR first, then alphabetical; USD never
+        // added into a EUR total.
+        let currencies: Vec<&str> = report
+            .revenue_recognition
+            .by_currency
+            .iter()
+            .map(|c| c.currency.as_str())
+            .collect();
+        assert_eq!(currencies, vec!["EUR", "USD"]);
+        assert_eq!(report.revenue_recognition.non_eur_currencies, vec!["USD"]);
+        assert!(report.revenue_recognition.has_source_data);
+        let eur = &report.revenue_recognition.by_currency[0];
+        // totals: 13000+3120 + 20000 + 5000+1200 + 3000 + 4000+960 + 8000+1920 + 2000+480 + 9000+2160
+        let eur_total: f64 = (13000
+            + 3120
+            + 20000
+            + 5000
+            + 1200
+            + 3000
+            + 4000
+            + 960
+            + 8000
+            + 1920
+            + 2000
+            + 480
+            + 9000
+            + 2160) as f64
+            / 100.0;
+        close(eur.total, eur_total);
+        close(eur.refunds, (4000 + 960) as f64 / 100.0);
+        close(eur.deferred, (8000 + 1920 + 2000 + 480) as f64 / 100.0);
+        // Recognized excludes refunds and open invoices.
+        close(
+            eur.recognized,
+            (13000 + 3120 + 20000 + 5000 + 1200 + 3000 + 9000 + 2160) as f64 / 100.0,
+        );
+        close(eur.net, eur.recognized - eur.refunds);
+        // Line-item categories come from the descriptions.
+        close(eur.subscription, 100.0);
+        close(eur.usage, 25.0);
+        // one-time: setup 5.00 + the 90.00 non-reconciling invoice + the
+        // snapshot-less invoices (200 + 50 + 30 + 40 + 80 + 20) — the same
+        // shared rule the monthly stream applies.
+        close(
+            eur.one_time,
+            5.0 + 90.0 + 200.0 + 50.0 + 30.0 + 40.0 + 80.0 + 20.0,
+        );
+        assert_eq!(eur.invoice_count, 8);
+        let usd = &report.revenue_recognition.by_currency[1];
+        close(usd.total, 70.0);
+        close(usd.subscription, 70.0);
+        assert_eq!(usd.invoice_count, 1);
+
+        // VAT analytics: only EUR invoices; EU-without-VAT joins domestic
+        // output; reverse charge and exports are separate; non-EUR counted.
+        let vat = &report.vat_analytics;
+        assert_eq!(
+            vat.vat_rate,
+            tax_policy::vat_standard_rate(Utc::now().date_naive())
+        );
+        // EU B2C (FR) stays its own subtotal line; only its output VAT joins
+        // the domestic output figure.
+        close(
+            vat.domestic_taxable_subtotal_eur,
+            (13000 + 4000 + 8000 + 2000 + 9000) as f64 / 100.0,
+        );
+        close(
+            vat.domestic_output_vat_eur,
+            (3120 + 1200 + 960 + 1920 + 480 + 2160) as f64 / 100.0,
+        );
+        close(vat.eu_reverse_charge_subtotal_eur, 200.0);
+        close(vat.eu_vat_due_subtotal_eur, 50.0);
+        close(vat.non_eu_export_subtotal_eur, 30.0);
+        assert_eq!(vat.non_eur_invoices, 1);
+        close(vat.vat_deductible_eur, 0.0);
+        assert!(!vat.input_tax_source);
+        close(vat.net_vat_payable_eur, vat.domestic_output_vat_eur);
+
+        // AR aging: only EUR open invoices, by due date.
+        let ar = &report.ar_aging;
+        close(ar.days_31_to_60_eur, 99.20);
+        close(ar.current_eur, 24.80);
+        close(
+            ar.total_outstanding_eur,
+            ar.current_eur
+                + ar.days_1_to_30_eur
+                + ar.days_31_to_60_eur
+                + ar.days_61_to_90_eur
+                + ar.days_over_90_eur,
+        );
+        close(
+            ar.bad_debt_reserve_eur,
+            ar.days_1_to_30_eur * 0.05
+                + ar.days_31_to_60_eur * 0.25
+                + ar.days_61_to_90_eur * 0.5
+                + ar.days_over_90_eur,
+        );
+
+        // Country breakdown: sorted by subtotal descending, EE domestic.
+        let countries: Vec<&str> = report
+            .revenue_by_country
+            .iter()
+            .map(|c| c.country_code.as_str())
+            .collect();
+        assert!(countries.contains(&"EE"));
+        assert!(report
+            .revenue_by_country
+            .iter()
+            .any(|c| c.is_domestic && c.country_code == "EE"));
+        assert!(report
+            .revenue_by_country
+            .iter()
+            .any(|c| c.is_eu && c.country_code == "DE"));
+        assert!(report
+            .revenue_by_country
+            .windows(2)
+            .all(|w| w[0].revenue_eur >= w[1].revenue_eur));
+
+        // Monthly streams cover the requested window in order.
+        assert_eq!(report.monthly_revenue_streams.len(), 3);
+        let current = report.monthly_revenue_streams.last().expect("current");
+        close(
+            current.total_eur,
+            current.subscription_eur + current.usage_eur + current.one_time_eur,
+        );
+        // Monthly categories obey the same reconciliation rule as the period
+        // recognition: the non-reconciling snapshot is NOT split (its net is
+        // one-time), so the monthly total still covers every invoice.
+        close(current.subscription_eur, 100.0);
+        close(current.usage_eur, 25.0);
+        close(
+            current.one_time_eur,
+            5.0 + 90.0 + 200.0 + 50.0 + 30.0 + 40.0 + 80.0 + 20.0,
+        );
+        // An earlier month with no invoices is an explicit zero, not omitted.
+        assert!(report
+            .monthly_revenue_streams
+            .iter()
+            .any(|m| m.total_eur == 0.0));
+
+        // Plan revenue comes from the tenants table (pro plan, 2 active).
+        let pro = report
+            .revenue_by_plan
+            .iter()
+            .find(|p| p.plan == "pro")
+            .expect("pro plan");
+        assert_eq!(pro.customers, 2);
+        close(pro.arr_eur, pro.mrr_eur * 12.0);
+    }
+
+    /// The period revenue-recognition view and the monthly stream are both
+    /// legally reported surfaces: they must categorize a snapshot-less
+    /// invoice identically. This pins the chosen rule — no `line_items`
+    /// snapshot (like a non-reconciling one) is one-time/unallocated revenue
+    /// in BOTH views — and asserts the two functions agree line by line and
+    /// on the total.
+    #[tokio::test]
+    async fn period_and_monthly_views_agree_for_snapshot_less_invoices() {
+        let Some(pool) = pool("snapshot_agreement").await else {
+            return;
+        };
+        // (a) A reconciling snapshot: 100.00 subscription + 25.00 usage.
+        insert_invoice(
+            &pool,
+            InvoiceSeed {
+                line_items: Some(serde_json::json!([
+                    {"description": "Subscription – Pro", "amount": 10000},
+                    {"description": "Overage: 1k emails", "amount": 2500}
+                ])),
+                ..InvoiceSeed::paid("t-dom", 12500, 0, "EE")
+            },
+        )
+        .await;
+        // (b) No line-item snapshot at all: 70.00, must be one-time in both.
+        insert_invoice(&pool, InvoiceSeed::paid("t-dom", 7000, 0, "EE")).await;
+
+        let report = generate_financial_compliance_report(&pool, 1)
+            .await
+            .expect("report");
+        let eur = report
+            .revenue_recognition
+            .by_currency
+            .iter()
+            .find(|c| c.currency == "EUR")
+            .expect("EUR revenue");
+        close(eur.subscription, 100.0);
+        close(eur.usage, 25.0);
+        close(eur.one_time, 70.0);
+
+        // The monthly stream must agree with the period view exactly.
+        let month = report
+            .monthly_revenue_streams
+            .last()
+            .expect("current month");
+        close(month.subscription_eur, eur.subscription);
+        close(month.usage_eur, eur.usage);
+        close(month.one_time_eur, eur.one_time);
+        close(month.total_eur, 195.0);
+        close(month.total_eur, eur.subscription + eur.usage + eur.one_time);
+        // No VAT and only paid invoices: the recognized total is the same
+        // figure the monthly stream reports.
+        close(month.total_eur, eur.recognized);
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_invoice_table_is_explicit_zero_not_a_fabricated_total() {
+        let Some(pool) = pool("empty").await else {
+            return;
+        };
+        let report = generate_financial_compliance_report(&pool, 1)
+            .await
+            .expect("report");
+        assert!(!report.revenue_recognition.has_source_data);
+        assert!(report.revenue_recognition.by_currency.is_empty());
+        assert!(report.revenue_recognition.non_eur_currencies.is_empty());
+        assert_eq!(report.vat_analytics.non_eur_invoices, 0);
+        close(report.vat_analytics.domestic_taxable_subtotal_eur, 0.0);
+        close(report.vat_analytics.net_vat_payable_eur, 0.0);
+        close(report.ar_aging.total_outstanding_eur, 0.0);
+        close(report.ar_aging.bad_debt_reserve_eur, 0.0);
+        assert!(report.revenue_by_country.is_empty());
+        assert_eq!(report.monthly_revenue_streams.len(), 1);
+        close(report.monthly_revenue_streams[0].total_eur, 0.0);
+        // A zero period is clamped to one month; a huge one to 24.
+        let clamped = generate_financial_compliance_report(&pool, 500)
+            .await
+            .expect("clamped");
+        assert_eq!(clamped.monthly_revenue_streams.len(), 24);
+        let negative = generate_financial_compliance_report(&pool, -5)
+            .await
+            .expect("negative clamped");
+        assert_eq!(negative.monthly_revenue_streams.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn subscription_plans_and_yearly_intervals_feed_mrr() {
+        let Some(pool) = pool("plans").await else {
+            return;
+        };
+        sqlx::query(
+            "INSERT INTO plans (name, price_monthly, price_yearly)
+             VALUES ('pro', 4900, 49000), ('scale', 19900, 199000)
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("plans");
+        sqlx::query(
+            "INSERT INTO subscriptions (id, tenant_id, plan_name, billing_interval, status, created_at, updated_at)
+             VALUES (gen_random_uuid(), 't-dom', 'pro', 'yearly', 'active', NOW(), NOW()),
+                    (gen_random_uuid(), 't-eu', 'scale', 'monthly', 'trialing', NOW(), NOW()),
+                    (gen_random_uuid(), 't-dom', 'pro', 'monthly', 'canceled', NOW(), NOW())",
+        )
+        .execute(&pool)
+        .await
+        .expect("subscriptions");
+        let report = generate_financial_compliance_report(&pool, 1)
+            .await
+            .expect("report");
+        let pro = report
+            .revenue_by_plan
+            .iter()
+            .find(|p| p.plan == "pro")
+            .expect("pro");
+        // Yearly 49000/12 = 4083 cents → 40.83; the canceled sub is excluded.
+        close(pro.mrr_eur, 40.83);
+        let scale = report
+            .revenue_by_plan
+            .iter()
+            .find(|p| p.plan == "scale")
+            .expect("scale");
+        close(scale.mrr_eur, 199.0);
+        let total: f64 = report.revenue_by_plan.iter().map(|p| p.mrr_eur).sum();
+        close(
+            report
+                .revenue_by_plan
+                .iter()
+                .map(|p| p.percentage)
+                .sum::<f64>(),
+            if total > 0.0 { 1.0 } else { 0.0 },
+        );
+        assert!(report
+            .revenue_by_plan
+            .windows(2)
+            .all(|w| w[0].mrr_eur >= w[1].mrr_eur));
     }
 }

@@ -729,3 +729,456 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial coverage tests (DB backed) for idempotent credit notes: the
+// debt-reduction/refund split, exactly-once wallet minting, tenant scoping,
+// invoice-state gates and currency mismatch refusal.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod coverage_adversarial {
+    use super::*;
+    use crate::invoices::invoice_outstanding_cents;
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    struct Env {
+        pool: PgPool,
+        db_name: String,
+        admin_url: String,
+    }
+
+    impl Env {
+        async fn finish(self) {
+            self.pool.close().await;
+            if let Ok(admin) = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&self.admin_url)
+                .await
+            {
+                let _ = sqlx::query(&format!(
+                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                    self.db_name
+                ))
+                .execute(&admin)
+                .await;
+                admin.close().await;
+            }
+        }
+    }
+
+    async fn provision(test_name: &str) -> Option<Env> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let (server_part, db_part) = url.rsplit_once('/').expect("db segment");
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in test_name.bytes() {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let db_name = format!("{db_only}_cncov_{:08x}", digest & 0xffff_ffff);
+
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{server_part}/postgres"));
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+
+        let migrations_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut count = 0_usize;
+        let mut newest = 0_i64;
+        for entry in std::fs::read_dir(&migrations_dir).expect("migrations dir") {
+            let name = entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            if let Some(prefix) = name.split('_').next() {
+                if let Ok(version) = prefix.parse::<i64>() {
+                    count += 1;
+                    newest = newest.max(version);
+                }
+            }
+        }
+        let template: Option<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
+        )
+        .bind(format!("apexmail_canonical_tpl_{count}_{newest}_%"))
+        .fetch_optional(&admin)
+        .await
+        .expect("template lookup");
+        let template = template.expect("canonical template database must exist");
+
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            db_name
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop test db");
+        sqlx::query(&format!(
+            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+            db_name, template
+        ))
+        .execute(&admin)
+        .await
+        .expect("clone test db");
+        admin.close().await;
+
+        let database_url = format!("{server_part}/{db_name}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&database_url)
+            .await
+            .expect("connect test db");
+        Some(Env {
+            pool,
+            db_name,
+            admin_url,
+        })
+    }
+
+    macro_rules! env_test {
+        ($name:ident, |$e:ident| $body:block) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(owned) = provision(stringify!($name)).await else {
+                    return;
+                };
+                let $e = &owned;
+                $body
+                owned.finish().await;
+            }
+        };
+    }
+
+    async fn seed_tenant(env: &Env, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, 'growth', 'active')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(format!("Coverage {tenant}"))
+        .execute(&env.pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_invoice(
+        env: &Env,
+        tenant: &str,
+        status: &str,
+        total: i64,
+        currency: &str,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, amount, currency, status, invoice_number,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $3, 0, $3, NOW(), NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(total)
+        .bind(currency)
+        .bind(status)
+        .bind(format!("CNCOV-{}", id.simple()))
+        .execute(&env.pool)
+        .await
+        .expect("seed invoice");
+        id
+    }
+
+    async fn record_payment(env: &Env, tenant: &str, invoice: Uuid, amount: i64, currency: &str) {
+        sqlx::query(
+            "INSERT INTO invoice_payment_allocations
+                 (id, tenant_id, invoice_id, operation_id, source, amount_cents, currency)
+             VALUES (gen_random_uuid(), $1, $2, $3, 'wallet', $4, $5)",
+        )
+        .bind(tenant)
+        .bind(invoice)
+        .bind(format!("cncov:{}", invoice.simple()))
+        .bind(amount)
+        .bind(currency)
+        .execute(&env.pool)
+        .await
+        .expect("payment allocation");
+    }
+
+    fn note(tenant: &str, invoice: Uuid, amount: i64, key: &str) -> CreateCreditNoteInput {
+        CreateCreditNoteInput {
+            invoice_id: invoice,
+            amount,
+            reason: "adversarial credit".to_string(),
+            tenant_id: tenant.to_string(),
+            idempotency_key: key.to_string(),
+        }
+    }
+
+    env_test!(paid_credit_note_refunds_only_the_paid_part_once, |env| {
+        let tenant = "cncov_paid";
+        seed_tenant(env, tenant).await;
+        let invoice = seed_invoice(env, tenant, "paid", 1000, "EUR").await;
+        record_payment(env, tenant, invoice, 1000, "EUR").await;
+
+        let created = create_credit_note(&env.pool, note(tenant, invoice, 400, "key-refund"))
+            .await
+            .expect("credit note");
+        assert_eq!(created.amount, 400);
+        assert_eq!(created.currency, "EUR");
+        assert_eq!(
+            (created.debt_reduction_cents, created.refunded_cents),
+            (0, 400),
+            "a fully-paid invoice has no debt left to reduce: the credit is refundable"
+        );
+        let (balance, credits): (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE((SELECT balance FROM wallets WHERE tenant_id = $1), -1),
+                    (SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'credit')",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("wallet");
+        assert_eq!((balance, credits), (400, 1), "exactly one mint");
+
+        // Idempotent replay: same key + same payload returns the record and
+        // mints nothing further.
+        let replay = create_credit_note(&env.pool, note(tenant, invoice, 400, "key-refund"))
+            .await
+            .expect("replay");
+        assert_eq!(replay.id, created.id);
+        let credits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'credit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("credits");
+        assert_eq!(credits, 1, "replay never mints twice");
+        let notes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM credit_notes")
+            .fetch_one(&env.pool)
+            .await
+            .expect("notes");
+        assert_eq!(notes, 1);
+
+        // Reusing the key for a different amount is rejected loudly.
+        let error = create_credit_note(&env.pool, note(tenant, invoice, 401, "key-refund"))
+            .await
+            .expect_err("key reuse");
+        assert!(
+            matches!(error, CreditNoteError::IdempotencyKeyReused { .. }),
+            "{error:?}"
+        );
+        let credits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM wallet_transactions WHERE tenant_id = $1 AND type = 'credit'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("credits");
+        assert_eq!(credits, 1, "a rejected retry touches no money");
+
+        // Over-crediting the invoice is refused.
+        let error = create_credit_note(&env.pool, note(tenant, invoice, 601, "key-over"))
+            .await
+            .expect_err("exceeds invoice");
+        assert!(
+            matches!(error, CreditNoteError::AmountExceedsInvoice),
+            "{error:?}"
+        );
+    });
+
+    env_test!(
+        unpaid_credit_note_reduces_debt_without_minting_value,
+        |env| {
+            let tenant = "cncov_unpaid";
+            seed_tenant(env, tenant).await;
+            let invoice = seed_invoice(env, tenant, "pending", 1000, "EUR").await;
+
+            let created = create_credit_note(&env.pool, note(tenant, invoice, 600, "key-debt"))
+                .await
+                .expect("credit note");
+            assert_eq!(
+                (created.debt_reduction_cents, created.refunded_cents),
+                (600, 0),
+                "nothing was paid, so nothing is refundable"
+            );
+            let wallets: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("wallets");
+            assert_eq!(wallets, 0, "debt reduction never mints spendable value");
+            let outstanding = invoice_outstanding_cents(&env.pool, invoice)
+                .await
+                .expect("outstanding");
+            assert_eq!(
+                outstanding, 400,
+                "the unpaid obligation drops by the credit"
+            );
+
+            // The remaining creditable capacity is exactly the remainder.
+            let error = create_credit_note(&env.pool, note(tenant, invoice, 401, "key-too-much"))
+                .await
+                .expect_err("over the remainder");
+            assert!(
+                matches!(error, CreditNoteError::AmountExceedsInvoice),
+                "{error:?}"
+            );
+            let note = create_credit_note(&env.pool, note(tenant, invoice, 400, "key-rest"))
+                .await
+                .expect("exact remainder");
+            assert_eq!(note.debt_reduction_cents, 400);
+            let outstanding = invoice_outstanding_cents(&env.pool, invoice)
+                .await
+                .expect("outstanding");
+            assert_eq!(outstanding, 0);
+        }
+    );
+
+    env_test!(credit_note_state_tenant_and_currency_gates, |env| {
+        let tenant = "cncov_gates";
+        seed_tenant(env, tenant).await;
+
+        // Draft and void invoices are not creditable.
+        for status in ["draft", "void"] {
+            let invoice = seed_invoice(env, tenant, status, 500, "EUR").await;
+            let error = create_credit_note(
+                &env.pool,
+                note(tenant, invoice, 100, &format!("key-{status}")),
+            )
+            .await
+            .expect_err("not creditable");
+            assert!(
+                matches!(error, CreditNoteError::InvoiceNotCreditable(_)),
+                "{status}: {error:?}"
+            );
+        }
+
+        // Unknown invoice and cross-tenant invoice ids are not found.
+        let error = create_credit_note(&env.pool, note(tenant, Uuid::new_v4(), 100, "key-missing"))
+            .await
+            .expect_err("missing invoice");
+        assert!(
+            matches!(error, CreditNoteError::InvoiceNotFound(_)),
+            "{error:?}"
+        );
+        let other = "cncov_gates_other";
+        seed_tenant(env, other).await;
+        let other_invoice = seed_invoice(env, other, "paid", 500, "EUR").await;
+        let error = create_credit_note(
+            &env.pool,
+            note(tenant, other_invoice, 100, "key-crosstenant"),
+        )
+        .await
+        .expect_err("cross-tenant invoice");
+        assert!(
+            matches!(error, CreditNoteError::InvoiceNotFound(_)),
+            "{error:?}"
+        );
+
+        // The same idempotency key is scoped per tenant: both tenants get
+        // their own note.
+        let mine = seed_invoice(env, tenant, "paid", 500, "EUR").await;
+        let theirs = seed_invoice(env, other, "paid", 500, "EUR").await;
+        record_payment(env, tenant, mine, 500, "EUR").await;
+        record_payment(env, other, theirs, 500, "EUR").await;
+        let first = create_credit_note(&env.pool, note(tenant, mine, 100, "shared-key"))
+            .await
+            .expect("tenant note");
+        let second = create_credit_note(&env.pool, note(other, theirs, 100, "shared-key"))
+            .await
+            .expect("other tenant note");
+        assert_ne!(first.id, second.id);
+
+        // A refund into a mismatched wallet currency is refused before any
+        // value is minted.
+        let usd_invoice = seed_invoice(env, tenant, "paid", 500, "USD").await;
+        record_payment(env, tenant, usd_invoice, 500, "USD").await;
+        let error = create_credit_note(&env.pool, note(tenant, usd_invoice, 100, "key-usd"))
+            .await
+            .expect_err("currency mismatch");
+        assert!(
+            matches!(error, CreditNoteError::CurrencyMismatch { .. }),
+            "{error:?}"
+        );
+        let usd_wallet: Option<String> =
+            sqlx::query_scalar("SELECT currency FROM wallets WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_optional(&env.pool)
+                .await
+                .expect("wallet");
+        assert_ne!(
+            usd_wallet.as_deref(),
+            Some("USD"),
+            "no USD wallet is created for the refused refund"
+        );
+        let notes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM credit_notes WHERE idempotency_key = 'key-usd'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("notes");
+        assert_eq!(notes, 0, "the refused credit is not recorded");
+    });
+
+    #[test]
+    fn credit_disposition_split_is_conservative() {
+        // Nothing paid: the whole credit reduces debt.
+        assert_eq!(split_credit_disposition(100, 0, 500), (100, 0));
+        // Fully paid: the whole credit is refundable value.
+        assert_eq!(split_credit_disposition(100, 500, 0), (0, 100));
+        // Mixed: the debt pool is consumed first (bounded by the
+        // outstanding), then the paid pool, never exceeding either.
+        assert_eq!(split_credit_disposition(300, 150, 200), (200, 100));
+        // In the REACHABLE domain the caller has already validated
+        // amount <= total - already_credited, which implies
+        // amount <= outstanding + paid: every cent is then disposed of.
+        for (amount, paid, outstanding) in [
+            (300, 150, 200),
+            (100, 0, 500),
+            (100, 500, 0),
+            (250, 150, 100),
+            (1, 1, 1),
+            (1_000_000, 1_000_000, 0),
+        ] {
+            assert!(
+                amount <= paid.max(0) + outstanding.max(0),
+                "test input respects the caller's precondition"
+            );
+            let (debt, refund) = split_credit_disposition(amount, paid, outstanding);
+            assert_eq!(
+                debt + refund,
+                amount,
+                "the split never loses or invents value"
+            );
+            assert!(refund <= paid.max(0), "refund is bounded by paid money");
+            assert!(
+                debt <= outstanding.max(0),
+                "debt is bounded by the obligation"
+            );
+        }
+        // The refund can never exceed what was actually paid.
+        assert_eq!(split_credit_disposition(300, 50, 100), (100, 50));
+        assert_eq!(split_credit_disposition(0, 100, 100), (0, 0));
+        // A negative requested amount never mints spendable value — the
+        // caller's amount validation rejects such a request before this
+        // point, so only the no-mint guarantee matters here.
+        let (_, refund) = split_credit_disposition(-5, 100, 100);
+        assert_eq!(refund, 0);
+    }
+}

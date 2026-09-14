@@ -904,6 +904,15 @@ impl AuditLogger {
         url: &str,
         events: &[AuditAction],
     ) -> Result<String, String> {
+        // Audit evidence travels over this endpoint: a plaintext or malformed
+        // URL is refused at registration time rather than leaking the stream.
+        let parsed = url::Url::parse(url).map_err(|e| format!("invalid webhook url: {e}"))?;
+        if parsed.scheme() != "https" {
+            return Err("webhook url must use https".into());
+        }
+        if parsed.host_str().is_none() {
+            return Err("webhook url must name a host".into());
+        }
         let id = Uuid::new_v4().to_string();
         let events_json: Vec<String> = events.iter().map(|a| a.to_string()).collect();
         let events_val = serde_json::to_value(&events_json).map_err(|e| format!("JSON: {e}"))?;
@@ -1703,6 +1712,328 @@ mod tests {
         assert_eq!(
             submicro, 0,
             "truncate_to_micros must yield PG-round-trippable microsecond timestamps"
+        );
+    }
+}
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// The audit log is evidence: every convenience action must write a chained
+// entry, the chain must detect tampering, and webhook registration must not
+// accept a plaintext endpoint.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+    use crate::types::{AuditAction, AuditOutcome, AuditResource};
+    use serde_json::json;
+
+    async fn logger(suffix: &str) -> Option<(PgPool, AuditLogger)> {
+        let pool =
+            test_support::canonical_pool(&format!("audit_{suffix}"), &format!("audit_{suffix}"))
+                .await?;
+        let logger = AuditLogger::new(
+            pool.clone(),
+            AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: true,
+                signing_key: "unit-audit-key-0123456789abcdef".into(),
+            },
+        );
+        logger.initialize().await.expect("initialize");
+        Some((pool, logger))
+    }
+
+    fn ctx(tenant: &str) -> LogContext {
+        LogContext {
+            tenant_id: Some(tenant.into()),
+            user_id: Some("user-1".into()),
+            session_id: Some("session-1".into()),
+            ip_address: Some("203.0.113.10".into()),
+            user_agent: Some("unit-test".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_convenience_action_writes_a_chained_entry() {
+        let Some((_pool, logger)) = logger("actions").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let details = json!({"why": "unit"});
+        let context = ctx(&tenant);
+
+        let created = logger
+            .log_create(AuditResource::ApiKey, "key-1", details.clone(), &context)
+            .await
+            .expect("create");
+        let read = logger
+            .log_read(AuditResource::ApiKey, "key-1", details.clone(), &context)
+            .await
+            .expect("read");
+        let updated = logger
+            .log_update(AuditResource::ApiKey, "key-1", details.clone(), &context)
+            .await
+            .expect("update");
+        let deleted = logger
+            .log_delete(AuditResource::ApiKey, "key-1", details.clone(), &context)
+            .await
+            .expect("delete");
+        let login = logger
+            .log_login("user-1", true, details.clone(), &context)
+            .await
+            .expect("login");
+        let failed_login = logger
+            .log_login("user-1", false, details.clone(), &context)
+            .await
+            .expect("failed login");
+        let sent = logger
+            .log_send("message-1", details.clone(), &context)
+            .await
+            .expect("send");
+        let exported = logger
+            .log_export(AuditResource::Settings, "audit", details.clone(), &context)
+            .await
+            .expect("export");
+        let ids = [
+            created.id.as_str(),
+            read.id.as_str(),
+            updated.id.as_str(),
+            deleted.id.as_str(),
+            login.id.as_str(),
+            failed_login.id.as_str(),
+            sent.id.as_str(),
+            exported.id.as_str(),
+        ];
+        let unique: std::collections::HashSet<&str> = ids.into_iter().collect();
+        assert_eq!(unique.len(), 8);
+
+        let entry = logger
+            .get_entry(&created.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(entry.action, AuditAction::Create);
+        assert_eq!(entry.resource, AuditResource::ApiKey);
+        assert_eq!(entry.outcome, AuditOutcome::Success);
+        assert_eq!(entry.tenant_id.as_deref(), Some(tenant.as_str()));
+        assert_eq!(entry.resource_id.as_deref(), Some("key-1"));
+        assert!(!entry.hash.is_empty());
+        assert_eq!(entry.user_id.as_deref(), Some("user-1"));
+        assert_eq!(entry.session_id.as_deref(), Some("session-1"));
+        assert_eq!(entry.ip_address.as_deref(), Some("203.0.113.10"));
+        // A failed login is recorded as a failure, not a success.
+        let entry = logger
+            .get_entry(&failed_login.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(entry.outcome, AuditOutcome::Failure);
+        assert!(entry.error_message.is_some());
+
+        // The chain verifies as a whole and per entry.
+        let verification = logger
+            .verify_chain(Some(&tenant), None, None)
+            .await
+            .expect("verify");
+        assert!(verification.valid, "{verification:?}");
+        assert!(verification.entries_checked >= 8);
+        assert!(
+            logger
+                .verify_chain_entries(std::slice::from_ref(&created))
+                .valid
+        );
+
+        // Queries are tenant-scoped and paginate.
+        let query = AuditLogQuery {
+            tenant_id: Some(tenant.clone()),
+            ..Default::default()
+        };
+        let (entries, total) = logger.query(&query).await.expect("query");
+        assert_eq!(total, 8);
+        assert_eq!(entries.len(), 8);
+        let foreign = AuditLogQuery {
+            tenant_id: Some(test_support::unique_tenant()),
+            ..Default::default()
+        };
+        let (foreign_entries, foreign_total) = logger.query(&foreign).await.expect("query");
+        assert_eq!(foreign_total, 0);
+        assert!(foreign_entries.is_empty());
+
+        // Stats and export cover the entries.
+        let stats = logger.get_stats(Some(&tenant)).await.expect("stats");
+        assert_eq!(stats["total_entries"], json!(8));
+        assert_eq!(stats["by_action"]["create"], json!(1));
+        assert_eq!(
+            stats["by_action"]["login"],
+            json!(2),
+            "both login attempts are recorded"
+        );
+        assert_eq!(stats["by_outcome"]["failure"], json!(1));
+        let export = logger.export(&query, "csv").await.expect("csv export");
+        assert!(export.data.contains("id,tenant_id"));
+        assert_eq!(export.content_type, "text/csv");
+        let json_export = logger.export(&query, "json").await.expect("json export");
+        assert_eq!(json_export.content_type, "application/json");
+        let pdf = logger.export(&query, "pdf").await.expect("pdf export");
+        assert!(pdf.data.starts_with("%PDF-"));
+        assert!(
+            logger.export(&query, "xml").await.is_err(),
+            "an unknown format is refused, never silently rendered"
+        );
+    }
+
+    #[tokio::test]
+    async fn tampering_with_a_stored_entry_breaks_the_chain() {
+        let Some((pool, logger)) = logger("tamper").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let context = ctx(&tenant);
+        for index in 0..3 {
+            logger
+                .log_create(
+                    AuditResource::Subscriber,
+                    &format!("sub-{index}"),
+                    json!({"index": index}),
+                    &context,
+                )
+                .await
+                .expect("log");
+        }
+        assert!(
+            logger
+                .verify_chain(Some(&tenant), None, None)
+                .await
+                .expect("verify")
+                .valid
+        );
+
+        // Rewriting the audited action must invalidate the chain.
+        sqlx::query(
+            "UPDATE audit_logs SET action = 'login'
+             WHERE id = (SELECT id FROM audit_logs WHERE tenant_id = $1
+                         ORDER BY timestamp, id LIMIT 1)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("tamper");
+        let verification = logger
+            .verify_chain(Some(&tenant), None, None)
+            .await
+            .expect("verify");
+        assert!(!verification.valid, "tampered chain must not verify");
+        assert!(verification.first_invalid_entry.is_some());
+
+        // A hostile entry fed directly to the chain validator is rejected.
+        let mut forged = logger
+            .get_entry(
+                &sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM audit_logs WHERE tenant_id = $1 LIMIT 1",
+                )
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("id"),
+            )
+            .await
+            .expect("get")
+            .expect("present");
+        forged.hash = "0".repeat(64);
+        assert!(!logger.verify_chain_entries(&[forged]).valid);
+        // An empty chain is not a failure.
+        assert!(logger.verify_chain_entries(&[]).valid);
+    }
+
+    #[tokio::test]
+    async fn webhook_registration_requires_https() {
+        let Some((pool, logger)) = logger("webhook").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        // A plaintext or malformed URL is refused and NOT persisted.
+        for url in [
+            "http://hooks.example.test/audit",
+            "ftp://hooks.example.test/audit",
+            "not a url",
+            "",
+            "https://",
+        ] {
+            let result = logger
+                .register_webhook(&tenant, url, &[AuditAction::Create])
+                .await;
+            assert!(result.is_err(), "accepted {url:?}");
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_webhooks WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "a refused registration must change nothing");
+
+        // A well-formed https endpoint is stored with its event filters.
+        logger
+            .register_webhook(
+                &tenant,
+                "https://hooks.example.test/audit",
+                &[AuditAction::Create, AuditAction::Delete],
+            )
+            .await
+            .expect("register");
+        let stored: (String, serde_json::Value) =
+            sqlx::query_as("SELECT url, events FROM audit_webhooks WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("stored webhook");
+        assert_eq!(stored.0, "https://hooks.example.test/audit");
+        assert_eq!(stored.1, json!(["create", "delete"]));
+    }
+
+    #[tokio::test]
+    async fn archiving_preserves_entries_and_the_chain_history() {
+        let Some((pool, logger)) = logger("archive").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let context = ctx(&tenant);
+        logger
+            .log_create(AuditResource::Subscriber, "sub-1", json!({}), &context)
+            .await
+            .expect("log");
+        // Archive everything older than now + 1s (i.e. the entry just written).
+        let archived = logger
+            .archive(Utc::now() + Duration::seconds(1))
+            .await
+            .expect("archive");
+        assert_eq!(archived, 1);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(remaining, 0);
+        let in_archive: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs_archive WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(in_archive, 1);
+        // Stats count both live and archived entries.
+        let stats = logger.get_stats(Some(&tenant)).await.expect("stats");
+        assert_eq!(stats["total_entries"], json!(1));
+        // Archiving again is a no-op.
+        assert_eq!(
+            logger
+                .archive(Utc::now() + Duration::seconds(1))
+                .await
+                .expect("archive again"),
+            0
         );
     }
 }

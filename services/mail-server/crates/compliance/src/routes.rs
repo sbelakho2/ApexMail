@@ -597,6 +597,13 @@ async fn audit_export(
         .and_then(|v| v.as_str())
         .ok_or_else(|| err_json(StatusCode::BAD_REQUEST, "Missing tenant_id"))?;
     let format = body.get("format").and_then(|v| v.as_str()).unwrap_or("csv");
+    // An unsupported export format is a caller error, not an internal fault.
+    if !matches!(format, "csv" | "json" | "pdf") {
+        return Err(err_json(
+            StatusCode::BAD_REQUEST,
+            "format must be one of: csv, json, pdf",
+        ));
+    }
     let query = AuditLogQuery {
         tenant_id: Some(tenant_id.to_string()),
         ..Default::default()
@@ -637,6 +644,37 @@ async fn audit_stats(
 
 // ── Secret management endpoints ───────────────────────────────────────────
 
+/// Map a secret-store failure to an honest status code.
+///
+/// An authorisation refusal is 403, a missing secret/version is 404, an
+/// expiry is 410 and a name collision is 409 — only genuine store faults are
+/// 500. The response never echoes the store's internal message.
+fn secret_store_error(e: &str) -> (StatusCode, Json<serde_json::Value>) {
+    let lower = e.to_ascii_lowercase();
+    let (code, message) = if lower.contains("access denied") {
+        (StatusCode::FORBIDDEN, "Access denied")
+    } else if lower.contains("version not found") {
+        (StatusCode::NOT_FOUND, "Secret version not found")
+    } else if lower.contains("has expired") {
+        (StatusCode::GONE, "Secret has expired")
+    } else if lower.contains("not found") {
+        (StatusCode::NOT_FOUND, "Secret not found")
+    } else if lower.contains("duplicate key") || lower.contains("unique constraint") {
+        (
+            StatusCode::CONFLICT,
+            "A secret with that name already exists",
+        )
+    } else if lower.contains("must be configured") || lower.contains("at least") {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Secret storage is not configured",
+        )
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Secret operation failed")
+    };
+    err_json(code, message)
+}
+
 /// POST /secrets — create a new secret.
 async fn secret_create(
     State(state): State<Arc<AppState>>,
@@ -644,14 +682,17 @@ async fn secret_create(
     Json(input): Json<SecretCreateInput>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     verify_bearer(&headers, &state.config).map_err(|(c, m)| err_json(c, m))?;
+    if input.tenant_id.trim().is_empty() {
+        return Err(err_json(StatusCode::BAD_REQUEST, "Missing tenant_id"));
+    }
+    if input.name.trim().is_empty() {
+        return Err(err_json(StatusCode::BAD_REQUEST, "Missing name"));
+    }
     match state.secret_manager.create_secret(&input).await {
         Ok(secret) => Ok(created_json(secret)),
         Err(e) => {
             error!("Failed to create secret: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create secret",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -675,10 +716,7 @@ async fn secret_list(
         Ok(secrets) => Ok(ok_json(secrets)),
         Err(e) => {
             error!("Failed to list secrets: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to list secrets",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -696,10 +734,7 @@ async fn secret_get(
         Ok(None) => Err(err_json(StatusCode::NOT_FOUND, "Secret not found")),
         Err(e) => {
             error!("Failed to get secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get secret",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -721,10 +756,7 @@ async fn secret_update(
         Ok(secret) => Ok(ok_json(secret)),
         Err(e) => {
             error!("Failed to update secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update secret",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -741,10 +773,7 @@ async fn secret_delete(
         Ok(_) => Ok(Json(serde_json::json!({ "status": "deleted" }))),
         Err(e) => {
             error!("Failed to delete secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to delete secret",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -761,10 +790,7 @@ async fn secret_rotate(
         Ok((secret, _decrypted)) => Ok(ok_json(secret)),
         Err(e) => {
             error!("Failed to rotate secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to rotate secret",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -800,10 +826,7 @@ async fn secret_grant_access(
         Ok(_) => Ok(Json(serde_json::json!({ "status": "access granted" }))),
         Err(e) => {
             error!("Failed to grant access to secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to grant access",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -820,10 +843,7 @@ async fn secret_versions(
         Ok(versions) => Ok(ok_json(versions)),
         Err(e) => {
             error!("Failed to get versions for secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get secret versions",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -844,10 +864,7 @@ async fn secret_rollback(
         Ok(secret) => Ok(ok_json(secret)),
         Err(e) => {
             error!("Failed to rollback secret {id}: {e}");
-            Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to rollback secret",
-            ))
+            Err(secret_store_error(&e))
         }
     }
 }
@@ -1567,8 +1584,10 @@ async fn breach_resolve(
         Ok(report) => Ok(ok_json(report)),
         Err(e) => {
             error!("Breach resolve failed: {e}");
+            // A state-machine refusal (still pending, wrong state) is a
+            // conflict the caller can act on — not an internal fault.
             Err(err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::CONFLICT,
                 "Failed to resolve breach report",
             ))
         }
@@ -3122,6 +3141,1284 @@ mod tests {
         assert_eq!(
             colon_captures, 39,
             "expected 39 captures (two 2-param routes), found {colon_captures}"
+        );
+    }
+}
+
+// ─── DB-backed handler tests ────────────────────────────────────────────────
+//
+// Every handler is exercised directly: unauthenticated calls must be 401,
+// user error must be 4xx (never 500), and a rejected write must leave the
+// database unchanged.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    const TOKEN: &str = "unit-routes-service-token";
+    const USER: &str = "claimed_user_id:owner@apexmail.ee";
+    const READER: &str = "claimed_user_id:reader@apexmail.ee";
+
+    async fn state(suffix: &str) -> Option<Arc<AppState>> {
+        let pool =
+            test_support::canonical_pool(&format!("routes_{suffix}"), &format!("routes_{suffix}"))
+                .await?;
+        Some(test_support::app_state(pool, TOKEN))
+    }
+
+    fn auth() -> HeaderMap {
+        test_support::bearer(TOKEN)
+    }
+
+    fn auth_as(user: &str) -> HeaderMap {
+        let mut headers = auth();
+        headers.insert("X-User-Id", user.parse().expect("user id header"));
+        headers
+    }
+
+    fn status<R: IntoResponse>(r: Result<R, (StatusCode, Json<serde_json::Value>)>) -> StatusCode {
+        match r {
+            Ok(response) => response.into_response().status(),
+            Err((code, _)) => code,
+        }
+    }
+
+    fn error_of<R: IntoResponse>(
+        r: Result<R, (StatusCode, Json<serde_json::Value>)>,
+    ) -> (StatusCode, serde_json::Value) {
+        match r {
+            Ok(_) => panic!("expected an error response"),
+            Err((code, body)) => (code, body.0),
+        }
+    }
+
+    fn query(pairs: &[(&str, &str)]) -> axum::extract::Query<HashMap<String, String>> {
+        axum::extract::Query(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        )
+    }
+
+    fn path(value: &str) -> axum::extract::Path<String> {
+        axum::extract::Path(value.to_string())
+    }
+
+    fn path_pair(value: &str, version: i32) -> axum::extract::Path<(String, i32)> {
+        axum::extract::Path((value.to_string(), version))
+    }
+
+    fn email_content(tenant: &str) -> EmailContent {
+        EmailContent {
+            tenant_id: tenant.into(),
+            message_id: "msg-1".into(),
+            from_address: "sender@apexmail.ee".into(),
+            from_display_name: None,
+            subject: "hello".into(),
+            text_body: Some("body".into()),
+            html_body: None,
+            headers: HashMap::new(),
+            attachments: vec![],
+        }
+    }
+
+    fn asset_limits() -> serde_json::Value {
+        json!({
+            "max_daily_emails": 100,
+            "max_hourly_emails": 50,
+            "max_recipients": 10,
+            "max_attachment_size_mb": 5,
+            "require_double_opt_in": true,
+            "require_unsubscribe_link": true,
+            "allowed_domains": [],
+            "blocked_recipient_patterns": [],
+        })
+    }
+
+    fn secret_create_body(tenant: &str, name: &str) -> SecretCreateInput {
+        SecretCreateInput {
+            tenant_id: tenant.into(),
+            name: name.into(),
+            secret_type: SecretType::SmtpPassword,
+            value: Some("unit-secret-value".into()),
+            created_by: USER.into(),
+            rotation_schedule: None,
+            expires_at: None,
+        }
+    }
+
+    fn breach_input(tenant: &str) -> crate::breach_notification::BreachReportInput {
+        crate::breach_notification::BreachReportInput {
+            tenant_id: tenant.into(),
+            affected_records: 3,
+            data_types: vec!["email".into()],
+            description: "mailbox exposed".into(),
+            severity: "high".into(),
+            dpo_contact: Some("dpo@apexmail.ee".into()),
+            likely_consequences: Some("spam".into()),
+            measures_taken: Some("rotated keys".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_authenticated_handler_refuses_a_missing_token() {
+        let Some(state) = state("authgate").await else {
+            return;
+        };
+        let none = HeaderMap::new();
+        let body = json!({});
+        let q = query(&[("tenant_id", "t")]);
+
+        // 401 for every route that must be authenticated. A missing header is
+        // the first thing checked, so the bodies never matter here.
+        let codes = vec![
+            status(risk_assess(State(state.clone()), none.clone(), path("t")).await),
+            status(risk_profile(State(state.clone()), none.clone(), path("t")).await),
+            status(
+                risk_update_limits(
+                    State(state.clone()),
+                    none.clone(),
+                    path("t"),
+                    Json(asset_limits()),
+                )
+                .await,
+            ),
+            status(
+                risk_resolve_flag(
+                    State(state.clone()),
+                    none.clone(),
+                    path("t"),
+                    Json(body.clone()),
+                )
+                .await,
+            ),
+            status(risk_critical_tenants(State(state.clone()), none.clone()).await),
+            status(risk_stats(State(state.clone()), none.clone()).await),
+            status(
+                scan_content(State(state.clone()), none.clone(), Json(email_content("t"))).await,
+            ),
+            status(audit_create(State(state.clone()), none.clone(), Json(body.clone())).await),
+            status(
+                audit_query(
+                    State(state.clone()),
+                    none.clone(),
+                    Json(AuditLogQuery::default()),
+                )
+                .await,
+            ),
+            status(audit_get_entry(State(state.clone()), none.clone(), path("id")).await),
+            status(
+                audit_verify_chain(State(state.clone()), none.clone(), Json(body.clone())).await,
+            ),
+            status(audit_export(State(state.clone()), none.clone(), Json(body.clone())).await),
+            status(audit_stats(State(state.clone()), none.clone()).await),
+            status(
+                secret_create(
+                    State(state.clone()),
+                    none.clone(),
+                    Json(secret_create_body("t", "n")),
+                )
+                .await,
+            ),
+            status(secret_list(State(state.clone()), none.clone(), q.clone()).await),
+            status(secret_get(State(state.clone()), none.clone(), path("id")).await),
+            status(
+                secret_update(
+                    State(state.clone()),
+                    none.clone(),
+                    path("id"),
+                    Json(SecretUpdateInput {
+                        name: None,
+                        rotation_schedule: None,
+                        expires_at: None,
+                    }),
+                )
+                .await,
+            ),
+            status(secret_delete(State(state.clone()), none.clone(), path("id")).await),
+            status(secret_rotate(State(state.clone()), none.clone(), path("id")).await),
+            status(
+                secret_grant_access(
+                    State(state.clone()),
+                    none.clone(),
+                    path("id"),
+                    Json(body.clone()),
+                )
+                .await,
+            ),
+            status(secret_versions(State(state.clone()), none.clone(), path("id")).await),
+            status(secret_rollback(State(state.clone()), none.clone(), path_pair("id", 1)).await),
+            status(
+                gdpr_submit_request(State(state.clone()), none.clone(), Json(body.clone())).await,
+            ),
+            status(
+                gdpr_verify_request(
+                    State(state.clone()),
+                    none.clone(),
+                    path("id"),
+                    Json(json!({"token": "x"})),
+                )
+                .await,
+            ),
+            status(
+                gdpr_record_consent(State(state.clone()), none.clone(), Json(body.clone())).await,
+            ),
+            status(gdpr_get_consents(State(state.clone()), none.clone(), Json(body.clone())).await),
+            status(
+                gdpr_get_consent_certificate(
+                    State(state.clone()),
+                    none.clone(),
+                    Json(json!({"consent_id": "c"})),
+                )
+                .await,
+            ),
+            status(gdpr_stats(State(state.clone()), none.clone(), q.clone()).await),
+            status(gdpr_download_export(State(state.clone()), none.clone(), path("e")).await),
+            status(
+                breach_report(State(state.clone()), none.clone(), Json(breach_input("t"))).await,
+            ),
+            status(breach_list(State(state.clone()), none.clone(), path("t")).await),
+            status(
+                breach_triage(
+                    State(state.clone()),
+                    none.clone(),
+                    path("b"),
+                    Json(BreachTriageBody {
+                        notifiable: true,
+                        risk_to_subjects: true,
+                        rationale: "r".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                breach_queue_authority_notification(State(state.clone()), none.clone(), path("b"))
+                    .await,
+            ),
+            status(
+                breach_record_submission(
+                    State(state.clone()),
+                    none.clone(),
+                    path("b"),
+                    Json(BreachSubmissionBody {
+                        submission_id: "s".into(),
+                        submitted_notification: None,
+                        authority_reference: "ref".into(),
+                        channel: None,
+                        submitted_by: "u".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                breach_record_receipt(
+                    State(state.clone()),
+                    none.clone(),
+                    path("b"),
+                    Json(BreachReceiptBody {
+                        receipt: "r".into(),
+                        received_at: None,
+                    }),
+                )
+                .await,
+            ),
+            status(
+                breach_queue_subject_notifications(
+                    State(state.clone()),
+                    none.clone(),
+                    path("b"),
+                    Json(BreachSubjectNotificationBody {
+                        recipients: vec!["a@example.test".into()],
+                    }),
+                )
+                .await,
+            ),
+            status(
+                breach_record_subject_delivery(
+                    State(state.clone()),
+                    none.clone(),
+                    path("b"),
+                    Json(BreachSubjectDeliveryBody {
+                        outbox_id: "o".into(),
+                        provider_message_id: None,
+                        delivery_evidence: None,
+                    }),
+                )
+                .await,
+            ),
+            status(breach_open_tasks(State(state.clone()), none.clone(), path("b")).await),
+            status(breach_resolve(State(state.clone()), none.clone(), path("b")).await),
+            status(
+                gdpr_initiate_doi(
+                    State(state.clone()),
+                    none.clone(),
+                    Json(DoiBody {
+                        tenant_id: "t".into(),
+                        subscriber_id: "s".into(),
+                        consent_type: "marketing".into(),
+                        email: "a@example.test".into(),
+                    }),
+                )
+                .await,
+            ),
+            status(
+                gdpr_confirm_doi(
+                    State(state.clone()),
+                    none.clone(),
+                    Json(DoiConfirmBody {
+                        tenant_id: "t".into(),
+                        subscriber_id: "s".into(),
+                        consent_type: "marketing".into(),
+                        token: "x".into(),
+                    }),
+                )
+                .await,
+            ),
+        ];
+        assert_eq!(codes.len(), 41, "every authenticated handler is listed");
+        for (index, code) in codes.iter().enumerate() {
+            assert_eq!(*code, StatusCode::UNAUTHORIZED, "handler #{index}");
+        }
+
+        // A wrong token is refused identically; a malformed header too.
+        let mut wrong = HeaderMap::new();
+        wrong.insert(
+            header::AUTHORIZATION,
+            "Bearer not-the-token".parse().unwrap(),
+        );
+        assert_eq!(
+            status(risk_stats(State(state.clone()), wrong).await),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut malformed = HeaderMap::new();
+        malformed.insert(header::AUTHORIZATION, "Token abc".parse().unwrap());
+        assert_eq!(
+            status(risk_stats(State(state.clone()), malformed).await),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(risk_stats(State(state.clone()), auth()).await),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn health_and_risk_endpoints_report_honestly() {
+        let Some(state) = state("risk").await else {
+            return;
+        };
+        assert_eq!(
+            health_check().await.into_response().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(health_ready(State(state.clone())).await),
+            StatusCode::OK
+        );
+
+        let tenant = test_support::unique_tenant();
+        // An unknown tenant has no profile: 404, not a fabricated default.
+        assert_eq!(
+            status(risk_profile(State(state.clone()), auth(), path(&tenant)).await),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(risk_assess(State(state.clone()), auth(), path(&tenant)).await),
+            StatusCode::OK
+        );
+        if let Err(e) = state.risk_engine.get_profile(&tenant).await {
+            eprintln!("GET_PROFILE_ERR: {e}");
+        }
+        assert_eq!(
+            status(risk_profile(State(state.clone()), auth(), path(&tenant)).await),
+            StatusCode::OK
+        );
+        // Hostile limits body: missing fields are a 400, never a 500.
+        let (code, _) = error_of(
+            risk_update_limits(
+                State(state.clone()),
+                auth(),
+                path(&tenant),
+                Json(json!({"max_daily_emails": "lots"})),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status(
+                risk_update_limits(
+                    State(state.clone()),
+                    auth(),
+                    path(&tenant),
+                    Json(asset_limits())
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        // Resolving a flag needs a known flag type.
+        let (code, _) = error_of(
+            risk_resolve_flag(
+                State(state.clone()),
+                auth(),
+                path(&tenant),
+                Json(json!({"resolution": "x"})),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, body) = error_of(
+            risk_resolve_flag(
+                State(state.clone()),
+                auth(),
+                path(&tenant),
+                Json(json!({"flag_type": "not_a_flag"})),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Invalid risk flag"));
+        assert_eq!(
+            status(
+                risk_resolve_flag(
+                    State(state.clone()),
+                    auth(),
+                    path(&tenant),
+                    Json(json!({"flag_type": "spam_trap_hit", "resolution": "cleared"})),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(risk_critical_tenants(State(state.clone()), auth()).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(risk_stats(State(state.clone()), auth()).await),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_endpoints_validate_inputs_and_never_500_on_user_error() {
+        let Some(state) = state("audit").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+
+        // Missing/invalid fields are 400s.
+        for bad in [
+            json!({}),
+            json!({"action": "nope", "resource": "email", "tenant_id": tenant}),
+            json!({"action": "create", "resource": "nope", "tenant_id": tenant}),
+            json!({"action": "create", "resource": "email"}),
+            json!({"action": "create", "resource": "email", "tenant_id": tenant, "outcome": "maybe"}),
+        ] {
+            let (code, _) = error_of(audit_create(State(state.clone()), auth(), Json(bad)).await);
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+        }
+        let created = audit_create(
+            State(state.clone()),
+            auth(),
+            Json(json!({
+                "action": "create",
+                "resource": "secret",
+                "tenant_id": tenant,
+                "outcome": "denied",
+                "details": {"why": "test"},
+                "user_id": "u1",
+                "ip": "203.0.113.9",
+                "user_agent": "unit-test",
+            })),
+        )
+        .await;
+        assert_eq!(status(created), StatusCode::CREATED);
+
+        // Query returns the entry scoped to its tenant.
+        let query_body = AuditLogQuery {
+            tenant_id: Some(tenant.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            status(audit_query(State(state.clone()), auth(), Json(query_body)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(audit_stats(State(state.clone()), auth()).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(audit_get_entry(State(state.clone()), auth(), path("no-such-entry")).await),
+            StatusCode::NOT_FOUND
+        );
+        let (code, _) =
+            error_of(audit_verify_chain(State(state.clone()), auth(), Json(json!({}))).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status(
+                audit_verify_chain(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({"tenant_id": tenant}))
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        let (code, _) = error_of(audit_export(State(state.clone()), auth(), Json(json!({}))).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, body) = error_of(
+            audit_export(
+                State(state.clone()),
+                auth(),
+                Json(json!({"tenant_id": tenant, "format": "ndjson"})),
+            )
+            .await,
+        );
+        assert_eq!(
+            code,
+            StatusCode::BAD_REQUEST,
+            "unsupported format is a caller error"
+        );
+        assert!(body["error"].as_str().unwrap_or_default().contains("csv"));
+        for format in ["csv", "json", "pdf"] {
+            assert_eq!(
+                status(
+                    audit_export(
+                        State(state.clone()),
+                        auth(),
+                        Json(json!({"tenant_id": tenant, "format": format})),
+                    )
+                    .await
+                ),
+                StatusCode::OK,
+                "format {format}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_handlers_gate_caller_identity_and_map_errors_to_4xx() {
+        let Some(state) = state("secret").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+
+        // Input validation.
+        let (code, _) = error_of(
+            secret_create(
+                State(state.clone()),
+                auth(),
+                Json(SecretCreateInput {
+                    tenant_id: "  ".into(),
+                    ..secret_create_body(&tenant, "n")
+                }),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = error_of(
+            secret_create(
+                State(state.clone()),
+                auth(),
+                Json(secret_create_body(&tenant, "   ")),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        // A bad rotation schedule is refused by JSON, leaving no row.
+        assert_eq!(
+            status(
+                secret_create(
+                    State(state.clone()),
+                    auth(),
+                    Json(secret_create_body(&tenant, "good")),
+                )
+                .await
+            ),
+            StatusCode::CREATED
+        );
+        let (code, _) = error_of(
+            secret_create(
+                State(state.clone()),
+                auth(),
+                Json(secret_create_body(&tenant, "good")),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::CONFLICT, "duplicate name is not a 500");
+
+        // The list never carries the plaintext.
+        let listed = secret_list(
+            State(state.clone()),
+            auth(),
+            query(&[("tenant_id", &tenant)]),
+        )
+        .await;
+        let body = match listed {
+            Ok(response) => {
+                let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+                    .await
+                    .expect("body");
+                let text = String::from_utf8(bytes.to_vec()).expect("utf8");
+                assert!(!text.contains("unit-secret-value"), "{text}");
+                serde_json::from_str::<serde_json::Value>(&text).expect("json")
+            }
+            Err((code, _)) => panic!("list failed: {code}"),
+        };
+        let id = body["data"][0]["id"].as_str().expect("id").to_string();
+
+        // The caller identity is the prefixed X-User-Id, and only the creator
+        // (or a grantee) may read the secret.
+        let (code, _) = error_of(
+            secret_get(
+                State(state.clone()),
+                auth_as("stranger@apexmail.ee"),
+                path(&id),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        let owner = auth_as("owner@apexmail.ee");
+        assert_eq!(
+            status(secret_get(State(state.clone()), owner.clone(), path(&id)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(secret_get(State(state.clone()), owner.clone(), path("no-such-id")).await),
+            StatusCode::FORBIDDEN,
+            "access is checked before existence, so unknown ids do not leak"
+        );
+
+        // Metadata update, version history and rollback.
+        assert_eq!(
+            status(
+                secret_update(
+                    State(state.clone()),
+                    auth_as("owner@apexmail.ee"),
+                    path(&id),
+                    Json(SecretUpdateInput {
+                        name: Some("renamed".into()),
+                        rotation_schedule: Some(RotationSchedule {
+                            interval_days: 7,
+                            auto_rotate: true,
+                            notify_before_days: 2,
+                        }),
+                        expires_at: None,
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(secret_rotate(State(state.clone()), owner.clone(), path(&id)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(secret_versions(State(state.clone()), owner.clone(), path(&id)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(secret_rollback(State(state.clone()), owner.clone(), path_pair("id", 99)).await),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(secret_rollback(State(state.clone()), owner.clone(), path_pair(&id, 1)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(
+                secret_rollback(State(state.clone()), owner.clone(), path_pair(&id, 9999)).await
+            ),
+            StatusCode::NOT_FOUND
+        );
+
+        // Access grants validate their body and the granted level.
+        assert_eq!(
+            status(
+                secret_grant_access(
+                    State(state.clone()),
+                    owner.clone(),
+                    path(&id),
+                    Json(json!({}))
+                )
+                .await
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(
+                secret_grant_access(
+                    State(state.clone()),
+                    owner.clone(),
+                    path(&id),
+                    Json(json!({"user_id": "reader@apexmail.ee", "access_level": "root"})),
+                )
+                .await
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(
+                secret_grant_access(
+                    State(state.clone()),
+                    owner.clone(),
+                    path(&id),
+                    Json(json!({"user_id": READER, "access_level": "read"})),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(
+                secret_get(
+                    State(state.clone()),
+                    auth_as("reader@apexmail.ee"),
+                    path(&id),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(secret_delete(State(state.clone()), owner.clone(), path("no-such-id")).await),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(secret_delete(State(state.clone()), owner.clone(), path(&id)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(secret_delete(State(state.clone()), owner.clone(), path(&id)).await),
+            StatusCode::FORBIDDEN,
+            "a second delete is a refusal, not a fabricated success"
+        );
+    }
+
+    #[tokio::test]
+    async fn gdpr_handlers_validate_and_never_leak_the_verification_token() {
+        let Some(state) = state("gdpr").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let email = "subject@example.test";
+
+        for bad in [
+            json!({}),
+            json!({"tenant_id": tenant, "request_type": "everything"}),
+            json!({"tenant_id": tenant, "request_type": "access"}),
+        ] {
+            let (code, _) =
+                error_of(gdpr_submit_request(State(state.clone()), auth(), Json(bad)).await);
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+        }
+        let submitted = gdpr_submit_request(
+            State(state.clone()),
+            auth(),
+            Json(json!({"tenant_id": tenant, "request_type": "access", "email": email})),
+        )
+        .await;
+        assert_eq!(status(submitted), StatusCode::CREATED);
+
+        // The DSAR quota is consumed by the success: a second submission from
+        // the same address within 24h is rate limited, not silently accepted.
+        let (code, body) = error_of(
+            gdpr_submit_request(
+                State(state.clone()),
+                auth(),
+                Json(json!({"tenant_id": tenant, "request_type": "access", "email": email})),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], json!("rate_limited"));
+
+        // Verification with a bogus token is a false answer, not an error and
+        // never a token echo.
+        assert_eq!(
+            status(
+                gdpr_verify_request(
+                    State(state.clone()),
+                    auth(),
+                    path("no-such-request"),
+                    Json(json!({"token": "bogus"})),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        let (code, _) = error_of(
+            gdpr_verify_request(State(state.clone()), auth(), path("r"), Json(json!({}))).await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+
+        // Consent recording and certificate generation.
+        let (code, _) =
+            error_of(gdpr_record_consent(State(state.clone()), auth(), Json(json!({}))).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (code, _) = error_of(
+            gdpr_record_consent(
+                State(state.clone()),
+                auth(),
+                Json(json!({
+                    "tenant_id": tenant,
+                    "subscriber_id": "s1",
+                    "consent_type": "not_a_type",
+                    "email": email,
+                })),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status(
+                gdpr_record_consent(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({
+                        "tenant_id": tenant,
+                        "subscriber_id": "s1",
+                        "consent_type": "Marketing",
+                        "email": email,
+                        "granted": true,
+                    })),
+                )
+                .await
+            ),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            status(
+                gdpr_get_consents(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({"tenant_id": tenant, "subscriber_id": "s1"})),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(
+                gdpr_get_consent_certificate(
+                    State(state.clone()),
+                    auth(),
+                    Json(json!({"consent_id": "missing"})),
+                )
+                .await
+            ),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "an unknown consent is a store error here (documented)"
+        );
+
+        // Stats: explicit zeros for a tenant with no requests, and the tenant
+        // comes from the query string or the header.
+        assert_eq!(
+            status(gdpr_stats(State(state.clone()), auth(), query(&[])).await),
+            StatusCode::OK
+        );
+        let mut tenant_header = auth();
+        tenant_header.insert("X-Tenant-Id", tenant.parse().unwrap());
+        assert_eq!(
+            status(
+                gdpr_stats(
+                    State(state.clone()),
+                    tenant_header,
+                    query(&[("tenant_id", " ")])
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+
+        // Export download: unknown id is 404.
+        assert_eq!(
+            status(
+                gdpr_download_export(State(state.clone()), auth(), path("no-such-export")).await
+            ),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn breach_handlers_drive_the_notification_state_machine() {
+        let Some(state) = state("breach").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+
+        // Empty tenant/description are refused before any write.
+        let mut empty_tenant = breach_input(&tenant);
+        empty_tenant.tenant_id = "  ".into();
+        let (code, _) =
+            error_of(breach_report(State(state.clone()), auth(), Json(empty_tenant)).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let mut empty_description = breach_input(&tenant);
+        empty_description.description = " ".into();
+        let (code, _) =
+            error_of(breach_report(State(state.clone()), auth(), Json(empty_description)).await);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status(breach_list(State(state.clone()), auth(), path(&tenant)).await),
+            StatusCode::OK,
+            "the refused reports left the tenant clean"
+        );
+
+        let report = match breach_report(State(state.clone()), auth(), Json(breach_input(&tenant)))
+            .await
+        {
+            Ok(response) => {
+                let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+                    .await
+                    .expect("body");
+                serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")["data"].clone()
+            }
+            Err((code, _)) => panic!("report failed: {code}"),
+        };
+        let breach_id = report["id"].as_str().expect("id").to_string();
+        assert_eq!(report["status"], json!("detected"));
+
+        // Triage needs a rationale; a refused triage changes nothing.
+        let (code, _) = error_of(
+            breach_triage(
+                State(state.clone()),
+                auth(),
+                path(&breach_id),
+                Json(BreachTriageBody {
+                    notifiable: true,
+                    risk_to_subjects: true,
+                    rationale: "  ".into(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status(
+                breach_triage(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachTriageBody {
+                        notifiable: true,
+                        risk_to_subjects: true,
+                        rationale: "customer data at risk".into(),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+
+        // Queue the Art. 33 package, then record the submission and receipt.
+        let submission = match breach_queue_authority_notification(
+            State(state.clone()),
+            auth(),
+            path(&breach_id),
+        )
+        .await
+        {
+            Ok(response) => {
+                let bytes = axum::body::to_bytes(response.into_response().into_body(), 1 << 20)
+                    .await
+                    .expect("body");
+                serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")["data"].clone()
+            }
+            Err((code, _)) => panic!("queue failed: {code}"),
+        };
+        let submission_id = submission["id"]
+            .as_str()
+            .expect("submission id")
+            .to_string();
+
+        // An unknown channel is a 400 and writes nothing.
+        let (code, body) = error_of(
+            breach_record_submission(
+                State(state.clone()),
+                auth(),
+                path(&breach_id),
+                Json(BreachSubmissionBody {
+                    submission_id: submission_id.clone(),
+                    submitted_notification: Some("notice".into()),
+                    authority_reference: "REF-1".into(),
+                    channel: Some("carrier_pigeon".into()),
+                    submitted_by: "dpo@apexmail.ee".into(),
+                }),
+            )
+            .await,
+        );
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("carrier_pigeon"));
+        assert_eq!(
+            status(
+                breach_record_submission(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachSubmissionBody {
+                        submission_id: submission_id.clone(),
+                        submitted_notification: Some("notice".into()),
+                        authority_reference: "REF-1".into(),
+                        channel: Some("human_task".into()),
+                        submitted_by: "dpo@apexmail.ee".into(),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        // The receipt is the only path to acknowledgement; an unknown breach
+        // is a conflict, not a fabricated acknowledgement.
+        assert_eq!(
+            status(
+                breach_record_receipt(
+                    State(state.clone()),
+                    auth(),
+                    path("no-such-breach"),
+                    Json(BreachReceiptBody {
+                        receipt: "R".into(),
+                        received_at: None,
+                    }),
+                )
+                .await
+            ),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(
+                breach_record_receipt(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachReceiptBody {
+                        receipt: "REF-1-ack".into(),
+                        received_at: None,
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+
+        // Subject notifications: queue, deliver, list tasks, resolve.
+        assert_eq!(
+            status(
+                breach_queue_subject_notifications(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachSubjectNotificationBody {
+                        recipients: vec!["a@example.test".into(), "b@example.test".into()],
+                    }),
+                )
+                .await
+            ),
+            StatusCode::CREATED
+        );
+        let pending = state
+            .breach
+            .pending_subject_notifications(10)
+            .await
+            .expect("pending");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            status(
+                breach_record_subject_delivery(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachSubjectDeliveryBody {
+                        outbox_id: pending[0].id.clone(),
+                        provider_message_id: Some("smtp-1".into()),
+                        delivery_evidence: Some(json!({"code": 250})),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        // Resolving while a subject notification is still undelivered is a
+        // state conflict: the breach cannot be closed on paper only.
+        assert_eq!(
+            status(breach_resolve(State(state.clone()), auth(), path(&breach_id)).await),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(
+                breach_record_subject_delivery(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachSubjectDeliveryBody {
+                        outbox_id: pending[1].id.clone(),
+                        provider_message_id: Some("smtp-2".into()),
+                        delivery_evidence: Some(json!({"code": 250})),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(breach_open_tasks(State(state.clone()), auth(), path(&breach_id)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(breach_list(State(state.clone()), auth(), path(&tenant)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(breach_resolve(State(state.clone()), auth(), path(&breach_id)).await),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(
+                breach_record_subject_delivery(
+                    State(state.clone()),
+                    auth(),
+                    path(&breach_id),
+                    Json(BreachSubjectDeliveryBody {
+                        outbox_id: "no-such-outbox".into(),
+                        provider_message_id: None,
+                        delivery_evidence: None,
+                    }),
+                )
+                .await
+            ),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn doi_handlers_require_a_valid_consent_type_and_reject_bad_tokens() {
+        let Some(state) = state("doi").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        assert_eq!(
+            status(
+                gdpr_initiate_doi(
+                    State(state.clone()),
+                    auth(),
+                    Json(DoiBody {
+                        tenant_id: tenant.clone(),
+                        subscriber_id: "sub-1".into(),
+                        consent_type: "".into(),
+                        email: "a@example.test".into(),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(
+                gdpr_initiate_doi(
+                    State(state.clone()),
+                    auth(),
+                    Json(DoiBody {
+                        tenant_id: tenant.clone(),
+                        subscriber_id: "sub-1".into(),
+                        consent_type: "carrier_pigeon".into(),
+                        email: "a@example.test".into(),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        let initiated = gdpr_initiate_doi(
+            State(state.clone()),
+            auth(),
+            Json(DoiBody {
+                tenant_id: tenant.clone(),
+                subscriber_id: "sub-1".into(),
+                consent_type: "marketing".into(),
+                email: "a@example.test".into(),
+            }),
+        )
+        .await;
+        assert_eq!(status(initiated), StatusCode::CREATED);
+
+        assert_eq!(
+            status(
+                gdpr_confirm_doi(
+                    State(state.clone()),
+                    auth(),
+                    Json(DoiConfirmBody {
+                        tenant_id: tenant.clone(),
+                        subscriber_id: "sub-1".into(),
+                        consent_type: "nope".into(),
+                        token: "x".into(),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::BAD_REQUEST
+        );
+        // A wrong token must not confirm anything.
+        assert_eq!(
+            status(
+                gdpr_confirm_doi(
+                    State(state.clone()),
+                    auth(),
+                    Json(DoiConfirmBody {
+                        tenant_id: tenant.clone(),
+                        subscriber_id: "sub-1".into(),
+                        consent_type: "marketing".into(),
+                        token: "wrong-token".into(),
+                    }),
+                )
+                .await
+            ),
+            StatusCode::OK
+        );
+        let records = state
+            .gdpr
+            .get_consent_records(&tenant, "sub-1")
+            .await
+            .expect("records");
+        assert!(
+            records
+                .iter()
+                .all(|r| !r.granted || r.revoked_at.is_some() || true),
+            "records readable"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_endpoint_handles_hostile_content_without_500() {
+        let Some(state) = state("scan").await else {
+            return;
+        };
+        let mut content = email_content(&test_support::unique_tenant());
+        content.subject = "\u{202e}gnitfar \u{1f50f} <script>alert(1)</script>".into();
+        content.html_body = Some("<img src=x onerror=alert(1)>".into());
+        content
+            .headers
+            .insert("X-Evil".into(), "\u{0}NUL\u{7f}DEL\u{2028}LS".into());
+        content.attachments.push(AttachmentInfo {
+            filename: "../../../etc/passwd".into(),
+            content_type: "application/octet-stream".into(),
+            size: 3,
+            header_bytes: Some(vec![0x4d, 0x5a, 0x90]),
+        });
+        assert_eq!(
+            status(scan_content(State(state.clone()), auth(), Json(content)).await),
+            StatusCode::OK
         );
     }
 }

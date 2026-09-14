@@ -39,7 +39,13 @@ const KEYSET_CURSOR_SEP: char = '\n';
 
 /// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
 fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
-    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+    // RFC3339, not Display: decode parses with `parse_from_rfc3339`, so a
+    // cursor rendered with Display("… UTC") could never be replayed (every
+    // next-page request 400'd).
+    encode_cursor(&format!(
+        "{}{KEYSET_CURSOR_SEP}{id}",
+        created_at.to_rfc3339()
+    ))
 }
 
 /// Decode and validate a `(created_at, id)` keyset cursor. Malformed
@@ -70,6 +76,23 @@ fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErr
 }
 
 // ─── Types ─────────────────────────────────────────────────────
+
+/// Reject malformed campaign ids as 404 before any `::uuid` cast reaches the
+/// database (an unvalidated cast used to surface as a 500).
+fn parse_campaign_id(id: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id).map_err(|_| ApiError::NotFound("campaign not found".into()))
+}
+
+/// Duplicate campaign names are an honest 409 (unique
+/// `idx_campaigns_tenant_name`), never a generic database 500.
+fn map_campaign_write_error(error: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(ref db_error) = error {
+        if db_error.code().as_deref() == Some("23505") {
+            return ApiError::Conflict("a campaign with this name already exists".into());
+        }
+    }
+    ApiError::from(error)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,7 +189,8 @@ async fn create_campaign(
     .bind(body.scheduled_at)
     .bind(now)
     .execute(&state.db)
-    .await?;
+    .await
+    .map_err(map_campaign_write_error)?;
 
     Ok((
         StatusCode::CREATED,
@@ -209,7 +233,7 @@ async fn list_campaigns(
         // campaigns.id is UUID — the VALUE is cast once, never the column,
         // so the primary-key index remains usable for the tie-break.
         sqlx::query_as::<_, CampaignRow>(
-            "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
+            "SELECT id::text, name, subject, template_id::text, status, scheduled_at, sent_count, created_at, updated_at
              FROM campaigns WHERE tenant_id = $1
                AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3::uuid))
              ORDER BY created_at DESC, id DESC LIMIT $4",
@@ -224,7 +248,7 @@ async fn list_campaigns(
         // Fallback to offset-based pagination for backward compatibility
         let offset = params.offset.clamp(0, 100_000);
         sqlx::query_as::<_, CampaignRow>(
-            "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
+            "SELECT id::text, name, subject, template_id::text, status, scheduled_at, sent_count, created_at, updated_at
              FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
         )
         .bind(&auth.tenant_id)
@@ -291,7 +315,7 @@ async fn delete_campaign(
     require_scopes(&auth, &["campaigns:write"])?;
 
     let result = sqlx::query("DELETE FROM campaigns WHERE id = $1::uuid AND tenant_id = $2")
-        .bind(&id)
+        .bind(parse_campaign_id(&id)?)
         .bind(&auth.tenant_id)
         .execute(&state.db)
         .await?;
@@ -381,7 +405,8 @@ struct CampaignRow {
     template_id: Option<String>,
     status: String,
     scheduled_at: Option<DateTime<Utc>>,
-    sent_count: i64,
+    // campaigns.sent_count is INT4 — sqlx refuses to decode INT4 into i64.
+    sent_count: i32,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -395,7 +420,7 @@ impl From<CampaignRow> for CampaignResponse {
             template_id: r.template_id,
             status: r.status,
             scheduled_at: r.scheduled_at.map(|t| t.to_rfc3339()),
-            sent_count: r.sent_count,
+            sent_count: r.sent_count as i64,
             created_at: r.created_at.to_rfc3339(),
             updated_at: r.updated_at.to_rfc3339(),
         }
@@ -408,10 +433,10 @@ async fn fetch_campaign(
     id: String,
 ) -> Result<CampaignRow, ApiError> {
     sqlx::query_as::<_, CampaignRow>(
-        "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
+        "SELECT id::text, name, subject, template_id::text, status, scheduled_at, sent_count, created_at, updated_at
          FROM campaigns WHERE id = $1::uuid AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(parse_campaign_id(&id)?)
     .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?
@@ -500,5 +525,543 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["sent_count"], 0);
+    }
+}
+
+// ─── Adversarial CRUD / pagination / transition tests ──────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'campaigns adversarial', 'free', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_campaign(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        name: &str,
+        status: &str,
+        created_at: DateTime<Utc>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO campaigns (id, tenant_id, name, subject, status, sent_count, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Subject', $4, 0, $5, $5)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(name)
+        .bind(status)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("seed campaign");
+        id
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, tenants: &[&str]) {
+        for tenant in tenants {
+            sqlx::query("DELETE FROM campaigns WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup campaigns");
+            sqlx::query("DELETE FROM campaign_jobs WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup jobs");
+            sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup tenants");
+        }
+    }
+
+    #[test]
+    fn keyset_cursor_rejects_every_malformed_shape() {
+        let ts = Utc::now();
+        let encoded = encode_keyset_cursor(&ts, "11111111-1111-1111-1111-111111111111");
+        let (decoded_ts, decoded_id) = decode_keyset_cursor(&encoded).expect("roundtrip");
+        assert_eq!(decoded_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(decoded_ts.timestamp(), ts.timestamp());
+
+        assert!(matches!(
+            decode_keyset_cursor("!!!not-hex!!!"),
+            Err(ApiError::BadRequest(_))
+        ));
+        // Hex but no separator.
+        let no_sep = encode_cursor("just-a-timestamp");
+        assert!(matches!(
+            decode_keyset_cursor(&no_sep),
+            Err(ApiError::BadRequest(_))
+        ));
+        // Unparsable timestamp.
+        let bad_ts = encode_cursor("yesterday\nsomeid");
+        assert!(matches!(
+            decode_keyset_cursor(&bad_ts),
+            Err(ApiError::BadRequest(_))
+        ));
+        // Empty id / oversize id / control byte in id.
+        for bad in [
+            format!("{ts}\n"),
+            format!("{ts}\n{}", "x".repeat(65)),
+            format!("{ts}\nsome\u{7}id"),
+        ] {
+            let encoded = encode_cursor(&bad);
+            assert!(
+                matches!(decode_keyset_cursor(&encoded), Err(ApiError::BadRequest(_))),
+                "cursor payload {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_validates_bounds_and_references_before_insert() {
+        let Some((state, pool)) = state_and_pool("adv_campaigns_create").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant).await;
+        let auth = auth_for(&tenant, &["campaigns:write"]);
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let campaign_name = format!("Launch {tag}");
+
+        let empty_name = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: String::new(),
+                subject: "s".into(),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(matches!(empty_name, Err(ApiError::Validation(_))));
+
+        let long_name = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: "n".repeat(201),
+                subject: "s".into(),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(matches!(long_name, Err(ApiError::Validation(_))));
+
+        let empty_subject = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: "ok".into(),
+                subject: String::new(),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(matches!(empty_subject, Err(ApiError::Validation(_))));
+
+        let long_subject = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: "ok".into(),
+                subject: "s".repeat(501),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(matches!(long_subject, Err(ApiError::Validation(_))));
+
+        // An unknown / cross-tenant template_id is a 404, never a silent FK.
+        let missing_template = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: "ok".into(),
+                subject: "s".into(),
+                template_id: Some(Uuid::new_v4().to_string()),
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(matches!(missing_template, Err(ApiError::NotFound(_))));
+
+        // A scheduled campaign is born in `scheduled`, a plain one is `draft`.
+        let (status, Json(created)) = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: campaign_name.clone(),
+                subject: "Hello".into(),
+                template_id: None,
+                scheduled_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            }),
+        )
+        .await
+        .expect("create scheduled");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created.status, "scheduled");
+
+        // Duplicate names within a tenant are an honest 409, not a 500.
+        let duplicate = create_campaign(
+            State(state.clone()),
+            auth.clone(),
+            Json(CreateCampaignRequest {
+                name: campaign_name,
+                subject: "Again".into(),
+                template_id: None,
+                scheduled_at: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(duplicate, Err(ApiError::Conflict(_))),
+            "duplicate campaign name must conflict, got {duplicate:?}"
+        );
+
+        cleanup(&pool, &[&tenant]).await;
+    }
+
+    #[tokio::test]
+    async fn list_paginates_by_offset_and_cursor_with_etag_revalidation() {
+        let Some((state, pool)) = state_and_pool("adv_campaigns_list").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a).await;
+        seed_tenant(&pool, &tenant_b).await;
+        let base = Utc::now();
+        let tag_a = uuid::Uuid::new_v4().simple().to_string();
+        let tag_b = uuid::Uuid::new_v4().simple().to_string();
+        for i in 0..3 {
+            seed_campaign(
+                &pool,
+                &tenant_a,
+                &format!("A{i}-{tag_a}"),
+                "draft",
+                base - chrono::Duration::minutes(i),
+            )
+            .await;
+        }
+        // Tenant B's row must never leak.
+        seed_campaign(
+            &pool,
+            &tenant_b,
+            &format!("B-secret-{tag_b}"),
+            "draft",
+            base,
+        )
+        .await;
+
+        let auth = auth_for(&tenant_a, &["campaigns:read"]);
+        let page1 = list_campaigns(
+            State(state.clone()),
+            auth.clone(),
+            HeaderMap::new(),
+            Query(ListCampaignsQuery {
+                limit: 2,
+                offset: 0,
+                cursor: None,
+            }),
+        )
+        .await
+        .expect("page 1");
+        assert_eq!(page1.status(), StatusCode::OK);
+        let etag = page1
+            .headers()
+            .get("ETag")
+            .and_then(|v| v.to_str().ok())
+            .expect("etag")
+            .to_string();
+        let bytes = axum::body::to_bytes(page1.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"].as_array().unwrap().len(), 2);
+        assert_eq!(body["meta"]["hasMore"], true);
+        let all_text = body.to_string();
+        assert!(!all_text.contains(&tag_b), "tenant isolation");
+
+        // Conditional GET with the same ETag → 304 with no body.
+        let mut headers = HeaderMap::new();
+        headers.insert("if-none-match", etag.parse().unwrap());
+        let not_modified = list_campaigns(
+            State(state.clone()),
+            auth.clone(),
+            headers,
+            Query(ListCampaignsQuery {
+                limit: 2,
+                offset: 0,
+                cursor: None,
+            }),
+        )
+        .await
+        .expect("conditional get");
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+
+        // Cursor page walks the remaining row; the keyset cursor never
+        // repeats the first page.
+        let cursor = body["meta"]["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_string();
+        let page2 = list_campaigns(
+            State(state.clone()),
+            auth.clone(),
+            HeaderMap::new(),
+            Query(ListCampaignsQuery {
+                limit: 2,
+                offset: 0,
+                cursor: Some(cursor),
+            }),
+        )
+        .await
+        .expect("page 2");
+        let bytes = axum::body::to_bytes(page2.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body2: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body2["data"].as_array().unwrap().len(), 1);
+        assert_eq!(body2["meta"]["hasMore"], false);
+
+        // Garbage cursors are 400s before touching SQL.
+        for bad in ["zzzz", &encode_cursor("2026-01-01T00:00:00Z")] {
+            let resp = list_campaigns(
+                State(state.clone()),
+                auth.clone(),
+                HeaderMap::new(),
+                Query(ListCampaignsQuery {
+                    limit: 2,
+                    offset: 0,
+                    cursor: Some(bad.to_string()),
+                }),
+            )
+            .await;
+            assert!(
+                matches!(resp, Err(ApiError::BadRequest(_))),
+                "cursor {bad:?} must be refused"
+            );
+        }
+
+        // Limit / offset clamps are honoured (limit 0 → 1, negative → 1).
+        for (limit, offset) in [(0i64, 0i64), (-3, -10), (i64::MAX, 0)] {
+            let resp = list_campaigns(
+                State(state.clone()),
+                auth.clone(),
+                HeaderMap::new(),
+                Query(ListCampaignsQuery {
+                    limit,
+                    offset,
+                    cursor: None,
+                }),
+            )
+            .await
+            .expect("clamped list");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        cleanup(&pool, &[&tenant_a, &tenant_b]).await;
+    }
+
+    #[tokio::test]
+    async fn get_delete_and_transitions_are_tenant_scoped_with_honest_errors() {
+        let Some((state, pool)) = state_and_pool("adv_campaigns_flow").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a).await;
+        seed_tenant(&pool, &tenant_b).await;
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let own = seed_campaign(&pool, &tenant_a, &format!("Own-{tag}"), "draft", Utc::now()).await;
+        let foreign = seed_campaign(
+            &pool,
+            &tenant_b,
+            &format!("Foreign-{tag}"),
+            "draft",
+            Utc::now(),
+        )
+        .await;
+
+        let read = auth_for(&tenant_a, &["campaigns:read"]);
+        let write = auth_for(&tenant_a, &["campaigns:write"]);
+
+        let Json(fetched) = get_campaign(State(state.clone()), read.clone(), Path(own.to_string()))
+            .await
+            .expect("own read");
+        assert_eq!(fetched.name, format!("Own-{tag}"));
+
+        // Malformed ids are 404s, not database 500s.
+        for bad in ["not-a-uuid", "", "123"] {
+            let resp =
+                get_campaign(State(state.clone()), read.clone(), Path(bad.to_string())).await;
+            assert!(
+                matches!(resp, Err(ApiError::NotFound(_))),
+                "GET {bad:?} must be 404, got {resp:?}"
+            );
+            let resp =
+                delete_campaign(State(state.clone()), write.clone(), Path(bad.to_string())).await;
+            assert!(
+                matches!(resp, Err(ApiError::NotFound(_))),
+                "DELETE {bad:?} must be 404, got {resp:?}"
+            );
+        }
+
+        let cross = get_campaign(
+            State(state.clone()),
+            read.clone(),
+            Path(foreign.to_string()),
+        )
+        .await;
+        assert!(matches!(cross, Err(ApiError::NotFound(_))));
+
+        // Status transitions: draft→sending→paused, then illegal ones refused.
+        let Json(resumed) =
+            resume_campaign(State(state.clone()), write.clone(), Path(own.to_string()))
+                .await
+                .expect("resume draft");
+        assert_eq!(resumed.status, "sending");
+        let Json(paused) =
+            pause_campaign(State(state.clone()), write.clone(), Path(own.to_string()))
+                .await
+                .expect("pause sending");
+        assert_eq!(paused.status, "paused");
+        let double_pause =
+            pause_campaign(State(state.clone()), write.clone(), Path(own.to_string())).await;
+        assert!(
+            matches!(double_pause, Err(ApiError::Validation(_))),
+            "pausing a paused campaign is invalid, got {double_pause:?}"
+        );
+        let cross_resume = resume_campaign(
+            State(state.clone()),
+            write.clone(),
+            Path(foreign.to_string()),
+        )
+        .await;
+        assert!(matches!(cross_resume, Err(ApiError::NotFound(_))));
+
+        // Resend requires a sent/partial campaign.
+        let draft_resend = resend_campaign(State(state.clone()), write.clone(), Path(own)).await;
+        assert!(matches!(draft_resend, Err(ApiError::BadRequest(_))));
+        sqlx::query("UPDATE campaigns SET status = 'sent' WHERE id = $1")
+            .bind(own)
+            .execute(&pool)
+            .await
+            .expect("mark sent");
+        let Json(resend) = resend_campaign(State(state.clone()), write.clone(), Path(own))
+            .await
+            .expect("resend sent");
+        assert_eq!(resend["status"], "queued");
+        let (job_count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM campaign_jobs WHERE campaign_id = $1")
+                .bind(own)
+                .fetch_one(&pool)
+                .await
+                .expect("job count");
+        assert_eq!(job_count, 1);
+        let (status,): (String,) =
+            sqlx::query_as("SELECT status FROM campaigns WHERE id = $1 AND tenant_id = $2")
+                .bind(own)
+                .bind(&tenant_a)
+                .fetch_one(&pool)
+                .await
+                .expect("status");
+        assert_eq!(status, "resending");
+
+        let foreign_resend =
+            resend_campaign(State(state.clone()), write.clone(), Path(foreign)).await;
+        assert!(matches!(foreign_resend, Err(ApiError::NotFound(_))));
+
+        // Cross-tenant delete is a 404 and leaves the row.
+        let cross_delete = delete_campaign(
+            State(state.clone()),
+            write.clone(),
+            Path(foreign.to_string()),
+        )
+        .await;
+        assert!(matches!(cross_delete, Err(ApiError::NotFound(_))));
+        let (still_there,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM campaigns WHERE id = $1 AND tenant_id = $2")
+                .bind(foreign)
+                .bind(&tenant_b)
+                .fetch_one(&pool)
+                .await
+                .expect("foreign still exists");
+        assert_eq!(still_there, 1);
+
+        // Own delete → 204, second delete → 404.
+        let deleted = delete_campaign(State(state.clone()), write.clone(), Path(own.to_string()))
+            .await
+            .expect("delete own");
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+        let deleted_again =
+            delete_campaign(State(state.clone()), write.clone(), Path(own.to_string())).await;
+        assert!(matches!(deleted_again, Err(ApiError::NotFound(_))));
+
+        // Scope gates.
+        assert!(matches!(
+            get_campaign(
+                State(state.clone()),
+                auth_for(&tenant_a, &[]),
+                Path(foreign.to_string())
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            resume_campaign(
+                State(state.clone()),
+                auth_for(&tenant_a, &["campaigns:read"]),
+                Path(foreign.to_string())
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        cleanup(&pool, &[&tenant_a, &tenant_b]).await;
+    }
+
+    #[test]
+    fn unknown_fields_are_refused_at_deserialization() {
+        assert!(serde_json::from_str::<CreateCampaignRequest>(
+            r#"{"name":"n","subject":"s","tenant_id":"other"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ListCampaignsQuery>(r#"{"limit":1,"evil":true}"#).is_err());
     }
 }

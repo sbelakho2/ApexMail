@@ -119,8 +119,10 @@ impl ReplicationService {
 
     /// Create a new replication slot.
     pub async fn create_slot(&self, name: &str, slot_type: &str) -> Result<(), String> {
-        // Validate name
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        // Validate name. An EMPTY name must be rejected explicitly:
+        // `chars().all(..)` on an empty iterator is vacuously true, so the
+        // old check let "" through to the replication-slot SQL.
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err("Invalid slot name".into());
         }
         let query = if slot_type == "logical" {
@@ -140,7 +142,7 @@ impl ReplicationService {
 
     /// Drop a replication slot.
     pub async fn drop_slot(&self, name: &str) -> Result<(), String> {
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err("Invalid slot name".into());
         }
         sqlx::query("SELECT pg_drop_replication_slot($1)")
@@ -237,7 +239,7 @@ impl ReplicationService {
         let rows: Vec<LagHistoryRow> = sqlx::query_as::<_, LagHistoryRow>(
             "SELECT replica_name, lag_ms, lag_bytes, recorded_at
              FROM ha_replication_lag_history
-             WHERE recorded_at > NOW() - make_interval(mins => $1)
+             WHERE recorded_at > NOW() - make_interval(mins => $1::int)
              ORDER BY recorded_at DESC",
         )
         .bind(minutes)
@@ -261,7 +263,7 @@ impl ReplicationService {
     /// Cleanup old lag history records.
     pub async fn cleanup_lag_history(&self, retain_hours: i64) -> Result<u64, String> {
         let res = sqlx::query(
-            "DELETE FROM ha_replication_lag_history WHERE recorded_at < NOW() - make_interval(hours => $1)"
+            "DELETE FROM ha_replication_lag_history WHERE recorded_at < NOW() - make_interval(hours => $1::int)"
         )
         .bind(retain_hours)
         .execute(&self.pool)

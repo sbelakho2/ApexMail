@@ -302,7 +302,6 @@ impl billing_service::send_admission::SendAdmissionBackend for FailingAdmissionB
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn reward_ledger_is_idempotent_and_the_ladder_moves_the_posterior_once() {
     let Some(pool) = common::test_pool("reward_ledger").await else {
         return;
@@ -417,7 +416,6 @@ async fn reward_ledger_is_idempotent_and_the_ladder_moves_the_posterior_once() {
 }
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn hostile_reward_inputs_fail_before_any_write() {
     let Some(pool) = common::test_pool("reward_hostile").await else {
         return;
@@ -498,7 +496,6 @@ async fn hostile_reward_inputs_fail_before_any_write() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn sparse_context_bucket_falls_back_to_global_and_a_populated_one_takes_over() {
     let Some(pool) = common::test_pool("context_fallback").await else {
         return;
@@ -624,7 +621,6 @@ async fn sparse_context_bucket_falls_back_to_global_and_a_populated_one_takes_ov
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn zero_and_exhausted_contact_budgets_are_exploit_only_and_deterministic() {
     let Some(pool) = common::test_pool("budget_exhaustion").await else {
         return;
@@ -709,7 +705,6 @@ async fn zero_and_exhausted_contact_budgets_are_exploit_only_and_deterministic()
 }
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn high_value_accounts_are_exploit_only_unless_explicitly_overridden() {
     let Some(pool) = common::test_pool("high_value").await else {
         return;
@@ -758,7 +753,6 @@ async fn high_value_accounts_are_exploit_only_unless_explicitly_overridden() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
     let Some(pool) = common::test_pool("variant_persist").await else {
         return;
@@ -883,7 +877,6 @@ async fn variant_is_persisted_before_send_and_survives_enqueue_failure() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn next_best_action_gate_skips_a_weak_prospect_with_a_recorded_reason() {
     let Some(pool) = common::test_pool("nba_gate").await else {
         return;
@@ -988,7 +981,6 @@ async fn next_best_action_gate_skips_a_weak_prospect_with_a_recorded_reason() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn calibration_measures_scores_against_realised_outcomes() {
     let Some(pool) = common::test_pool("calibrate_live").await else {
         return;
@@ -1084,7 +1076,6 @@ async fn calibration_measures_scores_against_realised_outcomes() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn replay_cases_compare_proposed_actions_with_realised_outcomes() {
     let Some(pool) = common::test_pool("replay_live").await else {
         return;
@@ -1284,7 +1275,6 @@ impl SalesIntelligence for ScriptedIntelligence {
 }
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn ai_outage_writes_zero_evidence_rows_and_says_why() {
     let Some(pool) = common::test_pool("ai_outage").await else {
         return;
@@ -1319,7 +1309,6 @@ async fn ai_outage_writes_zero_evidence_rows_and_says_why() {
 }
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn research_writes_only_grounded_claims_and_labels_hypotheses() {
     let Some(pool) = common::test_pool("research_grounded").await else {
         return;

@@ -3671,7 +3671,6 @@ mod tests {
     /// provenance columns on BOTH `messages` and `email_queue`, and the
     /// envelope sender is the resolved identity (never
     /// `SALES_CAMPAIGN_FROM_EMAIL`).
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[allow(clippy::type_complexity)]
     #[tokio::test]
     async fn sequenced_send_binds_typed_provenance_and_the_resolved_sender() {
@@ -3813,7 +3812,6 @@ mod tests {
     /// expired) gets `LeaseLost` and produces NO external effect — zero new
     /// rows in `messages` and `email_queue` — and its quota reservation is
     /// released.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn stale_fence_returns_lease_lost_and_writes_nothing() {
         let Some(pool) = crate::test_db::canonical_test_pool("stale_send_fence").await else {
@@ -3881,6 +3879,264 @@ mod tests {
             0,
             "the rolled-back reservation consumes no shared quota"
         );
+
+        cleanup_sequenced_fixture(&pool, &fx.tenant).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial default-run proofs (soft-skip only when the canonical test
+    // database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    /// The fenced sequenced send binds all four typed provenance ids and the
+    /// RESOLVED sender (never the deployment config address), stamps the
+    /// marketing category on both the message and its queue row, consumes
+    /// exactly one admission unit, and a replay of the same logical send is a
+    /// duplicate — never a second message.
+    #[tokio::test]
+    async fn sequenced_send_is_fenced_marketing_and_replay_is_a_duplicate() {
+        let Some(pool) = crate::test_db::canonical_test_pool("sequenced_default_run").await else {
+            return;
+        };
+        let fx = seed_sequenced_fixture(&pool, "seqdefault", true).await;
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = ProductionCampaignDispatcher::new(
+            test_dispatch_config(),
+            pool.clone(),
+            admission.clone(),
+        )
+        .expect("the test dispatch config is configured");
+
+        let outcome = dispatcher
+            .enqueue_sequenced(
+                &fx.tenant,
+                &fx.key,
+                &test_rendered(),
+                "prospect@example.com",
+                "https://sales.example/u/token",
+                &fx.sender,
+                fx.decision_id,
+                fx.step_execution_id,
+                fx.enrollment_id,
+                &fx.fence,
+                serde_json::json!({ "test": "default-run" }),
+            )
+            .await
+            .expect("a fenced sequenced send must succeed");
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+
+        let (from_email, subject, html, text, metadata, category): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            serde_json::Value,
+            String,
+        ) = sqlx::query_as(
+            "SELECT from_email, subject, html_body, text_body, metadata, message_category \
+             FROM messages WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(&fx.tenant)
+        .bind(&fx.key)
+        .fetch_one(&pool)
+        .await
+        .expect("the messages row must exist");
+        assert_eq!(
+            from_email, fx.sender.from_email,
+            "the resolved identity is the envelope sender"
+        );
+        assert_eq!(category, SALES_MARKETING_CATEGORY);
+        assert_eq!(category, message_category::MARKETING);
+        assert_eq!(metadata["sales_sender_pool"], "sales_outbound");
+        assert_eq!(metadata["sales_sender_source_ip"], "203.0.113.7");
+        assert!(!subject.is_empty());
+        // Both bodies are the rendered bodies (the worker appends the footer
+        // before calling; the dispatcher must not drop or mutate them).
+        assert!(html.is_some() && text.is_some());
+
+        // The queue row agrees and is bound to the verified domain.
+        let (q_category, q_from, q_to): (String, String, Vec<String>) = sqlx::query_as(
+            "SELECT message_category, from_address, to_addresses FROM email_queue \
+             WHERE tenant_id = $1 AND message_id = \
+                 (SELECT id FROM messages WHERE tenant_id = $1 AND idempotency_key = $2)",
+        )
+        .bind(&fx.tenant)
+        .bind(&fx.key)
+        .fetch_one(&pool)
+        .await
+        .expect("the email_queue row must exist");
+        assert_eq!(q_category, SALES_MARKETING_CATEGORY);
+        assert_eq!(q_from, fx.sender.from_email);
+        assert_eq!(q_to, vec!["prospect@example.com".to_string()]);
+
+        // A replay of the same logical send (the worker retried after a
+        // crash) is a duplicate: one message, one queue row, one reservation.
+        let replay = dispatcher
+            .enqueue_sequenced(
+                &fx.tenant,
+                &fx.key,
+                &test_rendered(),
+                "prospect@example.com",
+                "https://sales.example/u/token",
+                &fx.sender,
+                fx.decision_id,
+                fx.step_execution_id,
+                fx.enrollment_id,
+                &fx.fence,
+                serde_json::json!({ "test": "default-run" }),
+            )
+            .await
+            .expect("a replay must not error");
+        assert_eq!(
+            replay,
+            EnqueueOutcome::DuplicateIdempotency,
+            "the same identity is the same logical send"
+        );
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_queue WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages, 1, "a replay must never produce a second message");
+        assert_eq!(queued, 1);
+        assert_eq!(admission.reserved(), 2, "each attempt takes a reservation");
+
+        cleanup_sequenced_fixture(&pool, &fx.tenant).await;
+    }
+
+    /// The admission refusal classification, proved behaviourally: an
+    /// exhausted quota is a RETRYABLE error (the worker requeues with
+    /// backoff) and a canonical suppression is a TERMINAL `Suppressed`
+    /// outcome — both write nothing and neither sends.
+    #[tokio::test]
+    async fn admission_refusals_are_retryable_errors_or_terminal_skips() {
+        let Some(pool) = crate::test_db::canonical_test_pool("admission_refusal_default").await
+        else {
+            return;
+        };
+        let fx = seed_sequenced_fixture(&pool, "admission-refusal", true).await;
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = ProductionCampaignDispatcher::new(
+            test_dispatch_config(),
+            pool.clone(),
+            admission.clone(),
+        )
+        .expect("the test dispatch config is configured");
+        let send = || async {
+            dispatcher
+                .enqueue_sequenced(
+                    &fx.tenant,
+                    &fx.key,
+                    &test_rendered(),
+                    "prospect@example.com",
+                    "https://sales.example/u/token",
+                    &fx.sender,
+                    fx.decision_id,
+                    fx.step_execution_id,
+                    fx.enrollment_id,
+                    &fx.fence,
+                    serde_json::json!({ "test": "admission-refusal" }),
+                )
+                .await
+        };
+
+        // Quota exhausted: a retryable error, never a silent drop.
+        admission.state.lock().unwrap().limit = 0;
+        let error = send().await.expect_err("quota exhaustion is retryable");
+        assert!(
+            matches!(error, SalesError::QuotaExhausted(_)),
+            "expected QuotaExhausted, got {error:?}"
+        );
+
+        // Canonical suppression: a terminal outcome, not an error.
+        admission.state.lock().unwrap().limit = -1;
+        admission
+            .state
+            .lock()
+            .unwrap()
+            .suppressed
+            .insert("prospect@example.com".into());
+        let outcome = send()
+            .await
+            .expect("a suppression is a refusal outcome, not a database error");
+        assert_eq!(outcome, EnqueueOutcome::Suppressed);
+
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_queue WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages + queued, 0, "a refused send writes nothing");
+        assert_eq!(admission.used(), 0, "a refused send consumes no quota");
+
+        cleanup_sequenced_fixture(&pool, &fx.tenant).await;
+    }
+
+    /// A stale lease token (the worker died and its work was recovered) is
+    /// refused with `LeaseLost`, writes nothing, and releases the reservation
+    /// it had already taken — no external effect from a worker that no longer
+    /// owns the action.
+    #[tokio::test]
+    async fn stale_fenced_send_is_refused_and_releases_its_reservation() {
+        let Some(pool) = crate::test_db::canonical_test_pool("stale_fence_default_run").await
+        else {
+            return;
+        };
+        let fx = seed_sequenced_fixture(&pool, "stalefence-default", false).await;
+        let admission = Arc::new(FakeAdmissionBackend::default());
+        let dispatcher = ProductionCampaignDispatcher::new(
+            test_dispatch_config(),
+            pool.clone(),
+            admission.clone(),
+        )
+        .expect("the test dispatch config is configured");
+
+        let outcome = dispatcher
+            .enqueue_sequenced(
+                &fx.tenant,
+                &fx.key,
+                &test_rendered(),
+                "prospect@example.com",
+                "https://sales.example/u/token",
+                &fx.sender,
+                fx.decision_id,
+                fx.step_execution_id,
+                fx.enrollment_id,
+                &fx.fence,
+                serde_json::json!({ "test": "stale-default" }),
+            )
+            .await
+            .expect("a stale fence is a refusal, not a database error");
+        assert_eq!(outcome, EnqueueOutcome::LeaseLost);
+        let messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_queue WHERE tenant_id = $1")
+                .bind(&fx.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(messages + queued, 0, "a stale worker writes nothing");
+        assert_eq!(admission.released(), 1, "the refusal releases its slot");
+        assert_eq!(admission.used(), 0);
 
         cleanup_sequenced_fixture(&pool, &fx.tenant).await;
     }

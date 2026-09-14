@@ -763,3 +763,436 @@ mod tests {
         pool.close().await;
     }
 }
+
+// ─── Adversarial template CRUD / substitution tests ────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn auth_for(tenant: &str, scopes: &[&str]) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_tenant(pool: &sqlx::PgPool, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'templates adversarial', $2, 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, tenants: &[&str]) {
+        for tenant in tenants {
+            sqlx::query("DELETE FROM template_versions WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup versions");
+            sqlx::query("DELETE FROM templates WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup templates");
+            sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup tenant");
+        }
+    }
+
+    async fn create_ok(state: &AppState, tenant: &str, name: &str) -> TemplateResponse {
+        let (status, Json(tpl)) = create_template(
+            State(state.clone()),
+            auth_for(tenant, &["templates:write"]),
+            Json(CreateTemplateRequest {
+                name: name.into(),
+                subject: "Hello {{name}}".into(),
+                html_body: "<p>{{name}}</p>".into(),
+                text_body: Some("Hi {{name}}".into()),
+            }),
+        )
+        .await
+        .expect("create template");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(tpl.version, 1);
+        tpl
+    }
+
+    #[test]
+    fn substitution_escapes_values_and_preserves_unknown_placeholders() {
+        let mut vars = serde_json::Map::new();
+        vars.insert(
+            "name".into(),
+            serde_json::json!("<script>alert('x')</script>"),
+        );
+        vars.insert("count".into(), serde_json::json!(7));
+        vars.insert("flag".into(), serde_json::json!(true));
+        vars.insert("nil".into(), serde_json::Value::Null);
+        vars.insert("obj".into(), serde_json::json!({"a":"<b>"}));
+
+        let out = substitute(
+            "<b>{{name}}</b> {{count}} {{flag}} {{nil}} {{obj}} {{missing}}",
+            &vars,
+        );
+        assert!(!out.contains("<script>"), "script payload escaped: {out}");
+        assert!(out.contains("&lt;script&gt;"), "{out}");
+        assert!(out.contains("7"));
+        assert!(out.contains("true"));
+        assert!(out.contains("null"));
+        assert!(out.contains("{{missing}}"), "unknown vars stay literal");
+        // Malformed braces must never panic; a dangling opener round-trips
+        // through the placeholder-render path verbatim.
+        assert_eq!(substitute("{{", &vars), "{{}}");
+        assert_eq!(substitute("no vars here", &vars), "no vars here");
+        assert_eq!(substitute("", &vars), "");
+        let mut only_name = serde_json::Map::new();
+        only_name.insert("name".into(), serde_json::json!("N"));
+        assert_eq!(substitute("{{{name}}}", &only_name), "{{{name}}}");
+    }
+
+    #[tokio::test]
+    async fn crud_flow_versions_rollback_and_tenant_isolation() {
+        let Some((state, pool)) = state_and_pool("adv_templates_flow").await else {
+            return;
+        };
+        let tenant_a = apexmail_lib::id::generate_id("", 26);
+        let tenant_b = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant_a, "starter").await;
+        seed_tenant(&pool, &tenant_b, "starter").await;
+        let read = auth_for(&tenant_a, &["templates:read"]);
+        let write = auth_for(&tenant_a, &["templates:write"]);
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let template_name = format!("Welcome {tag}");
+
+        let tpl = create_ok(&state, &tenant_a, &template_name).await;
+        let (snap_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM template_versions WHERE template_id = $1 AND version = 1",
+        )
+        .bind(&tpl.id)
+        .fetch_one(&pool)
+        .await
+        .expect("v1 snapshot exists");
+        assert_eq!(snap_count, 1);
+
+        // Template names are NOT unique in the canonical schema
+        // (idx_templates_tenant_name is a plain index) — a same-name create
+        // succeeds and is a distinct resource; that is the current contract.
+        let (dup_status, Json(duplicate)) = create_template(
+            State(state.clone()),
+            write.clone(),
+            Json(CreateTemplateRequest {
+                name: template_name.clone(),
+                subject: "s".into(),
+                html_body: "<p>x</p>".into(),
+                text_body: None,
+            }),
+        )
+        .await
+        .expect("duplicate names are allowed on the canonical schema");
+        assert_eq!(dup_status, StatusCode::CREATED);
+        assert_ne!(duplicate.id, tpl.id);
+
+        // Empty required fields are validation errors.
+        for (name, subject, html) in [("", "s", "<p/>"), ("n", "", "<p/>"), ("n", "s", "")] {
+            let resp = create_template(
+                State(state.clone()),
+                write.clone(),
+                Json(CreateTemplateRequest {
+                    name: name.into(),
+                    subject: subject.into(),
+                    html_body: html.into(),
+                    text_body: None,
+                }),
+            )
+            .await;
+            assert!(matches!(resp, Err(ApiError::Validation(_))));
+        }
+
+        // Reads are tenant-scoped.
+        let Json(fetched) = get_template(State(state.clone()), read.clone(), Path(tpl.id.clone()))
+            .await
+            .expect("own read");
+        assert_eq!(fetched.name, template_name);
+        let cross = get_template(
+            State(state.clone()),
+            read.clone(),
+            Path("unknown-tpl".into()),
+        )
+        .await;
+        assert!(matches!(cross, Err(ApiError::NotFound(_))));
+
+        // Update bumps version and snapshots v2; render substitutes + escapes.
+        let Json(updated) = update_template(
+            State(state.clone()),
+            write.clone(),
+            Path(tpl.id.clone()),
+            Json(UpdateTemplateRequest {
+                name: Some(format!("Welcome v2 {tag}")),
+                subject: None,
+                html_body: Some("<h1>{{name}}</h1>".into()),
+                text_body: None,
+            }),
+        )
+        .await
+        .expect("update");
+        assert_eq!(updated.version, 2);
+        let (v2,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM template_versions WHERE template_id = $1 AND version = 2",
+        )
+        .bind(&tpl.id)
+        .fetch_one(&pool)
+        .await
+        .expect("v2 snapshot");
+        assert_eq!(v2, 1);
+
+        let Json(rendered) = render_template(
+            State(state.clone()),
+            read.clone(),
+            Path(tpl.id.clone()),
+            Json(RenderRequest {
+                variables: serde_json::json!({"name": "<script>x</script>"}),
+            }),
+        )
+        .await
+        .expect("render");
+        assert!(!rendered.html.contains("<script>"), "{}", rendered.html);
+        assert!(rendered.html.contains("&lt;script&gt;"));
+        assert!(rendered.text.as_deref().unwrap_or_default().contains("Hi"));
+
+        // Non-object `variables` degrade to an empty map without an error.
+        let Json(rendered_scalar) = render_template(
+            State(state.clone()),
+            read.clone(),
+            Path(tpl.id.clone()),
+            Json(RenderRequest {
+                variables: serde_json::json!("not-an-object"),
+            }),
+        )
+        .await
+        .expect("render scalar vars");
+        assert!(rendered_scalar.html.contains("{{name}}"));
+
+        // Rollback restores v1 content and version.
+        let Json(rolled) = rollback_template(
+            State(state.clone()),
+            write.clone(),
+            Path(tpl.id.clone()),
+            Json(RollbackRequest { version: 1 }),
+        )
+        .await
+        .expect("rollback v1");
+        assert_eq!(rolled.version, 1);
+        assert_eq!(rolled.name, template_name);
+        assert_eq!(rolled.html_body, "<p>{{name}}</p>");
+        let missing_version = rollback_template(
+            State(state.clone()),
+            write.clone(),
+            Path(tpl.id.clone()),
+            Json(RollbackRequest { version: 99 }),
+        )
+        .await;
+        assert!(matches!(missing_version, Err(ApiError::NotFound(_))));
+        let cross_rollback = rollback_template(
+            State(state.clone()),
+            write.clone(),
+            Path("not-our-template".into()),
+            Json(RollbackRequest { version: 1 }),
+        )
+        .await;
+        assert!(matches!(cross_rollback, Err(ApiError::NotFound(_))));
+
+        // Duplicate copies content as a draft with a "(copy)" name.
+        let (status, Json(copy)) =
+            duplicate_template(State(state.clone()), write.clone(), Path(tpl.id.clone()))
+                .await
+                .expect("duplicate");
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(copy.name, format!("{template_name} (copy)"));
+        assert_eq!(copy.status, "draft");
+        assert_eq!(copy.version, 1);
+
+        // Listing is paginated and tenant-scoped.
+        let Json(list) = list_templates(
+            State(state.clone()),
+            read.clone(),
+            Query(ListTemplatesQuery {
+                limit: 1,
+                offset: 0,
+                cursor: None,
+            }),
+        )
+        .await
+        .expect("list");
+        assert_eq!(list.len(), 1, "limit honoured");
+        let Json(all) = list_templates(
+            State(state.clone()),
+            read.clone(),
+            Query(ListTemplatesQuery {
+                limit: i64::MAX,
+                offset: -5,
+                cursor: Some(-3),
+            }),
+        )
+        .await
+        .expect("clamped list");
+        // original + same-name duplicate + "(copy)" duplicate
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().all(|t| t.id != "unknown"));
+
+        // Cross-tenant delete is a 404 and leaves the row.
+        let foreign = create_ok_foreign(&state, &tenant_b, &format!("Foreign {tag}")).await;
+        let cross_delete =
+            delete_template(State(state.clone()), write.clone(), Path(foreign.clone())).await;
+        assert!(matches!(cross_delete, Err(ApiError::NotFound(_))));
+        let (foreign_exists,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM templates WHERE id = $1 AND tenant_id = $2")
+                .bind(&foreign)
+                .bind(&tenant_b)
+                .fetch_one(&pool)
+                .await
+                .expect("foreign row survives");
+        assert_eq!(foreign_exists, 1);
+
+        // Own delete → 204, then 404s.
+        let deleted = delete_template(State(state.clone()), write.clone(), Path(tpl.id.clone()))
+            .await
+            .expect("delete own");
+        assert_eq!(deleted, StatusCode::NO_CONTENT);
+        for _ in 0..2 {
+            let gone =
+                delete_template(State(state.clone()), write.clone(), Path(tpl.id.clone())).await;
+            assert!(matches!(gone, Err(ApiError::NotFound(_))));
+        }
+        let gone_read =
+            get_template(State(state.clone()), read.clone(), Path(tpl.id.clone())).await;
+        assert!(matches!(gone_read, Err(ApiError::NotFound(_))));
+        let gone_update = update_template(
+            State(state.clone()),
+            write.clone(),
+            Path(tpl.id.clone()),
+            Json(UpdateTemplateRequest {
+                name: Some("zombie".into()),
+                subject: None,
+                html_body: None,
+                text_body: None,
+            }),
+        )
+        .await;
+        assert!(matches!(gone_update, Err(ApiError::NotFound(_))));
+
+        // Scope gates: read scope cannot write; no scope cannot read.
+        let forbidden = create_template(
+            State(state.clone()),
+            read.clone(),
+            Json(CreateTemplateRequest {
+                name: "nope".into(),
+                subject: "s".into(),
+                html_body: "<p/>".into(),
+                text_body: None,
+            }),
+        )
+        .await;
+        assert!(matches!(forbidden, Err(ApiError::Forbidden(_))));
+        let no_scope = get_template(
+            State(state.clone()),
+            auth_for(&tenant_a, &[]),
+            Path("anything".into()),
+        )
+        .await;
+        assert!(matches!(no_scope, Err(ApiError::Forbidden(_))));
+
+        cleanup(&pool, &[&tenant_a, &tenant_b]).await;
+    }
+
+    async fn create_ok_foreign(state: &AppState, tenant: &str, name: &str) -> String {
+        let (_, Json(tpl)) = create_template(
+            State(state.clone()),
+            auth_for(tenant, &["templates:write"]),
+            Json(CreateTemplateRequest {
+                name: name.into(),
+                subject: "Foreign".into(),
+                html_body: "<p>f</p>".into(),
+                text_body: None,
+            }),
+        )
+        .await
+        .expect("create foreign template");
+        tpl.id
+    }
+
+    #[tokio::test]
+    async fn free_plan_write_is_403_and_unknown_tenant_is_404() {
+        let Some((state, pool)) = state_and_pool("adv_templates_entitlement").await else {
+            return;
+        };
+        let free_tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &free_tenant, "free").await;
+        let write = auth_for(&free_tenant, &["templates:write"]);
+
+        let denied = create_template(
+            State(state.clone()),
+            write.clone(),
+            Json(CreateTemplateRequest {
+                name: "gated".into(),
+                subject: "s".into(),
+                html_body: "<p/>".into(),
+                text_body: None,
+            }),
+        )
+        .await;
+        assert!(
+            matches!(denied, Err(ApiError::Forbidden(_))),
+            "the custom_templates entitlement must gate writes, got {denied:?}"
+        );
+
+        // Reads are allowed on the free plan.
+        let Json(read) = list_templates(
+            State(state.clone()),
+            auth_for(&free_tenant, &["templates:read"]),
+            Query(ListTemplatesQuery {
+                limit: 10,
+                offset: 0,
+                cursor: None,
+            }),
+        )
+        .await
+        .expect("free plan can list");
+        assert!(read.is_empty());
+
+        // A tenant that does not exist resolves to 404, not a silent grant.
+        let ghost = apexmail_lib::id::generate_id("", 26);
+        let ghost_write = create_template(
+            State(state.clone()),
+            auth_for(&ghost, &["templates:write"]),
+            Json(CreateTemplateRequest {
+                name: "ghost".into(),
+                subject: "s".into(),
+                html_body: "<p/>".into(),
+                text_body: None,
+            }),
+        )
+        .await;
+        assert!(matches!(ghost_write, Err(ApiError::NotFound(_))));
+
+        cleanup(&pool, &[&free_tenant]).await;
+    }
+}

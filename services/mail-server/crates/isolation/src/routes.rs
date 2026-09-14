@@ -89,7 +89,31 @@ pub fn create_router(state: S) -> Router {
         .route("/audit/export/:org_id", get(audit_export))
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            bearer_gate,
+        ))
         .with_state(state)
+}
+
+/// Authentication gate for every route except `/health`.
+///
+/// Handlers re-check the bearer token themselves, but extractors run BEFORE a
+/// handler body: without this middleware a request with a malformed JSON body
+/// was rejected by the `Json` extractor (422 with schema details) before the
+/// handler could answer 401. Authentication must precede body validation.
+async fn bearer_gate(
+    State(state): State<S>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+    match verify_bearer(request.headers(), &state.config) {
+        Ok(()) => next.run(request).await,
+        Err((status, message)) => (status, err_json(message)).into_response(),
+    }
 }
 
 // ─── Auth ───────────────────────────────────────────────────────

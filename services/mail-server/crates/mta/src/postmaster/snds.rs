@@ -249,3 +249,136 @@ mod tests {
         assert!(parse_csv("\n\n").is_empty());
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    //! Malformed SNDS feeds must degrade to zeroed/skipped rows — never a
+    //! panic, never a bogus reputation signal — and the upsert must be
+    //! idempotent per (ip, day).
+
+    use super::*;
+
+    fn record(ip: &str, filter: &str, rate: f64) -> SndsRecord {
+        SndsRecord {
+            ip: ip.parse().unwrap(),
+            observed_at: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            activity_start: None,
+            activity_end: None,
+            rcpt_commands: 10,
+            data_commands: 9,
+            message_recipients: 8,
+            filter_result: Some(filter.to_string()),
+            complaint_rate: Some(rate),
+            trap_hits: 1,
+            sample_helo: None,
+            sample_from: None,
+            raw: serde_json::json!({"row": "fixture"}),
+        }
+    }
+
+    #[test]
+    fn client_construction_accepts_any_key() {
+        assert!(SndsClient::new(SndsCredentials {
+            access_key: "k".into()
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn malformed_rows_are_skipped_not_panicking() {
+        // Too few columns, bad IP, blank lines.
+        assert!(parse_csv("1.2.3.4,1,2,3").is_empty());
+        assert!(
+            parse_csv("not-an-ip,1/15/2026 0:00:00 AM,1/16/2026 0:00:00 AM,1,1,1,GREEN,0,0")
+                .is_empty()
+        );
+        assert!(parse_csv("   ").is_empty());
+
+        // A parseable row with garbage numerics degrades to zeros, and an
+        // unparseable date falls back to "today" (never an error).
+        let row = parse_row("1.2.3.4,x,y,n/a,n/a,n/a,-,weird,n/a").expect("ip is enough");
+        assert_eq!(row.rcpt_commands, 0);
+        assert_eq!(row.data_commands, 0);
+        assert_eq!(row.message_recipients, 0);
+        assert!(row.filter_result.is_none(), "'-' means no verdict");
+        assert!(row.complaint_rate.is_none());
+        assert!(row.activity_start.is_none());
+        assert_eq!(row.observed_at, Utc::now().date_naive());
+    }
+
+    #[test]
+    fn date_formats_and_complaint_scales_are_normalised() {
+        assert!(parse_dt("").is_none());
+        assert!(parse_dt("not a date").is_none());
+        assert!(parse_dt("2026-01-15").is_some(), "date-only fallback");
+        assert!(parse_dt("2026-01-15 10:30:00").is_some());
+        assert!(parse_dt("2026-01-15T10:30:00Z").is_some());
+        assert!(parse_dt("1/15/2026 10:30:00 AM").is_some());
+
+        assert_eq!(parse_complaint("<1%"), Some(0.005));
+        assert_eq!(parse_complaint(" 0.5 "), Some(0.5));
+        assert_eq!(parse_complaint("100"), Some(1.0));
+        assert_eq!(parse_complaint("-"), None);
+        assert_eq!(parse_complaint("banana"), None);
+    }
+
+    #[tokio::test]
+    async fn upsert_is_idempotent_per_ip_and_day() {
+        let pool = match migrator::test_support::fresh_canonical_pool("snds_upsert", "snds_upsert")
+            .await
+        {
+            Ok(Some(pool)) => pool,
+            Ok(None) => return,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+
+        let ip = format!("203.0.113.{}", 1 + (std::process::id() % 200) as u8);
+        let first = record(&ip, "GREEN", 0.001);
+        assert_eq!(
+            upsert_records(&pool, std::slice::from_ref(&first))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            upsert_records(&pool, std::slice::from_ref(&first))
+                .await
+                .unwrap(),
+            1
+        );
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM postmaster_snds_reputation WHERE ip = $1::inet",
+        )
+        .bind(&ip)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "the same (ip, day) upserts in place");
+
+        // A RED verdict for the same day REPLACES the fields (no stale GREEN).
+        let red = SndsRecord {
+            filter_result: Some("RED".into()),
+            complaint_rate: Some(0.05),
+            trap_hits: 42,
+            raw: serde_json::json!({"row": "updated"}),
+            ..first
+        };
+        assert_eq!(upsert_records(&pool, &[red]).await.unwrap(), 1);
+        let (filter, rate, traps): (Option<String>, Option<f64>, i64) = sqlx::query_as(
+            "SELECT filter_result, complaint_rate, trap_hits \
+             FROM postmaster_snds_reputation WHERE ip = $1::inet",
+        )
+        .bind(&ip)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(filter.as_deref(), Some("RED"));
+        assert_eq!(rate, Some(0.05));
+        assert_eq!(traps, 42);
+
+        // An empty batch is a no-op.
+        assert_eq!(upsert_records(&pool, &[]).await.unwrap(), 0);
+        pool.close().await;
+    }
+}

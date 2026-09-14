@@ -2262,3 +2262,1339 @@ async fn resolve_sender_domain_id(
     .fetch_optional(&mut **tx)
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use billing_service::send_admission::SendAdmissionBackend;
+    use billing_service::usage::{QuotaRecordResult, UsageError};
+
+    // -----------------------------------------------------------------------
+    // Event vocabulary and trigger resolution (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn event_kind_wire_names_parse_both_spellings_and_reject_unknown() {
+        assert_eq!(
+            AutomationEventKind::parse("contact.created"),
+            Some(AutomationEventKind::ContactCreated)
+        );
+        assert_eq!(
+            AutomationEventKind::parse(" contact_created "),
+            Some(AutomationEventKind::ContactCreated)
+        );
+        assert_eq!(
+            AutomationEventKind::parse("contact.updated"),
+            Some(AutomationEventKind::ContactUpdated)
+        );
+        assert_eq!(
+            AutomationEventKind::parse("tag_added"),
+            Some(AutomationEventKind::ContactTagAdded)
+        );
+        assert_eq!(
+            AutomationEventKind::parse("message_received"),
+            Some(AutomationEventKind::MessageReceived)
+        );
+        for bad in ["", "contact.deleted", "schedule", "MESSAGE.RECEIVED"] {
+            assert_eq!(AutomationEventKind::parse(bad), None, "'{bad}'");
+        }
+        assert_eq!(
+            AutomationEventKind::ContactCreated.as_str(),
+            "contact.created"
+        );
+        assert_eq!(
+            AutomationEventKind::MessageReceived.as_str(),
+            "message.received"
+        );
+    }
+
+    /// The admission category is per-event: only a 1:1 reply to a received
+    /// message is transactional; every lifecycle event is marketing.
+    #[test]
+    fn only_message_received_is_transactional() {
+        assert_eq!(
+            AutomationEventKind::MessageReceived.send_category(),
+            AUTOMATION_REPLY_CATEGORY
+        );
+        assert_eq!(
+            AutomationEventKind::MessageReceived.send_category(),
+            message_category::TRANSACTIONAL
+        );
+        for kind in [
+            AutomationEventKind::ContactCreated,
+            AutomationEventKind::ContactUpdated,
+            AutomationEventKind::ContactTagAdded,
+        ] {
+            assert_eq!(kind.send_category(), AUTOMATION_MARKETING_CATEGORY);
+            assert_eq!(kind.send_category(), message_category::MARKETING);
+            assert!(kind.is_contact_event());
+        }
+        assert!(!AutomationEventKind::MessageReceived.is_contact_event());
+    }
+
+    #[test]
+    fn resolve_trigger_reads_the_documented_shape() {
+        let resolution = resolve_trigger(&json!({
+            "type": "event",
+            "event": "contact.created",
+            "filters": { "tags": ["vip", " trial "] }
+        }));
+        assert_eq!(
+            resolution,
+            TriggerResolution::Supported(TriggerSpec {
+                event: AutomationEventKind::ContactCreated,
+                filter_tags: vec!["vip".to_string(), "trial".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_trigger_accepts_underscore_aliases_and_no_filters() {
+        for (raw, expected) in [
+            ("contact_created", AutomationEventKind::ContactCreated),
+            ("contact_updated", AutomationEventKind::ContactUpdated),
+            ("tag_added", AutomationEventKind::ContactTagAdded),
+            ("contact_tag_added", AutomationEventKind::ContactTagAdded),
+            ("message_received", AutomationEventKind::MessageReceived),
+        ] {
+            assert_eq!(
+                resolve_trigger(&json!({ "type": raw })),
+                TriggerResolution::Supported(TriggerSpec {
+                    event: expected,
+                    filter_tags: Vec::new(),
+                }),
+                "'{raw}'"
+            );
+        }
+        // An explicit null filter object is the same as absent.
+        assert_eq!(
+            resolve_trigger(
+                &json!({ "type": "event", "event": "contact.created", "filters": null })
+            ),
+            TriggerResolution::Supported(TriggerSpec {
+                event: AutomationEventKind::ContactCreated,
+                filter_tags: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_trigger_reports_every_unsupported_shape_with_a_reason() {
+        let cases: Vec<(Value, &str)> = vec![
+            (json!("event"), "not a JSON object"),
+            (json!({}), "no 'type'"),
+            (json!({ "type": "  " }), "no 'type'"),
+            (json!({ "type": "event" }), "no 'event' name"),
+            (
+                json!({ "type": "event", "event": "contact.deleted" }),
+                "unsupported trigger event",
+            ),
+            (json!({ "type": "schedule" }), "unsupported trigger kind"),
+            (json!({ "type": "webhook" }), "unsupported trigger kind"),
+            (
+                json!({ "type": "event", "event": "contact.created", "filters": [] }),
+                "filters must be a JSON object",
+            ),
+            (
+                json!({ "type": "event", "event": "contact.created", "filters": { "segment": [] } }),
+                "unsupported trigger filter",
+            ),
+            (
+                json!({ "type": "event", "event": "contact.created", "filters": { "tags": "vip" } }),
+                "must be an array of strings",
+            ),
+            (
+                json!({ "type": "event", "event": "contact.created", "filters": { "tags": [" "] } }),
+                "must contain non-empty strings",
+            ),
+            (
+                json!({ "type": "event", "event": "contact.created", "filters": { "tags": [1] } }),
+                "must contain non-empty strings",
+            ),
+        ];
+        for (trigger, needle) in cases {
+            match resolve_trigger(&trigger) {
+                TriggerResolution::Unsupported { reason, .. } => assert!(
+                    reason.contains(needle),
+                    "trigger {trigger} reason '{reason}' must contain '{needle}'"
+                ),
+                TriggerResolution::Supported(spec) => {
+                    panic!("trigger {trigger} must be unsupported, got {spec:?}")
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Conditions (pure)
+    // -----------------------------------------------------------------------
+
+    fn contact_context(tags: &[&str], status: &str) -> EventContext {
+        EventContext {
+            contact: Some(AutomationContact {
+                id: Uuid::new_v4(),
+                email: "ada@example.com".into(),
+                name: Some("Ada Lovelace".into()),
+                status: status.into(),
+                tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            }),
+            tags_added: vec!["trial".into()],
+            from_email: Some("sender@example.com".into()),
+            to_email: Some("ada@example.com".into()),
+            subject: Some("Hello".into()),
+        }
+    }
+
+    #[test]
+    fn absent_or_empty_conditions_are_met() {
+        let ctx = contact_context(&[], "subscribed");
+        assert_eq!(evaluate_conditions(None, &ctx), ConditionVerdict::Met);
+        assert_eq!(
+            evaluate_conditions(Some(&Value::Null), &ctx),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            evaluate_conditions(Some(&json!({})), &ctx),
+            ConditionVerdict::Met
+        );
+    }
+
+    #[test]
+    fn malformed_condition_shapes_are_unsupported_never_silently_true() {
+        let ctx = contact_context(&[], "subscribed");
+        for (conditions, needle) in [
+            (json!("all"), "must be a JSON object"),
+            (json!({ "when": [] }), "unsupported condition group"),
+            (json!({ "email": "x" }), "unsupported condition group"),
+            (json!({ "all": {} }), "'all' must be an array"),
+            (json!({ "any": "x" }), "'any' must be an array"),
+            (
+                json!({ "segment": "enterprise" }),
+                "unsupported condition group",
+            ),
+        ] {
+            match evaluate_conditions(Some(&conditions), &ctx) {
+                ConditionVerdict::Unsupported(reason) => assert!(
+                    reason.contains(needle),
+                    "{conditions}: '{reason}' must contain '{needle}'"
+                ),
+                other => panic!("{conditions} must be unsupported, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn condition_leaves_cover_every_operator() {
+        let ctx = contact_context(&["vip", "trial"], "subscribed");
+
+        let met = |leaf: Value| evaluate_conditions(Some(&json!({ "all": [leaf] })), &ctx);
+        assert_eq!(
+            met(json!({ "field": "tags", "operator": "contains", "value": "VIP" })),
+            ConditionVerdict::Met,
+            "contains is case-insensitive"
+        );
+        assert_eq!(
+            met(json!({ "field": "status", "operator": "equals", "value": "subscribed" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "status", "operator": "eq", "value": "Subscribed" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "status", "operator": "not_equals", "value": "unsubscribed" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "status", "operator": "ne", "value": "subscribed" })),
+            ConditionVerdict::NotMet("field 'status' did not satisfy 'ne'".into())
+        );
+        assert_eq!(
+            met(json!({ "field": "email", "operator": "in", "value": ["ada@example.com"] })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "email", "operator": "exists" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "missing_field", "operator": "not_exists" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "email", "operator": "not_exists" })),
+            ConditionVerdict::NotMet("field 'email' exists".into())
+        );
+        assert_eq!(
+            met(json!({ "field": "name", "operator": "equals", "value": "Ada Lovelace" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "contact.id", "operator": "exists" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "contact.status", "operator": "equals", "value": "subscribed" })),
+            ConditionVerdict::Met
+        );
+
+        // Array equality is order-insensitive and exact.
+        assert_eq!(
+            met(json!({ "field": "tags", "operator": "equals", "value": ["trial", "vip"] })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "tags", "operator": "ne", "value": ["trial"] })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "tags", "operator": "contains", "value": ["vip", "trial"] })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "tags", "operator": "in", "value": ["vip", "trial", "other"] })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "tags_added", "operator": "contains", "value": "TRIAL" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "message.subject", "operator": "equals", "value": "Hello" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "from_email", "operator": "exists" })),
+            ConditionVerdict::Met
+        );
+        assert_eq!(
+            met(json!({ "field": "to_email", "operator": "exists" })),
+            ConditionVerdict::Met
+        );
+    }
+
+    #[test]
+    fn unsupported_operators_and_missing_values_are_reported() {
+        let ctx = contact_context(&["vip"], "subscribed");
+        let verdicts = [
+            (
+                json!({ "all": [{ "field": "status", "operator": "matches" }] }),
+                "unsupported operator",
+            ),
+            (
+                json!({ "all": [{ "field": "status", "operator": "equals" }] }),
+                "missing 'value'",
+            ),
+            (
+                json!({ "all": [{ "field": "status" }] }),
+                "has no 'operator'",
+            ),
+            (
+                json!({ "all": [{ "operator": "equals", "value": "x" }] }),
+                "has no 'field'",
+            ),
+            (json!({ "all": ["nope"] }), "must be a JSON object"),
+            (
+                json!({ "all": [{ "field": "status", "operator": "new_op", "value": 1 }] }),
+                "unsupported operator",
+            ),
+        ];
+        for (conditions, needle) in verdicts {
+            match evaluate_conditions(Some(&conditions), &ctx) {
+                ConditionVerdict::Unsupported(reason) => assert!(
+                    reason.contains(needle),
+                    "{conditions}: '{reason}' must contain '{needle}'"
+                ),
+                other => panic!("{conditions} must be unsupported, got {other:?}"),
+            }
+        }
+
+        // An operator undefined for the field type is unsupported, not false.
+        match evaluate_conditions(
+            Some(&json!({ "all": [
+                { "field": "tags", "operator": "not_equals", "value": 3 }
+            ] })),
+            &ctx,
+        ) {
+            ConditionVerdict::Unsupported(reason) => assert!(reason.contains("not defined for")),
+            other => panic!("expected unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_and_all_group_semantics() {
+        let ctx = contact_context(&["vip"], "subscribed");
+        // 'any' with no leaves can never match.
+        assert_eq!(
+            evaluate_conditions(Some(&json!({ "any": [] })), &ctx),
+            ConditionVerdict::NotMet("'any' has no conditions".into())
+        );
+        // 'any' matching one leaf short-circuits to Met.
+        assert_eq!(
+            evaluate_conditions(
+                Some(&json!({ "any": [
+                    { "field": "status", "operator": "equals", "value": "nope" },
+                    { "field": "status", "operator": "equals", "value": "subscribed" }
+                ] })),
+                &ctx
+            ),
+            ConditionVerdict::Met
+        );
+        // 'any' with no match is NotMet with the aggregate reason.
+        assert_eq!(
+            evaluate_conditions(
+                Some(&json!({ "any": [
+                    { "field": "status", "operator": "equals", "value": "nope" }
+                ] })),
+                &ctx
+            ),
+            ConditionVerdict::NotMet("no condition in 'any' matched".into())
+        );
+        // An unsupported leaf inside 'any' is still Unsupported (the bogus
+        // leaf precedes any match, so the short-circuit cannot mask it).
+        assert!(matches!(
+            evaluate_conditions(
+                Some(&json!({ "any": [
+                    { "field": "status", "operator": "bogus", "value": "x" },
+                    { "field": "status", "operator": "equals", "value": "subscribed" }
+                ] })),
+                &ctx
+            ),
+            ConditionVerdict::Unsupported(_)
+        ));
+        // 'all' requires every leaf.
+        assert_eq!(
+            evaluate_conditions(
+                Some(&json!({ "all": [
+                    { "field": "status", "operator": "equals", "value": "subscribed" },
+                    { "field": "status", "operator": "equals", "value": "other" }
+                ] })),
+                &ctx
+            ),
+            ConditionVerdict::NotMet("field 'status' did not satisfy 'equals'".into())
+        );
+        // A missing field is NotMet for value operators, not Unsupported.
+        assert_eq!(
+            evaluate_conditions(
+                Some(&json!({ "all": [
+                    { "field": "ghost", "operator": "equals", "value": "x" }
+                ] })),
+                &ctx
+            ),
+            ConditionVerdict::NotMet("field 'ghost' does not exist".into())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Trigger filters, renderer, backoff (pure)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trigger_filters_distinguish_the_tag_added_family() {
+        let ctx = contact_context(&["vip", "trial"], "subscribed");
+        let spec = |tags: &[&str]| TriggerSpec {
+            event: AutomationEventKind::ContactCreated,
+            filter_tags: tags.iter().map(|tag| tag.to_string()).collect(),
+        };
+        assert!(trigger_filter_matches(
+            &spec(&[]),
+            &ctx,
+            AutomationEventKind::ContactCreated
+        ));
+        assert!(trigger_filter_matches(
+            &spec(&["VIP"]),
+            &ctx,
+            AutomationEventKind::ContactCreated
+        ));
+        assert!(
+            !trigger_filter_matches(
+                &spec(&["missing"]),
+                &ctx,
+                AutomationEventKind::ContactCreated
+            ),
+            "created requires ALL tags"
+        );
+
+        // tag_added: any ADDED tag (case-insensitive) fires.
+        let added = TriggerSpec {
+            event: AutomationEventKind::ContactTagAdded,
+            filter_tags: vec!["TRIAL".into()],
+        };
+        assert!(trigger_filter_matches(
+            &added,
+            &ctx,
+            AutomationEventKind::ContactTagAdded
+        ));
+        let other = TriggerSpec {
+            event: AutomationEventKind::ContactTagAdded,
+            filter_tags: vec!["other".into()],
+        };
+        assert!(!trigger_filter_matches(
+            &other,
+            &ctx,
+            AutomationEventKind::ContactTagAdded
+        ));
+
+        // A contact-family filter cannot match when the entity is gone.
+        let mut empty = ctx.clone();
+        empty.contact = None;
+        assert!(!trigger_filter_matches(
+            &spec(&["vip"]),
+            &empty,
+            AutomationEventKind::ContactUpdated
+        ));
+    }
+
+    #[test]
+    fn template_rendering_escapes_html_and_leaves_unknown_placeholders() {
+        let template = TemplateContent {
+            subject: "Hello {{first_name}} <{{email}}>".into(),
+            html_body: Some("<p>{{name}} & <b>{{first_name}}</b> {{unsubscribe_url}}</p>".into()),
+            text_body: Some("Hi {{first_name}}, {{unsubscribe_url}}".into()),
+        };
+        let ctx = EventContext {
+            contact: Some(AutomationContact {
+                id: Uuid::new_v4(),
+                email: "ada<evil>@example.com".into(),
+                name: Some("Ada <script>".into()),
+                status: "subscribed".into(),
+                tags: Vec::new(),
+            }),
+            ..EventContext::default()
+        };
+        let rendered = render_template(&template, &ctx);
+        assert_eq!(rendered.tags, vec!["automation".to_string()]);
+        // Text is not HTML-escaped; HTML is.
+        assert_eq!(
+            rendered.subject, "Hello Ada <ada<evil>@example.com>",
+            "subject text is raw first-name + email"
+        );
+        let html = rendered.html.unwrap();
+        assert!(html.contains("Ada &lt;script&gt;"), "{html}");
+        assert!(
+            !html.contains("<script>") && !html.contains("<evil>"),
+            "variable-produced markup must be escaped: {html}"
+        );
+        assert!(
+            html.contains("{{unsubscribe_url}}"),
+            "the delivery pipeline substitutes the unsubscribe URL: {html}"
+        );
+        assert_eq!(
+            rendered.text.unwrap(),
+            "Hi Ada, {{unsubscribe_url}}",
+            "text keeps the raw first name"
+        );
+
+        // A reply context without a contact falls back to the from address and
+        // an empty name.
+        let reply_ctx = EventContext {
+            from_email: Some("prospect@example.com".into()),
+            ..EventContext::default()
+        };
+        let rendered = render_template(&template, &reply_ctx);
+        assert_eq!(rendered.subject, "Hello  <prospect@example.com>");
+    }
+
+    #[test]
+    fn backoff_grows_quadratically_and_is_capped() {
+        assert_eq!(backoff_secs(1), 30.0);
+        assert_eq!(backoff_secs(2), 120.0);
+        assert_eq!(backoff_secs(10), 3000.0);
+        assert_eq!(backoff_secs(11), 3600.0, "capped at one hour");
+        assert_eq!(backoff_secs(120), 3600.0);
+        assert_eq!(backoff_secs(0), 30.0, "clamped to at least one attempt");
+        assert_eq!(backoff_secs(-5), 30.0);
+    }
+
+    #[test]
+    fn action_type_reads_only_a_non_empty_string() {
+        assert_eq!(
+            action_type(&json!({ "type": "send_email" })),
+            Some("send_email")
+        );
+        assert_eq!(
+            action_type(&json!({ "type": " send_email " })),
+            Some("send_email")
+        );
+        assert_eq!(action_type(&json!({ "type": "   " })), None);
+        assert_eq!(action_type(&json!({ "type": 7 })), None);
+        assert_eq!(action_type(&json!({})), None);
+        assert_eq!(action_type(&json!("send_email")), None);
+    }
+
+    #[test]
+    fn sender_domain_is_normalized_and_refuses_non_addresses() {
+        assert_eq!(
+            sender_domain("Sales@Example.COM"),
+            Some("example.com".into())
+        );
+        assert_eq!(sender_domain("a@example.com."), Some("example.com".into()));
+        assert_eq!(sender_domain("not-an-address"), None);
+        assert_eq!(sender_domain("a@"), None);
+        assert_eq!(sender_domain("a@   "), None);
+    }
+
+    #[test]
+    fn tick_report_merge_accumulates_every_counter() {
+        let mut total = TickReport {
+            events_claimed: 1,
+            ..TickReport::default()
+        };
+        total.merge(TickReport {
+            events_claimed: 2,
+            events_processed: 1,
+            events_deferred: 1,
+            events_failed: 1,
+            runs_started: 3,
+            runs_replayed: 4,
+            runs_succeeded: 5,
+            runs_skipped: 6,
+            runs_failed: 7,
+            actions_enqueued: 8,
+            events_pruned: 9,
+        });
+        assert_eq!(total.events_claimed, 3);
+        assert_eq!(total.events_processed, 1);
+        assert_eq!(total.events_deferred, 1);
+        assert_eq!(total.events_failed, 1);
+        assert_eq!(total.runs_started, 3);
+        assert_eq!(total.runs_replayed, 4);
+        assert_eq!(total.runs_succeeded, 5);
+        assert_eq!(total.runs_skipped, 6);
+        assert_eq!(total.runs_failed, 7);
+        assert_eq!(total.actions_enqueued, 8);
+        assert_eq!(total.events_pruned, 9);
+    }
+
+    #[test]
+    fn action_records_carry_the_classification() {
+        assert!(!ActionRecord::effect("tagged").is_enqueue());
+        assert_eq!(ActionRecord::effect("x").status, "succeeded");
+        assert_eq!(ActionRecord::skipped("no_recipient").status, "skipped");
+        assert_eq!(
+            ActionRecord::skipped("no_recipient").reason.as_deref(),
+            Some("no_recipient")
+        );
+        assert_eq!(ActionRecord::unsupported("kind").status, "unsupported");
+        assert!(ActionRecord::failed_retryable("db").retryable);
+        assert!(!ActionRecord::failed_terminal("db").retryable);
+        assert!(
+            ActionRecord::succeeded(Uuid::new_v4(), None, Uuid::new_v4(), json!({})).is_enqueue()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Executor (DB-backed; one fresh canonical database per test so the
+    // scheduler's global claim cannot race another suite's events).
+    // -----------------------------------------------------------------------
+
+    async fn fresh_pool(test_name: &str, suffix: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, suffix).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn fresh_tenant(label: &str) -> String {
+        crate::test_db::unique_test_tenant(label)
+    }
+
+    #[derive(Debug)]
+    struct FakeAdmission {
+        limit: AtomicI64,
+        used: AtomicI64,
+        reserves: AtomicUsize,
+        events: Mutex<std::collections::HashSet<Uuid>>,
+        suppressed: Mutex<Vec<String>>,
+    }
+
+    impl FakeAdmission {
+        fn new() -> Self {
+            Self {
+                limit: AtomicI64::new(-1),
+                used: AtomicI64::new(0),
+                reserves: AtomicUsize::new(0),
+                events: Mutex::new(std::collections::HashSet::new()),
+                suppressed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn suppress(&self, email: &str) {
+            self.suppressed
+                .lock()
+                .unwrap()
+                .push(email.trim().to_ascii_lowercase());
+        }
+
+        fn set_limit(&self, limit: i64) {
+            self.limit.store(limit, Ordering::SeqCst);
+        }
+
+        fn reserves(&self) -> usize {
+            self.reserves.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SendAdmissionBackend for FakeAdmission {
+        async fn record_send_usage(
+            &self,
+            _tenant_id: &str,
+            quantity: i64,
+            event_id: Uuid,
+        ) -> Result<QuotaRecordResult, UsageError> {
+            self.reserves.fetch_add(1, Ordering::SeqCst);
+            let mut events = self.events.lock().unwrap();
+            if events.contains(&event_id) {
+                return Ok(QuotaRecordResult {
+                    allowed: true,
+                    current: self.used.load(Ordering::SeqCst),
+                    duplicate: true,
+                });
+            }
+            let limit = self.limit.load(Ordering::SeqCst);
+            let used = self.used.load(Ordering::SeqCst);
+            if limit >= 0 && used + quantity > limit {
+                return Ok(QuotaRecordResult {
+                    allowed: false,
+                    current: used,
+                    duplicate: false,
+                });
+            }
+            self.used.fetch_add(quantity, Ordering::SeqCst);
+            events.insert(event_id);
+            Ok(QuotaRecordResult {
+                allowed: true,
+                current: used + quantity,
+                duplicate: false,
+            })
+        }
+
+        async fn rollback_send_usage(
+            &self,
+            _tenant_id: &str,
+            quantity: i64,
+            event_id: Uuid,
+            _recorded_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), UsageError> {
+            let removed = self.events.lock().unwrap().remove(&event_id);
+            if removed {
+                self.used.fetch_sub(quantity, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
+        async fn suppressed_recipients(
+            &self,
+            _tenant_id: &str,
+            canonical_recipients: &[String],
+        ) -> Result<Vec<String>, String> {
+            let suppressed = self.suppressed.lock().unwrap();
+            Ok(canonical_recipients
+                .iter()
+                .filter(|recipient| suppressed.contains(recipient))
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn executor(pool: &PgPool, backend: Arc<FakeAdmission>) -> AutomationExecutor {
+        AutomationExecutor::new(
+            pool.clone(),
+            SendAdmissionService::new(backend),
+            "automation-lib-worker",
+        )
+    }
+
+    async fn insert_tenant(pool: &PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) \
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(tenant)
+        .bind(format!("Automation Lib {tenant}"))
+        .bind(format!("autolib-{tenant}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+    }
+
+    async fn insert_domain(pool: &PgPool, tenant: &str) -> String {
+        let domain = format!(
+            "autolib-{}.example.com",
+            &Uuid::new_v4().simple().to_string()[..12]
+        );
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, \
+             ses_verified, dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'lib-selector', 'lib-public', \
+                     'dkim:v1:lib-test')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .bind(&domain)
+        .execute(pool)
+        .await
+        .expect("insert domain");
+        domain
+    }
+
+    async fn insert_template(pool: &PgPool, tenant: &str) -> String {
+        let id = format!("tpl_{}", &Uuid::new_v4().simple().to_string()[..16]);
+        sqlx::query(
+            "INSERT INTO templates (id, tenant_id, name, slug, subject, html_body, text_body) \
+             VALUES ($1, $2, $3, $4, 'Hello {{first_name}}', '<p>Hi {{name}} ({{email}})</p>', \
+                     'Hi {{first_name}}')",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(format!("Template {id}"))
+        .bind(&id)
+        .execute(pool)
+        .await
+        .expect("insert template");
+        id
+    }
+
+    async fn insert_automation(
+        pool: &PgPool,
+        tenant: &str,
+        name: &str,
+        trigger: Value,
+        conditions: Value,
+        actions: Value,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO automations \
+             (id, tenant_id, name, trigger_config, actions, conditions, status) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'enabled')",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(name)
+        .bind(&trigger)
+        .bind(&actions)
+        .bind(&conditions)
+        .execute(pool)
+        .await
+        .expect("insert automation");
+        id
+    }
+
+    fn send_email_action(from: &str, template_id: &str) -> Value {
+        json!([{
+            "type": "send_email",
+            "config": { "template_id": template_id, "from": from }
+        }])
+    }
+
+    async fn insert_contact(pool: &PgPool, tenant: &str, email: &str, tags: &[&str]) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO contacts (tenant_id, email, name, tags, status) \
+             VALUES ($1, $2, 'Ada Lovelace', $3, 'subscribed') RETURNING id",
+        )
+        .bind(tenant)
+        .bind(email)
+        .bind(json!(tags))
+        .fetch_one(pool)
+        .await
+        .expect("insert contact")
+    }
+
+    async fn message_count(pool: &PgPool, tenant: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("count messages")
+    }
+
+    async fn queue_categories(pool: &PgPool, tenant: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT message_category FROM email_queue WHERE tenant_id = $1 ORDER BY created_at",
+        )
+        .bind(tenant)
+        .fetch_all(pool)
+        .await
+        .expect("queue categories")
+    }
+
+    /// The full marketing path: contact.created → matching rule → one
+    /// admission-gated message stamped marketing, a succeeded run and a
+    /// message-linked action record; re-processing the same event resumes the
+    /// run with no second send.
+    #[tokio::test]
+    async fn automation_tick_sends_marketing_once_and_replay_never_resends() {
+        let Some(pool) = fresh_pool("automations_lib_marketing", "sa_lib_auto_mkt").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-mkt");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend.clone());
+
+        let automation = insert_automation(
+            &pool,
+            &tenant,
+            "Welcome series",
+            json!({ "type": "event", "event": "contact.created", "filters": { "tags": ["vip"] } }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+
+        let contact = insert_contact(&pool, &tenant, "ada@example.com", &["vip"]).await;
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.events_processed, 1, "{report:?}");
+        assert_eq!(report.events_deferred, 0);
+        assert_eq!(report.runs_started, 1, "{report:?}");
+        assert_eq!(report.runs_succeeded, 1, "{report:?}");
+        assert_eq!(report.actions_enqueued, 1);
+        assert_eq!(message_count(&pool, &tenant).await, 1);
+        assert_eq!(
+            queue_categories(&pool, &tenant).await,
+            vec![message_category::MARKETING.to_string()],
+            "lifecycle automation mail is marketing"
+        );
+        assert_eq!(backend.reserves(), 1, "admission was consulted once");
+
+        // The run is durable and explains itself.
+        let (status, retryable, skip_reason): (String, bool, Option<String>) = sqlx::query_as(
+            "SELECT status, retryable, skip_reason FROM automation_runs \
+             WHERE tenant_id = $1 AND automation_id = $2",
+        )
+        .bind(&tenant)
+        .bind(automation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "succeeded");
+        assert!(!retryable);
+        assert!(skip_reason.is_none());
+        let (action_status, message_id, detail): (String, Option<Uuid>, Value) = sqlx::query_as(
+            "SELECT status, message_id, detail FROM automation_run_actions \
+             WHERE tenant_id = $1 ORDER BY action_index LIMIT 1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(action_status, "succeeded");
+        assert!(message_id.is_some(), "the action links its message");
+        assert_eq!(detail["category"], message_category::MARKETING);
+        assert_eq!(detail["duplicate"], false);
+        assert_eq!(detail["recipient"], "ada@example.com");
+
+        // Re-ingesting the same logical event is a no-op.
+        assert!(
+            !exec
+                .ingest_event(
+                    &tenant,
+                    "contact.created",
+                    &format!("contact.created:{contact}"),
+                    Some(contact),
+                    None,
+                    json!({}),
+                )
+                .await
+                .unwrap(),
+            "a replay of the same event key must not insert a second event"
+        );
+
+        // Resurrect the event row and process it again: the run resumes and
+        // reports a replay, and no second message is ever produced.
+        sqlx::query(
+            "UPDATE automation_trigger_events SET status = 'pending', available_at = NOW(), \
+                    attempts = 0, processed_at = NULL, locked_until = NULL \
+             WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let replay = exec.tick().await.expect("replay tick");
+        assert_eq!(replay.runs_replayed, 1, "{replay:?}");
+        assert_eq!(replay.actions_enqueued, 0);
+        assert_eq!(
+            message_count(&pool, &tenant).await,
+            1,
+            "exactly-once: a replayed run never sends twice"
+        );
+        assert_eq!(backend.reserves(), 1, "no second admission reservation");
+    }
+
+    /// A rule triggered by a received message replies to the SENDER with a
+    /// transactional category — never the contact's address or a marketing
+    /// category.
+    #[tokio::test]
+    async fn inbound_reply_trigger_sends_transactional_to_the_sender() {
+        let Some(pool) = fresh_pool("automations_lib_reply", "sa_lib_auto_reply").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-reply");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        insert_automation(
+            &pool,
+            &tenant,
+            "Reply to inbound",
+            json!({ "type": "event", "event": "message.received" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+
+        assert!(exec
+            .ingest_event(
+                &tenant,
+                "message.received",
+                "inbound:msg-1",
+                None,
+                None,
+                json!({ "from_email": "prospect@other.example", "subject": "Re: pricing" }),
+            )
+            .await
+            .unwrap());
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.events_processed, 1, "{report:?}");
+        assert_eq!(report.actions_enqueued, 1);
+
+        let (recipients, category): (Value, String) =
+            sqlx::query_as("SELECT to_emails, message_category FROM messages WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            recipients,
+            json!(["prospect@other.example"]),
+            "the reply goes to the person who wrote in"
+        );
+        assert_eq!(
+            category,
+            message_category::TRANSACTIONAL,
+            "a 1:1 reply to a received message is transactional"
+        );
+        assert_eq!(
+            queue_categories(&pool, &tenant).await,
+            vec![message_category::TRANSACTIONAL.to_string()]
+        );
+    }
+
+    /// Unsupported trigger and action kinds are recorded in the run log with
+    /// their kind named — never silently ignored, never retried.
+    #[tokio::test]
+    async fn unsupported_trigger_and_action_kinds_are_recorded() {
+        let Some(pool) = fresh_pool("automations_lib_unsupported", "sa_lib_auto_unsup").await
+        else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-unsup");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        let schedule_rule = insert_automation(
+            &pool,
+            &tenant,
+            "Schedule rule",
+            json!({ "type": "schedule", "cron": "0 9 * * *" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        let bad_action_rule = insert_automation(
+            &pool,
+            &tenant,
+            "Unknown action",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            json!([{ "type": "teleport_contact", "config": {} }]),
+        )
+        .await;
+        let condition_rule = insert_automation(
+            &pool,
+            &tenant,
+            "Condition not met",
+            json!({ "type": "event", "event": "contact.created" }),
+            json!({ "all": [{ "field": "status", "operator": "equals", "value": "unsubscribed" }] }),
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+
+        insert_contact(&pool, &tenant, "ada@example.com", &[]).await;
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.events_processed, 1, "{report:?}");
+        assert_eq!(report.actions_enqueued, 0);
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+
+        let schedule_runs: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, skip_reason FROM automation_runs \
+             WHERE tenant_id = $1 AND automation_id = $2",
+        )
+        .bind(&tenant)
+        .bind(schedule_rule)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(schedule_runs.len(), 1, "one diagnosis per unsupported rule");
+        assert_eq!(schedule_runs[0].0, "skipped");
+        assert!(
+            schedule_runs[0]
+                .1
+                .as_deref()
+                .unwrap_or_default()
+                .contains("unsupported trigger kind"),
+            "{:?}",
+            schedule_runs[0]
+        );
+
+        let bad_runs: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, skip_reason FROM automation_runs \
+             WHERE tenant_id = $1 AND automation_id = $2",
+        )
+        .bind(&tenant)
+        .bind(bad_action_rule)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bad_runs.len(), 1);
+        assert_eq!(
+            bad_runs[0].0, "skipped",
+            "an unsupported action is not success"
+        );
+        assert!(
+            bad_runs[0]
+                .1
+                .as_deref()
+                .unwrap_or_default()
+                .contains("all actions skipped"),
+            "{:?}",
+            bad_runs[0]
+        );
+        let (action_status, action_reason): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, reason FROM automation_run_actions WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(action_status, "unsupported");
+        assert!(
+            action_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("teleport_contact"),
+            "{action_reason:?}"
+        );
+
+        let condition_runs: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT status, skip_reason FROM automation_runs \
+             WHERE tenant_id = $1 AND automation_id = $2",
+        )
+        .bind(&tenant)
+        .bind(condition_rule)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(condition_runs.len(), 1);
+        assert!(condition_runs[0]
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("condition_not_met:"));
+    }
+
+    /// A quota refusal defers the whole event; a later tick with quota
+    /// available resumes and sends exactly once. A suppressed recipient is a
+    /// terminal skip with no retry.
+    #[tokio::test]
+    async fn quota_refusal_defers_then_resumes_and_suppression_is_terminal() {
+        let Some(pool) = fresh_pool("automations_lib_quota", "sa_lib_auto_quota").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-quota");
+        insert_tenant(&pool, &tenant).await;
+        let domain = insert_domain(&pool, &tenant).await;
+        let template = insert_template(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        backend.set_limit(0);
+        let exec = executor(&pool, backend.clone());
+
+        let automation = insert_automation(
+            &pool,
+            &tenant,
+            "Quota rule",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            send_email_action(&format!("sales@{domain}"), &template),
+        )
+        .await;
+        insert_contact(&pool, &tenant, "ada@example.com", &[]).await;
+
+        let first = exec.tick().await.expect("first tick");
+        assert_eq!(first.events_deferred, 1, "{first:?}");
+        assert_eq!(first.runs_failed, 1);
+        assert_eq!(message_count(&pool, &tenant).await, 0);
+        let (status, last_error): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, last_error FROM automation_trigger_events WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            status, "pending",
+            "a retryable refusal is deferred, not lost"
+        );
+        assert!(
+            last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("quota_exceeded"),
+            "{last_error:?}"
+        );
+        let (run_status, retryable): (String, bool) = sqlx::query_as(
+            "SELECT status, retryable FROM automation_runs \
+             WHERE tenant_id = $1 AND automation_id = $2",
+        )
+        .bind(&tenant)
+        .bind(automation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(run_status, "failed");
+        assert!(retryable, "the run must be resumable");
+
+        // Quota restored: the same event resumes and sends once.
+        backend.set_limit(-1);
+        sqlx::query(
+            "UPDATE automation_trigger_events SET available_at = NOW(), locked_until = NULL \
+             WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let second = exec.tick().await.expect("second tick");
+        assert_eq!(second.events_processed, 1, "{second:?}");
+        assert_eq!(second.runs_succeeded, 1);
+        assert_eq!(message_count(&pool, &tenant).await, 1);
+
+        // A suppressed recipient on a fresh event is a terminal skip.
+        backend.suppress("blocked@example.com");
+        let blocked_contact = insert_contact(&pool, &tenant, "blocked@example.com", &[]).await;
+        let third = exec.tick().await.expect("third tick");
+        assert_eq!(third.events_processed, 1, "{third:?}");
+        assert_eq!(
+            message_count(&pool, &tenant).await,
+            1,
+            "no send for suppressed"
+        );
+        let (status, reason): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, reason FROM automation_run_actions \
+             WHERE tenant_id = $1 AND run_id = ( \
+                 SELECT id FROM automation_runs WHERE tenant_id = $1 AND trigger_event_key = $2) \
+             ORDER BY action_index LIMIT 1",
+        )
+        .bind(&tenant)
+        .bind(format!("contact.created:{blocked_contact}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "skipped");
+        assert_eq!(reason.as_deref(), Some("suppressed_recipient"));
+        let event_status: String = sqlx::query_scalar(
+            "SELECT status FROM automation_trigger_events \
+             WHERE tenant_id = $1 AND event_key = $2",
+        )
+        .bind(&tenant)
+        .bind(format!("contact.created:{blocked_contact}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            event_status, "processed",
+            "a terminal skip settles the event instead of retrying a suppression"
+        );
+    }
+
+    /// Tag and list actions change local state; a missing list/webhook target
+    /// is a recorded skip, never a failure.
+    #[tokio::test]
+    async fn tag_list_and_webhook_actions_record_their_effects() {
+        let Some(pool) = fresh_pool("automations_lib_actions", "sa_lib_auto_actions").await else {
+            return;
+        };
+        let tenant = fresh_tenant("auto-actions");
+        insert_tenant(&pool, &tenant).await;
+        let backend = Arc::new(FakeAdmission::new());
+        let exec = executor(&pool, backend);
+
+        insert_automation(
+            &pool,
+            &tenant,
+            "Local effects",
+            json!({ "type": "event", "event": "contact.created" }),
+            Value::Null,
+            json!([
+                { "type": "add_tag", "config": { "tags": ["engaged", "nurture"] } },
+                { "type": "remove_tag", "config": { "tag": "cold" } },
+                { "type": "add_to_list", "config": { "list_id": "no-such-list" } },
+                { "type": "webhook", "config": { "url": "https://no-such-webhook.example" } }
+            ]),
+        )
+        .await;
+
+        let contact = insert_contact(&pool, &tenant, "ada@example.com", &["cold"]).await;
+        let report = exec.tick().await.expect("tick");
+        assert_eq!(report.events_processed, 1, "{report:?}");
+        assert_eq!(report.runs_succeeded, 1, "local effects succeed");
+        assert_eq!(report.actions_enqueued, 0, "none of these sends mail");
+
+        let tags: Value = sqlx::query_scalar("SELECT tags FROM contacts WHERE id = $1")
+            .bind(contact)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let tags: Vec<String> = tags
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tag| tag.as_str().unwrap().to_string())
+            .collect();
+        assert!(tags.contains(&"engaged".to_string()), "{tags:?}");
+        assert!(tags.contains(&"nurture".to_string()), "{tags:?}");
+        assert!(!tags.contains(&"cold".to_string()), "removed: {tags:?}");
+
+        let records: Vec<(String, String, Option<String>, Value)> = sqlx::query_as(
+            "SELECT action_type, status, reason, detail FROM automation_run_actions \
+             WHERE tenant_id = $1 ORDER BY action_index",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].1, "succeeded");
+        assert!(records[0].3["effect"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("added"));
+        assert_eq!(records[1].1, "succeeded");
+        assert_eq!(records[2].2.as_deref(), Some("list_not_found"));
+        assert_eq!(records[3].2.as_deref(), Some("webhook_not_found"));
+    }
+}

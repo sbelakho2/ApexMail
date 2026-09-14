@@ -40,7 +40,15 @@ pub struct WebhookJob {
     /// required by every completion write — a worker whose visibility lease
     /// expired (and whose row was re-claimed) can no longer reschedule or
     /// delete the new owner's row. `None` for legacy/token-less claims.
-    #[sqlx(default)]
+    ///
+    /// The `rename` is load-bearing: `fetch_jobs` aliases the column as
+    /// `"claimToken"` (quoted, therefore case-sensitive), so without it the
+    /// derive looks for `claim_token`, finds no such column, and `default`
+    /// silently yields `None` — every fenced completion write then matches
+    /// `claim_token IS NOT DISTINCT FROM NULL` against a row that HAS a
+    /// token and is discarded as "lease lost" (rows stranded in
+    /// `processing` forever).
+    #[sqlx(rename = "claimToken", default)]
     pub claim_token: Option<String>,
 }
 

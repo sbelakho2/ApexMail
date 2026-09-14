@@ -1277,7 +1277,6 @@ mod tests {
     }
 
     /// (c) Approving a legitimate pending review releases the parked work.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn approve_releases_awaiting_approval_actions_to_queued() {
         let Some(pool) = crate::test_db::canonical_test_pool("review_approve").await else {
@@ -1355,7 +1354,6 @@ mod tests {
     /// whole review. Before this fix, `review_status` was committed as
     /// `approved` before the release ran, so the action stayed parked and the
     /// retry was rejected as "already approved".
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn failed_requeue_rolls_back_the_review_and_keeps_it_reviewable() {
         let Some(pool) = crate::test_db::canonical_test_pool("review_rollback").await else {
@@ -1455,7 +1453,6 @@ mod tests {
     }
 
     /// (c) Rejecting moves the parked work to `cancelled` with the note.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn reject_cancels_awaiting_approval_actions() {
         let Some(pool) = crate::test_db::canonical_test_pool("review_reject").await else {
@@ -1510,7 +1507,6 @@ mod tests {
 
     /// (d) Approval is not a bypass: a decision whose gates now refuse is
     /// cancelled, durably recorded as rejected, and the reasons are reported.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn approval_refused_by_gates_cancels_work_and_reports_reasons() {
         let Some(pool) = crate::test_db::canonical_test_pool("review_revalidate").await else {
@@ -1578,7 +1574,6 @@ mod tests {
     /// (e) Exceptions select on the decision's own recorded state, not the
     /// autonomy mode: an `execute` decision recorded under `assisted` must not
     /// be an exception.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn exceptions_select_decision_state_not_autonomy_mode() {
         let Some(pool) = crate::test_db::canonical_test_pool("exceptions_predicate").await else {
@@ -1629,6 +1624,503 @@ mod tests {
             !ids.contains(&executed),
             "an execute decision must not be an exception regardless of autonomy mode"
         );
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial handler-level proofs (run by default; soft-skip only when
+    // the canonical test database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    /// An `AppState` on the canonical test pool, mirroring the router tests.
+    fn test_state(pool: &PgPool) -> Arc<AppState> {
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy test redis pool");
+        Arc::new(AppState {
+            db: pool.clone(),
+            redis,
+            config: crate::config::SalesConfig::default(),
+            crm: crate::crm::CrmBackend::postgres(pool.clone()),
+            enrichment: crate::enrichment::EnrichmentService::mock(),
+            campaigns: crate::campaigns::CampaignManager::new(10, pool.clone()),
+            dispatcher: None,
+            calendar: crate::calendar::CalendarService::new(pool.clone()),
+            inbox: crate::inbox::InboxManager::new(pool.clone()),
+            service_token: TEST_SERVICE_TOKEN.into(),
+            rate_limit_fallback: Arc::new(
+                parking_lot::Mutex::new(std::collections::HashMap::new()),
+            ),
+            intelligence: Arc::new(crate::intelligence::OfflineIntelligence::new()),
+            strategist: Arc::new(crate::personalization::MessageStrategist::new(
+                pool.clone(),
+                crate::knowledge::SalesKnowledgeBase::canonical(),
+            )),
+        })
+    }
+
+    fn tenant_headers(tenant: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-tenant-id", tenant.parse().unwrap());
+        headers
+    }
+
+    fn authenticated_headers(tenant: &str, operator: &str) -> axum::http::HeaderMap {
+        let mut headers = tenant_headers(tenant);
+        headers.insert("x-api-key", TEST_SERVICE_TOKEN.parse().unwrap());
+        headers.insert("x-operator-id", operator.parse().unwrap());
+        headers
+    }
+
+    /// Every control read is tenant-scoped, paging is clamped, and the
+    /// exception/dead-letter views separate work that needs a human from work
+    /// that does not.
+    #[tokio::test]
+    async fn control_reads_are_tenant_scoped_and_paging_is_clamped() {
+        let Some(pool) = crate::test_db::canonical_test_pool("control_reads_scoped").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("ctl-read");
+        let other = crate::test_db::unique_test_tenant("ctl-other");
+        let state = test_state(&pool);
+
+        let denied = insert_decision(
+            &pool,
+            &tenant,
+            "contact",
+            "denied",
+            Some("not_required"),
+            "autonomous_guarded",
+        )
+        .await;
+        let awaiting = insert_decision(
+            &pool,
+            &tenant,
+            "contact",
+            "await_approval",
+            Some("pending"),
+            "approval_required",
+        )
+        .await;
+        let other_decision = insert_decision(
+            &pool,
+            &other,
+            "contact",
+            "denied",
+            Some("not_required"),
+            "autonomous_guarded",
+        )
+        .await;
+        let queue = ActionQueue::new(pool.clone(), format!("ctl-read-{tenant}"));
+        queue
+            .enqueue(
+                &tenant,
+                crate::actions::action_type::ENRICH,
+                crate::actions::entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("ctl-read:{tenant}"),
+                serde_json::json!({}),
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Decisions: a hostile limit/offset is clamped, and tenant B's row is
+        // invisible.
+        let Json(decisions_body) = decisions(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Query(PagingQuery {
+                limit: 10_000,
+                offset: -50,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(decisions_body["limit"], 200, "limit clamps to 200");
+        assert_eq!(decisions_body["offset"], 0, "offset clamps to 0");
+        let ids: Vec<&str> = decisions_body["decisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect();
+        assert!(ids.contains(&denied.to_string().as_str()));
+        assert!(ids.contains(&awaiting.to_string().as_str()));
+        assert!(
+            !ids.contains(&other_decision.to_string().as_str()),
+            "another tenant's decision must not leak: {decisions_body}"
+        );
+
+        // Exceptions select on the recorded verdict, and dead letters arrive
+        // in the same view.
+        let dead = queue
+            .enqueue(
+                &tenant,
+                crate::actions::action_type::ENRICH,
+                crate::actions::entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("ctl-dead:{tenant}"),
+                serde_json::json!({}),
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE sales_actions SET state = 'dead_letter', last_error = 'boom' WHERE id = $1",
+        )
+        .bind(dead.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let Json(exceptions_body) = exceptions(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Query(PagingQuery {
+                limit: 50,
+                offset: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        let exception_ids: Vec<&str> = exceptions_body["exceptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["id"].as_str())
+            .collect();
+        assert!(exception_ids.contains(&denied.to_string().as_str()));
+        assert!(exception_ids.contains(&awaiting.to_string().as_str()));
+        assert!(
+            !exception_ids.contains(&other_decision.to_string().as_str()),
+            "tenant B must not leak into exceptions: {exceptions_body}"
+        );
+        let dead_letters = exceptions_body["deadLetters"].as_array().unwrap();
+        assert_eq!(dead_letters.len(), 1, "{exceptions_body}");
+        assert!(dead_letters[0].to_string().contains(&dead.id.to_string()));
+
+        // The queue view and overview answer for this tenant.
+        let Json(action_view) = actions(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Query(PagingQuery {
+                limit: 50,
+                offset: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(action_view["stats"]["total"].as_i64().unwrap() >= 2);
+        assert!(action_view["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| { row["id"].as_str() == Some(dead.id.to_string().as_str()) }));
+        let Json(overview) = overview(State(state.clone()), tenant_headers(&tenant))
+            .await
+            .unwrap();
+        assert!(overview.is_object(), "{overview}");
+
+        // A missing tenant header is refused before any query.
+        let error = decisions(
+            State(state),
+            axum::http::HeaderMap::new(),
+            Query(PagingQuery {
+                limit: 10,
+                offset: 0,
+            }),
+        )
+        .await
+        .expect_err("a tenant-less request must be refused");
+        assert!(error.to_string().contains("x-tenant-id"), "{error}");
+
+        cleanup(&pool, &tenant).await;
+        sqlx::query("DELETE FROM sales_decisions WHERE tenant_id = $1")
+            .bind(&other)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Mode/pause/resume/kill-switch are operator intents that land in the
+    /// canonical autonomy row; resume never guesses upward, and an unknown
+    /// mode is refused rather than coerced to Disabled.
+    #[tokio::test]
+    async fn mode_pause_resume_and_kill_switch_land_in_the_canonical_state() {
+        let Some(pool) = crate::test_db::canonical_test_pool("control_mode_ops").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("ctl-mode");
+        let state = test_state(&pool);
+
+        // An unknown mode is an error naming the valid set.
+        let error = set_mode(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Json(ModeBody {
+                mode: "autonomous".into(),
+            }),
+        )
+        .await
+        .expect_err("an unknown mode must be refused");
+        assert!(
+            error.to_string().contains("unknown autonomy mode"),
+            "{error}"
+        );
+
+        // The empty-string parse must also be refused, not read as disabled.
+        let error = set_mode(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Json(ModeBody { mode: "".into() }),
+        )
+        .await
+        .expect_err("an empty mode must be refused");
+        assert!(
+            error.to_string().contains("unknown autonomy mode"),
+            "{error}"
+        );
+
+        let Json(set) = set_mode(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Json(ModeBody {
+                mode: "autonomous_guarded".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(set["mode"], "autonomous_guarded");
+        assert_eq!(set["killSwitch"], false);
+
+        // Pause is shadow, not disabled: the brain keeps recording.
+        let Json(paused) = pause(State(state.clone()), tenant_headers(&tenant))
+            .await
+            .unwrap();
+        assert_eq!(paused["mode"], "shadow");
+        let mode: String =
+            sqlx::query_scalar("SELECT mode FROM sales_autonomy_state WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(mode, "shadow");
+
+        // Resume restores approval_required — never guarded.
+        let Json(resumed) = resume(State(state.clone()), tenant_headers(&tenant))
+            .await
+            .unwrap();
+        assert_eq!(resumed["mode"], "approval_required");
+        assert!(
+            resumed["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("explicitly"),
+            "{resumed}"
+        );
+
+        // Kill switch engage/release round-trips.
+        let Json(engaged) = kill_switch(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Json(KillSwitchBody { engaged: true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(engaged["killSwitch"], true);
+        let Json(released) = kill_switch(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Json(KillSwitchBody { engaged: false }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(released["killSwitch"], false);
+        let mode: String =
+            sqlx::query_scalar("SELECT mode FROM sales_autonomy_state WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            mode, "approval_required",
+            "kill switch does not change mode"
+        );
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    /// Approving a parked decision through the HANDLER releases its work once;
+    /// a second review is refused as already-terminal (approval is not
+    /// re-writable), and the operator identity comes from the authenticated
+    /// header.
+    #[tokio::test]
+    async fn review_handler_approves_once_and_rejects_a_second_review() {
+        let Some(pool) = crate::test_db::canonical_test_pool("control_review_handler").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("ctl-review");
+        set_autonomy(&pool, &tenant, "approval_required", false).await;
+        let (decision_id, action_id) =
+            seed_awaiting_approval(&pool, &tenant, "handler", "enrich").await;
+        let state = test_state(&pool);
+
+        let Json(response) = review_decision(
+            State(state.clone()),
+            authenticated_headers(&tenant, "operator-7"),
+            Path(decision_id.to_string()),
+            Json(ReviewBody {
+                outcome: "approved".into(),
+                note: Some("ship it".into()),
+            }),
+        )
+        .await
+        .expect("the approval must succeed");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["outcome"], "approved");
+        assert_eq!(response["reviewedBy"], "operator-7");
+        assert_eq!(response["actionsAffected"], 1);
+        assert_eq!(response["revalidation"]["allowed"], true);
+
+        let (review_status, reviewed_by): (String, String) =
+            sqlx::query_as("SELECT review_status, reviewed_by FROM sales_decisions WHERE id = $1")
+                .bind(decision_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(review_status, "approved");
+        assert_eq!(reviewed_by, "operator-7");
+        let action_state: String =
+            sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+                .bind(action_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(action_state, "queued", "the parked action is released");
+
+        // A second review cannot overwrite the terminal one.
+        let error = review_decision(
+            State(state),
+            authenticated_headers(&tenant, "operator-8"),
+            Path(decision_id.to_string()),
+            Json(ReviewBody {
+                outcome: "rejected".into(),
+                note: None,
+            }),
+        )
+        .await
+        .expect_err("a terminal review must not be overwritten");
+        assert!(error.to_string().contains("already"), "{error}");
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    /// Rejecting cancels the parked work through the handler; replay refuses
+    /// approval-gated work (the second path around the gate), and a malformed
+    /// id is refused before any query.
+    #[tokio::test]
+    async fn replay_refuses_approval_gated_work_and_reject_cancels_it() {
+        let Some(pool) = crate::test_db::canonical_test_pool("control_replay_reject").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("ctl-replay");
+        set_autonomy(&pool, &tenant, "approval_required", false).await;
+        let (decision_id, action_id) =
+            seed_awaiting_approval(&pool, &tenant, "replay", "enrich").await;
+        let state = test_state(&pool);
+
+        // A malformed action id is a 400-class refusal, not a panic.
+        let error = replay_action(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Path("not-a-uuid".into()),
+        )
+        .await
+        .expect_err("a malformed id must be refused");
+        assert!(error.to_string().contains("action id"), "{error}");
+
+        // Replaying approval-gated work is refused.
+        let error = replay_action(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Path(action_id.to_string()),
+        )
+        .await
+        .expect_err("approval-gated work is not replayable");
+        assert!(error.to_string().contains("not replayable"), "{error}");
+
+        // Rejection cancels the parked action.
+        let Json(rejected) = review_decision(
+            State(state.clone()),
+            authenticated_headers(&tenant, "operator-9"),
+            Path(decision_id.to_string()),
+            Json(ReviewBody {
+                outcome: "rejected".into(),
+                note: Some("not a fit".into()),
+            }),
+        )
+        .await
+        .expect("reject must succeed");
+        assert_eq!(rejected["outcome"], "rejected");
+        assert_eq!(rejected["actionsAffected"], 1);
+        let action_state: String =
+            sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+                .bind(action_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(action_state, "cancelled");
+
+        // A dead-lettered action IS replayable, and the handler requeues it.
+        let queue = ActionQueue::new(pool.clone(), format!("ctl-dead-{tenant}"));
+        let dead = queue
+            .enqueue(
+                &tenant,
+                crate::actions::action_type::ENRICH,
+                crate::actions::entity_type::ACCOUNT,
+                Uuid::new_v4(),
+                &format!("ctl-replay-dead:{tenant}"),
+                serde_json::json!({}),
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_actions SET state = 'dead_letter' WHERE id = $1")
+            .bind(dead.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let Json(replayed) = replay_action(
+            State(state.clone()),
+            tenant_headers(&tenant),
+            Path(dead.id.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replayed["state"], "queued");
+        let state_now: String = sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+            .bind(dead.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state_now, "queued");
+
+        // Another tenant cannot replay it.
+        let error = replay_action(
+            State(state),
+            tenant_headers("some-other-tenant"),
+            Path(dead.id.to_string()),
+        )
+        .await
+        .expect_err("cross-tenant replay must be refused");
+        assert!(error.to_string().contains("not replayable"), "{error}");
 
         cleanup(&pool, &tenant).await;
     }

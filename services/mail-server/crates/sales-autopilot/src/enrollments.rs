@@ -2182,7 +2182,6 @@ mod tests {
         cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn lock_on_reply_cancels_queued_actions_and_stops_the_sequence() {
         let Some(pool) = live_pool("reply_lock").await else {
@@ -2905,7 +2904,6 @@ mod tests {
     /// account touch slot and the sender daily capacity. This is the guarantee
     /// that a failed enrollment consumes neither the weekly budget nor a
     /// sender's day.
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     #[tokio::test]
     async fn transaction_rollback_releases_touch_and_sender_reservations() {
         let Some(pool) = live_pool("reservation_rollback").await else {
@@ -3012,5 +3010,264 @@ mod tests {
             .await
             .unwrap();
         cleanup_fixture(&pool, &tenant, Some(fixture.policy_id)).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial reply-lock and listing proofs (run by default; soft-skip
+    // only when the canonical test database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    /// Every reply disposition lands the documented enrollment state and
+    /// queue effect — a soft bounce/out-of-office keeps the sequence, a human
+    /// reply stops it, and a suppression disposition records the unsubscribe.
+    /// The listing is tenant-scoped and joined, and `set_enrollment_state`
+    /// cancels queued work only for stopping states.
+    #[tokio::test]
+    async fn reply_dispositions_and_enrollment_listing_are_tenant_scoped() {
+        let Some(pool) = live_pool("reply_dispositions_default").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("enr-reply");
+        let other = crate::test_db::unique_test_tenant("enr-other");
+        let fixture = seed_fixture(&pool, &tenant).await;
+        let queue = ActionQueue::new(pool.clone(), format!("test-worker-{tenant}"));
+        let enrollment_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_enrollments \
+                 (id, tenant_id, sequence_version_id, account_id, contact_id, contact_point_id, \
+                  state, current_step_index) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'active', 0)",
+        )
+        .bind(enrollment_id)
+        .bind(&tenant)
+        .bind(fixture.version_id)
+        .bind(fixture.account_id)
+        .bind(fixture.contact_id)
+        .bind(fixture.contact_point_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let queued = queue
+            .enqueue(
+                &tenant,
+                action_type::SEND_STEP,
+                entity_type::ENROLLMENT,
+                enrollment_id,
+                &format!("reply-default-send:{enrollment_id}"),
+                serde_json::json!({}),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // An out-of-office keeps the sequence alive: state waiting, no human
+        // reply flag, queued work untouched.
+        lock_on_reply(
+            &pool,
+            &queue,
+            &tenant,
+            enrollment_id,
+            ReplyDisposition::OutOfOffice,
+        )
+        .await
+        .unwrap();
+        let (state, has_human_reply): (String, bool) =
+            sqlx::query_as("SELECT state, has_human_reply FROM sales_enrollments WHERE id = $1")
+                .bind(enrollment_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "waiting");
+        assert!(!has_human_reply, "an autoreply must not lock the sequence");
+        let action_state: String =
+            sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+                .bind(queued.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(action_state, "queued", "out-of-office cancels nothing");
+
+        // An unknown disposition pauses and cancels.
+        lock_on_reply(
+            &pool,
+            &queue,
+            &tenant,
+            enrollment_id,
+            ReplyDisposition::Unknown,
+        )
+        .await
+        .unwrap();
+        let (state, has_human_reply): (String, bool) =
+            sqlx::query_as("SELECT state, has_human_reply FROM sales_enrollments WHERE id = $1")
+                .bind(enrollment_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "paused");
+        assert!(has_human_reply);
+        let action_state: String =
+            sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+                .bind(queued.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(action_state, "cancelled");
+
+        // A suppression disposition records the unsubscribe; replay is
+        // idempotent (ON CONFLICT) rather than an error.
+        lock_on_reply(
+            &pool,
+            &queue,
+            &tenant,
+            enrollment_id,
+            ReplyDisposition::Complaint,
+        )
+        .await
+        .unwrap();
+        lock_on_reply(
+            &pool,
+            &queue,
+            &tenant,
+            enrollment_id,
+            ReplyDisposition::Unsubscribe,
+        )
+        .await
+        .unwrap();
+        let (state, completed_at): (String, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT state, completed_at FROM sales_enrollments WHERE id = $1")
+                .bind(enrollment_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "suppressed");
+        assert!(completed_at.is_some(), "suppression is terminal");
+        let unsubscribed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_unsubscribes \
+             WHERE tenant_id = $1 AND email = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&fixture.contact_email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            unsubscribed, 1,
+            "one suppression row despite two dispositions"
+        );
+
+        // Another tenant cannot lock this enrollment.
+        let error = lock_on_reply(
+            &pool,
+            &queue,
+            &other,
+            enrollment_id,
+            ReplyDisposition::Positive,
+        )
+        .await
+        .expect_err("cross-tenant reply locking must be refused");
+        assert!(matches!(error, SalesError::InvalidInput(_)), "{error:?}");
+
+        // The listing is joined, bounded and scoped.
+        let rows = list_enrollments(&pool, &tenant, 50, 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, enrollment_id);
+        assert_eq!(rows[0].state, "suppressed");
+        assert!(!rows[0].sequence_name.is_empty());
+        assert_eq!(
+            rows[0].contact_email.as_deref(),
+            Some(fixture.contact_email.as_str())
+        );
+        assert!(
+            list_enrollments(&pool, &other, 50, 0)
+                .await
+                .unwrap()
+                .is_empty(),
+            "another tenant sees no enrollments"
+        );
+        // Offset past the end is empty; the limit is clamped (0 rows).
+        assert!(list_enrollments(&pool, &tenant, 50, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(list_enrollments(&pool, &tenant, 0, 0)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // set_enrollment_state: resume keeps work-less state, a stopping
+        // state cancels, and a missing id reports false.
+        let resumed = set_enrollment_state(
+            &pool,
+            &queue,
+            &tenant,
+            enrollment_id,
+            EnrollmentState::Active,
+        )
+        .await
+        .unwrap();
+        assert!(resumed);
+        let second = queue
+            .enqueue(
+                &tenant,
+                action_type::SEND_STEP,
+                entity_type::ENROLLMENT,
+                enrollment_id,
+                &format!("reply-default-send2:{enrollment_id}"),
+                serde_json::json!({}),
+                Utc::now(),
+                100,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(set_enrollment_state(
+            &pool,
+            &queue,
+            &tenant,
+            enrollment_id,
+            EnrollmentState::Paused
+        )
+        .await
+        .unwrap());
+        let paused_action: String =
+            sqlx::query_scalar("SELECT state FROM sales_actions WHERE id = $1")
+                .bind(second.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(paused_action, "cancelled", "pause stops the next touch");
+        assert!(
+            !set_enrollment_state(
+                &pool,
+                &queue,
+                &tenant,
+                Uuid::new_v4(),
+                EnrollmentState::Paused
+            )
+            .await
+            .unwrap(),
+            "an unknown enrollment reports not-found"
+        );
+        assert!(
+            !set_enrollment_state(
+                &pool,
+                &queue,
+                &other,
+                enrollment_id,
+                EnrollmentState::Paused
+            )
+            .await
+            .unwrap(),
+            "another tenant cannot change the state"
+        );
+
+        sqlx::query("DELETE FROM sales_unsubscribes WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup_fixture(&pool, &tenant, fixture.policy_id).await;
     }
 }

@@ -2296,7 +2296,6 @@ mod tests {
             .expect("link decision to step execution");
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn revalidation_denies_a_contact_suppressed_after_the_decision() {
         let Some(pool) =
@@ -2345,7 +2344,6 @@ mod tests {
         assert!(revalidation.checked.contains(&GATE_SUPPRESSION));
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn revalidation_denies_a_human_reply_that_arrived_after_the_decision() {
         let Some(pool) =
@@ -2392,7 +2390,6 @@ mod tests {
         assert!(revalidation.checked.contains(&GATE_HUMAN_REPLY));
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn prohibited_policy_denies_even_under_autonomous_guarded() {
         let Some(pool) =
@@ -2448,7 +2445,6 @@ mod tests {
         );
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn checked_names_every_gate_that_was_re_read() {
         let Some(pool) = live_pool("decision_engine::tests::checked_names_every_gate").await else {
@@ -2496,7 +2492,6 @@ mod tests {
         );
     }
 
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn revalidation_of_a_missing_decision_is_an_error() {
         let Some(pool) = live_pool("decision_engine::tests::missing_decision").await else {
@@ -2515,7 +2510,6 @@ mod tests {
     /// was made and regresses to `unverified` before approval. The weaker
     /// "reject only literal `invalid`" rule let this through; the canonical
     /// rule (`email_point_is_sendable`) refuses it.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn revalidation_refuses_a_contact_that_regressed_from_valid_to_unverified() {
         let Some(pool) = live_pool("decision_engine::tests::revalidation_refuses_unverified").await
@@ -2570,7 +2564,6 @@ mod tests {
     /// [`DEFAULT_WEEKLY_ACCOUNT_BUDGET`]; the account row lock held by each
     /// worker is the real serialisation point, so the test exercises the same
     /// code path the formula-driven budget does.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_budget_of_one_admits_exactly_one_of_sixteen_concurrent_workers() {
         let Some(pool) = live_pool("decision_engine::tests::budget_race").await else {
@@ -2653,7 +2646,6 @@ mod tests {
 
     /// A reservation is consumed once per logical send and can be released
     /// when the send never happens.
-    #[ignore = "requires local PostgreSQL with the canonical sales schema"]
     #[tokio::test]
     async fn revalidation_reserves_once_per_logical_send_and_release_frees_the_slot() {
         let Some(pool) = live_pool("decision_engine::tests::reservation_lifecycle").await else {
@@ -2735,5 +2727,438 @@ mod tests {
         .unwrap();
         assert_eq!(state, "reserved");
         assert_eq!(rows, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial verdict proofs (run by default; soft-skip only when the
+    // canonical test database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    /// `(enforcement, blocked, block_reasons, review_status, action)` of a
+    /// persisted Decision Packet.
+    async fn decision_packet(
+        pool: &PgPool,
+        decision_id: Uuid,
+    ) -> (String, bool, serde_json::Value, Option<String>, String) {
+        sqlx::query_as(
+            "SELECT enforcement, blocked, block_reasons, review_status, action \
+             FROM sales_decisions WHERE id = $1",
+        )
+        .bind(decision_id)
+        .fetch_one(pool)
+        .await
+        .expect("the Decision Packet must exist")
+    }
+
+    /// The kill switch must both refuse the send AND leave a recorded
+    /// explanation; an external execute request additionally surfaces the stop
+    /// as an error so the caller cannot mistake it for an approval wait.
+    #[tokio::test]
+    async fn kill_switch_denial_is_recorded_and_surfaces_as_an_error() {
+        let Some(pool) = live_pool("decision_engine::tests::kill_switch_recorded").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-kill");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        sqlx::query("UPDATE sales_autonomy_state SET kill_switch = TRUE WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .expect_err("an external send under a kill switch must surface an error");
+        assert!(
+            matches!(error, SalesError::KillSwitchEngaged),
+            "expected KillSwitchEngaged, got {error:?}"
+        );
+
+        // The refusal is a RECORDED decision, never a silent skip: the packet
+        // names the kill switch and requires no human review.
+        let decision_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM sales_decisions WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (enforcement, blocked, reasons, review, _action) =
+            decision_packet(&pool, decision_id).await;
+        assert_eq!(enforcement, "denied");
+        assert!(blocked);
+        assert!(
+            reasons.as_array().unwrap().iter().any(|reason| reason
+                .as_str()
+                .unwrap_or("")
+                .starts_with("global_kill_switch:")),
+            "the packet must name the kill switch: {reasons}"
+        );
+        assert_eq!(review.as_deref(), Some("not_required"));
+
+        // An INTERNAL action is denied as well, but engine-side it is an
+        // ordinary recorded denial rather than an error: no external effect
+        // exists to protect.
+        let mut internal = send_context(&fixture, fixture.policy_input());
+        internal.action = DecisionAction::DoNothing;
+        let outcome = decide(&pool, internal)
+            .await
+            .expect("internal denial is Ok");
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(outcome
+            .block_reasons
+            .iter()
+            .any(|reason| reason.starts_with("global_kill_switch:")));
+    }
+
+    /// A missing legal-policy input fails closed: the gate cannot be
+    /// evaluated, so the packet is denied with the reason named.
+    #[tokio::test]
+    async fn missing_policy_input_denies_with_the_reason_recorded() {
+        let Some(pool) = live_pool("decision_engine::tests::missing_policy_input").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-nopolicy");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let mut ctx = send_context(&fixture, fixture.policy_input());
+        ctx.policy = None;
+
+        let outcome = decide(&pool, ctx).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("legal_policy_input_missing:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+        let (enforcement, blocked, reasons, _, _) =
+            decision_packet(&pool, outcome.decision_id).await;
+        assert_eq!(enforcement, "denied");
+        assert!(blocked);
+        assert!(reasons.to_string().contains("legal_policy_input_missing"));
+    }
+
+    /// A quarantined sender is a hard gate: the send is denied with the health
+    /// reason recorded, and an approved decision cannot ride over it.
+    #[tokio::test]
+    async fn quarantined_sender_denies_and_defeats_an_old_approval() {
+        let Some(pool) = live_pool("decision_engine::tests::sender_quarantine").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-sender");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let mut ctx = send_context(&fixture, fixture.policy_input());
+        ctx.selected_sender = Some(fixture.sender_id);
+
+        // Healthy first: the same context executes.
+        let first = decide(&pool, ctx.clone()).await.unwrap();
+        assert_eq!(
+            first.enforcement,
+            Enforcement::Execute,
+            "fixture must start executable: {:?}",
+            first.block_reasons
+        );
+        link_decision_to_step_execution(&pool, first.decision_id, fixture.step_execution_id).await;
+        sqlx::query("UPDATE sales_decisions SET review_status = 'approved' WHERE id = $1")
+            .bind(first.decision_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let approved = revalidate_execution(&pool, first.decision_id)
+            .await
+            .unwrap();
+        assert!(approved.allowed, "{:?}", approved.reasons);
+
+        // Quarantine AFTER the approval.
+        sqlx::query(
+            "UPDATE sales_sender_health SET state = 'quarantined' WHERE sender_identity_id = $1",
+        )
+        .bind(fixture.sender_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let outcome = decide(&pool, ctx).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("sender_health_denied:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+
+        let revalidation = revalidate_execution(&pool, first.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            !revalidation.allowed,
+            "an approval must not defeat a quarantined sender"
+        );
+        assert!(
+            revalidation
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("sender_health_denied:")),
+            "{:?}",
+            revalidation.reasons
+        );
+        assert!(revalidation.checked.contains(&GATE_SENDER_HEALTH));
+    }
+
+    /// The weekly account budget is enforced in `decide`, and the exhaustion
+    /// reason is recorded on the packet.
+    #[tokio::test]
+    async fn exhausted_weekly_budget_denies_with_the_reason_recorded() {
+        let Some(pool) = live_pool("decision_engine::tests::frequency_budget").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-budget");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+
+        // DEFAULT_WEEKLY_ACCOUNT_BUDGET realised touches in the last 7 days.
+        sqlx::query(
+            "INSERT INTO sales_outcomes (id, tenant_id, account_id, outcome, occurred_at) \
+             SELECT gen_random_uuid(), $1, $2, 'delivered', NOW() \
+             FROM generate_series(1, $3)",
+        )
+        .bind(&tenant)
+        .bind(fixture.account_id)
+        .bind(DEFAULT_WEEKLY_ACCOUNT_BUDGET)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Denied);
+        assert!(
+            outcome
+                .block_reasons
+                .iter()
+                .any(|reason| reason.starts_with("account_frequency_budget_exhausted:")),
+            "{:?}",
+            outcome.block_reasons
+        );
+        let (enforcement, blocked, _, _, _) = decision_packet(&pool, outcome.decision_id).await;
+        assert_eq!(enforcement, "denied");
+        assert!(blocked);
+    }
+
+    /// A human reply that arrived after the decision is re-read here — not
+    /// just at decision time — so an approved touch cannot race it out.
+    #[tokio::test]
+    async fn revalidation_denies_after_a_human_reply_and_records_every_gate() {
+        let Some(pool) = live_pool("decision_engine::tests::revalidation_every_gate").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-allgates");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let mut ctx = send_context(&fixture, fixture.policy_input());
+        ctx.selected_sender = Some(fixture.sender_id);
+        let outcome = decide(&pool, ctx).await.unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+
+        // Five independent things go wrong at once: kill switch, an
+        // unsubscribe, an address regression, and a human reply.
+        sqlx::query("UPDATE sales_autonomy_state SET kill_switch = TRUE WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sales_unsubscribes (tenant_id, email) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind(&fixture.email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_contact_points SET verification = 'unverified' WHERE id = $1")
+            .bind(fixture.contact_point_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sales_enrollments SET has_human_reply = TRUE WHERE id = $1")
+            .bind(fixture.enrollment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let revalidation = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(!revalidation.allowed);
+        for prefix in [
+            "global_kill_switch:",
+            "suppressed:",
+            "contact_point_not_sendable:",
+            "human_reply:",
+        ] {
+            assert!(
+                revalidation
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.starts_with(prefix)),
+                "missing '{prefix}' in {:?}",
+                revalidation.reasons
+            );
+        }
+        // Every re-read gate is named for the audit trail, not just the one
+        // that fired first.
+        for gate in [
+            GATE_KILL_SWITCH,
+            GATE_AUTONOMY_MODE,
+            GATE_SUPPRESSION,
+            GATE_CONTACT_POINT_SUPPRESSED,
+            GATE_ADDRESS_VERIFICATION,
+            GATE_HUMAN_REPLY,
+            GATE_SENDER_HEALTH,
+            GATE_FREQUENCY_BUDGET,
+            GATE_LEGAL_POLICY,
+        ] {
+            assert!(
+                revalidation.checked.contains(&gate),
+                "gate '{gate}' was not re-read: {:?}",
+                revalidation.checked
+            );
+        }
+    }
+
+    /// A prohibited policy flip after an approval must stop the send, while a
+    /// flip to approval-required is satisfied by the recorded approval: the
+    /// gate re-derives the verdict under the CURRENT policy.
+    #[tokio::test]
+    async fn stale_approval_cannot_execute_after_the_policy_moved_to_prohibited() {
+        let Some(pool) = live_pool("decision_engine::tests::stale_approval_policy").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-stale");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+        sqlx::query("UPDATE sales_decisions SET review_status = 'approved' WHERE id = $1")
+            .bind(outcome.decision_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let approved = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(approved.allowed, "{:?}", approved.reasons);
+
+        // The policy moves to approval-required: the recorded approval
+        // satisfies the current human requirement.
+        sqlx::query(
+            "UPDATE sales_jurisdiction_policies \
+             SET decision = 'approval_required', basis = 'soft_opt_in' \
+             WHERE jurisdiction = $1 AND channel = 'email' AND contact_type = 'b2b_professional' \
+               AND version = 1",
+        )
+        .bind(&fixture.jurisdiction)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let after_flip = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            after_flip.allowed,
+            "an approved decision satisfies approval-required: {:?}",
+            after_flip.reasons
+        );
+
+        // The policy moves to prohibited: no approval can authorize it.
+        sqlx::query(
+            "UPDATE sales_jurisdiction_policies \
+             SET decision = 'prohibited', basis = 'not_permitted' \
+             WHERE jurisdiction = $1 AND channel = 'email' AND contact_type = 'b2b_professional' \
+               AND version = 1",
+        )
+        .bind(&fixture.jurisdiction)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let prohibited = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(
+            !prohibited.allowed,
+            "a prohibited policy must defeat a stale approval"
+        );
+        assert!(
+            prohibited
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("legal_policy_prohibited:")),
+            "{:?}",
+            prohibited.reasons
+        );
+    }
+
+    /// An unapproved decision under an approval-required policy is refused by
+    /// revalidation with the approval requirement named.
+    #[tokio::test]
+    async fn revalidation_refuses_a_pending_approval_under_approval_required_policy() {
+        let Some(pool) = live_pool("decision_engine::tests::pending_approval_policy").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("dec-pending");
+        let fixture = seed_send_fixture(&pool, &tenant, "allowed", "legitimate_interest").await;
+        let outcome = decide(&pool, send_context(&fixture, fixture.policy_input()))
+            .await
+            .unwrap();
+        assert_eq!(outcome.enforcement, Enforcement::Execute);
+        link_decision_to_step_execution(&pool, outcome.decision_id, fixture.step_execution_id)
+            .await;
+
+        sqlx::query(
+            "UPDATE sales_jurisdiction_policies \
+             SET decision = 'approval_required', basis = 'soft_opt_in' \
+             WHERE jurisdiction = $1 AND channel = 'email' AND contact_type = 'b2b_professional' \
+               AND version = 1",
+        )
+        .bind(&fixture.jurisdiction)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let revalidation = revalidate_execution(&pool, outcome.decision_id)
+            .await
+            .unwrap();
+        assert!(!revalidation.allowed);
+        assert!(
+            revalidation
+                .reasons
+                .iter()
+                .any(|reason| reason.starts_with("legal_policy_approval_required:")),
+            "{:?}",
+            revalidation.reasons
+        );
+    }
+
+    /// Revalidating a decision that no longer exists is an error, never a
+    /// silent "allowed".
+    #[tokio::test]
+    async fn revalidation_of_a_vanished_decision_fails_closed() {
+        let Some(pool) = live_pool("decision_engine::tests::missing_decision_error").await else {
+            return;
+        };
+        let error = revalidate_execution(&pool, Uuid::new_v4())
+            .await
+            .expect_err("a missing decision must not revalidate");
+        assert!(
+            matches!(error, SalesError::InvalidInput(_)),
+            "expected InvalidInput, got {error:?}"
+        );
     }
 }

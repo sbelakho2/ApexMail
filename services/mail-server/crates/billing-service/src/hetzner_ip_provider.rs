@@ -70,17 +70,76 @@ struct UpdateRdnsRequest {
 
 // ─── Provider Types ────────────────────────────────────────────
 
-/// Provisioning status for an IP.
+/// Canonical lifecycle status of a dedicated IP.
+///
+/// The variants mirror EXACTLY the vocabulary `dedicated_ips_status_check`
+/// admits (migration 207); [`IpStatus::as_db_status`] returns the string the
+/// CHECK accepts and [`IpStatus::from_db_status`] parses it back. There is
+/// deliberately no `Degraded`/`Disabled`/`Released`: the schema cannot hold
+/// those values, so such variants were unreachable and misleading. A
+/// provider-side disabled address is the canonical `Suspended` (not
+/// selectable, resumable); a released one is the terminal `Retired`.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "ip_status", rename_all = "snake_case")]
 pub enum IpStatus {
     Pending,
     Provisioning,
-    Active,
+    Created,
+    Attached,
+    RdnsReady,
     Warming,
-    Degraded,
-    Disabled,
-    Released,
+    Active,
+    Suspended,
+    Cooldown,
+    Failed,
+    CleanupFailed,
+    Releasing,
+    Retired,
+}
+
+impl IpStatus {
+    /// The exact string `dedicated_ips_status_check` admits.
+    pub fn as_db_status(&self) -> &'static str {
+        match self {
+            IpStatus::Pending => "pending",
+            IpStatus::Provisioning => "provisioning",
+            IpStatus::Created => "created",
+            IpStatus::Attached => "attached",
+            IpStatus::RdnsReady => "rdns_ready",
+            IpStatus::Warming => "warming",
+            IpStatus::Active => "active",
+            IpStatus::Suspended => "suspended",
+            IpStatus::Cooldown => "cooldown",
+            IpStatus::Failed => "failed",
+            IpStatus::CleanupFailed => "cleanup_failed",
+            IpStatus::Releasing => "releasing",
+            IpStatus::Retired => "retired",
+        }
+    }
+
+    /// Parse the canonical `dedicated_ips.status` vocabulary. An unknown
+    /// value is a TYPED REFUSAL, never a silent fail-closed guess: a status
+    /// the schema does not define means this build's vocabulary is stale or
+    /// the row was corrupted, and reporting it as `Pending` would hide an IP
+    /// whose provider resource may still exist.
+    pub fn from_db_status(status: &str) -> Result<Self, ProvisionError> {
+        match status {
+            "pending" => Ok(IpStatus::Pending),
+            "provisioning" => Ok(IpStatus::Provisioning),
+            "created" => Ok(IpStatus::Created),
+            "attached" => Ok(IpStatus::Attached),
+            "rdns_ready" => Ok(IpStatus::RdnsReady),
+            "warming" => Ok(IpStatus::Warming),
+            "active" => Ok(IpStatus::Active),
+            "suspended" => Ok(IpStatus::Suspended),
+            "cooldown" => Ok(IpStatus::Cooldown),
+            "failed" => Ok(IpStatus::Failed),
+            "cleanup_failed" => Ok(IpStatus::CleanupFailed),
+            "releasing" => Ok(IpStatus::Releasing),
+            "retired" => Ok(IpStatus::Retired),
+            other => Err(ProvisionError::UnknownStatus(other.to_string())),
+        }
+    }
 }
 
 /// A provisioned dedicated IP.
@@ -108,6 +167,22 @@ pub struct IpProvisioningRequest {
     pub error_message: Option<String>,
 }
 
+/// Raw `dedicated_ips` row as listed for a tenant (named row: the 10-tuple
+/// tripped clippy's type-complexity gate).
+#[derive(Debug, sqlx::FromRow)]
+struct DedicatedIpRow {
+    id: String,
+    tenant_id: String,
+    ip_address: String,
+    hetzner_floating_ip_id: Option<i64>,
+    status: String,
+    rdns_hostname: Option<String>,
+    hetzner_server_id: Option<i64>,
+    warmup_day: i32,
+    created_at: DateTime<Utc>,
+    allocated_at: Option<DateTime<Utc>>,
+}
+
 // ─── Hetzner IP Provider ───────────────────────────────────────
 
 /// Provider for Hetzner Cloud IP management.
@@ -122,6 +197,9 @@ pub struct HetznerIpProvider {
     default_location: String,
     /// MTA server ID to assign IPs to.
     mta_server_id: Option<u64>,
+    /// API base URL. Production always uses [`HETZNER_API_BASE`]; tests may
+    /// point this at a local mock via [`HetznerIpProvider::with_base_url`].
+    base_url: String,
 }
 
 impl HetznerIpProvider {
@@ -143,7 +221,17 @@ impl HetznerIpProvider {
             db,
             default_location,
             mta_server_id,
+            base_url: HETZNER_API_BASE.to_string(),
         })
+    }
+
+    /// Override the API base URL. Production callers never use this; it
+    /// exists so tests can exercise the HTTP client (status handling,
+    /// malformed JSON, pagination, rDNS) against a LOCAL mock instead of
+    /// the real network.
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
     }
 
     /// Create from environment variables.
@@ -166,12 +254,16 @@ impl HetznerIpProvider {
     ) -> Result<DedicatedIp, ProvisionError> {
         info!(tenant_id = %tenant_id, "Provisioning new dedicated IP");
 
-        // Create request record
+        // Create request record. `ip_provisioning_queue.id` is a UUID column
+        // and its request_type CHECK only admits ('ses_dedicated',
+        // 'hetzner_ip', 'byoip_import') — binding TEXT without a cast and
+        // writing 'dedicated_ip' made every provisioning attempt fail at
+        // this first statement.
         let request_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             r#"
             INSERT INTO ip_provisioning_queue (id, tenant_id, request_type, region, quantity, status, created_at)
-            VALUES ($1, $2, 'dedicated_ip', 'us-east-1', 1, 'pending', NOW())
+            VALUES ($1::uuid, $2, 'hetzner_ip', 'us-east-1', 1, 'pending', NOW())
             "#,
         )
         .bind(&request_id)
@@ -196,7 +288,7 @@ impl HetznerIpProvider {
 
         let response = self
             .client
-            .post(format!("{}/floating_ips", HETZNER_API_BASE))
+            .post(format!("{}/floating_ips", self.base_url))
             .bearer_auth(&self.api_token)
             .json(&create_request)
             .send()
@@ -265,16 +357,17 @@ impl HetznerIpProvider {
             r#"
             INSERT INTO dedicated_ips (
                 id, tenant_id, ip_address, hetzner_floating_ip_id, status,
-                rdns_hostname, hetzner_server_id, warmup_day, created_at, allocated_at
+                rdns_hostname, hetzner_server_id, warmup_day, created_at, allocated_at,
+                warmup_started_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $9)
             "#,
         )
         .bind(&dedicated_ip.id)
         .bind(&dedicated_ip.tenant_id)
         .bind(&dedicated_ip.ip_address)
         .bind(dedicated_ip.hetzner_floating_ip_id)
-        .bind("warming")
+        .bind(IpStatus::Warming.as_db_status())
         .bind(&dedicated_ip.rdns_hostname)
         .bind(dedicated_ip.assigned_server_id)
         .bind(dedicated_ip.warmup_day)
@@ -303,7 +396,7 @@ impl HetznerIpProvider {
             .client
             .post(format!(
                 "{}/floating_ips/{}/actions/assign",
-                HETZNER_API_BASE, floating_ip_id
+                self.base_url, floating_ip_id
             ))
             .bearer_auth(&self.api_token)
             .json(&request)
@@ -341,7 +434,7 @@ impl HetznerIpProvider {
             .client
             .post(format!(
                 "{}/floating_ips/{}/actions/change_dns_ptr",
-                HETZNER_API_BASE, floating_ip_id
+                self.base_url, floating_ip_id
             ))
             .bearer_auth(&self.api_token)
             .json(&request)
@@ -382,7 +475,7 @@ impl HetznerIpProvider {
         // Delete from Hetzner
         let response = self
             .client
-            .delete(format!("{}/floating_ips/{}", HETZNER_API_BASE, hetzner_id))
+            .delete(format!("{}/floating_ips/{}", self.base_url, hetzner_id))
             .bearer_auth(&self.api_token)
             .send()
             .await
@@ -393,11 +486,14 @@ impl HetznerIpProvider {
             return Err(ProvisionError::HetznerApi(error_text));
         }
 
-        // Update database
+        // Update database. `dedicated_ips.status` has a CHECK constraint
+        // that does NOT admit the literal 'released' (the terminal state is
+        // 'retired'), so writing 'released' made every release fail on the
+        // local update AFTER deleting the floating IP upstream.
         sqlx::query(
             r#"
             UPDATE dedicated_ips
-            SET status = 'released'
+            SET status = 'retired', updated_at = NOW()
             WHERE id = $1
             "#,
         )
@@ -416,71 +512,38 @@ impl HetznerIpProvider {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<DedicatedIp>, ProvisionError> {
-        let ips: Vec<DedicatedIp> = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                Option<i64>,
-                String,
-                Option<String>,
-                Option<i64>,
-                i32,
-                DateTime<Utc>,
-                Option<DateTime<Utc>>,
-            ),
-        >(
+        let rows: Vec<DedicatedIpRow> = sqlx::query_as(
             r#"
             SELECT id, tenant_id, ip_address, hetzner_floating_ip_id, status,
                    rdns_hostname, hetzner_server_id, warmup_day, created_at, allocated_at
             FROM dedicated_ips
-            WHERE tenant_id = $1 AND status != 'released'
+            WHERE tenant_id = $1 AND status NOT IN ('released', 'retired')
             ORDER BY created_at
             "#,
         )
         .bind(tenant_id)
         .fetch_all(&self.db)
         .await
-        .map_err(|e| ProvisionError::Database(e.to_string()))?
-        .into_iter()
-        .map(
-            |(
-                id,
-                tenant_id,
-                ip_address,
-                hetzner_floating_ip_id,
-                status,
-                rdns_hostname,
-                assigned_server_id,
-                warmup_day,
-                created_at,
-                activated_at,
-            )| {
-                DedicatedIp {
-                    id,
-                    tenant_id,
-                    ip_address,
-                    hetzner_floating_ip_id,
-                    status: match status.as_str() {
-                        "pending" => IpStatus::Pending,
-                        "provisioning" => IpStatus::Provisioning,
-                        "active" => IpStatus::Active,
-                        "warming" => IpStatus::Warming,
-                        "degraded" => IpStatus::Degraded,
-                        "disabled" => IpStatus::Disabled,
-                        "released" => IpStatus::Released,
-                        _ => IpStatus::Pending,
-                    },
-                    rdns_hostname,
-                    assigned_server_id,
-                    warmup_day,
-                    created_at,
-                    activated_at,
-                }
-            },
-        )
-        .collect();
+        .map_err(|e| ProvisionError::Database(e.to_string()))?;
+
+        let mut ips = Vec::with_capacity(rows.len());
+        for row in rows {
+            ips.push(DedicatedIp {
+                id: row.id,
+                tenant_id: row.tenant_id,
+                ip_address: row.ip_address,
+                hetzner_floating_ip_id: row.hetzner_floating_ip_id,
+                // Total, honest mapping: every value the CHECK admits maps
+                // to its canonical variant, and an unknown value refuses
+                // loudly instead of masquerading as `Pending`.
+                status: IpStatus::from_db_status(&row.status)?,
+                rdns_hostname: row.rdns_hostname,
+                assigned_server_id: row.hetzner_server_id,
+                warmup_day: row.warmup_day,
+                created_at: row.created_at,
+                activated_at: row.allocated_at,
+            });
+        }
 
         Ok(ips)
     }
@@ -540,9 +603,11 @@ impl HetznerIpProvider {
 
     /// Process pending provisioning requests.
     pub async fn process_pending_requests(&self) -> Result<usize, ProvisionError> {
+        // `id` is a UUID column; decoding it directly into `String` failed
+        // with a type mismatch, so the pending queue could never be read.
         let pending: Vec<(String, String)> = sqlx::query_as(
             r#"
-            SELECT id, tenant_id
+            SELECT id::text AS id, tenant_id
             FROM ip_provisioning_queue
             WHERE status = 'pending'
             ORDER BY created_at
@@ -616,6 +681,9 @@ pub enum ProvisionError {
     #[error("IP not found: {0}")]
     NotFound(String),
 
+    #[error("Unknown dedicated IP status: {0}")]
+    UnknownStatus(String),
+
     #[error("Rate limited")]
     RateLimited,
 }
@@ -629,5 +697,42 @@ mod tests {
     #[test]
     fn test_ip_status_variants() {
         assert_eq!(format!("{:?}", IpStatus::Warming), "Warming");
+    }
+
+    /// The mapper is TOTAL over the real schema vocabulary (migration 207's
+    /// `dedicated_ips_status_check`) and REFUSES anything outside it with a
+    /// typed error. In particular `degraded`/`disabled`/`released` — the
+    /// enum's old, unreachable variants — are refusals, not silent mappings.
+    #[test]
+    fn every_canonical_status_round_trips_and_unknown_values_are_refused() {
+        const CANONICAL: [&str; 13] = [
+            "pending",
+            "provisioning",
+            "created",
+            "attached",
+            "rdns_ready",
+            "warming",
+            "active",
+            "suspended",
+            "cooldown",
+            "failed",
+            "cleanup_failed",
+            "releasing",
+            "retired",
+        ];
+        for status in CANONICAL {
+            let parsed = IpStatus::from_db_status(status)
+                .unwrap_or_else(|error| panic!("{status} must parse: {error}"));
+            assert_eq!(parsed.as_db_status(), status, "round trip for {status}");
+        }
+
+        for unknown in ["degraded", "disabled", "released", "", "active ", "unknown"] {
+            let error = IpStatus::from_db_status(unknown)
+                .expect_err("a status outside the CHECK vocabulary must be refused");
+            assert!(
+                matches!(&error, ProvisionError::UnknownStatus(value) if value == unknown),
+                "{unknown}: {error:?}"
+            );
+        }
     }
 }

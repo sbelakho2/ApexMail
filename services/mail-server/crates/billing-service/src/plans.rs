@@ -1119,3 +1119,372 @@ mod tests {
             .is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial coverage tests (DB backed) for plan upserts, quota resolution
+// and the entitlement snapshot's override rules.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod coverage_adversarial {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    struct Env {
+        pool: PgPool,
+        db_name: String,
+        admin_url: String,
+    }
+
+    impl Env {
+        async fn finish(self) {
+            self.pool.close().await;
+            if let Ok(admin) = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&self.admin_url)
+                .await
+            {
+                let _ = sqlx::query(&format!(
+                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                    self.db_name
+                ))
+                .execute(&admin)
+                .await;
+                admin.close().await;
+            }
+        }
+    }
+
+    async fn provision(test_name: &str) -> Option<Env> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())?;
+        let (server_part, db_part) = url.rsplit_once('/').expect("db segment");
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let mut digest: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in test_name.bytes() {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        let db_name = format!("{db_only}_plcov_{:08x}", digest & 0xffff_ffff);
+
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("{server_part}/postgres"));
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(30))
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+
+        let migrations_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut count = 0_usize;
+        let mut newest = 0_i64;
+        for entry in std::fs::read_dir(&migrations_dir).expect("migrations dir") {
+            let name = entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            if let Some(prefix) = name.split('_').next() {
+                if let Ok(version) = prefix.parse::<i64>() {
+                    count += 1;
+                    newest = newest.max(version);
+                }
+            }
+        }
+        let template: Option<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE $1 ORDER BY datname DESC LIMIT 1",
+        )
+        .bind(format!("apexmail_canonical_tpl_{count}_{newest}_%"))
+        .fetch_optional(&admin)
+        .await
+        .expect("template lookup");
+        let template = template.expect("canonical template database must exist");
+
+        sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            db_name
+        ))
+        .execute(&admin)
+        .await
+        .expect("drop test db");
+        sqlx::query(&format!(
+            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+            db_name, template
+        ))
+        .execute(&admin)
+        .await
+        .expect("clone test db");
+        admin.close().await;
+
+        let database_url = format!("{server_part}/{db_name}");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&database_url)
+            .await
+            .expect("connect test db");
+        Some(Env {
+            pool,
+            db_name,
+            admin_url,
+        })
+    }
+
+    macro_rules! env_test {
+        ($name:ident, |$e:ident| $body:block) => {
+            #[tokio::test]
+            async fn $name() {
+                let Some(owned) = provision(stringify!($name)).await else {
+                    return;
+                };
+                let $e = &owned;
+                $body
+                owned.finish().await;
+            }
+        };
+    }
+
+    async fn seed_tenant(env: &Env, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, $3, 'active')
+             ON CONFLICT (id) DO UPDATE SET plan = EXCLUDED.plan",
+        )
+        .bind(tenant)
+        .bind(format!("Coverage {tenant}"))
+        .bind(plan)
+        .execute(&env.pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    fn upsert(name: &str, email_limit: i64, api_limit: i64) -> PlanUpsertInput {
+        PlanUpsertInput {
+            name: name.to_string(),
+            display_name: format!("{name} display"),
+            description: "coverage".to_string(),
+            price_monthly: 1000,
+            price_yearly: 10_000,
+            email_limit,
+            api_call_limit: api_limit,
+            sort_order: 7,
+            features: PlanFeatures::default(),
+            stripe_price_id_monthly: Some("price_cov_monthly".to_string()),
+            stripe_price_id_yearly: None,
+        }
+    }
+
+    env_test!(
+        upsert_plan_input_updates_in_place_and_keeps_stripe_ids,
+        |env| {
+            let created = upsert_plan_input(&env.pool, &upsert("plcov_plan", 100, 200))
+                .await
+                .expect("create");
+            assert_eq!(created.name, "plcov_plan");
+            assert_eq!(created.email_limit, 100);
+            assert!(created.is_active);
+
+            // A second upsert with the same name updates rather than duplicates,
+            // and a NULL stripe id preserves the stored one.
+            let mut update = upsert("plcov_plan", 300, 400);
+            update.stripe_price_id_monthly = None;
+            update.stripe_price_id_yearly = Some("price_cov_yearly".to_string());
+            let updated = upsert_plan_input(&env.pool, &update).await.expect("update");
+            assert_eq!(updated.id, created.id, "same row, updated in place");
+            assert_eq!(updated.email_limit, 300);
+            assert_eq!(
+                updated.stripe_price_id_monthly.as_deref(),
+                Some("price_cov_monthly"),
+                "an omitted Stripe price never erases the stored id"
+            );
+            assert_eq!(
+                updated.stripe_price_id_yearly.as_deref(),
+                Some("price_cov_yearly")
+            );
+            let rows: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM plans WHERE name = 'plcov_plan'")
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("rows");
+            assert_eq!(rows, 1);
+        }
+    );
+
+    env_test!(
+        quota_resolution_honours_override_and_builtin_fallback,
+        |env| {
+            // Unknown tenant: no quota at all.
+            assert!(get_quota_for_tenant(&env.pool, "plcov_absent")
+                .await
+                .expect("absent")
+                .is_none());
+
+            // Tenant on a plan with no plans row: builtin seed fallback.
+            let builtin = "plcov_builtin";
+            seed_tenant(env, builtin, "free").await;
+            let quota = get_quota_for_tenant(&env.pool, builtin)
+                .await
+                .expect("quota")
+                .expect("row");
+            let free = builtin_plan_seed(Some("free"));
+            assert_eq!(quota.plan_name, "free");
+            assert_eq!(quota.emails_per_month, free.email_limit);
+            assert_eq!(quota.rate_limit_tier, RateLimitTier::Free);
+
+            // A plans row wins over the builtin seed.
+            upsert_plan_input(&env.pool, &upsert("free", 42, 43))
+                .await
+                .expect("plans row");
+            let quota = get_quota_for_tenant(&env.pool, builtin)
+                .await
+                .expect("quota")
+                .expect("row");
+            assert_eq!(
+                (quota.emails_per_month, quota.api_calls_per_month),
+                (42, 43)
+            );
+
+            // An active override replaces the tenant's own plan...
+            let overridden = "plcov_overridden";
+            seed_tenant(env, overridden, "free").await;
+            upsert_plan_input(&env.pool, &upsert("enterprise", 999_999, 999_999))
+                .await
+                .expect("enterprise");
+            sqlx::query(
+            "INSERT INTO plan_overrides (tenant_id, plan, active) VALUES ($1, 'enterprise', true)",
+        )
+        .bind(overridden)
+        .execute(&env.pool)
+        .await
+        .expect("override");
+            let quota = get_quota_for_tenant(&env.pool, overridden)
+                .await
+                .expect("quota")
+                .expect("row");
+            assert_eq!(quota.plan_name, "enterprise");
+            assert_eq!(quota.rate_limit_tier, RateLimitTier::Unlimited);
+
+            // ...but an EXPIRED override is ignored.
+            sqlx::query(
+            "UPDATE plan_overrides SET expires_at = NOW() - INTERVAL '1 day' WHERE tenant_id = $1",
+        )
+        .bind(overridden)
+        .execute(&env.pool)
+        .await
+        .expect("expire override");
+            let quota = get_quota_for_tenant(&env.pool, overridden)
+                .await
+                .expect("quota")
+                .expect("row");
+            assert_eq!(quota.plan_name, "free");
+            assert_eq!(quota.emails_per_month, 42, "back to the tenant's own plan");
+        }
+    );
+
+    env_test!(entitlement_snapshot_applies_boolean_overrides_only, |env| {
+        assert!(get_entitlement_snapshot(&env.pool, "plcov_absent")
+            .await
+            .expect("absent")
+            .is_none());
+
+        let tenant = "plcov_entitlement";
+        seed_tenant(env, tenant, "free").await;
+        let snapshot = get_entitlement_snapshot(&env.pool, tenant)
+            .await
+            .expect("snapshot")
+            .expect("row");
+        assert_eq!(snapshot.tenant_id(), tenant);
+        assert_eq!(snapshot.plan(), "free");
+
+        // A JSON boolean override is applied; a string/number/unknown key is
+        // not (fail closed to the plan value).
+        for (key, value) in [
+            ("dedicated_ip", serde_json::json!(true)),
+            ("sso_enabled", serde_json::json!("yes")),
+            ("max_team_members", serde_json::json!(99)),
+            ("not_a_real_feature", serde_json::json!(true)),
+        ] {
+            sqlx::query(
+                "INSERT INTO feature_flag_overrides (tenant_id, flag_key, value)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(tenant)
+            .bind(key)
+            .bind(value)
+            .execute(&env.pool)
+            .await
+            .expect("override");
+        }
+        let snapshot = get_entitlement_snapshot(&env.pool, tenant)
+            .await
+            .expect("snapshot")
+            .expect("row");
+        use billing_entitlements::{CapacityKey, FeatureKey};
+        assert!(
+            snapshot.has_feature(FeatureKey::DedicatedIp),
+            "boolean override applied"
+        );
+        let free_features = builtin_plan_seed(Some("free")).features;
+        assert_eq!(
+            snapshot.has_feature(FeatureKey::Sso),
+            free_features.sso_enabled,
+            "a non-boolean override fails closed"
+        );
+        assert_eq!(
+            snapshot.capacity(CapacityKey::TeamMembers),
+            i64::from(free_features.max_team_members),
+            "a numeric override never changes capacity"
+        );
+
+        // Latest row per key wins.
+        sqlx::query(
+            "UPDATE feature_flag_overrides
+             SET value = 'false'::jsonb, created_at = NOW() + INTERVAL '1 minute'
+             WHERE tenant_id = $1 AND flag_key = 'dedicated_ip'",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("newer override");
+        let snapshot = get_entitlement_snapshot(&env.pool, tenant)
+            .await
+            .expect("snapshot")
+            .expect("row");
+        assert!(
+            !snapshot.has_feature(FeatureKey::DedicatedIp),
+            "the latest override is authoritative"
+        );
+    });
+
+    #[test]
+    fn plan_name_to_tier_mapping_is_total() {
+        // Every builtin plan name maps to a tier; unknown names default to
+        // Standard rather than panicking or granting Unlimited.
+        for name in [
+            "free",
+            "starter",
+            "pro",
+            "payg",
+            "growth",
+            "scale",
+            "enterprise",
+        ] {
+            let seed = builtin_plan_seed(Some(name));
+            assert!(!seed.name.is_empty());
+        }
+        let unknown = builtin_plan_seed(Some("totally-unknown"));
+        assert_eq!(unknown.name, "free", "unknown plans fail closed to free");
+        assert_eq!(plan_overage_rate_millicents("free"), None);
+        assert_eq!(plan_overage_rate_millicents("payg"), None);
+        assert_eq!(plan_overage_rate_millicents("growth"), Some(35));
+        assert_eq!(plan_overage_rate_millicents("pro"), Some(60));
+        assert_eq!(plan_overage_rate_millicents("starter"), Some(80));
+    }
+}

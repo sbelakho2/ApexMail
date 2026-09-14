@@ -372,7 +372,9 @@ fn is_local_base_url(base_url: &str) -> bool {
     url::Url::parse(base_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
-        .map(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+        // `url::Url::host_str` keeps the brackets on IPv6 literals, so the
+        // loopback spelling "[::1]" must be accepted alongside "::1".
+        .map(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]"))
         .unwrap_or(false)
 }
 
@@ -1717,5 +1719,784 @@ pub(crate) mod tests {
     #[test]
     fn validate_rate_limit_config_rejects_excessive_window() {
         assert!(validate_rate_limit_config(100, 86401).is_err());
+    }
+}
+
+// ─── Adversarial configuration tests ───────────────────────────
+//
+// Env access is process-global: every test here runs inside an `EnvSandbox`
+// that clears every variable `Config::from_env` reads and restores the
+// original values on drop, behind a module-wide mutex.
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Every variable `Config::from_env` consults (plus the audit signer,
+    /// which reads ENVIRONMENT at insert time in concurrent tests).
+    const CONFIG_ENV_KEYS: &[&str] = &[
+        "ENVIRONMENT",
+        "AUDIT_SIGNING_KEY",
+        "SESSION_SECRET",
+        "IMPERSONATION_SECRET",
+        "CSRF_SECRET",
+        "TRACKING_SECRET_KEY",
+        "JWT_PRIVATE_KEY_PEM",
+        "JWT_PUBLIC_KEY_PEM",
+        "JWT_PREVIOUS_PUBLIC_KEYS_PEM",
+        "JWT_EXPIRY",
+        "API_KEY_HASH_SECRET",
+        "WEBHOOK_SIGNING_SECRET",
+        "WEBHOOK_TIMEOUT_MS",
+        "WEBHOOK_MAX_RETRIES",
+        "IDEMPOTENCY_TTL_SECONDS",
+        "BASE_URL",
+        "CORS_ORIGINS",
+        "PORT",
+        "HOST",
+        "PUBLIC_RATE_LIMIT_ENABLED",
+        "DB_HOST",
+        "DB_PORT",
+        "DB_NAME",
+        "DB_USER",
+        "DB_PASSWORD",
+        "DB_MAX_CONNECTIONS",
+        "API_REPLICA_COUNT",
+        "EXPECTED_REPLICA_COUNT",
+        "DB_CLUSTER_CONNECTION_BUDGET",
+        "STATEMENT_CACHE_CAPACITY",
+        "QUERY_TIMEOUT_SECONDS",
+        "DATABASE_URL",
+        "DATABASE_REPLICA_URL",
+        "REDIS_HOST",
+        "REDIS_PORT",
+        "REDIS_PASSWORD",
+        "REDIS_DB",
+        "REDIS_POOL_MAX_SIZE",
+        "RATE_LIMIT_MAX_REQUESTS",
+        "RATE_LIMIT_WINDOW_MS",
+        "MAX_INFLIGHT_REQUESTS",
+        "TRUSTED_PROXIES",
+        "UI_WEB_HOSTS",
+        "UI_CONTROL_PLANE_HOSTS",
+        "UI_MARKETING_HOSTS",
+        "UI_MARKETING_SURFACE",
+        "UI_DEFAULT_SURFACE",
+        "AWS_REGION",
+        "SES_IP_POOL_PREFIX",
+        "SES_DEFAULT_WARMUP_DAYS",
+        "SES_CONFIGURATION_SET",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "GITHUB_CLIENT_ID",
+        "GITHUB_CLIENT_SECRET",
+        "OAUTH_REDIRECT_BASE_URL",
+        "CONTROL_PLANE_API_KEY",
+        "SALES_AUTOPILOT_BASE_URL",
+        "AI_SERVICE_BASE_URL",
+        "INTERNAL_SERVICE_TOKEN",
+        "CP_ALLOWED_IPS",
+        "CP_SESSION_SECRET",
+        "CP_SESSION_IDLE_TIMEOUT_SECS",
+        "CP_SESSION_ABSOLUTE_TIMEOUT_SECS",
+        "GRADER_ENABLED",
+        "GRADER_RATE_LIMIT",
+        "GRADER_RATE_WINDOW",
+        "GRADER_CACHE_TTL",
+        "GRADER_MAX_BODY_SIZE",
+        "PLACEMENT_ENABLED",
+        "PLACEMENT_POLLING_INTERVAL",
+        "PLACEMENT_MAX_POLLING_ATTEMPTS",
+        "PLACEMENT_MAX_SEEDS_PER_TEST",
+        "PLACEMENT_MAX_TESTS_PER_HOUR",
+        "PLACEMENT_IMAP_TIMEOUT",
+        "PLACEMENT_ENCRYPT_PASSWORDS",
+        "PLACEMENT_ENCRYPTION_SECRET",
+        "KIWI_ENABLED",
+        "KIWI_SECRET_KEY",
+        "WAF_ENABLED",
+        "WAF_ENFORCE",
+        "KIWI_ALGORITHM",
+        "KIWI_ARGON_M_KIB",
+        "KIWI_PBKDF2_ITERATIONS",
+        "KIWI_ARGON_T",
+        "KIWI_ARGON_P",
+        "KIWI_DIFFICULTY_BITS",
+        "KIWI_ARGON2_DIFFICULTY_BITS",
+        "KIWI_CHALLENGE_TTL_SECS",
+        "KIWI_MIN_DURATION_MS",
+        "KIWI_ARGON2_MAX_CONCURRENT",
+        "KIWI_ENFORCE_TELEMETRY",
+        "KIWI_AUTO_TUNE",
+        "KIWI_AUTO_TUNE_MIN_BITS",
+        "KIWI_AUTO_TUNE_MAX_BITS",
+        "METRICS_PORT",
+        "HTTP_CLIENT_TIMEOUT_SECONDS",
+        "INTERNAL_TLS_ENABLED",
+        "INTERNAL_TLS_CA_CERT_PATH",
+        "INTERNAL_TLS_CLIENT_CERT_PATH",
+        "INTERNAL_TLS_CLIENT_KEY_PATH",
+        "EMAIL_TRANSPORT_TYPE",
+    ];
+
+    struct EnvSandbox {
+        previous: Vec<(&'static str, Option<OsString>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvSandbox {
+        fn new() -> Self {
+            let guard = ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
+            let mut previous = Vec::with_capacity(CONFIG_ENV_KEYS.len());
+            for key in CONFIG_ENV_KEYS {
+                previous.push((*key, std::env::var_os(key)));
+                std::env::remove_var(key);
+            }
+            Self {
+                previous,
+                _guard: guard,
+            }
+        }
+
+        fn set(&self, key: &str, value: &str) {
+            std::env::set_var(key, value);
+        }
+
+        /// Clear every variable `from_env` reads (the sandbox cleared them
+        /// once at construction; helpers must be able to reset state).
+        fn clear(&self) {
+            for key in CONFIG_ENV_KEYS {
+                std::env::remove_var(key);
+            }
+        }
+
+        /// Minimal development environment: every REQUIRED variable set to a
+        /// valid value, everything else cleared.
+        fn minimal_dev(&self) {
+            self.clear();
+            self.set("ENVIRONMENT", "development");
+            self.set("JWT_PRIVATE_KEY_PEM", "-----BEGIN PRIVATE KEY-----x");
+            self.set("JWT_PUBLIC_KEY_PEM", "-----BEGIN PUBLIC KEY-----x");
+            self.set("API_KEY_HASH_SECRET", "dev-api-key-hash-secret-0123456789");
+            self.set(
+                "WEBHOOK_SIGNING_SECRET",
+                "dev-webhook-signing-secret-0123456789",
+            );
+        }
+    }
+
+    impl Drop for EnvSandbox {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Every production requirement, each one individually strong.
+    fn strong_production(sandbox: &EnvSandbox) {
+        sandbox.clear();
+        sandbox.set("ENVIRONMENT", "production");
+        sandbox.set(
+            "AUDIT_SIGNING_KEY",
+            "production-audit-signing-key-0123456789",
+        );
+        sandbox.set("JWT_PRIVATE_KEY_PEM", "-----BEGIN PRIVATE KEY-----x");
+        sandbox.set("JWT_PUBLIC_KEY_PEM", "-----BEGIN PUBLIC KEY-----x");
+        sandbox.set(
+            "API_KEY_HASH_SECRET",
+            "production-api-key-hash-secret-0123456789",
+        );
+        sandbox.set(
+            "WEBHOOK_SIGNING_SECRET",
+            "production-webhook-signing-secret-0123456789",
+        );
+        sandbox.set("SESSION_SECRET", "production-session-secret-0123456789ab");
+        sandbox.set(
+            "IMPERSONATION_SECRET",
+            "production-impersonation-secret-0123456789",
+        );
+        sandbox.set("CSRF_SECRET", "production-csrf-secret-0123456789abcdef");
+        sandbox.set(
+            "TRACKING_SECRET_KEY",
+            "production-tracking-secret-0123456789ab",
+        );
+        sandbox.set(
+            "CP_SESSION_SECRET",
+            "production-cp-session-secret-0123456789",
+        );
+        sandbox.set("DB_PASSWORD", "correct-horse-battery-staple");
+        sandbox.set("BILLING_COMPANY_IBAN", "EE381010220123456789");
+        sandbox.set("BILLING_COMPANY_PHONE", "+3721234567");
+        sandbox.set("KIWI_SECRET_KEY", "production-kiwi-secret-0123456789");
+        sandbox.set("BASE_URL", "https://app.apexmail.ee");
+        sandbox.set("OAUTH_REDIRECT_BASE_URL", "https://app.apexmail.ee");
+        sandbox.set("PLACEMENT_ENABLED", "false");
+    }
+
+    // ── pure helpers ────────────────────────────────────────────
+
+    #[test]
+    fn adversarial_config_parsers_and_validators() {
+        // Integer parsers surface the variable name and the offending value.
+        for (key, result) in [
+            ("PORT", parse_u16("PORT", "70000")),
+            ("DB_PORT", parse_u16("DB_PORT", "-1")),
+        ] {
+            match result {
+                Err(ConfigError::Invalid { var, reason }) => {
+                    assert_eq!(var, key);
+                    assert!(reason.contains("u16"), "{reason}");
+                }
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
+        assert_eq!(parse_u16("P", "65535").unwrap(), u16::MAX);
+        assert_eq!(parse_u32("P", "4294967295").unwrap(), u32::MAX);
+        assert_eq!(parse_u64("P", "18446744073709551615").unwrap(), u64::MAX);
+        assert_eq!(parse_u8("P", "255").unwrap(), u8::MAX);
+        assert_eq!(parse_usize("P", "0").unwrap(), 0);
+        for result in [
+            parse_u32("P", "x").err(),
+            parse_u64("P", "-1").err(),
+            parse_u8("P", "256").err(),
+            parse_usize("P", "1.5").err(),
+        ] {
+            assert!(matches!(result, Some(ConfigError::Invalid { .. })));
+        }
+
+        // Duration: hours suffix or plain seconds, strictly parsed.
+        assert_eq!(
+            parse_duration_hours("JWT_EXPIRY", "2h").unwrap(),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(
+            parse_duration_hours("JWT_EXPIRY", " 3600 ").unwrap(),
+            Duration::from_secs(3600)
+        );
+        assert_eq!(
+            parse_duration_hours("JWT_EXPIRY", "0").unwrap(),
+            Duration::ZERO
+        );
+        for bad in ["", "1h30m", "-1", "1.5h", "abc", "99999999999999999999h"] {
+            assert!(
+                parse_duration_hours("JWT_EXPIRY", bad).is_err(),
+                "{bad:?} must not parse"
+            );
+        }
+
+        // PEM lists: `||` separated, trimmed, `\n` unescaped, empties dropped.
+        assert!(parse_optional_pem_list(None).is_empty());
+        assert!(parse_optional_pem_list(Some(String::new())).is_empty());
+        assert!(parse_optional_pem_list(Some("||  ||".into())).is_empty());
+        assert_eq!(
+            parse_optional_pem_list(Some("a\\nb|| c ".into())),
+            vec!["a\nb".to_string(), "c".to_string()]
+        );
+
+        // CSV: trims, drops empties, keeps every element (even "*" plus others).
+        assert_eq!(parse_csv(" a ,, b "), vec!["a", "b"]);
+        assert_eq!(parse_csv("*").len(), 1);
+        assert_eq!(parse_csv("*,https://x").len(), 2);
+
+        // env_required_pem unescapes and reports the missing variable.
+        assert!(matches!(
+            env_required("CONFIG_TEST_DEFINITELY_MISSING"),
+            Err(ConfigError::MissingVar(name)) if name == "CONFIG_TEST_DEFINITELY_MISSING"
+        ));
+        std::env::set_var("CONFIG_TEST_PEM", "line1\\nline2");
+        assert_eq!(env_required_pem("CONFIG_TEST_PEM").unwrap(), "line1\nline2");
+        std::env::remove_var("CONFIG_TEST_PEM");
+
+        // URL locality.
+        assert!(is_local_base_url("http://localhost:3000"));
+        assert!(is_local_base_url("https://127.0.0.1"));
+        assert!(is_local_base_url("http://[::1]:8080"));
+        assert!(!is_local_base_url("http://0.0.0.0:3000"));
+        assert!(!is_local_base_url("https://app.example.com"));
+        assert!(!is_local_base_url("not a url"));
+        assert!(!is_local_base_url(""));
+
+        // Host normalisation: ports, case, trailing dot, bracketed IPv6.
+        assert_eq!(normalize_host("App.ApexMail.EE."), "app.apexmail.ee");
+        assert_eq!(
+            normalize_host("admin.apexmail.ee:3002"),
+            "admin.apexmail.ee"
+        );
+        assert_eq!(normalize_host("[::1]:3000"), "::1");
+        assert_eq!(normalize_host("[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(normalize_host("2001:db8::1"), "2001:db8::1");
+        assert_eq!(normalize_host("  127.0.0.1  "), "127.0.0.1");
+
+        // Connection-budget math and refusals.
+        assert_eq!(default_db_cluster_connection_budget(0), 0);
+        assert_eq!(default_db_cluster_connection_budget(20), 48);
+        assert_eq!(default_max_inflight_requests(0), 16);
+        assert!(validate_db_connection_budget(20, 0, 3, Some(60)).is_err());
+        assert!(validate_db_connection_budget(20, 4, 3, Some(60)).is_err());
+        assert!(validate_db_connection_budget(20, 3, 3, Some(60)).is_ok());
+        // No explicit budget + oversized potential: warns, still Ok.
+        assert!(validate_db_connection_budget(20, 100, 3, None).is_ok());
+
+        // Secret and setting validators.
+        assert!(validate_secret("S", " short ", 8, &[]).is_err());
+        assert!(validate_secret("S", "CHANGEME", 4, &["changeme"]).is_err());
+        assert!(validate_secret("S", "a-strong-secret-value", 4, &["changeme"]).is_ok());
+        assert!(validate_required_setting("S", "   ", &[]).is_err());
+        assert!(validate_required_setting("S", "UNCONFIGURED", &["unconfigured"]).is_err());
+        assert!(validate_required_setting("S", "real", &["unconfigured"]).is_ok());
+        assert!(validate_https_url("U", "not a url").is_err());
+        assert!(validate_https_url("U", "http://x.test").is_err());
+        assert!(validate_https_url("U", "https://x.test").is_ok());
+        assert!(validate_rate_limit_config(100, 86_400).is_ok());
+        assert!(validate_rate_limit_config(1, 86_401).is_err());
+    }
+
+    #[test]
+    fn adversarial_config_urls_and_key_chain() {
+        let _sandbox = EnvSandbox::new();
+        let mut config = super::tests::valid_production_config();
+        config.db_user = "user@name".into();
+        config.db_password = "p@ss:w/rd".into();
+        config.db_host = "db.internal".into();
+        config.db_port = 6543;
+        config.db_name = "apex".into();
+        // Built URL percent-encodes credentials.
+        std::env::remove_var("DATABASE_URL");
+        let url = config.database_url();
+        assert_eq!(
+            url,
+            "postgres://user%40name:p%40ss%3Aw%2Frd@db.internal:6543/apex?sslmode=disable"
+        );
+        // An explicit DATABASE_URL wins verbatim (sslmode and params intact).
+        std::env::set_var("DATABASE_URL", "postgres://x:y@h:1/z?sslmode=require");
+        assert_eq!(
+            config.database_url(),
+            "postgres://x:y@h:1/z?sslmode=require"
+        );
+        // A blank override falls back to the constructed URL.
+        std::env::set_var("DATABASE_URL", "   ");
+        assert!(config.database_url().starts_with("postgres://user%40name:"));
+
+        // Redis URL: absent password vs empty password.
+        config.redis_host = "redis.internal".into();
+        config.redis_port = 6380;
+        config.redis_db = 0;
+        config.redis_password = None;
+        assert_eq!(config.redis_url(), "redis://redis.internal:6380/0");
+        config.redis_password = Some(String::new());
+        assert_eq!(config.redis_url(), "redis://:@redis.internal:6380/0");
+
+        // JWT verification chain: current key first, previous keys appended.
+        config.jwt_public_key_pem = "current".into();
+        config.jwt_previous_public_keys_pem = vec!["prev1".into(), "prev2".into()];
+        assert_eq!(
+            config.jwt_verification_public_keys().collect::<Vec<_>>(),
+            vec!["current", "prev1", "prev2"]
+        );
+
+        // SES transport selection: only an explicit "smtp" opts out.
+        std::env::remove_var("EMAIL_TRANSPORT_TYPE");
+        assert!(Config::ses_transport_enabled());
+        for value in ["", "  ", "ses", "SES"] {
+            std::env::set_var("EMAIL_TRANSPORT_TYPE", value);
+            assert!(Config::ses_transport_enabled(), "{value:?}");
+        }
+        std::env::set_var("EMAIL_TRANSPORT_TYPE", " SMTP ");
+        assert!(!Config::ses_transport_enabled());
+    }
+
+    #[test]
+    fn adversarial_config_ui_surface_routing() {
+        let mut config = super::tests::valid_production_config();
+        config.ui_web_hosts = vec!["app.apexmail.ee".into(), "127.0.0.1".into()];
+        config.ui_control_plane_hosts = vec!["admin.apexmail.ee".into(), "localhost".into()];
+        config.ui_marketing_hosts = vec!["apexmail.ee".into()];
+        config.ui_marketing_surface = "marketing-zola".into();
+        config.ui_default_surface = Some("web".into());
+
+        // Case/port/trailing-dot variants all normalise before matching.
+        assert_eq!(
+            config.ui_surface_for_host(Some("APP.APEXMAIL.EE:443")),
+            Some("web")
+        );
+        assert_eq!(
+            config.ui_surface_for_host(Some("admin.apexmail.ee.")),
+            Some("control-plane")
+        );
+        assert_eq!(config.ui_surface_for_host(Some("[::1]:3000")), Some("web"));
+        assert_eq!(
+            config.ui_surface_for_host(Some("APEXMAIL.EE")),
+            Some("marketing-zola")
+        );
+        assert_eq!(
+            config.ui_surface_for_host(Some("unknown.example")),
+            Some("web")
+        );
+        assert_eq!(config.ui_surface_for_host(None), Some("web"));
+        // No default surface outside development: unknown hosts map to None.
+        config.ui_default_surface = None;
+        assert_eq!(config.ui_surface_for_host(None), None);
+        assert_eq!(config.ui_surface_for_host(Some("unknown.example")), None);
+        assert!(!config.is_explicit_web_host(None));
+        assert!(!config.is_explicit_web_host(Some("unknown.example")));
+        assert!(config.is_explicit_web_host(Some("127.0.0.1:3000")));
+    }
+
+    #[test]
+    fn adversarial_config_cp_auth_env_bounds() {
+        let sandbox = EnvSandbox::new();
+        let defaults = CpAuthConfig::from_env().unwrap();
+        assert!(defaults.allowed_ips.is_empty());
+        assert!(defaults.session_secret.starts_with("dev-cp-session-secret"));
+        assert_eq!(defaults.session_idle_timeout_secs, 900);
+        assert_eq!(defaults.session_absolute_timeout_secs, 14_400);
+
+        // The idle timeout must be > 0 AND strictly below the absolute one.
+        for (idle, absolute) in [("0", "100"), ("100", "100"), ("101", "100")] {
+            sandbox.set("CP_SESSION_IDLE_TIMEOUT_SECS", idle);
+            sandbox.set("CP_SESSION_ABSOLUTE_TIMEOUT_SECS", absolute);
+            assert!(
+                CpAuthConfig::from_env().is_err(),
+                "idle={idle} absolute={absolute} must be refused"
+            );
+        }
+        sandbox.set("CP_SESSION_IDLE_TIMEOUT_SECS", "60");
+        sandbox.set("CP_SESSION_ABSOLUTE_TIMEOUT_SECS", "120");
+        sandbox.set("CP_ALLOWED_IPS", "10.0.0.0/8, 192.168.0.0/16");
+        sandbox.set("CP_SESSION_SECRET", "explicit-cp-secret");
+        let config = CpAuthConfig::from_env().unwrap();
+        assert_eq!(config.allowed_ips.len(), 2);
+        assert_eq!(config.session_secret, "explicit-cp-secret");
+        assert_eq!(config.session_idle_timeout_secs, 60);
+        sandbox.set("CP_SESSION_IDLE_TIMEOUT_SECS", "not-a-number");
+        assert!(matches!(
+            CpAuthConfig::from_env(),
+            Err(ConfigError::Invalid { var, .. }) if var == "CP_SESSION_IDLE_TIMEOUT_SECS"
+        ));
+    }
+
+    // ── from_env: development defaults and overrides ────────────
+
+    #[test]
+    fn adversarial_config_from_env_dev_defaults_and_overrides() {
+        let sandbox = EnvSandbox::new();
+        sandbox.minimal_dev();
+        let config = Config::from_env().expect("minimal development env must load");
+        assert_eq!(config.environment, Environment::Development);
+        assert_eq!(config.port, 3000);
+        assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.db_max_connections, 50);
+        assert_eq!(config.api_replica_count, 1);
+        assert_eq!(config.expected_replica_count, 3);
+        assert_eq!(config.statement_cache_capacity, 500);
+        assert_eq!(config.query_timeout_seconds, 30);
+        assert_eq!(config.redis_pool_max_size, 100);
+        assert_eq!(config.rate_limit_max_requests, 1000);
+        assert_eq!(config.rate_limit_window_ms, 60_000);
+        assert_eq!(config.max_inflight_requests, 75);
+        // Default base URL is 0.0.0.0 (not a localhost host) -> no CORS.
+        assert!(config.cors_origins.is_empty());
+        assert_eq!(config.ui_default_surface.as_deref(), Some("web"));
+        assert!(config.session_secret.starts_with("dev-session-secret-"));
+        assert!(config
+            .impersonation_secret
+            .starts_with("dev-impersonation-secret-"));
+        assert!(config.csrf_secret.starts_with("dev-csrf-secret-"));
+        assert!(config
+            .tracking_secret_key
+            .starts_with("dev-tracking-secret-"));
+        assert_eq!(config.jwt_expiry, Duration::from_secs(86_400));
+        assert!(config.grader_enabled);
+        assert!(config.placement_enabled);
+        assert!(config.kiwi_enabled);
+        assert!(config.waf_enabled);
+        assert!(!config.waf_enforce);
+        assert_eq!(config.kiwi_algorithm, kiwicaptcha::PoWAlgorithm::Sha256);
+        assert_eq!(config.kiwi_difficulty_bits, 20);
+        assert_eq!(config.kiwi_argon_t, 3);
+        assert_eq!(config.kiwi_challenge_ttl_secs, 120);
+        assert_eq!(config.metrics_port, 9090);
+        assert!(config.public_rate_limit_enabled);
+        assert!(config.control_plane_api_key.is_none());
+        assert!(config.internal_service_token.is_none());
+
+        // Explicit overrides are honoured, including truthy/duration forms.
+        sandbox.set("PORT", "8080");
+        sandbox.set("DB_MAX_CONNECTIONS", "10");
+        sandbox.set("API_REPLICA_COUNT", "2");
+        sandbox.set("EXPECTED_REPLICA_COUNT", "7");
+        sandbox.set("DB_CLUSTER_CONNECTION_BUDGET", "999");
+        sandbox.set("RATE_LIMIT_MAX_REQUESTS", "5");
+        sandbox.set("RATE_LIMIT_WINDOW_MS", "1000");
+        sandbox.set("MAX_INFLIGHT_REQUESTS", "7");
+        sandbox.set("PUBLIC_RATE_LIMIT_ENABLED", "off");
+        sandbox.set("JWT_EXPIRY", "2h");
+        sandbox.set("CORS_ORIGINS", "https://a.test, https://b.test");
+        sandbox.set("REDIS_DB", "3");
+        sandbox.set("GRADER_ENABLED", "false");
+        sandbox.set("PLACEMENT_ENABLED", "false");
+        sandbox.set("KIWI_ENABLED", "false");
+        sandbox.set("KIWI_SECRET_KEY", "dev");
+        sandbox.set("WAF_ENABLED", "false");
+        sandbox.set("WAF_ENFORCE", "true");
+        sandbox.set("KIWI_MIN_DURATION_MS", "500");
+        sandbox.set("CONTROL_PLANE_API_KEY", "cp-key");
+        sandbox.set("INTERNAL_SERVICE_TOKEN", "token");
+        sandbox.set("SES_CONFIGURATION_SET", "cfg-set");
+        sandbox.set("INTERNAL_TLS_ENABLED", "true");
+        sandbox.set("DATABASE_REPLICA_URL", "postgres://replica/db");
+        sandbox.set("UI_DEFAULT_SURFACE", "control-plane");
+        let config = Config::from_env().expect("override env must load");
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.db_max_connections, 10);
+        assert_eq!(config.api_replica_count, 2);
+        assert_eq!(config.expected_replica_count, 7);
+        assert_eq!(config.db_cluster_connection_budget, Some(999));
+        assert_eq!(config.rate_limit_max_requests, 5);
+        assert_eq!(config.max_inflight_requests, 7);
+        assert!(!config.public_rate_limit_enabled);
+        assert_eq!(config.jwt_expiry, Duration::from_secs(7200));
+        assert_eq!(
+            config.cors_origins,
+            vec!["https://a.test", "https://b.test"]
+        );
+        assert_eq!(config.redis_db, 3);
+        assert_eq!(config.redis_pool_max_size, 32, "max(32, 10*2)");
+        assert!(!config.grader_enabled);
+        assert!(!config.placement_enabled);
+        assert!(!config.kiwi_enabled);
+        assert!(!config.waf_enabled);
+        assert!(config.waf_enforce);
+        assert_eq!(config.kiwi_min_duration_ms, Some(500));
+        assert_eq!(config.control_plane_api_key.as_deref(), Some("cp-key"));
+        assert_eq!(config.internal_service_token.as_deref(), Some("token"));
+        assert_eq!(config.ses_configuration_set.as_deref(), Some("cfg-set"));
+        assert!(config.internal_tls_enabled);
+        assert_eq!(
+            config.database_replica_url.as_deref(),
+            Some("postgres://replica/db")
+        );
+        assert_eq!(config.ui_default_surface.as_deref(), Some("control-plane"));
+    }
+
+    // ── from_env: refusals ──────────────────────────────────────
+
+    #[test]
+    fn adversarial_config_from_env_rejections() {
+        let sandbox = EnvSandbox::new();
+        sandbox.minimal_dev();
+        std::env::remove_var("JWT_PRIVATE_KEY_PEM");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::MissingVar(name)) if name == "JWT_PRIVATE_KEY_PEM"
+        ));
+        sandbox.minimal_dev();
+
+        for (key, value) in [
+            ("PORT", "abc"),
+            ("REDIS_DB", "300"),
+            ("DB_PORT", "0x10"),
+            ("GRADER_RATE_LIMIT", "-1"),
+            ("MAX_INFLIGHT_REQUESTS", "0"),
+            ("RATE_LIMIT_MAX_REQUESTS", "0"),
+            ("RATE_LIMIT_WINDOW_MS", "0"),
+            ("API_REPLICA_COUNT", "0"),
+            ("DB_CLUSTER_CONNECTION_BUDGET", "1"),
+            ("STATEMENT_CACHE_CAPACITY", "nope"),
+            ("QUERY_TIMEOUT_SECONDS", "nope"),
+            ("WEBHOOK_TIMEOUT_MS", "nope"),
+            ("IDEMPOTENCY_TTL_SECONDS", "nope"),
+            ("METRICS_PORT", "99999"),
+            ("HTTP_CLIENT_TIMEOUT_SECONDS", "nope"),
+        ] {
+            sandbox.minimal_dev();
+            sandbox.set(key, value);
+            let error = Config::from_env().err();
+            let expected_var = if key == "DB_PORT" { "DB_PORT" } else { key };
+            match error {
+                Some(ConfigError::Invalid { var, .. }) => assert_eq!(var, expected_var),
+                Some(ConfigError::MissingVar(name)) => {
+                    panic!("{key}={value}: unexpected MissingVar({name})")
+                }
+                Some(ConfigError::SecurityCheck(reason)) => {
+                    panic!("{key}={value}: unexpected SecurityCheck({reason})")
+                }
+                None => panic!("{key}={value} must be refused"),
+            }
+        }
+
+        // KiwiCaptcha Argon2id contract: m_kib >= 8*p and t in 3..=6, p == 1.
+        sandbox.minimal_dev();
+        sandbox.set("KIWI_ALGORITHM", "argon2id");
+        sandbox.set("KIWI_ARGON_M_KIB", "1");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid { var, .. }) if var == "KIWI_ARGON_M_KIB"
+        ));
+        sandbox.set("KIWI_ARGON_M_KIB", "16384");
+        sandbox.set("KIWI_ARGON_T", "1");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid { var, .. }) if var == "KIWI_ARGON_T"
+        ));
+        sandbox.set("KIWI_ARGON_T", "7");
+        assert!(Config::from_env().is_err());
+        sandbox.set("KIWI_ARGON_T", "3");
+        sandbox.set("KIWI_ARGON_P", "2");
+        assert!(Config::from_env().is_err());
+        sandbox.set("KIWI_ARGON_P", "1");
+        // Argon2id difficulty is clamped to the browser-solvable ceiling.
+        sandbox.set("KIWI_ARGON2_DIFFICULTY_BITS", "255");
+        sandbox.set("KIWI_AUTO_TUNE_MAX_BITS", "255");
+        let config = Config::from_env().expect("argon2id config must load");
+        assert_eq!(config.kiwi_algorithm, kiwicaptcha::PoWAlgorithm::Argon2id);
+        assert!(config.kiwi_argon2_difficulty_bits <= SOLVER_MAX_ARGON2_TARGET_BITS);
+        assert!(config.kiwi_auto_tune_max_bits <= SOLVER_MAX_TARGET_BITS);
+    }
+
+    #[test]
+    #[should_panic(expected = "KIWI_MIN_DURATION_MS")]
+    fn adversarial_config_kiwi_min_duration_floor_panics() {
+        let sandbox = EnvSandbox::new();
+        sandbox.minimal_dev();
+        // A floor at/above the TTL leaves no acceptable submission window.
+        sandbox.set("KIWI_CHALLENGE_TTL_SECS", "10");
+        sandbox.set("KIWI_MIN_DURATION_MS", "10000");
+        let _ = Config::from_env();
+    }
+
+    // ── from_env: production gate ───────────────────────────────
+
+    #[test]
+    fn adversarial_config_production_gate() {
+        let sandbox = EnvSandbox::new();
+        sandbox.minimal_dev();
+        sandbox.set("ENVIRONMENT", "production");
+        // Explicit production secrets are required, not generated.
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::MissingVar(name)) if name == "SESSION_SECRET"
+        ));
+
+        strong_production(&sandbox);
+        sandbox.set("API_KEY_HASH_SECRET", "short");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::SecurityCheck(reason)) if reason.contains("API_KEY_HASH_SECRET")
+        ));
+
+        strong_production(&sandbox);
+        sandbox.set("BASE_URL", "http://app.apexmail.ee");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::SecurityCheck(reason)) if reason.contains("https")
+        ));
+
+        strong_production(&sandbox);
+        sandbox.set("BILLING_COMPANY_IBAN", "UNCONFIGURED");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::SecurityCheck(reason)) if reason.contains("BILLING_COMPANY_IBAN")
+        ));
+
+        strong_production(&sandbox);
+        sandbox.set("CORS_ORIGINS", "*");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::SecurityCheck(reason)) if reason.contains("wildcard")
+        ));
+
+        strong_production(&sandbox);
+        sandbox.set("PLACEMENT_ENABLED", "true");
+        sandbox.set("PLACEMENT_ENCRYPTION_SECRET", "change-me-in-production");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::SecurityCheck(reason)) if reason.contains("PLACEMENT_ENCRYPTION_SECRET")
+        ));
+
+        // Fully strong production environment loads; the dev-only default
+        // surface and wildcard CORS are gone.
+        strong_production(&sandbox);
+        let config = Config::from_env().expect("strong production env must load");
+        assert_eq!(config.environment, Environment::Production);
+        assert!(config.environment.is_production());
+        assert!(config.ui_default_surface.is_none());
+        assert!(config.cors_origins.is_empty());
+        assert!(!config.placement_enabled);
+        assert!(!config.session_secret.starts_with("dev-"));
+    }
+
+    #[test]
+    fn adversarial_config_environment_aliases_and_previous_keys() {
+        let sandbox = EnvSandbox::new();
+        sandbox.minimal_dev();
+        for (raw, expected) in [
+            ("production", Environment::Production),
+            ("PROD", Environment::Production),
+            ("staging", Environment::Staging),
+            ("Staging", Environment::Staging),
+            ("weird", Environment::Development),
+            ("", Environment::Development),
+        ] {
+            if expected == Environment::Production {
+                strong_production(&sandbox);
+            } else {
+                sandbox.minimal_dev();
+            }
+            sandbox.set("ENVIRONMENT", raw);
+            let config = Config::from_env().expect("valid env must load");
+            assert_eq!(config.environment, expected, "ENVIRONMENT={raw:?}");
+        }
+
+        // Previous verification keys are split and unescaped.
+        sandbox.minimal_dev();
+        sandbox.set("JWT_PREVIOUS_PUBLIC_KEYS_PEM", "a\\nb||c");
+        let config = Config::from_env().unwrap();
+        assert_eq!(
+            config.jwt_previous_public_keys_pem,
+            vec!["a\nb".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn adversarial_config_generated_secrets_and_env_or() {
+        // Generated development secrets are unique per call and carry the
+        // label prefix, so parallel test binaries never share a signing key.
+        let first = generated_dev_secret("session-secret");
+        let second = generated_dev_secret("session-secret");
+        assert_ne!(first, second);
+        assert!(first.starts_with("dev-session-secret-"));
+        assert!(first.len() > "dev-session-secret-".len() + 30);
+
+        // env_or: exact override wins, missing falls back, empty is a value.
+        std::env::remove_var("CONFIG_ADVERSARIAL_MARKER");
+        assert_eq!(env_or("CONFIG_ADVERSARIAL_MARKER", "fallback"), "fallback");
+        std::env::set_var("CONFIG_ADVERSARIAL_MARKER", "");
+        assert_eq!(env_or("CONFIG_ADVERSARIAL_MARKER", "fallback"), "");
+        std::env::set_var("CONFIG_ADVERSARIAL_MARKER", "  spaced  ");
+        assert_eq!(
+            env_or("CONFIG_ADVERSARIAL_MARKER", "fallback"),
+            "  spaced  ",
+            "env_or must not trim"
+        );
+        std::env::remove_var("CONFIG_ADVERSARIAL_MARKER");
+
+        // default_cors_origins: only development + a localhost base URL gets
+        // the wildcard; IPv6 loopback counts as local (bracketed spelling).
+        assert_eq!(
+            default_cors_origins(Environment::Development, "http://[::1]:3000"),
+            vec!["*"]
+        );
+        assert!(default_cors_origins(Environment::Staging, "http://localhost:3000").is_empty());
+        assert!(
+            default_cors_origins(Environment::Production, "https://app.apexmail.ee").is_empty()
+        );
     }
 }

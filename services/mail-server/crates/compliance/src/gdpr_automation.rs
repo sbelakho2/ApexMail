@@ -3644,3 +3644,421 @@ fn gdpr_requests_mirror_id_fits_varchar_26() {
     assert_eq!(cp_request_id.len(), 26);
     assert!(cp_request_id.starts_with("gdr_"));
 }
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// GDPR clocks and consent proofs: a confirmation token must be single-use and
+// time-bounded, retention must delete only what it may, and an objection or
+// restriction must actually stop processing (suppression + consent
+// withdrawal) while the request records the legal outcome.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+    use crate::types::ConsentType;
+
+    async fn automation(suffix: &str) -> Option<(PgPool, GdprAutomation)> {
+        let pool =
+            test_support::canonical_pool(&format!("gdpr_{suffix}"), &format!("gdpr_{suffix}"))
+                .await?;
+        let automation = GdprAutomation::new(
+            pool.clone(),
+            test_support::redis_pool(),
+            test_support::gdpr_config(),
+        );
+        Some((pool, automation))
+    }
+
+    #[tokio::test]
+    async fn double_opt_in_is_single_use_time_bounded_and_records_proof() {
+        let Some((pool, automation)) = automation("doi").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let token = automation
+            .initiate_double_opt_in(&tenant, "sub-1", ConsentType::Marketing, "a@example.test")
+            .await
+            .expect("initiate");
+        assert!(!token.is_empty());
+
+        // A wrong token never confirms.
+        assert!(!automation
+            .confirm_double_opt_in(&tenant, "sub-1", ConsentType::Marketing, "wrong")
+            .await
+            .expect("wrong token"));
+        // The right token confirms exactly once and records the consent with
+        // the double-opt-in source (the legal proof).
+        assert!(automation
+            .confirm_double_opt_in(&tenant, "sub-1", ConsentType::Marketing, &token)
+            .await
+            .expect("confirm"));
+        let records = automation
+            .get_consent_records(&tenant, "sub-1")
+            .await
+            .expect("records");
+        assert_eq!(records.len(), 1);
+        assert!(records[0].granted);
+        assert_eq!(records[0].source.to_string(), "double_opt_in");
+        assert_eq!(records[0].consent_type, ConsentType::Marketing);
+        assert!(records[0].granted_at.is_some());
+        // The token was consumed: replay fails.
+        assert!(!automation
+            .confirm_double_opt_in(&tenant, "sub-1", ConsentType::Marketing, &token)
+            .await
+            .expect("replay"));
+        // A different subscriber cannot use it.
+        assert!(!automation
+            .confirm_double_opt_in(&tenant, "sub-2", ConsentType::Marketing, &token)
+            .await
+            .expect("other subscriber"));
+
+        // An expired token is refused AND cleaned up.
+        let expired = automation
+            .initiate_double_opt_in(&tenant, "sub-3", ConsentType::Marketing, "c@example.test")
+            .await
+            .expect("initiate");
+        sqlx::query("UPDATE double_opt_in_tokens SET expires_at = NOW() - INTERVAL '1 hour' WHERE tenant_id = $1 AND subscriber_id = 'sub-3'")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("expire");
+        assert!(!automation
+            .confirm_double_opt_in(&tenant, "sub-3", ConsentType::Marketing, &expired)
+            .await
+            .expect("expired"));
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM double_opt_in_tokens WHERE tenant_id = $1 AND subscriber_id = 'sub-3'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(remaining, 0, "an expired token is deleted, not left live");
+
+        // Re-initiating replaces the previous token (no token accumulation).
+        let first = automation
+            .initiate_double_opt_in(&tenant, "sub-4", ConsentType::Marketing, "d@example.test")
+            .await
+            .expect("first");
+        let second = automation
+            .initiate_double_opt_in(&tenant, "sub-4", ConsentType::Marketing, "d@example.test")
+            .await
+            .expect("second");
+        assert_ne!(first, second);
+        assert!(!automation
+            .confirm_double_opt_in(&tenant, "sub-4", ConsentType::Marketing, &first)
+            .await
+            .expect("old token"));
+        assert!(automation
+            .confirm_double_opt_in(&tenant, "sub-4", ConsentType::Marketing, &second)
+            .await
+            .expect("new token"));
+    }
+
+    #[tokio::test]
+    async fn consent_certificates_are_signed_and_unknown_ids_are_refused() {
+        let Some((_pool, automation)) = automation("cert").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let record = automation
+            .record_consent(
+                &tenant,
+                "sub-1",
+                "proof@example.test",
+                ConsentType::Marketing,
+                true,
+                crate::types::ConsentSource::Api,
+                None,
+            )
+            .await
+            .expect("record");
+        let certificate = automation
+            .generate_consent_certificate(&record.id)
+            .await
+            .expect("certificate");
+        assert!(
+            certificate.contains(&record.id),
+            "the certificate binds the record id"
+        );
+        assert!(certificate.contains(&tenant));
+        // The signed certificate is stored on the record.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT proof_document FROM consent_records WHERE id = $1")
+                .bind(&record.id)
+                .fetch_one(&_pool)
+                .await
+                .expect("proof");
+        assert_eq!(stored.as_deref(), Some(certificate.as_str()));
+        // Unknown consent ids are explicit errors, not fabricated proofs.
+        assert!(automation
+            .generate_consent_certificate("no-such-consent")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn retention_deletes_only_withdrawn_consents_and_expired_exports() {
+        let Some((pool, automation)) = automation("retention").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let old = Utc::now() - chrono::Duration::days(4000);
+        // Old withdrawn consent: deletable.
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, revoked_at, source, metadata)
+             VALUES (gen_random_uuid(), $1, 'withdrawn', 'w@example.test', 'marketing', false, $2, $2, 'api', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .bind(old)
+        .execute(&pool)
+        .await
+        .expect("withdrawn");
+        // Old but GRANTED consent: retained (the proof outlives the request).
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, source, metadata)
+             VALUES (gen_random_uuid(), $1, 'granted', 'g@example.test', 'marketing', true, $2, 'api', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .bind(old)
+        .execute(&pool)
+        .await
+        .expect("granted");
+        // Fresh withdrawal: retained until the retention window passes.
+        sqlx::query(
+            "INSERT INTO consent_records
+               (id, tenant_id, subscriber_id, email, consent_type, granted, granted_at, revoked_at, source, metadata)
+             VALUES (gen_random_uuid(), $1, 'fresh', 'f@example.test', 'marketing', false, NOW(), NOW(), 'api', '{}'::jsonb)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("fresh");
+
+        let (consents, exports) = automation.enforce_retention().await.expect("retention");
+        assert_eq!(consents, 1, "only the old withdrawn consent is deleted");
+        let survivors: Vec<String> = sqlx::query_scalar(
+            "SELECT subscriber_id FROM consent_records WHERE tenant_id = $1 ORDER BY subscriber_id",
+        )
+        .bind(&tenant)
+        .fetch_all(&pool)
+        .await
+        .expect("survivors");
+        assert_eq!(survivors, vec!["fresh".to_string(), "granted".to_string()]);
+        assert_eq!(exports, 0);
+        // A second sweep is a no-op.
+        assert_eq!(automation.enforce_retention().await.expect("again"), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn objection_and_restriction_suppress_and_withdraw_consents() {
+        let Some((pool, automation)) = automation("objection").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let email = "objector@example.test";
+        // A live marketing consent to be withdrawn by the objection.
+        automation
+            .record_consent(
+                &tenant,
+                "sub-1",
+                email,
+                ConsentType::Marketing,
+                true,
+                crate::types::ConsentSource::Api,
+                None,
+            )
+            .await
+            .expect("consent");
+
+        for (request_id, request_type) in [("REQ-obj", "objection"), ("REQ-res", "restriction")] {
+            sqlx::query(
+                "INSERT INTO data_subject_requests
+                   (id, tenant_id, request_type, email, verification_token_hash, verified,
+                    verified_at, status, requested_at, expires_at)
+                 VALUES ($1, $2, $3, $4, 'hash', true, NOW(), 'verified', NOW(),
+                         NOW() + INTERVAL '30 days')",
+            )
+            .bind(request_id)
+            .bind(&tenant)
+            .bind(request_type)
+            .bind(email)
+            .execute(&pool)
+            .await
+            .expect("request");
+            let result = automation
+                .process_request(request_id)
+                .await
+                .expect("process");
+            assert!(result.rejection_reason.is_none(), "{result:?}");
+            // The request reaches a terminal, recorded outcome.
+            let (status, completed): (String, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status, completed_at FROM data_subject_requests WHERE id = $1",
+            )
+            .bind(request_id)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+            assert!(
+                matches!(
+                    status.as_str(),
+                    "completed" | "restricted" | "objection_upheld"
+                ),
+                "{request_type}: {status}"
+            );
+            assert!(completed.is_some(), "{request_type} must record completion");
+        }
+
+        // Processing is actually stopped: the subject is suppressed, and the
+        // marketing consent is withdrawn.
+        let suppressed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM suppression_list WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant)
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .expect("suppression");
+        assert_eq!(suppressed, 1);
+        let reason: String = sqlx::query_scalar(
+            "SELECT reason FROM suppression_list WHERE tenant_id = $1 AND email = $2",
+        )
+        .bind(&tenant)
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .expect("reason");
+        assert_eq!(reason, "gdpr_restriction");
+        let live_consents: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM consent_records
+             WHERE tenant_id = $1 AND email = $2 AND granted = true AND revoked_at IS NULL",
+        )
+        .bind(&tenant)
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .expect("live consents");
+        assert_eq!(live_consents, 0, "the objection withdrew the live consent");
+
+        // Processing an unknown request is an explicit error.
+        assert!(automation.process_request("no-such-request").await.is_err());
+        // A restriction on a fresh subject creates the suppression entry.
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified,
+                verified_at, status, requested_at, expires_at)
+             VALUES ('REQ-res-2', $1, 'restriction', 'other@example.test', 'hash', true, NOW(),
+                     'verified', NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("second request");
+        automation
+            .process_request("REQ-res-2")
+            .await
+            .expect("process");
+        let suppressed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM suppression_list WHERE tenant_id = $1 AND email = 'other@example.test'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("suppression");
+        assert_eq!(suppressed, 1);
+    }
+
+    #[tokio::test]
+    async fn verification_tokens_are_compared_and_consumed_once() {
+        // Verification enqueues the request on the broker: without a configured
+        // Redis there is no queue, so the suite soft-skips (workspace
+        // convention).
+        let Some(redis) = test_support::configured_redis() else {
+            return;
+        };
+        let Some((pool, _)) = automation("verify").await else {
+            return;
+        };
+        let automation = GdprAutomation::new(pool.clone(), redis, test_support::gdpr_config());
+        let tenant = test_support::unique_tenant();
+        let token = "unit-verification-token";
+        let hash = crate::gdpr_automation::sha256_hex(token);
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, expires_at)
+             VALUES ('REQ-verify', $1, 'access', 'v@example.test', $2, false,
+                     'pending_verification', NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .bind(&tenant)
+        .bind(&hash)
+        .execute(&pool)
+        .await
+        .expect("request");
+
+        // A wrong token is a false answer; the request stays unverified.
+        assert!(!automation
+            .verify_request("REQ-verify", "wrong-token")
+            .await
+            .expect("wrong"));
+        let verified: bool = sqlx::query_scalar(
+            "SELECT verified FROM data_subject_requests WHERE id = 'REQ-verify'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("flag");
+        assert!(!verified);
+        // The right token verifies exactly once.
+        assert!(automation
+            .verify_request("REQ-verify", token)
+            .await
+            .expect("verify"));
+        assert!(!automation
+            .verify_request("REQ-verify", token)
+            .await
+            .expect("replay"));
+        // Unknown request ids are a false answer, never an error/fabrication.
+        assert!(!automation
+            .verify_request("no-such-request", token)
+            .await
+            .expect("unknown"));
+    }
+
+    #[tokio::test]
+    async fn request_stats_are_explicit_zeros_and_tenant_scoped() {
+        let Some((pool, automation)) = automation("stats").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let empty = automation
+            .get_request_stats(Some(&tenant))
+            .await
+            .expect("stats");
+        assert_eq!(empty["total"], serde_json::json!(0));
+        assert_eq!(empty["pending_verification"], serde_json::json!(0));
+        // The all-tenant view is a superset, not a different shape.
+        let global = automation.get_request_stats(None).await.expect("global");
+        assert!(global["total"].as_i64().unwrap_or(0) >= 0);
+        sqlx::query(
+            "INSERT INTO data_subject_requests
+               (id, tenant_id, request_type, email, verification_token_hash, verified, status,
+                requested_at, expires_at)
+             VALUES ('REQ-stats', $1, 'access', 's@example.test', 'hash', true, 'verified',
+                     NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("request");
+        let stats = automation
+            .get_request_stats(Some(&tenant))
+            .await
+            .expect("stats");
+        assert_eq!(stats["total"], serde_json::json!(1));
+        assert_eq!(stats["verified"], serde_json::json!(1));
+        assert_eq!(stats["pending_verification"], serde_json::json!(0));
+    }
+}

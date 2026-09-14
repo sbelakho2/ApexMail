@@ -2412,4 +2412,1290 @@ mod tests {
             .await
             .unwrap();
     }
+    // ═══════════════════════════════════════════════════════════════════════
+    // Adversarial DB-backed storage suite
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Provision the canonical database and return a ready storage handle.
+    async fn adversarial_storage(test_name: &str) -> Option<(MessageStorage, PgPool)> {
+        let pool = optional_pool(test_name).await?;
+        let storage = MessageStorage::new(pool.clone());
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return None;
+        }
+        Some((storage, pool))
+    }
+
+    /// Create an account + return (account, its INBOX mailbox).
+    async fn account_with_inbox(storage: &MessageStorage, tag: &str) -> (Account, Mailbox) {
+        let email = format!("{tag}-{}@example.com", Uuid::new_v4());
+        let account = storage
+            .create_account(&email, "not-a-real-hash", Some("Adversarial"))
+            .await
+            .expect("create account");
+        let inbox = storage
+            .list_mailboxes(&account.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .expect("default inbox");
+        (account, inbox)
+    }
+
+    #[tokio::test]
+    async fn account_and_mailbox_lifecycle_is_strict() {
+        let Some((storage, pool)) = adversarial_storage("adv_account_mailbox").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+
+        // An address without a domain is refused before any SQL.
+        let err = storage
+            .create_account("not-an-email", "h", None)
+            .await
+            .expect_err("address without @ must be refused");
+        assert!(err.to_string().contains("Invalid email"), "{err}");
+
+        let (account, inbox) = account_with_inbox(&storage, "lifecycle").await;
+        assert_eq!(account.domain, "example.com");
+        assert_eq!(account.display_name.as_deref(), Some("Adversarial"));
+        assert!(account.quota_bytes > 0);
+
+        // The six canonical defaults exist with their typed kinds.
+        let mailboxes = storage.list_mailboxes(&account.id).await.unwrap();
+        assert_eq!(mailboxes.len(), 6);
+        for (name, kind) in [
+            ("Inbox", MailboxType::Inbox),
+            ("Sent", MailboxType::Sent),
+            ("Drafts", MailboxType::Drafts),
+            ("Trash", MailboxType::Trash),
+            ("Spam", MailboxType::Spam),
+            ("Archive", MailboxType::Archive),
+        ] {
+            let found = mailboxes.iter().find(|m| m.name == name).expect(name);
+            assert_eq!(found.mailbox_type, kind);
+            assert_eq!(found.uidnext, 1, "fresh mailbox starts at UID 1");
+        }
+
+        // Duplicate account email is a typed unique violation.
+        let dup = storage.create_account(&account.email, "h", None).await;
+        assert!(dup.is_err(), "duplicate email must fail");
+        // Lookups are exact and scoped.
+        assert_eq!(
+            storage
+                .get_account_by_email(&account.email)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            account.id
+        );
+        assert!(storage
+            .get_account_by_email("nobody@example.com")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_account(&Uuid::new_v4())
+            .await
+            .unwrap()
+            .is_none());
+
+        // get_mailbox_by_name is case-insensitive.
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "inbox")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            inbox.id
+        );
+        assert!(storage
+            .get_mailbox_by_name(&account.id, "no-such-mailbox")
+            .await
+            .unwrap()
+            .is_none());
+
+        // get_mailbox_by_type covers every variant; Custom intentionally
+        // resolves nothing (there is no "custom" type column value).
+        for kind in [
+            MailboxType::Inbox,
+            MailboxType::Sent,
+            MailboxType::Drafts,
+            MailboxType::Trash,
+            MailboxType::Spam,
+            MailboxType::Archive,
+        ] {
+            assert!(
+                storage
+                    .get_mailbox_by_type(&account.id, kind)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "missing default mailbox {kind:?}"
+            );
+        }
+        assert!(storage
+            .get_mailbox_by_type(&account.id, MailboxType::Custom)
+            .await
+            .unwrap()
+            .is_none());
+
+        // create_mailbox: empty name refused, duplicate refused, special-use
+        // mapped to the canonical type.
+        assert!(storage
+            .create_mailbox(&account.id, "   ", None)
+            .await
+            .is_err());
+        assert!(storage
+            .create_mailbox(&account.id, "Inbox", None)
+            .await
+            .is_err());
+        let project = storage
+            .create_mailbox(&account.id, "Projects", Some("\\Archive"))
+            .await
+            .expect("create mailbox");
+        assert_eq!(project.mailbox_type, MailboxType::Archive);
+        let custom = storage
+            .create_mailbox(&account.id, "Custom", Some("\\Bogus"))
+            .await
+            .unwrap();
+        assert_eq!(custom.mailbox_type, MailboxType::Custom);
+        assert_eq!(storage.list_mailboxes(&account.id).await.unwrap().len(), 8);
+
+        // delete_mailbox: system mailboxes are protected, custom ones go away
+        // exactly once, unknown names are false (never an error).
+        let del_err = storage
+            .delete_mailbox(&account.id, "Inbox")
+            .await
+            .expect_err("system mailbox must not be deletable");
+        assert!(del_err.to_string().contains("Cannot delete system mailbox"));
+        assert!(storage.delete_mailbox(&account.id, "Custom").await.unwrap());
+        assert!(!storage.delete_mailbox(&account.id, "Custom").await.unwrap());
+        assert!(!storage.delete_mailbox(&account.id, "Ghost").await.unwrap());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn store_message_uid_monotonic_per_mailbox_and_bound() {
+        let Some((storage, pool)) = adversarial_storage("adv_store_uid").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "uid").await;
+
+        let mut uids = Vec::new();
+        let mut total_raw = 0i64;
+        for i in 0..3 {
+            let msg = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<uid-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            total_raw += msg.raw_size;
+            let (id, uid) = storage.store_message(&msg).await.unwrap();
+            assert_eq!(id, msg.id);
+            uids.push(uid);
+        }
+        assert_eq!(uids, vec![1, 2, 3], "UIDs are 1-based and monotonic");
+
+        // Counters and usage follow the inserts.
+        let refreshed = storage
+            .get_mailbox_by_name(&account.id, "Inbox")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.total_messages, 3);
+        assert_eq!(refreshed.unread_messages, 3);
+        assert_eq!(refreshed.uidnext, 4);
+        let (used, quota, used_messages) = storage.get_account_quota(&account.id).await.unwrap();
+        assert_eq!(used, total_raw);
+        assert_eq!(used_messages, 3);
+        assert!(quota > 0);
+
+        // A mailbox of a DIFFERENT account is refused (cross-account write).
+        let (other_account, _) = account_with_inbox(&storage, "uid-other").await;
+        let mut foreign = sample_message(
+            other_account.id,
+            inbox.id,
+            &format!("<foreign-{}@example.com>", Uuid::new_v4()),
+        );
+        foreign.id = Uuid::new_v4();
+        let err = storage
+            .store_message(&foreign)
+            .await
+            .expect_err("mailbox belongs to another account");
+        assert!(err.to_string().contains("does not belong"), "{err}");
+
+        // Per-mailbox dedup: redelivery collapses, a second mailbox does not.
+        let mid = format!("<dedup-adv-{}@example.com>", Uuid::new_v4());
+        let first = sample_message(account.id, inbox.id, &mid);
+        let (id1, uid1) = storage.store_message(&first).await.unwrap();
+        let mut redelivery = first.clone();
+        redelivery.id = Uuid::new_v4();
+        let (id2, uid2) = storage.store_message(&redelivery).await.unwrap();
+        assert_eq!((id1, uid1), (id2, uid2), "same mailbox dedups");
+
+        let sent = storage
+            .get_mailbox_by_type(&account.id, MailboxType::Sent)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut elsewhere = first.clone();
+        elsewhere.id = Uuid::new_v4();
+        elsewhere.mailbox_id = sent.id;
+        let (id3, uid3) = storage.store_message(&elsewhere).await.unwrap();
+        assert_ne!(id3, id1, "a different mailbox holds its own copy");
+        assert_ne!(uid3, uid1, "UID space is per mailbox");
+
+        // An EMPTY message-id is never deduplicated.
+        let mut no_mid = sample_message(account.id, inbox.id, "");
+        no_mid.id = Uuid::new_v4();
+        let (id_empty_1, _) = storage.store_message(&no_mid).await.unwrap();
+        no_mid.id = Uuid::new_v4();
+        let (id_empty_2, _) = storage.store_message(&no_mid).await.unwrap();
+        assert_ne!(id_empty_1, id_empty_2, "empty message-id must not dedup");
+
+        pool.close().await;
+    }
+
+    /// UID allocation must stay unique and strictly increasing when many
+    /// writers race for the same mailbox.
+    #[tokio::test]
+    async fn concurrent_stores_allocate_unique_monotonic_uids() {
+        let Some((storage, pool)) = adversarial_storage("adv_concurrent_uid").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "concurrent").await;
+        let storage = std::sync::Arc::new(storage);
+
+        // The canonical fixture pool holds 4 connections; 3 concurrent
+        // writers exercise real contention without exhausting it.
+        const WRITERS: usize = 3;
+        let mut handles = Vec::new();
+        for w in 0..WRITERS {
+            let storage = std::sync::Arc::clone(&storage);
+            handles.push(tokio::spawn(async move {
+                let msg = sample_message(
+                    account.id,
+                    inbox.id,
+                    &format!("<race-{w}-{}@example.com>", Uuid::new_v4()),
+                );
+                storage.store_message(&msg).await.map(|(_, uid)| uid)
+            }));
+        }
+        let mut uids = Vec::new();
+        for handle in handles {
+            uids.push(handle.await.unwrap().expect("concurrent store"));
+        }
+        uids.sort_unstable();
+        uids.dedup();
+        assert_eq!(uids.len(), WRITERS, "every writer got a unique UID");
+        assert_eq!(uids.first().copied(), Some(1));
+        assert_eq!(uids.last().copied(), Some(WRITERS as i64));
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn quota_boundaries_are_exact() {
+        let Some((storage, pool)) = adversarial_storage("adv_quota").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "quota").await;
+
+        let first = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<q0-{}@example.com>", Uuid::new_v4()),
+        );
+        let size = first.raw_size;
+        storage.store_message(&first).await.unwrap();
+
+        // Exactly at the quota: allowed (the check is `>` not `>=`), so the
+        // cap is set to the bytes ALREADY used plus the incoming message.
+        let used_now: i64 =
+            sqlx::query_scalar("SELECT used_bytes FROM mail_accounts WHERE id = $1")
+                .bind(account.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(used_now, size, "one stored message accounts for its bytes");
+        sqlx::query("UPDATE mail_accounts SET quota_bytes = $2 WHERE id = $1")
+            .bind(account.id)
+            .bind(used_now + size)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut at_limit = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<q1-{}@example.com>", Uuid::new_v4()),
+        );
+        at_limit.id = Uuid::new_v4();
+        at_limit.raw_size = size;
+        storage
+            .store_message(&at_limit)
+            .await
+            .expect("exactly at the quota is allowed");
+
+        // One byte over: refused with the typed QuotaExceeded error.
+        let mut over = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<q2-{}@example.com>", Uuid::new_v4()),
+        );
+        over.id = Uuid::new_v4();
+        over.raw_size = 1;
+        let err = storage
+            .store_message(&over)
+            .await
+            .expect_err("one byte over the quota must be refused");
+        assert!(
+            err.downcast_ref::<QuotaExceeded>().is_some(),
+            "expected QuotaExceeded, got {err}"
+        );
+        // The refused row was not written.
+        assert!(storage.get_message(&over.id).await.unwrap().is_none());
+
+        // quota_bytes = 0 means unlimited.
+        sqlx::query("UPDATE mail_accounts SET quota_bytes = 0 WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let unlimited = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<q3-{}@example.com>", Uuid::new_v4()),
+        );
+        storage.store_message(&unlimited).await.unwrap();
+
+        // Message-count quota uses the per-mailbox counters as its source: a
+        // mailbox already at the cap rejects the next store.
+        sqlx::query("UPDATE mail_mailboxes SET total_messages = 100000 WHERE id = $1")
+            .bind(inbox.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut over_count = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<q4-{}@example.com>", Uuid::new_v4()),
+        );
+        over_count.id = Uuid::new_v4();
+        let err = storage
+            .store_message(&over_count)
+            .await
+            .expect_err("message-count cap must be enforced");
+        assert!(
+            err.downcast_ref::<QuotaExceeded>().is_some(),
+            "expected QuotaExceeded, got {err}"
+        );
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn flag_operations_merge_and_ignore_unknown_uids() {
+        use mail_proto::generated::FlagOperation;
+        let Some((storage, pool)) = adversarial_storage("adv_flags").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "flags").await;
+
+        let msg = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<f-{}@example.com>", Uuid::new_v4()),
+        );
+        let (_, uid) = storage.store_message(&msg).await.unwrap();
+
+        // Empty UID list is a no-op, not an error.
+        assert_eq!(
+            storage
+                .apply_flag_operation_by_uids(
+                    &account.id,
+                    &inbox.id,
+                    &[],
+                    &MessageFlags::default(),
+                    FlagOperation::Add
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        // Unknown UID touches nothing and reports 0 rows.
+        assert_eq!(
+            storage
+                .apply_flag_operation_by_uids(
+                    &account.id,
+                    &inbox.id,
+                    &[9_999_999],
+                    &MessageFlags::default(),
+                    FlagOperation::Add
+                )
+                .await
+                .unwrap(),
+            0
+        );
+
+        // Add merges, preserving flags that were already set.
+        let add = MessageFlags {
+            is_read: true,
+            labels: vec!["\\Answered".to_string(), "keyword".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            storage
+                .apply_flag_operation_by_uids(
+                    &account.id,
+                    &inbox.id,
+                    &[uid],
+                    &add,
+                    FlagOperation::Add
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        let flags = storage
+            .get_message_flags_by_uids(&account.id, &inbox.id, &[uid])
+            .await
+            .unwrap();
+        let current = flags.get(&uid).expect("flags row");
+        assert!(current.is_read);
+        assert_eq!(current.labels, vec!["\\Answered", "keyword"]);
+
+        // Add a starred flag; the earlier flags survive (OR-merge).
+        let star = MessageFlags {
+            is_starred: true,
+            labels: vec!["keyword".to_string()],
+            ..Default::default()
+        };
+        storage
+            .apply_flag_operation_by_uids(&account.id, &inbox.id, &[uid], &star, FlagOperation::Add)
+            .await
+            .unwrap();
+        let current = storage
+            .get_message_flags_by_uids(&account.id, &inbox.id, &[uid])
+            .await
+            .unwrap()
+            .remove(&uid)
+            .unwrap();
+        assert!(current.is_read && current.is_starred, "OR-merge keeps both");
+        assert_eq!(
+            current.labels,
+            vec!["\\Answered", "keyword"],
+            "labels dedup"
+        );
+
+        // Remove clears only the named flags/labels.
+        let remove = MessageFlags {
+            is_read: true,
+            labels: vec!["keyword".to_string()],
+            ..Default::default()
+        };
+        storage
+            .apply_flag_operation_by_uids(
+                &account.id,
+                &inbox.id,
+                &[uid],
+                &remove,
+                FlagOperation::Remove,
+            )
+            .await
+            .unwrap();
+        let current = storage
+            .get_message_flags_by_uids(&account.id, &inbox.id, &[uid])
+            .await
+            .unwrap()
+            .remove(&uid)
+            .unwrap();
+        assert!(!current.is_read, "removed flag clears");
+        assert!(current.is_starred, "unrelated flag stays");
+        assert_eq!(current.labels, vec!["\\Answered"]);
+
+        // Set (and Unspecified, the same destructive branch) overwrites all.
+        let set = MessageFlags {
+            is_deleted: true,
+            labels: vec!["only".to_string()],
+            ..Default::default()
+        };
+        storage
+            .apply_flag_operation_by_uids(
+                &account.id,
+                &inbox.id,
+                &[uid],
+                &set,
+                FlagOperation::Unspecified,
+            )
+            .await
+            .unwrap();
+        let current = storage
+            .get_message_flags_by_uids(&account.id, &inbox.id, &[uid])
+            .await
+            .unwrap()
+            .remove(&uid)
+            .unwrap();
+        assert!(current.is_deleted && !current.is_starred);
+        assert_eq!(current.labels, vec!["only"]);
+
+        // Single-message paths.
+        let single = MessageFlags {
+            is_starred: true,
+            labels: vec!["k1".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            storage
+                .update_message_flags_by_uid(&account.id, &inbox.id, uid, &single)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            storage
+                .update_message_flags_by_uid(&account.id, &inbox.id, 999_999, &single)
+                .await
+                .unwrap(),
+            0
+        );
+        let by_id = storage
+            .get_messages_by_uids(&account.id, &inbox.id, &[uid])
+            .await
+            .unwrap();
+        assert_eq!(by_id.len(), 1);
+        let mut flip = MessageFlags {
+            is_read: true,
+            ..Default::default()
+        };
+        flip.labels = vec!["bye".to_string()];
+        storage
+            .update_message_flags(&by_id[0].id, &flip)
+            .await
+            .unwrap();
+        let stored = storage.get_message(&by_id[0].id).await.unwrap().unwrap();
+        assert!(stored.is_read && !stored.is_starred);
+        assert_eq!(stored.labels, vec!["bye"]);
+
+        // Empty UID lists on the read paths return empty collections.
+        assert!(storage
+            .get_message_flags_by_uids(&account.id, &inbox.id, &[])
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(storage
+            .get_messages_by_uids(&account.id, &inbox.id, &[])
+            .await
+            .unwrap()
+            .is_empty());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn list_filters_metadata_and_pagination() {
+        let Some((storage, pool)) = adversarial_storage("adv_list").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "list").await;
+        let (other_account, other_inbox) = account_with_inbox(&storage, "list-other").await;
+
+        // Three messages: one read+starred, one read, one unseen.
+        let mut uids = Vec::new();
+        for i in 0..3 {
+            let mut msg = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<list-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            msg.id = Uuid::new_v4();
+            msg.is_read = i < 2;
+            msg.is_starred = i == 0;
+            msg.raw_size = 10 + i;
+            let (_, uid) = storage.store_message(&msg).await.unwrap();
+            uids.push(uid);
+        }
+        // A row in another account's mailbox must never appear.
+        let foreign = sample_message(
+            other_account.id,
+            other_inbox.id,
+            &format!("<foreign-list-{}@example.com>", Uuid::new_v4()),
+        );
+        storage.store_message(&foreign).await.unwrap();
+
+        let base = MessageQuery {
+            account_id: account.id,
+            mailbox_id: Some(inbox.id),
+            limit: 100,
+            offset: 0,
+            ..Default::default()
+        };
+
+        let all = storage.list_messages(&base).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.iter().map(|m| m.uid).collect::<Vec<_>>(),
+            vec![3, 2, 1],
+            "newest UID first"
+        );
+        // Full listing decrypts bodies (plaintext store here).
+        assert!(all.iter().all(|m| m.raw_message.is_some()));
+
+        // Metadata-only listing has identical rows but no bodies.
+        let meta = storage.list_message_metadata(&base).await.unwrap();
+        assert_eq!(meta.len(), 3);
+        assert!(meta
+            .iter()
+            .all(|m| m.text_body.is_none() && m.html_body.is_none() && m.raw_message.is_none()));
+        assert_eq!(meta[0].uid, 3);
+
+        // Flag filters.
+        let read = storage
+            .list_messages(&MessageQuery {
+                is_read: Some(true),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(read.len(), 2);
+        let unread = storage
+            .list_messages(&MessageQuery {
+                is_read: Some(false),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(unread.len(), 1);
+        let starred = storage
+            .list_messages(&MessageQuery {
+                is_starred: Some(true),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(starred.len(), 1);
+
+        // UID bounds are inclusive and pushed into SQL.
+        let bounded = storage
+            .list_messages(&MessageQuery {
+                uid_min: Some(2),
+                uid_max: Some(3),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded.iter().map(|m| m.uid).collect::<Vec<_>>(),
+            vec![3, 2]
+        );
+        let below = storage
+            .list_messages(&MessageQuery {
+                uid_max: Some(1),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(below.len(), 1);
+
+        // LIMIT/OFFSET paging is exact and clamped by the caller.
+        let page1 = storage
+            .list_messages(&MessageQuery {
+                limit: 1,
+                offset: 0,
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        let page2 = storage
+            .list_messages(&MessageQuery {
+                limit: 1,
+                offset: 1,
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page1[0].uid, 3);
+        assert_eq!(page2[0].uid, 2);
+
+        // Soft-deleted rows are INCLUDED by default (they leave via EXPUNGE).
+        storage
+            .apply_flag_operation_by_uids(
+                &account.id,
+                &inbox.id,
+                &[uids[0]],
+                &MessageFlags {
+                    is_deleted: true,
+                    ..Default::default()
+                },
+                mail_proto::generated::FlagOperation::Set,
+            )
+            .await
+            .unwrap();
+        let default_view = storage.list_messages(&base).await.unwrap();
+        assert_eq!(default_view.len(), 3, "\\Deleted rows stay in the view");
+        let deleted_only = storage
+            .list_messages(&MessageQuery {
+                is_deleted: Some(true),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(deleted_only.len(), 1);
+        let live_only = storage
+            .list_messages(&MessageQuery {
+                is_deleted: Some(false),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(live_only.len(), 2);
+
+        // Point reads.
+        assert!(storage
+            .get_message_by_uid(&account.id, &inbox.id, uids[0])
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_message_by_uid(&account.id, &inbox.id, 999_999)
+            .await
+            .unwrap()
+            .is_none());
+        // Cross-account read of a foreign UID returns nothing.
+        assert!(storage
+            .get_message_by_uid(&other_account.id, &inbox.id, uids[0])
+            .await
+            .unwrap()
+            .is_none());
+        let by_id = storage.get_message(&foreign.id).await.unwrap().unwrap();
+        assert_eq!(by_id.account_id, other_account.id);
+        assert!(storage
+            .get_message_consistent(&foreign.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_message_consistent(&Uuid::new_v4())
+            .await
+            .unwrap()
+            .is_none());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn fulltext_and_header_search_are_scoped() {
+        let Some((storage, pool)) = adversarial_storage("adv_search").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "search").await;
+        let (other_account, other_inbox) = account_with_inbox(&storage, "search-other").await;
+
+        let mut hit = sample_message(account.id, inbox.id, "<search-hit@example.com>");
+        hit.id = Uuid::new_v4();
+        hit.subject = "Quarterly invoice attached".to_string();
+        hit.text_body = Some("Please find the invoice for the quarter".to_string());
+        hit.headers =
+            serde_json::json!({"Message-ID": "<search-hit@example.com>", "X-Trace": "abc123"});
+        storage.store_message(&hit).await.unwrap();
+
+        let mut miss = sample_message(account.id, inbox.id, "<search-miss@example.com>");
+        miss.id = Uuid::new_v4();
+        miss.subject = "Lunch plans".to_string();
+        miss.text_body = Some("nothing relevant".to_string());
+        miss.headers = serde_json::json!({"Message-ID": "<search-miss@example.com>"});
+        storage.store_message(&miss).await.unwrap();
+
+        // Same word in ANOTHER account must not leak.
+        let mut foreign = sample_message(
+            other_account.id,
+            other_inbox.id,
+            "<search-foreign@example.com>",
+        );
+        foreign.id = Uuid::new_v4();
+        foreign.subject = "Quarterly invoice attached".to_string();
+        storage.store_message(&foreign).await.unwrap();
+
+        let (hits, total) = storage
+            .search_messages(&account.id, &inbox.id, "invoice", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<search-hit@example.com>");
+        assert!(
+            hits[0].text_body.is_none(),
+            "search results are metadata-only"
+        );
+
+        // Short/blank queries short-circuit to empty without touching the DB.
+        for bad in ["", "a", "  "] {
+            let (rows, total) = storage
+                .search_messages(&account.id, &inbox.id, bad, 100, 0)
+                .await
+                .unwrap();
+            assert!(rows.is_empty() && total == 0, "query {bad:?}");
+        }
+
+        // Header search honors the field NAME (a subject match is not enough).
+        let (hits, total) = storage
+            .search_by_header(&account.id, &inbox.id, "X-Trace", "ABC", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!((hits.len(), total), (1, 1));
+        let (hits, total) = storage
+            .search_by_header(&account.id, &inbox.id, "Subject", "Quarterly", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "subject is not a stored header field");
+        assert!(hits.is_empty());
+        // LIKE metacharacters are literal.
+        let (_, total) = storage
+            .search_by_header(&account.id, &inbox.id, "X-Trace", "%", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "'%' must not act as a wildcard");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn move_delete_expunge_update_counts() {
+        let Some((storage, pool)) = adversarial_storage("adv_move").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "move").await;
+        let sent = storage
+            .get_mailbox_by_type(&account.id, MailboxType::Sent)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut uids = Vec::new();
+        for i in 0..3 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<mv-{i}-{}@example.com>", Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            uids.push(storage.store_message(&m).await.unwrap().1);
+        }
+
+        // Single move: the destination allocates the next UID; counts follow.
+        let moved = storage
+            .get_message_by_uid(&account.id, &inbox.id, uids[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let new_uid = storage.move_message(&moved.id, &sent.id).await.unwrap();
+        assert_eq!(new_uid, 1, "destination UID space starts at 1");
+        assert!(storage
+            .get_message_by_uid(&account.id, &inbox.id, uids[0])
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Sent")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            1
+        );
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Inbox")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            2
+        );
+
+        // Batch move: unknown id aborts the whole batch (nothing partial).
+        let a = storage
+            .get_message_by_uid(&account.id, &inbox.id, uids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        let ghost = Uuid::new_v4();
+        let err = storage
+            .move_messages_batch(&[a.id, ghost], &sent.id)
+            .await
+            .expect_err("unknown message must fail the batch");
+        assert!(err.to_string().contains("not found"));
+        assert!(
+            storage
+                .get_message_by_uid(&account.id, &inbox.id, uids[1])
+                .await
+                .unwrap()
+                .is_some(),
+            "rollback kept the first message in place"
+        );
+        assert!(storage
+            .move_messages_batch(&[], &sent.id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Batch move succeeds and returns a UID per message, in order.
+        let new_uids = storage
+            .move_messages_batch(&[a.id], &sent.id)
+            .await
+            .unwrap();
+        assert_eq!(new_uids.len(), 1);
+        assert!(new_uids[0] > new_uid);
+
+        // Expunge: only \Deleted rows are removed, UID EXPUNGE is a subset.
+        let remaining = storage
+            .get_message_by_uid(&account.id, &inbox.id, uids[2])
+            .await
+            .unwrap()
+            .unwrap();
+        storage
+            .apply_flag_operation_by_uids(
+                &account.id,
+                &inbox.id,
+                &[uids[2]],
+                &MessageFlags {
+                    is_deleted: true,
+                    ..Default::default()
+                },
+                mail_proto::generated::FlagOperation::Set,
+            )
+            .await
+            .unwrap();
+        // UID EXPUNGE for an unrelated UID removes nothing.
+        assert!(storage
+            .expunge_deleted_messages_for_uids(&account.id, &inbox.id, &[999_999])
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(storage
+            .expunge_deleted_messages_for_uids(&account.id, &inbox.id, &[])
+            .await
+            .unwrap()
+            .is_empty());
+        let expunged = storage
+            .expunge_deleted_messages_for_uids(&account.id, &inbox.id, &[uids[2]])
+            .await
+            .unwrap();
+        assert_eq!(expunged, vec![uids[2]]);
+        assert!(storage.get_message(&remaining.id).await.unwrap().is_none());
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Inbox")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            0
+        );
+
+        // delete_message removes a single row and adjusts usage.
+        let (used_before, _, _) = storage.get_account_quota(&account.id).await.unwrap();
+        let sent_msg = storage
+            .get_message_by_uid(&account.id, &sent.id, new_uid)
+            .await
+            .unwrap()
+            .unwrap();
+        let size = sent_msg.raw_size;
+        storage.delete_message(&sent_msg.id).await.unwrap();
+        let (used_after, _, _) = storage.get_account_quota(&account.id).await.unwrap();
+        assert_eq!(used_after, used_before - size);
+        assert!(storage.delete_message(&Uuid::new_v4()).await.is_err());
+
+        // refresh_mailbox_counts is idempotent on an empty mailbox.
+        storage.refresh_mailbox_counts(&inbox.id).await.unwrap();
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn purge_soft_deleted_respects_retention_and_recomputes_usage() {
+        let Some((storage, pool)) = adversarial_storage("adv_purge").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account, inbox) = account_with_inbox(&storage, "purge").await;
+
+        // One fresh soft-deleted row and one aged beyond the window.
+        let mut fresh = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<p-fresh-{}@example.com>", Uuid::new_v4()),
+        );
+        fresh.id = Uuid::new_v4();
+        fresh.is_deleted = true;
+        storage.store_message(&fresh).await.unwrap();
+        let mut old = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<p-old-{}@example.com>", Uuid::new_v4()),
+        );
+        old.id = Uuid::new_v4();
+        old.is_deleted = true;
+        storage.store_message(&old).await.unwrap();
+
+        // A live (not deleted) aged message is never purged.
+        let mut live = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<p-live-{}@example.com>", Uuid::new_v4()),
+        );
+        live.id = Uuid::new_v4();
+        storage.store_message(&live).await.unwrap();
+
+        // The canonical schema stamps updated_at = NOW() on every UPDATE
+        // (BEFORE UPDATE trigger, cloned onto every partition), so fixture
+        // rows cannot be backdated from SQL. The retention window is instead
+        // probed by moving the CUTOFF (NOW() - retention days):
+        //   * 30/0 days: no row is older than the cutoff yet;
+        //   * -1 day: the cutoff moves into the future, so every soft-deleted
+        //     row qualifies while the live row must never be touched.
+        assert_eq!(
+            storage.purge_soft_deleted_messages(30).await.unwrap(),
+            0,
+            "a 30-day window must not touch rows soft-deleted seconds ago"
+        );
+        let purged = storage.purge_soft_deleted_messages(-1).await.unwrap();
+        assert_eq!(purged, 2, "only soft-deleted rows are ever purged");
+        assert!(storage.get_message(&old.id).await.unwrap().is_none());
+        assert!(storage.get_message(&fresh.id).await.unwrap().is_none());
+        assert!(storage.get_message(&live.id).await.unwrap().is_some());
+
+        // Used bytes were recomputed from the surviving LIVE rows.
+        let (used, _, used_messages) = storage.get_account_quota(&account.id).await.unwrap();
+        let expected: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(raw_size), 0)::bigint FROM mail_messages WHERE account_id = $1 AND is_deleted = false",
+        )
+        .bind(account.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(used, expected);
+        assert_eq!(used_messages, 1);
+        assert_eq!(
+            storage
+                .get_mailbox_by_name(&account.id, "Inbox")
+                .await
+                .unwrap()
+                .unwrap()
+                .total_messages,
+            1,
+            "mailbox counters follow the purge"
+        );
+
+        // Runs are idempotent once the rows are gone.
+        assert_eq!(storage.purge_soft_deleted_messages(-1).await.unwrap(), 0);
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn encryption_round_trips_through_the_database_and_rejects_tampering() {
+        let Some(pool) = optional_pool("adv_encryption").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let storage = MessageStorage::with_encryption(
+            pool.clone(),
+            b"0123456789abcdef0123456789abcdef".to_vec(),
+        );
+        storage.initialize().await.unwrap();
+        assert!(storage.is_encryption_enabled());
+
+        let (account, inbox) = account_with_inbox(&storage, "crypto").await;
+        let mut msg = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<enc-{}@example.com>", Uuid::new_v4()),
+        );
+        msg.id = Uuid::new_v4();
+        msg.text_body = Some("secret body".to_string());
+        msg.html_body = Some("<p>secret html</p>".to_string());
+        msg.raw_message = Some(b"From: a@b\r\n\r\nsecret".to_vec());
+        let (id, uid) = storage.store_message(&msg).await.unwrap();
+
+        // The stored bytes are ciphertext, not plaintext.
+        let raw_text: String =
+            sqlx::query_scalar("SELECT text_body FROM mail_messages WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(raw_text.starts_with("$AES256GCM$"), "stored encrypted");
+        let raw_raw: Vec<u8> =
+            sqlx::query_scalar("SELECT raw_message FROM mail_messages WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(raw_raw.starts_with(b"$AES256GCM$"), "raw body encrypted");
+
+        // Round trip through every read path.
+        let read_back = storage
+            .get_message_by_uid(&account.id, &inbox.id, uid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_back.text_body.as_deref(), Some("secret body"));
+        assert_eq!(read_back.html_body.as_deref(), Some("<p>secret html</p>"));
+        assert_eq!(
+            read_back.raw_message.as_deref(),
+            Some(b"From: a@b\r\n\r\nsecret".as_ref())
+        );
+        let via_id = storage.get_message(&id).await.unwrap().unwrap();
+        assert_eq!(via_id.text_body.as_deref(), Some("secret body"));
+
+        // Listing with the full column set also decrypts.
+        let listed = storage
+            .list_messages(&MessageQuery {
+                account_id: account.id,
+                mailbox_id: Some(inbox.id),
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].text_body.as_deref(), Some("secret body"));
+
+        // A ciphertext relocated to another row (AAD mismatch) must NOT
+        // decrypt: the read fails closed instead of returning garbage.
+        let mut other = sample_message(
+            account.id,
+            inbox.id,
+            &format!("<enc2-{}@example.com>", Uuid::new_v4()),
+        );
+        other.id = Uuid::new_v4();
+        other.text_body = Some("other".to_string());
+        let (other_id, _) = storage.store_message(&other).await.unwrap();
+        sqlx::query("UPDATE mail_messages SET text_body = $2 WHERE id = $1")
+            .bind(other_id)
+            .bind(&raw_text)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let err = storage
+            .get_message(&other_id)
+            .await
+            .expect_err("relocated ciphertext must fail to decrypt");
+        let message = err.to_string().to_lowercase();
+        assert!(
+            message.contains("decrypt") || message.contains("cipher"),
+            "unexpected error: {err}"
+        );
+
+        // Tampered ciphertext also fails closed: flip one ciphertext byte and
+        // re-encode (flipping the base64 text itself could corrupt the UTF-8
+        // encoding, and a corrupt base64 body is a different failure mode).
+        let body = raw_text
+            .strip_prefix(ENCRYPTED_PREFIX)
+            .expect("encrypted envelope prefix");
+        let mut cipher_bytes = base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .expect("stored ciphertext decodes");
+        let last = cipher_bytes.len() - 1;
+        cipher_bytes[last] ^= 0x01;
+        let tampered = format!(
+            "{}{}",
+            ENCRYPTED_PREFIX,
+            base64::engine::general_purpose::STANDARD.encode(&cipher_bytes)
+        );
+        sqlx::query("UPDATE mail_messages SET text_body = $2 WHERE id = $1")
+            .bind(id)
+            .bind(&tampered)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            storage.get_message(&id).await.is_err(),
+            "tamper must be rejected"
+        );
+
+        pool.close().await;
+    }
+
+    /// Cross-account isolation: a foreign account id can never reach another
+    /// account's rows through any read path.
+    #[tokio::test]
+    async fn cross_account_isolation_on_every_read_path() {
+        let Some((storage, pool)) = adversarial_storage("adv_isolation").await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let (account_a, inbox_a) = account_with_inbox(&storage, "iso-a").await;
+        let (account_b, inbox_b) = account_with_inbox(&storage, "iso-b").await;
+
+        let mut msg = sample_message(account_a.id, inbox_a.id, "<iso-secret@example.com>");
+        msg.id = Uuid::new_v4();
+        msg.subject = "Account A only".to_string();
+        msg.text_body = Some("needle isolation".to_string());
+        let (id, uid) = storage.store_message(&msg).await.unwrap();
+
+        // B cannot read A's row by id, by UID, by list, by search or by flags.
+        assert!(
+            storage.get_message(&id).await.unwrap().is_some(),
+            "A owns it"
+        );
+        assert!(
+            storage
+                .get_message_by_uid(&account_b.id, &inbox_a.id, uid)
+                .await
+                .unwrap()
+                .is_none(),
+            "B cannot address A's mailbox"
+        );
+        assert!(
+            storage
+                .list_messages(&MessageQuery {
+                    account_id: account_b.id,
+                    mailbox_id: Some(inbox_a.id),
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .is_empty(),
+            "account filter is authoritative"
+        );
+        let (_rows, total) = storage
+            .search_messages(&account_b.id, &inbox_a.id, "isolation", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 0);
+        assert!(storage
+            .get_message_flags_by_uids(&account_b.id, &inbox_a.id, &[uid])
+            .await
+            .unwrap()
+            .is_empty());
+        // B's own view is empty too.
+        assert!(storage
+            .list_messages(&MessageQuery {
+                account_id: account_b.id,
+                mailbox_id: Some(inbox_b.id),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty());
+
+        pool.close().await;
+    }
 }

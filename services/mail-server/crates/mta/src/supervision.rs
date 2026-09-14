@@ -195,4 +195,33 @@ mod tests {
             "graceful shutdown must not flip readiness"
         );
     }
+
+    #[tokio::test]
+    async fn next_exit_with_no_listeners_reports_a_failure_and_unreadies() {
+        let readiness = Readiness::new();
+        let mut supervisor = ListenerSupervisor::new(readiness.clone());
+        let (name, result) = supervisor.next_exit().await;
+        assert_eq!(name, "<no-listeners>");
+        assert!(result.is_err());
+        assert!(
+            !readiness.is_ready(),
+            "an empty supervisor while the service is live is a failure"
+        );
+        // abort_all on an empty set is a no-op, and join_all drains cleanly.
+        supervisor.abort_all();
+        let results = supervisor.join_all(Duration::from_millis(10)).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_all_collects_a_listener_that_finishes_inside_the_grace() {
+        let readiness = Readiness::new();
+        let mut supervisor = ListenerSupervisor::new(readiness.clone());
+        supervisor.spawn("finishes", async { Ok(()) });
+        let results = supervisor.join_all(Duration::from_secs(5)).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "finishes");
+        assert!(results[0].1.is_ok());
+        assert!(readiness.is_ready(), "graceful shutdown keeps readiness");
+    }
 }

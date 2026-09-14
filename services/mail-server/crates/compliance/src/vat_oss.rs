@@ -795,3 +795,626 @@ mod tests {
         assert_eq!(first.len(), 64);
     }
 }
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+//
+// The OSS/VD returns are statutory filings: derivation must come from the
+// recognition ledger, regeneration must be idempotent while pre-submission,
+// an unacknowledged return cannot be amended, and a paid remittance needs a
+// payment date.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+    use chrono::Datelike;
+
+    async fn pool(suffix: &str) -> Option<PgPool> {
+        let pool = test_support::canonical_pool(&format!("oss_{suffix}"), &format!("oss_{suffix}"))
+            .await?;
+        sqlx::query(
+            "INSERT INTO tenants (id, name) VALUES ('oss-tenant', 'OSS Tenant')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("tenant");
+        Some(pool)
+    }
+
+    async fn registration(pool: &PgPool) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO oss_registrations
+               (tenant_id, scheme, registration_country, registration_number, valid_from, status)
+             VALUES ('oss-tenant', 'union', 'EE', 'EE-OSS-1', DATE '2025-01-01', 'active')
+             RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("registration")
+    }
+
+    struct Entry<'a> {
+        supply: &'a str,
+        period: &'a str,
+        country: &'a str,
+        taxable: i64,
+        vat: i64,
+        currency: &'a str,
+        reason: &'a str,
+    }
+
+    async fn seed_eu_b2c_entry(pool: &PgPool, entry: Entry<'_>) {
+        let invoice_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO invoices
+               (id, tenant_id, amount, currency, status, issued_at, created_at, updated_at,
+                subtotal, vat_total, total, billing_country)
+             VALUES (gen_random_uuid(), 'oss-tenant', $1, $2, 'paid',
+                     to_timestamp($3 || '-15', 'YYYY-MM-DD'), NOW(), NOW(),
+                     $1, $4, $1 + $4, $5)
+             RETURNING id",
+        )
+        .bind(entry.taxable)
+        .bind(entry.currency)
+        .bind(entry.period)
+        .bind(entry.vat)
+        .bind(entry.country)
+        .fetch_one(pool)
+        .await
+        .expect("invoice");
+        sqlx::query(
+            "INSERT INTO vat_recognition_entries
+               (id, supply_id, tenant_id, invoice_id, event_type, taxable_event_at,
+                recognition_period, taxable_amount_cents, vat_rate, vat_amount_cents,
+                currency, scheme, reason)
+             VALUES (gen_random_uuid(), $1, 'oss-tenant', $2, 'supply', NOW(), $3, $4, $5, $6,
+                     $7, 'general', $8)",
+        )
+        .bind(entry.supply)
+        .bind(invoice_id)
+        .bind(entry.period)
+        .bind(entry.taxable)
+        .bind(entry.vat as f64 / entry.taxable.max(1) as f64)
+        .bind(entry.vat)
+        .bind(entry.currency)
+        .bind(entry.reason)
+        .execute(pool)
+        .await
+        .expect("recognition entry");
+    }
+
+    #[tokio::test]
+    async fn oss_derivation_is_canonical_idempotent_and_ledger_driven() {
+        let Some(pool) = pool("derive").await else {
+            return;
+        };
+        let reg = registration(&pool).await;
+        // In-scope: EU B2C in EUR outside EE.
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-1",
+                period: "2026-03",
+                country: "DE",
+                taxable: 10000,
+                vat: 1900,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-2",
+                period: "2026-03",
+                country: "FR",
+                taxable: 20000,
+                vat: 3800,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        // Out of scope: domestic EE, non-EUR, wrong reason, other period.
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-3",
+                period: "2026-03",
+                country: "EE",
+                taxable: 99999,
+                vat: 0,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-4",
+                period: "2026-03",
+                country: "DE",
+                taxable: 88888,
+                vat: 0,
+                currency: "USD",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-5",
+                period: "2026-03",
+                country: "DE",
+                taxable: 77777,
+                vat: 0,
+                currency: "EUR",
+                reason: "domestic",
+            },
+        )
+        .await;
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-6",
+                period: "2026-02",
+                country: "DE",
+                taxable: 66666,
+                vat: 0,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+
+        let return_id = generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect("generate");
+        let totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_taxable_cents, total_vat_cents, supply_count FROM oss_returns WHERE id = $1",
+        )
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .expect("totals");
+        assert_eq!(totals, (30000, 5700, 2), "only the two in-scope supplies");
+        let status: String = sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
+            .bind(return_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "generated");
+
+        // Regeneration is idempotent: same row, same totals.
+        let again = generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect("regenerate");
+        assert_eq!(again, return_id);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oss_returns")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
+        // A late correction updates the SAME pre-submission row.
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-7",
+                period: "2026-03",
+                country: "IT",
+                taxable: 5000,
+                vat: 1100,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect("regen");
+        let totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_taxable_cents, total_vat_cents, supply_count FROM oss_returns WHERE id = $1",
+        )
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .expect("totals");
+        assert_eq!(totals, (35000, 6800, 3));
+        // Unknown registrations are explicit errors.
+        assert!(generate_oss_return(&pool, Uuid::new_v4(), "2026-03")
+            .await
+            .is_err());
+        // An empty period is an explicit zero return, not a failure.
+        let empty = generate_oss_return(&pool, reg, "2026-01")
+            .await
+            .expect("empty period");
+        let totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_taxable_cents, total_vat_cents, supply_count FROM oss_returns WHERE id = $1",
+        )
+        .bind(empty)
+        .fetch_one(&pool)
+        .await
+        .expect("totals");
+        assert_eq!(totals, (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn oss_state_machine_refuses_skips_and_freezes_acknowledged_returns() {
+        let Some(pool) = pool("states").await else {
+            return;
+        };
+        let reg = registration(&pool).await;
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-1",
+                period: "2026-03",
+                country: "DE",
+                taxable: 10000,
+                vat: 1900,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        let return_id = generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect("generate");
+
+        // Skipping validation is refused.
+        assert!(
+            transition_oss_return(&pool, return_id, FilingStatus::Acknowledged, None)
+                .await
+                .is_err()
+        );
+        transition_oss_return(&pool, return_id, FilingStatus::Validated, None)
+            .await
+            .expect("validate");
+        // Submission without a receipt stays explicit (a human task is
+        // opened) — acknowledgement is never implied.
+        transition_oss_return(&pool, return_id, FilingStatus::Submitted, None)
+            .await
+            .expect("submit");
+        transition_oss_return(&pool, return_id, FilingStatus::Acknowledged, Some("ACK-1"))
+            .await
+            .expect("acknowledge");
+        let reference: Option<String> =
+            sqlx::query_scalar("SELECT acknowledgement_reference FROM oss_returns WHERE id = $1")
+                .bind(return_id)
+                .fetch_one(&pool)
+                .await
+                .expect("reference");
+        assert_eq!(reference.as_deref(), Some("ACK-1"));
+        // Once acknowledged the return is frozen: no regeneration.
+        let err = generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect_err("acknowledged must not regenerate");
+        assert!(err.contains("already submitted/acknowledged"), "{err}");
+        // An unknown return id is an error.
+        assert!(
+            transition_oss_return(&pool, Uuid::new_v4(), FilingStatus::Validated, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn adjustments_require_an_acknowledged_return_and_an_explicit_correction() {
+        let Some(pool) = pool("adjust").await else {
+            return;
+        };
+        let reg = registration(&pool).await;
+        seed_eu_b2c_entry(
+            &pool,
+            Entry {
+                supply: "s-1",
+                period: "2026-03",
+                country: "DE",
+                taxable: 10000,
+                vat: 1900,
+                currency: "EUR",
+                reason: "eu_b2c",
+            },
+        )
+        .await;
+        let return_id = generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect("generate");
+
+        // Invalid correction type / empty reason are refused.
+        assert!(create_oss_return_adjustment(
+            &pool, return_id, "2026-03", "guess", 100, 21, "EUR", "reason", None
+        )
+        .await
+        .is_err());
+        assert!(create_oss_return_adjustment(
+            &pool, return_id, "2026-03", "increase", 100, 21, "EUR", "   ", None
+        )
+        .await
+        .is_err());
+        // Pre-acknowledgement amendment is refused, naming the status.
+        let err = create_oss_return_adjustment(
+            &pool,
+            return_id,
+            "2026-03",
+            "increase",
+            100,
+            21,
+            "EUR",
+            "correction",
+            None,
+        )
+        .await
+        .expect_err("not acknowledged");
+        assert!(err.contains("must be acknowledged first"), "{err}");
+        // Unknown returns are errors.
+        assert!(create_oss_return_adjustment(
+            &pool,
+            Uuid::new_v4(),
+            "2026-03",
+            "increase",
+            1,
+            0,
+            "EUR",
+            "r",
+            None
+        )
+        .await
+        .is_err());
+
+        transition_oss_return(&pool, return_id, FilingStatus::Validated, None)
+            .await
+            .expect("validate");
+        transition_oss_return(&pool, return_id, FilingStatus::Submitted, None)
+            .await
+            .expect("submit");
+        transition_oss_return(&pool, return_id, FilingStatus::Acknowledged, Some("ACK-1"))
+            .await
+            .expect("acknowledge");
+        let adjustment = create_oss_return_adjustment(
+            &pool,
+            return_id,
+            "2026-03",
+            "decrease",
+            1000,
+            190,
+            "EUR",
+            "overdeclared",
+            None,
+        )
+        .await
+        .expect("adjustment");
+        let parent_status: String =
+            sqlx::query_scalar("SELECT status FROM oss_returns WHERE id = $1")
+                .bind(return_id)
+                .fetch_one(&pool)
+                .await
+                .expect("status");
+        assert_eq!(parent_status, "amended");
+        let stored: (String, i64, Option<String>) = sqlx::query_as(
+            "SELECT correction_type, vat_amount_cents, reason FROM oss_return_adjustments WHERE id = $1",
+        )
+        .bind(adjustment)
+        .fetch_one(&pool)
+        .await
+        .expect("stored");
+        assert_eq!(stored.0, "decrease");
+        assert_eq!(stored.1, 190);
+        assert_eq!(stored.2.as_deref(), Some("overdeclared"));
+        // An amended return can be amended again (corrections chain).
+        create_oss_return_adjustment(
+            &pool,
+            return_id,
+            "2026-03",
+            "replacement",
+            500,
+            95,
+            "EUR",
+            "final",
+            None,
+        )
+        .await
+        .expect("second adjustment");
+    }
+
+    #[tokio::test]
+    async fn payments_validate_status_and_require_a_date_when_paid() {
+        let Some(pool) = pool("payments").await else {
+            return;
+        };
+        let reg = registration(&pool).await;
+        let return_id = generate_oss_return(&pool, reg, "2026-03")
+            .await
+            .expect("generate");
+        assert!(record_oss_payment(
+            &pool,
+            Some(return_id),
+            "2026-03",
+            1900,
+            "EUR",
+            "done",
+            None,
+            None
+        )
+        .await
+        .is_err());
+        let err = record_oss_payment(
+            &pool,
+            Some(return_id),
+            "2026-03",
+            1900,
+            "EUR",
+            "paid",
+            None,
+            Some("REF-1"),
+        )
+        .await
+        .expect_err("paid without a date");
+        assert!(err.contains("requires paid_at"), "{err}");
+
+        let pending = record_oss_payment(
+            &pool,
+            Some(return_id),
+            "2026-03",
+            1900,
+            "EUR",
+            "pending",
+            None,
+            None,
+        )
+        .await
+        .expect("pending");
+        assert_ne!(pending, Uuid::nil());
+        let paid = record_oss_payment(
+            &pool,
+            Some(return_id),
+            "2026-03",
+            1900,
+            "EUR",
+            "paid",
+            Some(Utc::now()),
+            Some("REF-2"),
+        )
+        .await
+        .expect("paid");
+        assert_ne!(paid, pending);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oss_payments")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 2, "each remittance fact is its own evidence row");
+    }
+
+    #[tokio::test]
+    async fn vd_entries_require_authoritative_vies_evidence() {
+        let Some(pool) = pool("vd").await else {
+            return;
+        };
+        // An invoice with no VIES evidence must NOT enter the VD report.
+        sqlx::query(
+            "INSERT INTO invoices
+               (id, tenant_id, amount, currency, status, issued_at, created_at, updated_at,
+                subtotal, vat_total, total, billing_country, vat_rate)
+             VALUES (gen_random_uuid(), 'oss-tenant', 5000, 'EUR', 'paid', NOW(), NOW(), NOW(),
+                     5000, 0, 5000, 'DE', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("invoice without evidence");
+        let now = Utc::now();
+        let period = period_key(now.date_naive().year(), now.date_naive().month()).expect("period");
+        let return_id = generate_vd_return(&pool, &period).await.expect("vd return");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vd_entries WHERE return_id = $1")
+            .bind(return_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 0, "no evidence means no reported supply");
+        let totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_taxable_cents, total_vat_cents, line_count FROM vd_returns WHERE id = $1",
+        )
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .expect("totals");
+        assert_eq!(totals, (0, 0, 0));
+
+        // With authoritative evidence the supply is reported with the
+        // validated VAT number, zero-rated.
+        let evidence: Uuid = sqlx::query_scalar(
+            "INSERT INTO vat_validation_evidence
+               (id, vat_number, country, source, requested_at, valid, response_hash, valid_from)
+             VALUES (gen_random_uuid(), 'DE811234567', 'DE', 'VIES', NOW(), true, 'hash-1', CURRENT_DATE)
+             RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("evidence");
+        sqlx::query(
+            "INSERT INTO invoices
+               (id, tenant_id, amount, currency, status, issued_at, created_at, updated_at,
+                subtotal, vat_total, total, billing_country, vat_rate, vat_evidence_id)
+             VALUES (gen_random_uuid(), 'oss-tenant', 7000, 'EUR', 'paid', NOW(), NOW(), NOW(),
+                     7000, 0, 7000, 'DE', 0, $1)",
+        )
+        .bind(evidence)
+        .execute(&pool)
+        .await
+        .expect("invoice with evidence");
+        let return_id = generate_vd_return(&pool, &period)
+            .await
+            .expect("regenerate");
+        let totals: (i64, i64, i64) = sqlx::query_as(
+            "SELECT total_taxable_cents, total_vat_cents, line_count FROM vd_returns WHERE id = $1",
+        )
+        .bind(return_id)
+        .fetch_one(&pool)
+        .await
+        .expect("totals");
+        assert_eq!(totals, (7000, 0, 1));
+        let vat_number: String =
+            sqlx::query_scalar("SELECT customer_vat_number FROM vd_entries WHERE return_id = $1")
+                .bind(return_id)
+                .fetch_one(&pool)
+                .await
+                .expect("vat number");
+        assert_eq!(
+            vat_number, "DE811234567",
+            "spaces are not part of the number"
+        );
+
+        // Transitioning the VD return enforces the same state machine.
+        assert!(
+            transition_vd_return(&pool, return_id, FilingStatus::Acknowledged, None)
+                .await
+                .is_err()
+        );
+        transition_vd_return(&pool, return_id, FilingStatus::Validated, None)
+            .await
+            .expect("validate");
+    }
+
+    #[test]
+    fn period_keys_and_status_machines_are_strict() {
+        assert_eq!(period_key(2026, 1).as_deref(), Ok("2026-01"));
+        assert_eq!(period_key(2026, 12).as_deref(), Ok("2026-12"));
+        assert!(period_key(2026, 0).is_err());
+        assert!(period_key(2026, 13).is_err());
+        assert!(period_key(1999, 1).is_err());
+        assert!(period_key(2101, 1).is_err());
+        for status in [
+            FilingStatus::Draft,
+            FilingStatus::Generated,
+            FilingStatus::Validated,
+            FilingStatus::Submitted,
+            FilingStatus::Acknowledged,
+            FilingStatus::Amended,
+            FilingStatus::Failed,
+        ] {
+            assert_eq!(FilingStatus::from_db(status.as_str()), Some(status));
+            assert!(!status.as_str().is_empty());
+        }
+        assert_eq!(FilingStatus::from_db("nonsense"), None);
+        assert_eq!(
+            FilingStatus::from_db(" GENERATED "),
+            Some(FilingStatus::Generated)
+        );
+        // The documented machine: no skipping states.
+        assert!(FilingStatus::Draft.can_transition(FilingStatus::Generated));
+        assert!(FilingStatus::Generated.can_transition(FilingStatus::Validated));
+        assert!(FilingStatus::Validated.can_transition(FilingStatus::Submitted));
+        assert!(FilingStatus::Submitted.can_transition(FilingStatus::Acknowledged));
+        assert!(FilingStatus::Acknowledged.can_transition(FilingStatus::Amended));
+        assert!(!FilingStatus::Draft.can_transition(FilingStatus::Acknowledged));
+        assert!(!FilingStatus::Draft.can_transition(FilingStatus::Submitted));
+        assert!(!FilingStatus::Acknowledged.can_transition(FilingStatus::Draft));
+        assert!(!FilingStatus::Acknowledged.can_transition(FilingStatus::Generated));
+        // The submission transport exists in this build, but only behind an
+        // explicit runtime configuration (never an implicit filing).
+        assert!(oss_submission_is_implemented());
+        assert!(vd_submission_is_implemented());
+    }
+}

@@ -940,7 +940,6 @@ mod tests {
     /// A sender with no remaining capacity must not be selected; a NULL limit
     /// is unlimited; a paused/quarantined identity is excluded regardless of
     /// capacity. Live path: the real resolver, against the real schema.
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     #[tokio::test]
     async fn selection_excludes_at_limit_and_unhealthy_identities() {
         let Some(pool) = crate::test_db::canonical_test_pool("sender_capacity_exclusions").await
@@ -1016,7 +1015,6 @@ mod tests {
         cleanup_senders(&pool, &tenant).await;
     }
 
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     #[tokio::test]
     async fn paused_and_quarantined_identities_are_never_selected() {
         let Some(pool) = crate::test_db::canonical_test_pool("sender_health_exclusions").await
@@ -1070,7 +1068,6 @@ mod tests {
 
     /// Ten concurrent selections against two identities with `daily_limit = 5`
     /// each: every call gets a reservation and neither identity exceeds five.
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_selections_never_exceed_each_identity_daily_limit() {
         let Some(pool) = crate::test_db::canonical_test_pool("sender_capacity_race").await else {
@@ -1156,7 +1153,6 @@ mod tests {
 
     /// Releasing a reservation for a refused send returns the slot, and the
     /// next selection can reuse it. Double release never goes negative.
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     #[tokio::test]
     async fn released_reservation_is_reusable_and_never_negative() {
         let Some(pool) = crate::test_db::canonical_test_pool("sender_release").await else {
@@ -1224,7 +1220,6 @@ mod tests {
 
     /// A transaction that rolls back releases a capacity reservation made
     /// inside it: the counter row is exactly as it was before.
-    #[ignore = "live Postgres: set SALES_TEST_DATABASE_URL"]
     #[tokio::test]
     async fn transaction_rollback_releases_sender_capacity() {
         let Some(pool) = crate::test_db::canonical_test_pool("sender_rollback").await else {

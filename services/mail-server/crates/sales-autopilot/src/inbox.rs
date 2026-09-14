@@ -278,7 +278,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_categorization() {
         let Some(mgr) = make_mgr("inbox::tests::test_categorization").await else {
@@ -315,7 +314,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_list_by_category_and_mark_replied() {
         let Some(mgr) = make_mgr("inbox::tests::test_list_by_category_and_mark_replied").await
@@ -339,7 +337,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_reply_rate() {
         let Some(mgr) = make_mgr("inbox::tests::test_reply_rate").await else {

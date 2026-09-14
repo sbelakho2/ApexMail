@@ -892,3 +892,264 @@ mod tests {
         assert_eq!(vat_rates::EU_COUNTRIES.len(), 27);
     }
 }
+
+// ─── Adversarial compliance-overview tests ─────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    fn customer_auth(tenant: &str) -> AuthUser {
+        AuthUser {
+            tenant_id: tenant.to_string(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, tenant: &str) {
+        for (table, column) in [
+            ("gdpr_requests", "tenant_id"),
+            ("system_alerts", "tenant_id"),
+            ("domains", "tenant_id"),
+            ("audit_logs", "tenant_id"),
+            ("invoices", "tenant_id"),
+            ("billing_addresses", "tenant_id"),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE {column} = $1"))
+                .bind(tenant)
+                .execute(pool)
+                .await
+                .expect("cleanup");
+        }
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .execute(pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    #[test]
+    fn gdpr_summary_ignores_unknown_statuses_and_keeps_overdue() {
+        let rows = vec![
+            ("pending".to_string(), 2),
+            ("processing".to_string(), 3),
+            ("completed".to_string(), 4),
+            ("rejected".to_string(), 9),
+            ("weird".to_string(), 9),
+        ];
+        let summary = summarize_gdpr_request_counts(&rows, 7);
+        assert_eq!(summary.pending, 2);
+        assert_eq!(summary.processing, 3);
+        assert_eq!(summary.completed, 4);
+        assert_eq!(summary.overdue, 7, "derived overdue count is preserved");
+    }
+
+    #[test]
+    fn empty_vat_widget_is_all_zeroes_with_the_period_label() {
+        let widget = empty_vat_widget(2026, 7);
+        assert!(!widget.has_data);
+        assert_eq!(widget.tax_year, 2026);
+        assert_eq!(widget.tax_month, 7);
+        assert_eq!(widget.invoice_count, 0);
+        assert!(widget.rates.is_empty());
+        assert!(widget.latest_kmd_status.is_none());
+        assert!(widget.due_date.is_none());
+        let json = serde_json::to_value(&widget).unwrap();
+        assert_eq!(json["hasData"], false);
+        assert_eq!(json["taxYear"], 2026);
+    }
+
+    #[tokio::test]
+    async fn overview_is_tenant_scoped_for_customers_and_global_for_system() {
+        let Some((state, pool)) = state_and_pool("adv_compliance_overview").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'compliance adversarial', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        // GDPR: one pending today, one overdue (created 40 days ago), one
+        // completed long ago (NOT overdue).
+        sqlx::query(
+            "INSERT INTO gdpr_requests (id, tenant_id, email, request_type, status, created_at, updated_at)
+             VALUES ($1, $2, 'a@example.com', 'access', 'pending', NOW(), NOW()),
+                    ($3, $2, 'b@example.com', 'erasure', 'processing', NOW() - INTERVAL '40 days', NOW()),
+                    ($4, $2, 'c@example.com', 'access', 'completed', NOW() - INTERVAL '40 days', NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("", 20))
+        .bind(&tenant)
+        .bind(apexmail_lib::id::generate_id("", 20))
+        .bind(apexmail_lib::id::generate_id("", 20))
+        .execute(&pool)
+        .await
+        .expect("seed gdpr");
+        // Alerts: unacknowledged critical + low for this tenant, one
+        // acknowledged row that must NOT count.
+        sqlx::query(
+            "INSERT INTO system_alerts (alert_type, message, severity, acknowledged, tenant_id, created_at)
+             VALUES ('test', 'critical one', 'critical', false, $1, NOW()),
+                    ('test', 'low one', 'info', false, $1, NOW()),
+                    ('test', 'ignored ack', 'critical', true, $1, NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed alerts");
+        // Domains: one fully compliant, one bare.
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, spf_verified, dkim_verified,
+                 dmarc_verified, return_path_verified, mta_sts_verified, bimi_verified,
+                 tlsrpt_verified, dkim_selector, dkim_public_key, dkim_private_key, dkim_enabled,
+                 ses_verified, verified, created_at, updated_at)
+             VALUES ($1, $2, $3, 'verified', true, true, true, true, true, true, true,
+                     'adv', 'pub', 'priv', true, true, true, NOW(), NOW()),
+                    ($4, $2, $5, 'pending', false, false, false, false, false, false, false,
+                     'adv', NULL, NULL, false, false, false, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(format!("adv-{}.example.com", uuid::Uuid::new_v4().simple()))
+        .bind(uuid::Uuid::new_v4())
+        .bind(format!(
+            "adv2-{}.example.com",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed domains");
+        // Audit logs: two today, one older than a week.
+        for (i, ts) in ["NOW()", "NOW()", "NOW() - INTERVAL '10 days'"]
+            .iter()
+            .enumerate()
+        {
+            sqlx::query(&format!(
+                "INSERT INTO audit_logs (id, tenant_id, action, resource, outcome, signature, timestamp)
+                 VALUES ($1, $2, 'adv.action', 'risk', 'success', 'sig', {ts})"
+            ))
+            .bind(format!("adv-audit-{i}-{}", uuid::Uuid::new_v4().simple()))
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed audit log");
+        }
+        // Current-month paid invoice + EE billing address.
+        sqlx::query(
+            "INSERT INTO invoices (tenant_id, status, issued_at, subtotal, vat_total, total)
+             VALUES ($1, 'paid', NOW(), 10000, 2000, 12000)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed invoice");
+        sqlx::query(
+            "INSERT INTO billing_addresses (tenant_id, country, company_name)
+             VALUES ($1, 'EE', 'Adv OÜ')",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed billing address");
+
+        // Customer-scoped branch: exact counts, no other tenant's rows.
+        let Json(scoped) = get_compliance_overview(State(state.clone()), customer_auth(&tenant))
+            .await
+            .expect("scoped overview");
+        assert_eq!(scoped.risk_summary.critical, 1);
+        assert_eq!(scoped.risk_summary.low, 1);
+        assert_eq!(scoped.gdpr_requests.pending, 1);
+        assert_eq!(scoped.gdpr_requests.processing, 1);
+        assert_eq!(scoped.gdpr_requests.completed, 1);
+        assert_eq!(
+            scoped.gdpr_requests.overdue, 1,
+            "only the 40-day-old open request is overdue"
+        );
+        assert!(scoped.audit_stats.today_events >= 2);
+        assert!(scoped
+            .policy_compliance
+            .iter()
+            .any(|p| p.name == "SPF Records" && p.total == 2 && p.compliant == 1));
+        assert!(scoped
+            .recent_alerts
+            .iter()
+            .all(|a| a.tenant_id.as_deref() == Some(&tenant)));
+        assert!(
+            scoped.recent_alerts.len() <= 10,
+            "the alert feed is bounded at 10"
+        );
+        assert!(scoped.vat_summary.has_data);
+        assert_eq!(scoped.vat_summary.invoice_count, 1);
+        assert_eq!(scoped.vat_summary.total_taxable_cents, 10_000);
+        assert_eq!(scoped.vat_summary.total_vat_cents, 2_000);
+        assert_eq!(scoped.vat_summary.rates.len(), 1);
+        assert_eq!(
+            scoped.vat_summary.rates[0]["reason"],
+            serde_json::Value::Null
+        );
+        assert!(scoped.vat_summary.due_date.is_some(), "due date computed");
+
+        // System/global branch: aggregates at least our seeds.
+        let Json(global) = get_compliance_overview(State(state.clone()), admin_auth())
+            .await
+            .expect("global overview");
+        assert!(global.risk_summary.critical >= 1);
+        assert!(global.gdpr_requests.overdue >= 1);
+        assert!(global.audit_stats.today_events >= 2);
+        assert!(global.vat_summary.invoice_count >= 1);
+
+        // Scope-less caller is refused.
+        let mut no_scope = customer_auth(&tenant);
+        no_scope.scopes = vec![];
+        assert!(matches!(
+            get_compliance_overview(State(state.clone()), no_scope).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        cleanup(&pool, &tenant).await;
+    }
+
+    #[tokio::test]
+    async fn zero_row_overview_reports_zeroes_not_errors() {
+        let Some((state, pool)) = state_and_pool("adv_compliance_empty").await else {
+            return;
+        };
+        // A freshly generated tenant id with no rows at all: every section
+        // must render zeroes rather than fail.
+        let ghost = apexmail_lib::id::generate_id("", 26);
+        let Json(overview) = get_compliance_overview(State(state.clone()), customer_auth(&ghost))
+            .await
+            .expect("empty overview succeeds");
+        assert_eq!(overview.risk_summary.low, 0);
+        assert_eq!(overview.risk_summary.critical, 0);
+        assert_eq!(overview.gdpr_requests.pending, 0);
+        assert_eq!(overview.gdpr_requests.overdue, 0);
+        assert!(overview.recent_alerts.is_empty());
+        assert_eq!(overview.vat_summary.invoice_count, 0);
+        assert!(!overview.vat_summary.has_data);
+        let _ = pool;
+    }
+}

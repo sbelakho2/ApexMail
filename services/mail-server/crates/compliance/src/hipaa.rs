@@ -805,3 +805,395 @@ mod tests {
         assert_ne!(h1, h3);
     }
 }
+
+// ─── DB-backed adversarial lifecycle tests ─────────────────────────────────
+//
+// A BAA is a legal instrument: every transition must be refused unless the
+// workflow allows it, the event chain must be tamper-evident, and a tenant
+// must never see another tenant's agreement.
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+
+    async fn service(suffix: &str) -> Option<(PgPool, HipaaService)> {
+        let pool =
+            test_support::canonical_pool(&format!("hipaa_{suffix}"), &format!("hp_{suffix}"))
+                .await?;
+        Some((
+            pool.clone(),
+            HipaaService::new(pool, b"unit-baa-key".to_vec()),
+        ))
+    }
+
+    fn sign_input(marker: &str) -> SignBaaInput {
+        SignBaaInput {
+            signer_name: format!("Signer {marker}"),
+            signer_email: format!("{marker}@example.test"),
+            signer_title: Some("CTO".into()),
+            signer_ip: Some("203.0.113.7".into()),
+            document_url: Some("https://docs.example.test/baa.pdf".into()),
+            document_sha256: Some("a".repeat(64)),
+        }
+    }
+
+    fn countersign_input() -> CountersignBaaInput {
+        CountersignBaaInput {
+            countersigner_name: "ApexMail Legal".into(),
+            countersigner_email: "legal@apexmail.ee".into(),
+            effective_date: None,
+        }
+    }
+
+    async fn drive_to_active(svc: &HipaaService, tenant: &str) -> Baa {
+        let baa = svc
+            .request_baa(tenant, "v2.1", "actor:request")
+            .await
+            .expect("request");
+        let baa = svc
+            .sign(&baa.id, "actor:sign", sign_input("alice"))
+            .await
+            .expect("sign");
+        let baa = svc
+            .countersign(&baa.id, "actor:countersign", countersign_input())
+            .await
+            .expect("countersign");
+        svc.activate(&baa.id, "actor:activate")
+            .await
+            .expect("activate")
+    }
+
+    #[tokio::test]
+    async fn baa_lifecycle_is_hash_chained_and_tenant_scoped() {
+        let Some((pool, svc)) = service("lifecycle").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let other = test_support::unique_tenant();
+
+        let requested = svc
+            .request_baa(&tenant, "v2.1", "actor:request")
+            .await
+            .expect("request");
+        assert_eq!(requested.status, BaaStatus::Requested);
+        assert_eq!(requested.version, "v2.1");
+
+        let signed = svc
+            .sign(&requested.id, "actor:sign", sign_input("alice"))
+            .await
+            .expect("sign");
+        assert_eq!(signed.status, BaaStatus::Signed);
+        assert!(signed.signed_signature.is_some());
+        assert_eq!(
+            signed.document_sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+
+        let countersigned = svc
+            .countersign(&signed.id, "actor:countersign", countersign_input())
+            .await
+            .expect("countersign");
+        assert_eq!(countersigned.status, BaaStatus::Countersigned);
+        assert!(countersigned.effective_date.is_some());
+
+        let active = svc
+            .activate(&countersigned.id, "actor:activate")
+            .await
+            .expect("activate");
+        assert_eq!(active.status, BaaStatus::Active);
+        assert!(svc.is_active_for_tenant(&tenant).await);
+        // Tenant isolation: the other tenant is not active and sees no rows.
+        assert!(!svc.is_active_for_tenant(&other).await);
+        assert!(svc.list_for_tenant(&other).await.expect("list").is_empty());
+
+        // The event chain is intact and every transition is recorded.
+        assert_eq!(svc.verify_chain(&active.id).await.expect("chain"), 4);
+        let events = svc.list_events(&active.id).await.expect("events");
+        let kinds: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["requested", "signed", "countersigned", "activated"]
+        );
+
+        // A fresh service bootstrapped from the DB agrees (cache rebuild).
+        let boot = HipaaService::new(pool.clone(), b"unit-baa-key".to_vec());
+        boot.initialize().await.expect("initialize");
+        assert!(boot.is_active_for_tenant(&tenant).await);
+    }
+
+    #[tokio::test]
+    async fn baa_forbids_out_of_order_transitions_and_double_creation() {
+        let Some((_pool, svc)) = service("transitions").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let baa = svc
+            .request_baa(&tenant, "v1.0", "actor:request")
+            .await
+            .expect("request");
+
+        // A second in-flight BAA is refused, with the reason named.
+        let err = svc
+            .request_baa(&tenant, "v1.0", "actor:request")
+            .await
+            .expect_err("double creation must be refused");
+        assert!(err.contains("terminate it first"), "{err}");
+
+        // Signing twice is refused (state machine, not idempotent).
+        svc.sign(&baa.id, "actor:sign", sign_input("alice"))
+            .await
+            .expect("sign");
+        let err = svc
+            .sign(&baa.id, "actor:sign", sign_input("alice"))
+            .await
+            .expect_err("double sign must be refused");
+        assert!(err.contains("Cannot sign BAA in status signed"), "{err}");
+
+        // Skipping countersignature cannot activate.
+        let err = svc
+            .activate(&baa.id, "actor:activate")
+            .await
+            .expect_err("activation before countersignature must be refused");
+        assert!(
+            err.contains("Cannot activate BAA in status signed"),
+            "{err}"
+        );
+        assert!(!svc.is_active_for_tenant(&tenant).await);
+
+        // Unknown ids are honest not-found errors, never fabricated rows.
+        assert!(svc.fetch("no-such-baa").await.expect("fetch").is_none());
+        assert!(svc.sign("no-such-baa", "a", sign_input("x")).await.is_err());
+        assert!(svc
+            .countersign("no-such-baa", "a", countersign_input())
+            .await
+            .is_err());
+        assert!(svc.activate("no-such-baa", "a").await.is_err());
+        assert!(svc.terminate("no-such-baa", "a", "why").await.is_err());
+        assert_eq!(svc.verify_chain("no-such-baa").await.expect("chain"), 0);
+    }
+
+    #[tokio::test]
+    async fn baa_termination_and_reactivation_are_guarded() {
+        let Some((_pool, svc)) = service("termination").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let baa = svc
+            .request_baa(&tenant, "v1.0", "actor:request")
+            .await
+            .expect("request");
+
+        // Termination is allowed from an in-flight state, with the reason kept.
+        let terminated = svc
+            .terminate(&baa.id, "actor:terminate", "customer churn")
+            .await
+            .expect("terminate");
+        assert_eq!(terminated.status, BaaStatus::Terminated);
+        assert_eq!(
+            terminated.termination_reason.as_deref(),
+            Some("customer churn")
+        );
+        // Terminating an already-terminated BAA is idempotent.
+        let again = svc
+            .terminate(&baa.id, "actor", "again")
+            .await
+            .expect("idempotent");
+        assert_eq!(again.status, BaaStatus::Terminated);
+        assert_eq!(again.termination_reason.as_deref(), Some("customer churn"));
+
+        // A terminated BAA cannot come back to life.
+        let err = svc
+            .activate(&baa.id, "actor:activate")
+            .await
+            .expect_err("terminated must not activate");
+        assert!(
+            err.contains("Cannot activate BAA in status terminated"),
+            "{err}"
+        );
+        assert!(!svc.is_active_for_tenant(&tenant).await);
+
+        // After termination the tenant may request a replacement.
+        let replacement = svc
+            .request_baa(&tenant, "v2.0", "actor:request")
+            .await
+            .expect("replacement request");
+        assert_ne!(replacement.id, baa.id);
+    }
+
+    #[tokio::test]
+    async fn activating_a_new_baa_supersedes_the_prior_active_one() {
+        let Some((pool, svc)) = service("supersede").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let first = drive_to_active(&svc, &tenant).await;
+        let err = svc
+            .request_baa(&tenant, "v2.0", "a")
+            .await
+            .expect_err("in-flight");
+        assert!(err.contains("terminate it first"));
+        svc.terminate(&first.id, "actor", "renewal")
+            .await
+            .expect("terminate first");
+
+        let second = drive_to_active(&svc, &tenant).await;
+        assert!(svc.is_active_for_tenant(&tenant).await);
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM hipaa_baas WHERE tenant_id = $1 AND status = 'active'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(active_count, 1, "exactly one active BAA per tenant");
+
+        // Activating again is idempotent and does not append an event.
+        let before = svc.verify_chain(&second.id).await.expect("chain");
+        let same = svc
+            .activate(&second.id, "actor:activate")
+            .await
+            .expect("idempotent");
+        assert_eq!(same.id, second.id);
+        assert_eq!(svc.verify_chain(&second.id).await.expect("chain"), before);
+    }
+
+    #[tokio::test]
+    async fn baa_signature_binds_the_document_hash_and_signer_identity() {
+        let Some((_pool, svc)) = service("signature").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let baa = svc
+            .request_baa(&tenant, "v1.0", "actor:request")
+            .await
+            .expect("request");
+        let signed = svc
+            .sign(&baa.id, "actor:sign", sign_input("alice"))
+            .await
+            .expect("sign");
+        let signature = signed.signed_signature.clone().expect("signature");
+        assert_eq!(signature.len(), 64, "hex SHA-256 sized HMAC");
+        assert!(signature.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Re-deriving from a different document hash gives a different
+        // signature: the binding is real, not a constant.
+        let canonical = serde_json::json!({
+            "baa_id": baa.id,
+            "tenant_id": signed.tenant_id,
+            "version": signed.version,
+            "signer_name": "Signer alice",
+            "signer_email": "alice@example.test",
+            "signer_title": "CTO",
+            "document_sha256": "b".repeat(64),
+        });
+        let mut mac = HmacSha256::new_from_slice(b"unit-baa-key").unwrap();
+        mac.update(&serde_json::to_vec(&canonical).unwrap());
+        let recomputed = hex::encode(mac.finalize().into_bytes());
+        assert_ne!(recomputed, signature);
+    }
+
+    #[tokio::test]
+    async fn tampered_baa_event_chain_is_detected() {
+        let Some((pool, svc)) = service("tamper").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let baa = svc
+            .request_baa(&tenant, "v1.0", "actor:request")
+            .await
+            .expect("request");
+        svc.sign(&baa.id, "actor:sign", sign_input("alice"))
+            .await
+            .expect("sign");
+        assert_eq!(svc.verify_chain(&baa.id).await.expect("chain"), 2);
+
+        // Rewriting the actor (the legal "who") must invalidate the hash.
+        sqlx::query(
+            "UPDATE hipaa_baa_events SET actor = 'attacker'
+             WHERE id = (SELECT id FROM hipaa_baa_events WHERE baa_id = $1
+                         ORDER BY occurred_at LIMIT 1)",
+        )
+        .bind(&baa.id)
+        .execute(&pool)
+        .await
+        .expect("tamper");
+        let err = svc
+            .verify_chain(&baa.id)
+            .await
+            .expect_err("tamper must be detected");
+        assert!(err.contains("hash mismatch"), "{err}");
+
+        // Dropping a middle event breaks the previous_hash linkage.
+        let fresh_tenant = test_support::unique_tenant();
+        let fresh = svc
+            .request_baa(&fresh_tenant, "v1.0", "actor:request")
+            .await
+            .expect("request");
+        svc.sign(&fresh.id, "actor:sign", sign_input("bob"))
+            .await
+            .expect("sign");
+        svc.countersign(&fresh.id, "actor:countersign", countersign_input())
+            .await
+            .expect("countersign");
+        sqlx::query("DELETE FROM hipaa_baa_events WHERE baa_id = $1 AND event_type = 'signed'")
+            .bind(&fresh.id)
+            .execute(&pool)
+            .await
+            .expect("delete middle event");
+        let err = svc
+            .verify_chain(&fresh.id)
+            .await
+            .expect_err("gap must be detected");
+        assert!(err.contains("previous_hash mismatch"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hostile_baa_inputs_are_stored_verbatim_and_never_crash() {
+        let Some((pool, svc)) = service("hostile").await else {
+            return;
+        };
+        let tenant = test_support::unique_tenant();
+        let baa = svc
+            .request_baa(&tenant, "v1.0", "actor:request")
+            .await
+            .expect("request");
+        // Unicode, RTL, emoji and an over-long title: the service must persist
+        // exactly what was signed.
+        let hostile = SignBaaInput {
+            signer_name: "Z͑̽a̸l̷g̶o̴ ユーザー 🔏".into(),
+            signer_email: "unicodé@example.test".into(),
+            signer_title: Some("x".repeat(4096)),
+            signer_ip: Some("2001:db8::1".into()),
+            document_url: Some("https://docs.example.test/%00/baa.pdf".into()),
+            document_sha256: Some("not-a-hash".into()),
+        };
+        let signed = svc
+            .sign(&baa.id, "actor:sign", hostile.clone())
+            .await
+            .expect("sign");
+        assert_eq!(
+            signed.signer_name.as_deref(),
+            Some(hostile.signer_name.as_str())
+        );
+        assert_eq!(
+            signed.signer_email.as_deref(),
+            Some(hostile.signer_email.as_str())
+        );
+        assert_eq!(signed.document_sha256.as_deref(), Some("not-a-hash"));
+        assert_eq!(svc.verify_chain(&baa.id).await.expect("chain"), 2);
+
+        // An unknown status materialised by an operator is an explicit error,
+        // not a silently-coerced status.
+        sqlx::query("UPDATE hipaa_baas SET status = 'bogus' WHERE id = $1")
+            .bind(&baa.id)
+            .execute(&pool)
+            .await
+            .expect("corrupt status");
+        let err = svc
+            .fetch(&baa.id)
+            .await
+            .expect_err("unknown status must be an error");
+        assert!(err.contains("invalid baa status"), "{err}");
+    }
+}

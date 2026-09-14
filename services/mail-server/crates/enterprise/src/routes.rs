@@ -1003,20 +1003,52 @@ fn clamp_offset(offset: i64) -> i64 {
     offset.clamp(0, 100_000)
 }
 
+/// Map a structured [`crate::types::ApiResult`] error code onto a real HTTP
+/// status.
+///
+/// NOT_FOUND previously surfaced as HTTP 200 with `{"success":false}` — a
+/// lie to any client checking `response.ok`. Codes with no documented HTTP
+/// meaning keep the historical 200 (the envelope still describes the
+/// outcome), so handlers whose result cannot distinguish a not-found are
+/// untouched. `VERIFICATION_FAILED` intentionally stays 200: the check ran
+/// successfully and its negative outcome is the payload (pinned by the
+/// log-stream SSRF tests), it is not a malformed request.
+fn api_result_error_status(code: Option<&str>) -> Option<StatusCode> {
+    match code {
+        Some("NOT_FOUND") => Some(StatusCode::NOT_FOUND),
+        Some("VALIDATION") | Some("INVALID_IP") => Some(StatusCode::BAD_REQUEST),
+        Some("INVALID_TRANSITION") | Some("ALREADY_SUBMITTED") => Some(StatusCode::CONFLICT),
+        // A provisioning/retry attempted from the wrong state is a CONFLICT
+        // (the request is well-formed; the resource is not in a state that
+        // permits it) — it was reported as HTTP 200 with success:false.
+        Some("INVALID_STATE") => Some(StatusCode::CONFLICT),
+        _ => None,
+    }
+}
+
 fn service_result<T: serde::Serialize>(
     result: Result<crate::types::ApiResult<T>, String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match result {
-        Ok(r) => match serde_json::to_value(&r) {
-            Ok(v) => (StatusCode::OK, Json(v)),
-            Err(e) => {
-                tracing::error!(error = %e, "JSON serialization failed in service_result");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "internal serialization error"})),
-                )
+        Ok(r) => {
+            // The envelope (success/data/error/code) is unchanged; only the
+            // status line is corrected.
+            let status = if r.success {
+                StatusCode::OK
+            } else {
+                api_result_error_status(r.code.as_deref()).unwrap_or(StatusCode::OK)
+            };
+            match serde_json::to_value(&r) {
+                Ok(v) => (status, Json(v)),
+                Err(e) => {
+                    tracing::error!(error = %e, "JSON serialization failed in service_result");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": "internal serialization error"})),
+                    )
+                }
             }
-        },
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
@@ -1024,30 +1056,14 @@ fn service_result<T: serde::Serialize>(
     }
 }
 
-/// Support-surface variant of [`service_result`]: the SupportService returns
-/// structured error codes (VALIDATION, INVALID_TRANSITION, ALREADY_SUBMITTED,
-/// NOT_FOUND) that must surface as real HTTP status codes instead of a 200
-/// with `success:false`. The response body still carries the ApiResult JSON,
-/// so the client keeps the human-readable error message.
+/// Support-surface variant of [`service_result`]. The SupportService returns
+/// structured error codes (VALIDATION, INVALID_TRANSITION,
+/// ALREADY_SUBMITTED, NOT_FOUND) that must surface as real HTTP status codes
+/// instead of a 200 with `success:false`. The response body still carries
+/// the ApiResult JSON, so the client keeps the human-readable error message.
 fn support_result<T: serde::Serialize>(
     result: Result<crate::types::ApiResult<T>, String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    if let Ok(ref r) = result {
-        if !r.success {
-            let status = match r.code.as_deref() {
-                Some("VALIDATION") => StatusCode::BAD_REQUEST,
-                Some("INVALID_TRANSITION") | Some("ALREADY_SUBMITTED") => StatusCode::CONFLICT,
-                Some("NOT_FOUND") => StatusCode::NOT_FOUND,
-                _ => StatusCode::OK,
-            };
-            if status != StatusCode::OK {
-                let body = serde_json::to_value(r).unwrap_or_else(
-                    |_| serde_json::json!({"success": false, "error": "invalid request"}),
-                );
-                return (status, Json(body));
-            }
-        }
-    }
     service_result(result)
 }
 
@@ -2231,7 +2247,26 @@ async fn log_stream_stats(
     if let Some(e) = guard_resource_tenant(&auth, &existing).await {
         return e;
     }
+    // An unknown stream id answered 200 with zeroed statistics, which reads
+    // as "this stream delivered nothing" for a stream that does not exist.
+    if !matches!(&existing, Ok(api_result) if api_result.data.is_some()) {
+        return missing_resource("log stream", id);
+    }
     service_result(state.log_streaming.get_stats(id).await)
+}
+
+/// 404 in the enterprise envelope shape (`success:false` + `code`) for a
+/// resource id that does not exist.
+fn missing_resource(what: &str, id: Uuid) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "success": false,
+            "data": serde_json::Value::Null,
+            "error": format!("{what} {id} not found"),
+            "code": "NOT_FOUND",
+        })),
+    )
 }
 
 // ── Private Deploy Handlers ────────────────────────────────────────────
@@ -2359,6 +2394,46 @@ async fn ip_reputation(
     service_result(state.private_deploy.get_ip_reputation(&ip_address).await)
 }
 
+/// A CIDR block must be a syntactically valid NETWORK address: a malformed
+/// value (bad syntax, prefix > 32/128, host bits set) is caller error and
+/// must be answered with a 4xx — previously it reached the database and
+/// surfaced as a 500.
+fn is_valid_network_cidr(cidr: &str) -> bool {
+    use std::net::IpAddr;
+    let Some((address, prefix)) = cidr.trim().split_once('/') else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u32>() else {
+        return false;
+    };
+    match address.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            if prefix > 32 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            u32::from(v4) & mask == u32::from(v4)
+        }
+        Ok(IpAddr::V6(v6)) => {
+            if prefix > 128 {
+                return false;
+            }
+            let bits = u128::from(v6);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            bits & mask == bits
+        }
+        Err(_) => false,
+    }
+}
+
 async fn byoip_register(
     State(state): State<S>,
     Extension(auth): Extension<AuthContext>,
@@ -2366,6 +2441,12 @@ async fn byoip_register(
 ) -> impl IntoResponse {
     if let Err(e) = verify_tenant_access(&auth, &body.tenant_id) {
         return e;
+    }
+    if !is_valid_network_cidr(&body.cidr_block) {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "cidr_block must be a valid network CIDR (network address with host bits clear)",
+        );
     }
     service_result(
         state
@@ -3073,6 +3154,21 @@ async fn whitelabel_get_templates(
     if let Err(e) = verify_tenant_access(&auth, &tenant_id) {
         return e;
     }
+    // A tenant with no whitelabel configuration must be a 404, not an empty
+    // success: "no templates configured yet" and "this tenant has no
+    // whitelabel surface" are different answers.
+    let configured = state.whitelabel.get_config(tenant_id.clone()).await;
+    if !matches!(&configured, Ok(api_result) if api_result.data.is_some()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "success": false,
+                "data": serde_json::Value::Null,
+                "error": format!("no whitelabel configuration for tenant {tenant_id}"),
+                "code": "NOT_FOUND",
+            })),
+        );
+    }
     service_result(state.whitelabel.get_email_templates(tenant_id).await)
 }
 
@@ -3196,9 +3292,62 @@ async fn qbr_benchmarks(
 
 // ── PDF Generation Handlers (via pdf-renderer service) ─────────────────
 
-static PDF_RENDERER_URL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".to_string())
-});
+/// Base URL of the pdf-renderer, read per call (not cached in a `LazyLock`)
+/// so tests and operators can re-point it without a process restart. An
+/// unset/blank `PDF_RENDERER_URL` means PDF rendering is not configured.
+fn pdf_renderer_base_url() -> Option<String> {
+    std::env::var("PDF_RENDERER_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Render a PDF through the configured pdf-renderer.
+///
+/// * unconfigured → 503 with an explicit message (never a misleading 502);
+/// * configured but unreachable/erroring → 502 and no partial body;
+/// * success → the renderer's bytes verbatim.
+async fn render_pdf(
+    state: &AppState,
+    payload: &serde_json::Value,
+) -> Result<axum::body::Bytes, (StatusCode, String)> {
+    let Some(base_url) = pdf_renderer_base_url() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PDF rendering is not configured: set PDF_RENDERER_URL to the pdf-renderer base URL"
+                .to_string(),
+        ));
+    };
+
+    let response = state
+        .http_client
+        .post(format!("{base_url}/v1/pdf/render"))
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("pdf-renderer unreachable: {e}"),
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("pdf-renderer error {status}: {body}"),
+        ));
+    }
+
+    response.bytes().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("pdf-renderer read error: {e}"),
+        )
+    })
+}
 
 /// POST /dpa/:tenant_id/pdf — Generate a GDPR Data Processing Agreement PDF
 async fn dpa_generate_pdf(
@@ -3239,34 +3388,7 @@ async fn dpa_generate_pdf(
         "data": data,
     });
 
-    let resp = state
-        .http_client
-        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("pdf-renderer unreachable: {e}"),
-            )
-        })?;
-
-    if !resp.status().is_success() {
-        let status_code = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("pdf-renderer error {status_code}: {body}"),
-        ));
-    }
-
-    let pdf_bytes = resp.bytes().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("pdf-renderer read error: {e}"),
-        )
-    })?;
+    let pdf_bytes = render_pdf(&state, &payload).await?;
 
     Ok((
         StatusCode::OK,
@@ -3321,34 +3443,7 @@ async fn qbr_generate_pdf(
         "data": qbr_json,
     });
 
-    let resp = state
-        .http_client
-        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("pdf-renderer unreachable: {e}"),
-            )
-        })?;
-
-    if !resp.status().is_success() {
-        let sc = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("pdf-renderer error {sc}: {body}"),
-        ));
-    }
-
-    let pdf_bytes = resp.bytes().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("pdf-renderer read error: {e}"),
-        )
-    })?;
+    let pdf_bytes = render_pdf(&state, &payload).await?;
 
     let content_disposition = format!("attachment; filename=\"qbr-{id}.pdf\"");
 
@@ -3400,34 +3495,7 @@ async fn compliance_report_pdf(
         "data": report_json,
     });
 
-    let resp = state
-        .http_client
-        .post(format!("{}/v1/pdf/render", *PDF_RENDERER_URL))
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("pdf-renderer unreachable: {e}"),
-            )
-        })?;
-
-    if !resp.status().is_success() {
-        let sc = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("pdf-renderer error {sc}: {body}"),
-        ));
-    }
-
-    let pdf_bytes = resp.bytes().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("pdf-renderer read error: {e}"),
-        )
-    })?;
+    let pdf_bytes = render_pdf(&state, &payload).await?;
 
     Ok((
         StatusCode::OK,

@@ -1216,11 +1216,11 @@ pub fn parse_arf_report(message: &str) -> ComplaintInfo {
         } else if lower.starts_with("version:") {
             info.version = Some(extract_value(trimmed));
         } else if lower.starts_with("original-rcpt-to:") {
-            info.original_recipient = Some(extract_value(trimmed));
+            info.original_recipient = Some(normalize_arf_addr(&extract_value(trimmed)));
         } else if lower.starts_with("original-mail-from:") {
             let from = extract_value(trimmed);
             if info.reported_domain.is_none() {
-                info.reported_domain = from.rsplit_once('@').map(|(_, d)| d.to_string());
+                info.reported_domain = from.rsplit_once('@').map(|(_, d)| normalize_arf_addr(d));
             }
         } else if lower.starts_with("arrival-date:") {
             info.arrival_date = Some(extract_value(trimmed));
@@ -1234,11 +1234,28 @@ pub fn parse_arf_report(message: &str) -> ComplaintInfo {
             info.authentication_results = Some(extract_value(trimmed));
         } else if lower.starts_with("original-message-id:") && info.original_message_id.is_none() {
             let mid = extract_value(trimmed);
-            info.original_message_id = Some(mid.trim_matches(|c| c == '<' || c == '>').to_string());
+            info.original_message_id = Some(normalize_arf_addr(&mid));
         }
     }
 
     info
+}
+
+/// ARF address/message-id fields are conventionally wrapped in angle brackets
+/// (`Original-Rcpt-To: <user@example.com>`, `Original-Mail-From:
+/// <sender@domain>`); the brackets are not part of the addr-spec. Leaving
+/// them in broke the suppression identity check — the reported
+/// `<user@example.com>` never equals the queued `user@example.com`, so every
+/// complaint from a conforming reporter was dropped as "forged" and the
+/// recipient was never suppressed — and produced a `sender_reputation`
+/// domain with a trailing `>`.
+fn normalize_arf_addr(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+        .to_string()
 }
 
 fn extract_value(line: &str) -> String {
@@ -1820,5 +1837,859 @@ Original-Message-ID: <original@example.com>\r\n";
             source.contains(trim_needle),
             "the webhook push path must trim the queue to a bounded length"
         );
+    }
+}
+
+#[cfg(test)]
+mod adversarial_db_tests {
+    //! Adversarial, DB-backed tests for ARF/FBL ingestion.
+    //!
+    //! The canned reports below are driven through the REAL `process_complaint`
+    //! and REAL SMTP sessions (`handle_session`) against the canonical
+    //! provisioned schema (`migrator::test_support::fresh_canonical_pool`) and
+    //! the local Redis. `TEST_DATABASE_URL` gates the suite: unset soft-skips,
+    //! configured-but-broken FAILS.
+    //!
+    //! Trust model under test: only an authoritative source may suppress or
+    //! move reputation; forged ARF fields are recorded but never trusted.
+
+    use super::*;
+    use sqlx::PgPool;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn redis_pool() -> deadpool_redis::Pool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    fn test_server(pool: PgPool, redis: deadpool_redis::Pool) -> Arc<FeedbackLoopServer> {
+        let server = Arc::new(FeedbackLoopServer::new(
+            FeedbackConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port: 0,
+                hostname: "fbl.test".into(),
+                max_arf_size: 1024 * 1024,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+            },
+            pool,
+            redis,
+            "fbl.test".into(),
+        ));
+        server.rdns_cache.insert(
+            LOOPBACK,
+            FblSourceCheck::Authoritative {
+                provider: "google".into(),
+                method: FblValidationMethod::RdnsFcrcdns,
+            },
+        );
+        server
+    }
+
+    fn unique_tenant() -> String {
+        format!("fbl-{}", &Uuid::new_v4().simple().to_string()[..20])
+    }
+
+    async fn seed_tenant(pool: &PgPool, tenant: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status)
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(tenant)
+        .bind(format!("FBL {tenant}"))
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+    }
+
+    /// Seed a sent message the complaint can reference: returns (queue id,
+    /// message_id) — both must be resolvable by `lookup_sent_message`.
+    async fn seed_sent_message(pool: &PgPool, tenant: &str, recipient: &str) -> (String, String) {
+        seed_tenant(pool, tenant).await;
+        let id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue
+                 (id, from_address, to_addresses, subject, tenant_id, message_id, status)
+             VALUES ($1, 'sender@apexmail.test', ARRAY[$2]::text[], 'adversarial fixture',
+                     $3, $4, 'sent')",
+        )
+        .bind(id)
+        .bind(recipient)
+        .bind(tenant)
+        .bind(message_id)
+        .execute(pool)
+        .await
+        .expect("insert sent message");
+        (id.to_string(), message_id.to_string())
+    }
+
+    /// A conforming ARF report: every address/message-id field is wrapped in
+    /// angle brackets, exactly as RFC 5965 examples show them.
+    fn arf(message_id: &str, recipient: &str, from_domain: &str) -> String {
+        format!(
+            "Feedback-Type: abuse\r\n\
+             User-Agent: AdversarialReporter/1.0\r\n\
+             Version: 1\r\n\
+             Original-Mail-From: <sender@{from_domain}>\r\n\
+             Original-Rcpt-To: <{recipient}>\r\n\
+             Arrival-Date: Mon, 08 Sep 2025 12:00:00 +0000\r\n\
+             Reporting-MTA: dns; mx.reporter.test\r\n\
+             Source-IP: 203.0.113.9\r\n\
+             Original-Message-ID: <{message_id}>\r\n\
+             \r\n\
+             This is an abuse report body.\r\n"
+        )
+    }
+
+    async fn complaint_row(
+        pool: &PgPool,
+        id: &str,
+    ) -> Option<(
+        bool,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> {
+        let uuid = Uuid::parse_str(id).expect("complaint id is a uuid");
+        sqlx::query_as::<_, (bool, Option<String>, Option<String>, Option<String>, Option<String>)>(
+            "SELECT authoritative, original_message_id, original_recipient, provider, observation_detail
+             FROM complaint_events WHERE id = $1",
+        )
+        .bind(uuid)
+        .fetch_optional(pool)
+        .await
+        .expect("complaint row")
+    }
+
+    async fn suppression_count(pool: &PgPool, tenant: &str, email: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND email = $2")
+            .bind(tenant)
+            .bind(email)
+            .fetch_one(pool)
+            .await
+            .expect("suppression count")
+    }
+
+    async fn reputation_complaints(pool: &PgPool, domain: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(complaints), 0)::bigint FROM sender_reputation WHERE domain = $1",
+        )
+        .bind(domain)
+        .fetch_one(pool)
+        .await
+        .expect("reputation")
+    }
+
+    // ── ARF parsing identity (regression: bracket normalization) ───────────
+
+    #[test]
+    fn arf_bracketed_addresses_are_normalized_to_bare_addr_specs() {
+        let report = arf("msg-1", "user@example.test", "reporter.test");
+        let parsed = parse_arf_report(&report);
+        assert_eq!(
+            parsed.original_recipient.as_deref(),
+            Some("user@example.test")
+        );
+        assert_eq!(parsed.original_message_id.as_deref(), Some("msg-1"));
+        assert_eq!(
+            parsed.reported_domain.as_deref(),
+            Some("reporter.test"),
+            "the reported domain must not carry a trailing '>'"
+        );
+        // Brackets around the message id must not survive either.
+        let bracketed = parse_arf_report("Original-Message-ID: <<msg-2>>\r\n");
+        assert_eq!(bracketed.original_message_id.as_deref(), Some("msg-2"));
+    }
+
+    // ── trust: authoritative vs forged ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn authoritative_complaint_suppresses_referenceable_recipient_exactly_once() {
+        let Some(pool) = test_pool("fbl_authoritative").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "victim@example.test";
+        let (queue_id, _message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+        let report = arf(&queue_id, recipient, "reporter.test");
+
+        let first = server
+            .process_complaint(LOOPBACK, Some("google"), report.as_bytes())
+            .await
+            .expect("authoritative complaint accepted");
+        let row = complaint_row(&pool, &first).await.expect("recorded");
+        assert!(row.0, "authoritative flag must be set");
+        assert_eq!(row.1.as_deref(), Some(queue_id.as_str()));
+        assert_eq!(
+            row.2.as_deref(),
+            Some(recipient),
+            "the bracketed ARF recipient must match the queued recipient"
+        );
+        assert_eq!(row.3.as_deref(), Some("google"));
+        assert!(
+            row.4.is_none(),
+            "authoritative rows carry no observation detail"
+        );
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 1);
+        assert_eq!(reputation_complaints(&pool, "reporter.test").await, 1);
+
+        // The webhook payload was queued.
+        let mut conn = server.redis.get().await.unwrap();
+        let payloads: Vec<String> = redis::cmd("LRANGE")
+            .arg("mta:webhook_queue")
+            .arg(0)
+            .arg(9)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            payloads.iter().any(|p| p.contains(&first)),
+            "the complaint webhook must be queued"
+        );
+
+        // REPLAY: the same report must dedupe side effects (M55).
+        let second = server
+            .process_complaint(LOOPBACK, Some("google"), report.as_bytes())
+            .await
+            .expect("replayed complaint is accepted idempotently");
+        let _ = second;
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 1);
+        assert_eq!(
+            reputation_complaints(&pool, "reporter.test").await,
+            1,
+            "a replayed report must not double-count reputation"
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM complaint_events WHERE source_ip = $1 AND original_message_id = $2",
+        )
+        .bind(LOOPBACK.to_string())
+        .bind(&queue_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "deduplicated rows collapse to one");
+    }
+
+    #[tokio::test]
+    async fn message_id_reference_is_resolved_but_forged_recipient_never_suppresses() {
+        let Some(pool) = test_pool("fbl_forged_recipient").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "real@example.test";
+        let (_queue_id, message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+
+        // The report references a REAL sent message but claims a DIFFERENT
+        // recipient (attacker-chosen): suppression must be dropped.
+        let forged = arf(&message_id, "someone-else@example.test", "reporter.test");
+        let id = server
+            .process_complaint(LOOPBACK, Some("google"), forged.as_bytes())
+            .await
+            .expect("complaint recorded");
+        let row = complaint_row(&pool, &id).await.expect("recorded");
+        assert!(row.0);
+        assert_eq!(
+            suppression_count(&pool, &tenant, "someone-else@example.test").await,
+            0,
+            "a forged recipient must never be suppressed"
+        );
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
+
+        // Unknown message id: recorded, reputation moved, no suppression.
+        let unknown = arf(&Uuid::new_v4().to_string(), recipient, "reporter.test");
+        let id = server
+            .process_complaint(LOOPBACK, Some("google"), unknown.as_bytes())
+            .await
+            .expect("complaint recorded");
+        assert!(complaint_row(&pool, &id).await.is_some());
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
+    }
+
+    #[tokio::test]
+    async fn non_authoritative_complaint_is_recorded_but_never_suppresses_or_moves_reputation() {
+        let Some(pool) = test_pool("fbl_non_authoritative").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "victim@example.test";
+        let (queue_id, _message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+        let report = arf(&queue_id, recipient, "forged-domain.test");
+
+        let id = server
+            .process_complaint(LOOPBACK, None, report.as_bytes())
+            .await
+            .expect("non-authoritative complaint recorded");
+        let row = complaint_row(&pool, &id).await.expect("recorded");
+        assert!(!row.0, "authoritative must be false");
+        assert!(row.1.is_none(), "natural keys must stay NULL");
+        assert!(row.2.is_none());
+        assert!(row.3.is_none());
+        assert!(
+            row.4
+                .as_deref()
+                .unwrap_or_default()
+                .contains("non-authoritative"),
+            "the observation must explain the untrusted source: {:?}",
+            row.4
+        );
+        assert_eq!(
+            suppression_count(&pool, &tenant, recipient).await,
+            0,
+            "non-authoritative reports must never suppress"
+        );
+        assert_eq!(
+            reputation_complaints(&pool, "forged-domain.test").await,
+            0,
+            "non-authoritative reports must never move reputation"
+        );
+
+        // No webhook payload may reference this complaint.
+        let mut conn = server.redis.get().await.unwrap();
+        let payloads: Vec<String> = redis::cmd("LRANGE")
+            .arg("mta:webhook_queue")
+            .arg(0)
+            .arg(9)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            !payloads.iter().any(|p| p.contains(&id)),
+            "non-authoritative complaints must not push a webhook"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_complaint_is_refused_before_any_side_effect() {
+        let Some(pool) = test_pool("fbl_oversize").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "victim@example.test";
+        let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+
+        let mut config = server.config.clone();
+        config.max_arf_size = 64;
+        let small = Arc::new(FeedbackLoopServer::new(
+            config,
+            pool.clone(),
+            redis_pool(),
+            "fbl.test".into(),
+        ));
+        let report = arf(&queue_id, recipient, "reporter.test");
+        assert!(report.len() > 64);
+        small
+            .process_complaint(LOOPBACK, Some("google"), report.as_bytes())
+            .await
+            .expect_err("oversized payload must be refused");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM complaint_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "an oversized payload must leave no side effects");
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 0);
+    }
+
+    // ── full SMTP session over the real entry point ────────────────────────
+
+    /// Bind a one-shot session server and drive `handle_session` over a real
+    /// TCP connection. Returns the client halves plus the session task.
+    async fn connect_session(
+        server: Arc<FeedbackLoopServer>,
+    ) -> (
+        tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+        tokio::net::tcp::OwnedWriteHalf,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            server.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, writer) = tcp.into_split();
+        (tokio::io::BufReader::new(reader), writer, task)
+    }
+
+    async fn session_reply(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut full = String::new();
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::io::AsyncBufReadExt::read_line(reader, &mut line),
+            )
+            .await
+            .expect("reply must arrive within 5s")
+            .expect("read must not fail");
+            let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !more {
+                return full;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_data_ingests_a_complete_arf_report_and_refuses_a_truncated_one() {
+        let Some(pool) = test_pool("fbl_session").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let recipient = "victim@example.test";
+        let (queue_id, _message_id) = seed_sent_message(&pool, &tenant, recipient).await;
+        let server = test_server(pool.clone(), redis_pool());
+
+        // ── complete report ────────────────────────────────────────────────
+        let (mut reader, mut writer, task) = connect_session(server.clone()).await;
+        assert!(session_reply(&mut reader).await.starts_with("220"));
+        writer.write_all(b"EHLO reporter.test\r\n").await.unwrap();
+        assert!(session_reply(&mut reader).await.starts_with("250"));
+        writer
+            .write_all(b"MAIL FROM:<fbl@reporter.test>\r\n")
+            .await
+            .unwrap();
+        assert_eq!(session_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
+        assert_eq!(session_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert_eq!(session_reply(&mut reader).await, "354 Go ahead\r\n");
+
+        let report = arf(&queue_id, recipient, "reporter.test");
+        for line in report.lines() {
+            writer
+                .write_all(format!("{line}\r\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        writer.write_all(b".\r\n").await.unwrap();
+        let accepted = session_reply(&mut reader).await;
+        assert!(
+            accepted.starts_with("250 2.0.0 Ok id="),
+            "a complete report must be accepted: {accepted:?}"
+        );
+
+        // RFC 5321 §4.1.1.4: the next transaction must start with MAIL FROM.
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
+        assert_eq!(
+            session_reply(&mut reader).await,
+            "503 5.5.1 Error: need MAIL command first\r\n",
+            "end-of-DATA must clear the reverse-path flag"
+        );
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        assert_eq!(session_reply(&mut reader).await, "221 2.0.0 Bye\r\n");
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+
+        assert_eq!(suppression_count(&pool, &tenant, recipient).await, 1);
+        let recorded: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM complaint_events WHERE original_message_id = $1 AND authoritative",
+        )
+        .bind(&queue_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(recorded, 1, "the session must record exactly one complaint");
+
+        // ── truncated report (no <CRLF>.<CRLF>) ────────────────────────────
+        let (mut reader, mut writer, task) = connect_session(server.clone()).await;
+        assert!(session_reply(&mut reader).await.starts_with("220"));
+        writer.write_all(b"EHLO reporter.test\r\n").await.unwrap();
+        let _ = session_reply(&mut reader).await;
+        writer
+            .write_all(b"MAIL FROM:<fbl@reporter.test>\r\n")
+            .await
+            .unwrap();
+        let _ = session_reply(&mut reader).await;
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
+        let _ = session_reply(&mut reader).await;
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        assert_eq!(session_reply(&mut reader).await, "354 Go ahead\r\n");
+        writer
+            .write_all(format!("Original-Message-ID: <{queue_id}>\r\n").as_bytes())
+            .await
+            .unwrap();
+        // Drop the write half: EOF mid-DATA without the terminator.
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM complaint_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            total, 1,
+            "a truncated DATA payload must never be processed as a complaint"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_serves_the_configured_listener_and_stop_ends_it() {
+        let Some(pool) = test_pool("fbl_start_stop").await else {
+            return;
+        };
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let server = Arc::new(FeedbackLoopServer::new(
+            FeedbackConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port,
+                hostname: "fbl.test".into(),
+                max_arf_size: 1024 * 1024,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+            },
+            pool,
+            redis_pool(),
+            "fbl.test".into(),
+        ));
+        let running = server.clone();
+        let handle = tokio::spawn(async move { running.start().await });
+
+        // Wait until the listener accepts.
+        let mut client = None;
+        for _ in 0..100 {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(stream) => {
+                    client = Some(stream);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+        let mut client = client.expect("start must bind the configured listener");
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        let mut buf = [0u8; 64];
+        let n = tokio::io::AsyncReadExt::read(&mut client, &mut buf)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+
+        server.stop();
+        let joined = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(joined.is_ok(), "stop() must end the accept loop");
+        let started = joined.expect("checked above");
+        assert!(started.is_ok(), "start must return Ok on shutdown");
+    }
+
+    // ── registry ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn load_registry_from_db_installs_rows_and_keeps_the_current_set_when_empty() {
+        let Some(pool) = test_pool("fbl_registry_load").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let seeds = server.registry.read().unwrap().providers().len();
+        assert!(seeds > 0, "compiled seeds must be present initially");
+
+        // A row registered for this test's own network authorizes loopback.
+        sqlx::query(
+            "INSERT INTO fbl_provider_registry
+                 (provider, display_name, rdns_patterns, source_networks, validation_method, enabled)
+             VALUES ('adversarial-provider', 'Adversarial', ARRAY['fbl.test']::text[],
+                     ARRAY['127.0.0.0/8']::text[], 'rdns_fcrcdns', true)
+             ON CONFLICT (provider) DO UPDATE SET enabled = true",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert provider");
+
+        let loaded = server
+            .load_registry_from_db(&pool)
+            .await
+            .expect("registry load");
+        assert!(loaded >= seeds, "the canonical registry carries seed rows");
+        {
+            let registry = server.registry.read().unwrap();
+            assert!(registry
+                .providers()
+                .iter()
+                .any(|p| p.provider == "adversarial-provider"));
+            assert_eq!(
+                registry.authorize(LOOPBACK, &["mx.fbl.test".into()]),
+                FblAuthority::Candidate {
+                    provider: "adversarial-provider".into(),
+                    method: FblValidationMethod::RdnsFcrcdns,
+                    matched_hostname: "mx.fbl.test".into(),
+                }
+            );
+        }
+
+        // Empty table: the CURRENT registry must stay in place (no downgrade).
+        sqlx::query("DELETE FROM fbl_provider_registry")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let loaded = server
+            .load_registry_from_db(&pool)
+            .await
+            .expect("empty load");
+        assert_eq!(loaded, 0);
+        assert_eq!(
+            server.registry.read().unwrap().providers().len(),
+            seeds + 1,
+            "an empty registry table must not wipe the loaded providers"
+        );
+
+        // Explicit replacement is wired to the same lock.
+        server.set_registry(FblRegistry::new(vec![]));
+        assert!(server.registry.read().unwrap().is_empty());
+    }
+
+    // ── complaint-rate alert webhooks ──────────────────────────────────────
+
+    /// Minimal HTTP stub: records the request and answers with one status.
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        head: String,
+        body: Vec<u8>,
+    }
+
+    fn spawn_http_stub(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        Arc<std::sync::Mutex<Vec<RecordedRequest>>>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let requests: Arc<std::sync::Mutex<Vec<RecordedRequest>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let recorded = Arc::clone(&recorded);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let head_end = loop {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if buf.len() > 1 << 20 {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            if key.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < head_end + content_length {
+                        let n = match socket.read(&mut tmp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let body_bytes =
+                        buf[head_end..(head_end + content_length).min(buf.len())].to_vec();
+                    recorded
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(RecordedRequest {
+                            head,
+                            body: body_bytes,
+                        });
+                    let out = format!(
+                        "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(out.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        (addr, requests)
+    }
+
+    #[tokio::test]
+    async fn high_complaint_rate_webhooks_are_signed_and_their_delivery_recorded() {
+        let Some(pool) = test_pool("fbl_alert_webhook").await else {
+            return;
+        };
+        let server = test_server(pool.clone(), redis_pool());
+        let tenant = unique_tenant();
+        let recipient = "victim@example.test";
+        let (queue_id, _) = seed_sent_message(&pool, &tenant, recipient).await;
+        let domain = "alert-domain.test";
+
+        // The rate gate needs sent > 100 and rate > 0.1%; seed sent=1000 and
+        // one prior complaint so the new one crosses 0.2%.
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let key = format!("mta:reputation:{domain}:{date}");
+        {
+            let mut conn = server.redis.get().await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut *conn)
+                .await
+                .unwrap();
+            let _: i64 = redis::cmd("HINCRBY")
+                .arg(&key)
+                .arg("sent")
+                .arg(1000i64)
+                .query_async(&mut *conn)
+                .await
+                .unwrap();
+            let _: i64 = redis::cmd("HINCRBY")
+                .arg(&key)
+                .arg("complaints")
+                .arg(1i64)
+                .query_async(&mut *conn)
+                .await
+                .unwrap();
+        }
+
+        let (stub_addr, requests) = spawn_http_stub(200, "ok");
+        let live_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO alert_webhooks (id, url, secret, enabled, alert_types)
+             VALUES ($1, $2, 'sh-secret', true, '[\"complaint_rate\"]'::jsonb)",
+        )
+        .bind(live_id)
+        .bind(format!("http://{stub_addr}/hook"))
+        .execute(&pool)
+        .await
+        .expect("insert live alert webhook");
+        let dead_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO alert_webhooks (id, url, secret, enabled, alert_types)
+             VALUES ($1, 'http://127.0.0.1:1/dead', '', true, '[\"complaint_rate\"]'::jsonb)",
+        )
+        .bind(dead_id)
+        .execute(&pool)
+        .await
+        .expect("insert dead alert webhook");
+
+        let report = arf(&queue_id, recipient, domain);
+        server
+            .process_complaint(LOOPBACK, Some("google"), report.as_bytes())
+            .await
+            .expect("complaint processed");
+
+        let (success, status_code, error): (bool, Option<i32>, Option<String>) = sqlx::query_as(
+            "SELECT success, status_code, error_message FROM alert_webhook_deliveries WHERE webhook_id = $1",
+        )
+        .bind(live_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("live delivery row");
+        assert!(success, "2xx alert delivery must be recorded as success");
+        assert_eq!(status_code, Some(200));
+        assert!(error.is_none());
+
+        let (dead_success, dead_error): (bool, Option<String>) = sqlx::query_as(
+            "SELECT success, error_message FROM alert_webhook_deliveries WHERE webhook_id = $1",
+        )
+        .bind(dead_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("dead delivery row");
+        assert!(
+            !dead_success,
+            "an unreachable webhook is a recorded failure"
+        );
+        assert!(dead_error.is_some());
+
+        // The live request carried the signed payload.
+        let recorded = requests.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(recorded.len(), 1, "exactly the live webhook was called");
+        let head = &recorded[0].head;
+        assert!(head.contains("x-apexmail-event: complaint_rate_alert"));
+        let signature = head
+            .lines()
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                if k.eq_ignore_ascii_case("x-apexmail-signature") {
+                    Some(v.trim().to_string())
+                } else {
+                    None
+                }
+            })
+            .expect("signature header");
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"sh-secret").unwrap();
+        mac.update(&recorded[0].body);
+        assert_eq!(
+            signature,
+            hex::encode(mac.finalize().into_bytes()),
+            "the alert payload must be HMAC-signed with the webhook secret"
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&recorded[0].body).expect("JSON payload");
+        assert_eq!(payload["alert_type"], "complaint_rate");
+        assert_eq!(payload["sent_count"], 1000);
+        assert_eq!(payload["threshold"], 0.001);
+
+        // The DB reputation row also moved (long-term tracking).
+        assert_eq!(reputation_complaints(&pool, domain).await, 1);
+
+        let mut conn = server.redis.get().await.unwrap();
+        let _: () = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .unwrap();
     }
 }

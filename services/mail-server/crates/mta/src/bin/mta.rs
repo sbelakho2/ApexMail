@@ -648,3 +648,108 @@ mod tests {
         assert!(submission_tls_acceptor(&tls).unwrap().is_some());
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    //! Reachable pieces of the MTA binary: TLS material loading must fail
+    //! loudly (never a half-configured listener), and the expiry-alarm loop
+    //! must keep running through both valid and unreadable certificates.
+
+    use super::*;
+
+    fn pem(der: &[u8]) -> String {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.push_str(std::str::from_utf8(chunk).unwrap());
+            out.push('\n');
+        }
+        out.push_str("-----END CERTIFICATE-----\n");
+        out
+    }
+
+    fn cert_expiring_in(days: i64) -> String {
+        let mut params = rcgen::CertificateParams::new(vec!["mail.apexmail.ee".to_string()])
+            .expect("rcgen params");
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        let not_after = chrono::Utc::now() + chrono::Duration::days(days);
+        params.not_after = rcgen::date_time_ymd(
+            not_after.format("%Y").to_string().parse().unwrap(),
+            not_after.format("%m").to_string().parse().unwrap(),
+            not_after.format("%d").to_string().parse().unwrap(),
+        );
+        let key = rcgen::KeyPair::generate().expect("key");
+        pem(params.self_signed(&key).expect("cert").der().as_ref())
+    }
+
+    #[test]
+    fn load_tls_acceptor_rejects_a_key_file_without_a_private_key() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("cert.pem");
+        std::fs::write(&cert, cert_expiring_in(60)).unwrap();
+        let key = dir.path().join("empty-key.pem");
+        std::fs::write(&key, "").unwrap();
+
+        let error = load_tls_acceptor(cert.to_str().unwrap(), key.to_str().unwrap())
+            .err()
+            .expect("a key file without a private key must be fatal");
+        assert!(
+            error.to_string().contains("No private key found"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn load_tls_acceptor_rejects_a_certificate_file_without_certificates() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("garbage.pem");
+        std::fs::write(&cert, "not a certificate\n").unwrap();
+        // A valid key paired with no certificate must fail rather than
+        // produce a listener that cannot complete a handshake.
+        let key = dir.path().join("key.pem");
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        std::fs::write(&key, key_pair.serialize_pem()).unwrap();
+
+        assert!(load_tls_acceptor(cert.to_str().unwrap(), key.to_str().unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn cert_expiry_alarm_loop_survives_valid_and_unreadable_certificates() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+
+        // A certificate inside the 30-day alarm window: the loop must inspect
+        // it, emit the alarm, and stay alive for the next tick.
+        let expiring = dir.path().join("expiring.pem");
+        std::fs::write(&expiring, cert_expiring_in(20)).unwrap();
+        let handle = tokio::spawn(cert_expiry_alarm_loop(
+            expiring.to_string_lossy().to_string(),
+        ));
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "the alarm loop must keep running after a successful inspection"
+        );
+        handle.abort();
+
+        // An unreadable path logs the error and must not kill the loop
+        // (otherwise the operator loses every later expiry alarm).
+        let missing = dir.path().join("missing.pem");
+        let handle = tokio::spawn(cert_expiry_alarm_loop(
+            missing.to_string_lossy().to_string(),
+        ));
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.is_finished(),
+            "an unreadable certificate must not stop the alarm loop"
+        );
+        handle.abort();
+    }
+}

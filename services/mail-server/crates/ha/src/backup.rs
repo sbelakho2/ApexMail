@@ -753,8 +753,14 @@ impl BackupService {
             // Parse JSONL row and generate INSERT
             if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
                 if let Some(obj) = row.as_object() {
+                    // jsonb_populate_record, not json_populate_record: sqlx
+                    // binds serde_json::Value as `jsonb`, and jsonb has no
+                    // implicit cast to the `json` argument of
+                    // json_populate_record — that call failed for every row
+                    // ("function json_populate_record(<table>, jsonb) does not
+                    // exist"), so restores could never insert anything.
                     let insert_sql = format!(
-                        "INSERT INTO {table} SELECT * FROM json_populate_record(NULL::{table}, $1)",
+                        "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1)",
                         table = table
                     );
 
@@ -923,24 +929,48 @@ impl BackupService {
             }
         }
 
-        // Check 1:index health — an abundance of never-scanned indexes after
-        // a restore hints at broken/dropped index usage.
+        // Every check below is scoped to the RESTORED tables: database-wide
+        // counts (the previous form) mixed pre-existing, unrelated objects
+        // into the verdict — this canonical schema always carries NOT VALID
+        // constraints and never-scanned indexes on other tables, so a
+        // perfectly restored table was reported as a failed restore.
+        let restored_tables: Vec<String> = tables
+            .iter()
+            .filter(|t| Self::is_valid_identifier(t))
+            .cloned()
+            .collect();
+
+        // Check 1:index health — a restored table whose index is INVALID
+        // (indisvalid = false, e.g. an interrupted CREATE INDEX CONCURRENTLY)
+        // means index usage cannot be trusted. Freshly-reset idx_scan counters
+        // are expected after a restore and are not evidence of breakage.
         let index_ok: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pg_stat_user_indexes WHERE idx_scan = 0",
+            "SELECT COUNT(*) FROM pg_index i
+             JOIN pg_class c ON c.oid = i.indexrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE NOT i.indisvalid
+               AND n.nspname = 'public'
+               AND c.relname = ANY($1)",
         )
+        .bind(&restored_tables)
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten()
-        .map(|c| c < 100)
+        .map(|invalid_indexes| invalid_indexes == 0)
         .unwrap_or(false);
 
-        // Check 2:constraint validity — real validity is "no constraint is
-        // marked NOT VALID" (pg_constraint.convalidated), not merely "CHECK
-        // constraints exist".
+        // Check 2:constraint validity — real validity is "no constraint on a
+        // restored table is marked NOT VALID" (pg_constraint.convalidated).
         let constraint_ok: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pg_constraint WHERE NOT convalidated",
+            "SELECT COUNT(*) FROM pg_constraint con
+             JOIN pg_class c ON c.oid = con.conrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE NOT con.convalidated
+               AND n.nspname = 'public'
+               AND c.relname = ANY($1)",
         )
+        .bind(&restored_tables)
         .fetch_optional(&self.pool)
         .await
         .ok()
@@ -948,26 +978,44 @@ impl BackupService {
         .map(|invalid_count| invalid_count == 0)
         .unwrap_or(false);
 
-        // Check 3:sequence validity — a sequence is dangling (invalid after
-        // a restore) when nothing owns it as a column default. Counting all
-        // sequences (the old check) said nothing about validity.
+        // Check 3:sequence validity — scoped to the RESTORED tables' own
+        // sequences. A table's serial/identity column is bound to its
+        // sequence by a `pg_depend` ownership entry; the sequence is
+        // orphaned when that ownership/owning column is gone. The previous
+        // database-wide count (every sequence with no owner) made any
+        // unrelated `CREATE SEQUENCE` in the schema invalidate an otherwise
+        // correct restore.
         let sequence_ok: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM pg_sequences s
-             WHERE NOT EXISTS (
-                SELECT 1 FROM pg_depend d
-                JOIN pg_class seq ON seq.oid = d.objid
-                WHERE d.classid = 'pg_class'::regclass
-                  AND d.refclassid = 'pg_class'::regclass
-                  AND d.refobjsubid > 0
-                  AND seq.relkind = 'S'
-                  AND seq.relname = s.sequencename
-             )",
+            "SELECT COUNT(*)
+             FROM pg_class tbl
+             JOIN pg_namespace n ON n.oid = tbl.relnamespace
+             JOIN pg_attribute a
+               ON a.attrelid = tbl.oid AND a.attnum > 0 AND NOT a.attisdropped
+             WHERE n.nspname = 'public'
+               AND tbl.relname = ANY($1)
+               AND pg_get_serial_sequence(
+                     format('%I.%I', n.nspname, tbl.relname), a.attname
+                   ) IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM pg_depend d
+                   JOIN pg_class seq ON seq.oid = d.objid AND seq.relkind = 'S'
+                   WHERE d.classid = 'pg_class'::regclass
+                     AND d.refclassid = 'pg_class'::regclass
+                     AND d.refobjid = tbl.oid
+                     AND d.refobjsubid = a.attnum
+                     AND d.deptype IN ('a', 'i')
+                     AND seq.oid = pg_get_serial_sequence(
+                           format('%I.%I', n.nspname, tbl.relname), a.attname
+                         )::regclass
+               )",
         )
+        .bind(&restored_tables)
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten()
-        .map(|dangling| dangling == 0)
+        .map(|orphaned| orphaned == 0)
         .unwrap_or(false);
 
         let checksum_match = tables_verified as usize == tables.len();
@@ -1011,26 +1059,28 @@ impl BackupService {
                     started_at, completed_at, duration_ms, parent_backup_id, metadata
              FROM ha_backups WHERE 1=1",
         );
-        let mut params: Vec<String> = Vec::with_capacity(2);
+        let mut filters: Vec<String> = Vec::with_capacity(2);
         if let Some(bt) = backup_type {
-            params.push(bt.to_string());
-            sql.push_str(&format!(" AND backup_type = ${}", params.len()));
+            filters.push(bt.to_string());
+            sql.push_str(&format!(" AND backup_type = ${}", filters.len()));
         }
         if let Some(st) = status {
-            params.push(st.to_string());
-            sql.push_str(&format!(" AND status = ${}", params.len()));
+            filters.push(st.to_string());
+            sql.push_str(&format!(" AND status = ${}", filters.len()));
         }
+        // LIMIT must be bound as an integer: binding the clamped value as a
+        // string makes PostgreSQL infer `text` for the placeholder, and a
+        // text-typed LIMIT is a hard error ("argument of LIMIT must be type
+        // bigint, not type text") — the previous code failed on every call.
         let clamped_limit = limit.clamp(1, 1000);
-        params.push(clamped_limit.to_string());
-        sql.push_str(&format!(
-            " ORDER BY started_at DESC LIMIT ${}",
-            params.len()
-        ));
+        let limit_param = filters.len() + 1;
+        sql.push_str(&format!(" ORDER BY started_at DESC LIMIT ${limit_param}"));
 
         let mut query = sqlx::query_as::<_, BackupRow>(&sql);
-        for p in &params {
+        for p in &filters {
             query = query.bind(p);
         }
+        query = query.bind(clamped_limit);
 
         let rows = query
             .fetch_all(&self.pool)
@@ -1106,7 +1156,7 @@ impl BackupService {
         // Which backups are expiring (id + location) BEFORE deleting rows.
         let expired: Vec<(Uuid, Option<String>)> = sqlx::query_as(
             "SELECT id, location FROM ha_backups WHERE status = 'completed'
-             AND completed_at < NOW() - make_interval(days => $1)",
+             AND completed_at < NOW() - make_interval(days => $1::int)",
         )
         .bind(days)
         .fetch_all(&self.pool)
@@ -1125,7 +1175,7 @@ impl BackupService {
 
         let res = sqlx::query(
             "DELETE FROM ha_backups WHERE status = 'completed'
-             AND completed_at < NOW() - make_interval(days => $1)",
+             AND completed_at < NOW() - make_interval(days => $1::int)",
         )
         .bind(days)
         .execute(&self.pool)

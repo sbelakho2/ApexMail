@@ -436,3 +436,181 @@ mod tests {
         );
     }
 }
+
+// ─── Adversarial dashboard-stats tests ─────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    #[test]
+    fn mrr_sql_normalizes_yearly_prices_with_rounding() {
+        let sql = build_subscription_mrr_sql(true);
+        assert!(sql.contains("ROUND(p.price_yearly / 12.0)::bigint"));
+        assert!(sql.contains("COALESCE(NULLIF(s.billing_interval, ''), 'monthly')"));
+        assert!(sql.contains("s.status IN ('active', 'trialing', 'past_due')"));
+        // Without the column the expression degrades to the monthly price.
+        let sql = build_subscription_mrr_sql(false);
+        assert!(sql.contains("'monthly'"));
+        assert!(!sql.contains("billing_interval"));
+        assert!(sql.contains("ELSE p.price_monthly"));
+    }
+
+    #[tokio::test]
+    async fn unreadable_count_queries_degrade_to_zero() {
+        let Some((_state, pool)) = state_and_pool("adv_dashboard_zero").await else {
+            return;
+        };
+        assert_eq!(
+            fetch_count_or_zero(&pool, "SELECT COUNT(*)::bigint FROM no_such_table_adv").await,
+            0
+        );
+        assert_eq!(
+            fetch_count_or_zero(&pool, "this is not sql at all").await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_aggregate_seeded_platform_rows_and_are_gated() {
+        let Some((state, pool)) = state_and_pool("adv_dashboard_stats").await else {
+            return;
+        };
+        invalidate_dashboard_cache().await;
+
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let plan_name = format!("adv-dash-plan-{tag}");
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'dash adversarial', $2, 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO plans (id, name, price_monthly, price_yearly, features)
+             VALUES ($1, $2, 1500, 18000, '{}'::jsonb)",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at)
+             VALUES ($1, $2, $3, 'active', 'monthly', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("sub_dash_{tag}"))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed subscription");
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, status, created_at, updated_at)
+             VALUES ($1, 'a@example.com', '[\"b@example.com\"]'::jsonb, 'delivered', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+        sqlx::query(
+            "INSERT INTO system_alerts (alert_type, message, severity, acknowledged, tenant_id, created_at)
+             VALUES ('adv', 'critical', 'critical', false, $1, NOW()),
+                    ('adv', 'warning', 'warning', false, $1, NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed alerts");
+
+        let Json(stats) = get_dashboard_stats(State(state.clone()), admin_auth())
+            .await
+            .expect("stats");
+        assert!(stats.platform.active_tenants >= 1);
+        assert!(stats.platform.total_emails >= 1);
+        assert!(
+            stats.platform.mrr >= 15.0,
+            "seeded MRR included: {}",
+            stats.platform.mrr
+        );
+        assert!(stats.compliance.risk_alerts >= 2);
+        assert!(stats.compliance.critical_tenants >= 1);
+        assert!(
+            stats.platform.health_status == "healthy"
+                || stats.platform.health_status == "degraded"
+                || stats.platform.health_status == "down",
+            "documented health vocabulary: {}",
+            stats.platform.health_status
+        );
+
+        // A second call inside the TTL is served from the cache (same shape).
+        let Json(cached) = get_dashboard_stats(State(state.clone()), admin_auth())
+            .await
+            .expect("cached stats");
+        assert_eq!(
+            cached.platform.active_tenants,
+            stats.platform.active_tenants
+        );
+
+        // Gate: customer tenant and scope-less keys are refused.
+        let mut customer = admin_auth();
+        customer.tenant_id = tenant.clone();
+        assert!(matches!(
+            get_dashboard_stats(State(state.clone()), customer).await,
+            Err(ApiError::Forbidden(_))
+        ));
+        let mut no_scope = admin_auth();
+        no_scope.scopes = vec![];
+        assert!(matches!(
+            get_dashboard_stats(State(state.clone()), no_scope).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        sqlx::query("DELETE FROM system_alerts WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup alerts");
+        sqlx::query("DELETE FROM messages WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup messages");
+        sqlx::query("DELETE FROM stripe_subscriptions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup subs");
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+        invalidate_dashboard_cache().await;
+    }
+}

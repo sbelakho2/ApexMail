@@ -907,3 +907,94 @@ mod tests {
         assert!(parse_pinned_ca_pems("  ,  ").is_empty());
     }
 }
+
+#[cfg(test)]
+mod adversarial_svg_tests {
+    //! BIMI SVG sanitisation is a security boundary (SVG is scriptable): every
+    //! dangerous construct must be refused, and only a namespaced <svg> root
+    //! with allow-listed elements may pass.
+
+    use super::*;
+
+    const VALID: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40"/></svg>"#;
+
+    #[test]
+    fn valid_bimi_svg_passes() {
+        assert!(validate_svg_content(VALID));
+    }
+
+    #[test]
+    fn non_svg_root_or_missing_namespace_is_refused() {
+        assert!(!validate_svg_content("<html><body>hi</body></html>"));
+        assert!(!validate_svg_content(r#"<svg viewBox="0 0 1 1"></svg>"#));
+        assert!(!validate_svg_content(""));
+        assert!(!validate_svg_content("not xml at all <"));
+    }
+
+    #[test]
+    fn dangerous_elements_and_doctypes_are_refused() {
+        for body in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><body/></foreignObject></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><animate/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><set/></svg>"#,
+            r#"<!DOCTYPE svg [<!ENTITY x SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"/> "#,
+        ] {
+            assert!(
+                !validate_svg_content(body),
+                "dangerous SVG must be refused: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn event_handlers_and_script_urls_are_refused() {
+        for body in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><a href="javascript:alert(1)"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><a xlink:href="vbscript:msgbox"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/png;base64,AAAA"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect fill="expression(alert(1))"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><a href="eval(1)"/></svg>"#,
+        ] {
+            assert!(
+                !validate_svg_content(body),
+                "scriptable SVG must be refused: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_references_are_refused_but_local_fragments_pass() {
+        for body in [
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="http://evil.test/x.png"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.test/x.png"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="//evil.test/x.png"/></svg>"#,
+        ] {
+            assert!(
+                !validate_svg_content(body),
+                "remote references must be refused: {body}"
+            );
+        }
+        // A same-document fragment is not a remote fetch.
+        assert!(validate_svg_content(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><use href="#local"/></svg>"##
+        ));
+    }
+
+    #[tokio::test]
+    async fn logo_url_must_be_https_svg_before_any_fetch() {
+        // Non-HTTPS and non-SVG URLs are refused without touching the network.
+        assert!(!validate_bimi_logo_url("http://cdn.example/logo.svg").await);
+        assert!(!validate_bimi_logo_url("https://cdn.example/logo.png").await);
+        assert!(!validate_bimi_logo_url("ftp://cdn.example/logo.svg").await);
+        assert!(!validate_bimi_logo_url("").await);
+    }
+
+    #[tokio::test]
+    async fn dmarc_failed_indicator_is_never_verified() {
+        let indicator = get_bimi_indicator("example.com", false).await;
+        assert!(!indicator.verified);
+        assert!(indicator.logo_url.is_none());
+    }
+}

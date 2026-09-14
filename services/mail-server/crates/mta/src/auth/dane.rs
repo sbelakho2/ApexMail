@@ -1022,3 +1022,344 @@ mod tests {
         TLSA_CACHE.invalidate(name);
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    //! Fail-closed coverage for DANE/TLSA decisions that the wire path does
+    //! not reach (F-16 keeps the module unwired): every invalid selector,
+    //! matching type, chain shape and policy input must return `false` /
+    //! `supported = false`, never a permissive default.
+
+    use super::*;
+
+    fn cert_der(san: &str) -> Vec<u8> {
+        let params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        params.self_signed(&key_pair).unwrap().der().to_vec()
+    }
+
+    fn pem_of(der: &[u8]) -> String {
+        use base64::Engine as _;
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            B64.encode(der)
+        )
+    }
+
+    // ── TLSA generation: invalid input never produces a usable record ─────
+
+    #[test]
+    fn generate_tlsa_rejects_malformed_pem_and_unknown_parameters() {
+        // No PEM blocks at all.
+        let result = generate_tlsa_record("not a pem", "example.com", 25, "tcp", 3, 1, 1);
+        assert!(result.record.certificate_association_data.is_empty());
+        assert!(result.dns_record.is_empty());
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Failed to parse PEM")));
+
+        let pem = pem_of(&cert_der("example.com"));
+
+        // Unsupported selector (RFC 6698 only defines 0/1).
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 2, 1);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Unsupported selector")));
+        assert!(result.record.certificate_association_data.is_empty());
+
+        // Unsupported matching type.
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 0, 9);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Unsupported matching type")));
+
+        // Unsupported usage still yields the association data but is flagged.
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 255, 0, 1);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Unsupported usage")));
+
+        // usage=3 warns about the DNSSEC prerequisite.
+        let result = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 0, 1);
+        assert!(result.recommendations.iter().any(|r| r.contains("DNSSEC")));
+    }
+
+    #[test]
+    fn generate_tlsa_selector1_or_2_and_matching_types_are_exact() {
+        let der = cert_der("example.com");
+        let pem = pem_of(&der);
+        let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der).unwrap();
+
+        // matching_type 0 = exact association data, no hashing.
+        let exact = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 0, 0);
+        assert_eq!(exact.record.certificate_association_data, hex::encode(&der));
+
+        // matching_type 2 = SHA-512 over the SPKI for selector 1.
+        let sha512 = generate_tlsa_record(&pem, "example.com", 25, "tcp", 3, 1, 2);
+        assert_eq!(
+            sha512.record.certificate_association_data,
+            hex::encode(Sha512::digest(cert.public_key().raw))
+        );
+    }
+
+    #[test]
+    fn describe_tlsa_record_names_unknown_values() {
+        let record = TlsaRecord {
+            usage: 9,
+            selector: 9,
+            matching_type: 9,
+            certificate_association_data: "00".into(),
+        };
+        let desc = describe_tlsa_record(&record);
+        assert!(desc.contains("Unknown usage"));
+        assert!(desc.contains("Unknown selector"));
+        assert!(desc.contains("Unknown matching type"));
+    }
+
+    #[test]
+    fn parse_tlsa_data_rejects_incomplete_or_non_numeric_answers() {
+        assert!(parse_tlsa_data("3 1 1").is_none(), "too few fields");
+        assert!(parse_tlsa_data("x 1 1 abcd").is_none(), "non-numeric usage");
+        assert!(
+            parse_tlsa_data("3 y 1 abcd").is_none(),
+            "non-numeric selector"
+        );
+        assert!(
+            parse_tlsa_data("3 1 z abcd").is_none(),
+            "non-numeric matching"
+        );
+        // Association data whitespace is stripped (DoH answers chunk it).
+        let record = parse_tlsa_data("3 1 1 ab cd ef").unwrap();
+        assert_eq!(record.certificate_association_data, "abcdef");
+    }
+
+    #[test]
+    fn extract_der_from_pem_requires_both_delimiters_and_payload() {
+        assert!(extract_der_from_pem("-----BEGIN CERTIFICATE-----\nYWJj").is_none());
+        assert!(extract_der_from_pem("YWJj\n-----END CERTIFICATE-----").is_none());
+        assert!(
+            extract_der_from_pem("-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----")
+                .is_none()
+        );
+        assert!(extract_der_from_pem(
+            "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----"
+        )
+        .is_none());
+    }
+
+    // ── chain validation: fail closed on every malformed shape ───────────
+
+    #[test]
+    fn empty_chains_and_unknown_parameters_never_match() {
+        let der = cert_der("example.com");
+        let matches_any = TlsaRecord {
+            usage: 3,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&der)),
+        };
+        assert!(!validate_chain_against_tlsa(
+            &[],
+            &matches_any,
+            "example.com"
+        ));
+        assert!(!validate_certificate_against_tlsa(&[], &matches_any));
+
+        // Unknown usage/selector/matching-type never match even with a
+        // correct digest.
+        for (usage, selector, matching) in [(4u8, 0u8, 1u8), (3, 2, 1), (3, 0, 3)] {
+            let record = TlsaRecord {
+                usage,
+                selector,
+                matching_type: matching,
+                certificate_association_data: hex::encode(Sha256::digest(&der)),
+            };
+            assert!(
+                !validate_chain_against_tlsa(std::slice::from_ref(&der), &record, "example.com"),
+                "usage={usage} selector={selector} matching={matching} must not match"
+            );
+        }
+
+        // A syntactically invalid certificate can never match selector 1.
+        let record = TlsaRecord {
+            usage: 3,
+            selector: 1,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(b"junk")),
+        };
+        assert!(!validate_chain_against_tlsa(
+            &[b"junk".to_vec()],
+            &record,
+            "e"
+        ));
+    }
+
+    #[test]
+    fn dane_ta_requires_a_valid_signature_chain_to_the_matching_anchor() {
+        // Anchor matches, but the leaf is NOT signed by it: fail closed.
+        let ca_params = {
+            let mut p = rcgen::CertificateParams::new(vec!["ca.example".to_string()]).unwrap();
+            p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            p
+        };
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let unrelated_key = rcgen::KeyPair::generate().unwrap();
+        let unrelated_leaf = rcgen::CertificateParams::new(vec!["mail.example".to_string()])
+            .unwrap()
+            .self_signed(&unrelated_key)
+            .unwrap();
+
+        let chain = vec![unrelated_leaf.der().to_vec(), ca_cert.der().to_vec()];
+        let record = TlsaRecord {
+            usage: 2,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(ca_cert.der())),
+        };
+        assert!(
+            !validate_chain_against_tlsa(&chain, &record, "mail.example"),
+            "DANE-TA must verify the signature chain, not just the anchor digest"
+        );
+
+        // A garbage certificate in the chain is rejected outright.
+        let garbage = vec![b"not a certificate".to_vec(), ca_cert.der().to_vec()];
+        assert!(!validate_chain_against_tlsa(
+            &garbage,
+            &record,
+            "mail.example"
+        ));
+    }
+
+    #[test]
+    fn pkix_usages_fail_closed_without_a_publicly_trusted_chain() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let der = cert_der("example.com");
+        for usage in [0u8, 1u8] {
+            let record = TlsaRecord {
+                usage,
+                selector: 0,
+                matching_type: 1,
+                certificate_association_data: hex::encode(Sha256::digest(&der)),
+            };
+            assert!(
+                !validate_certificate_against_tlsa(&der, &record),
+                "PKIX usage {usage} must require real PKIX validation (self-signed must fail)"
+            );
+        }
+        // An invalid server name can never validate a PKIX chain.
+        assert!(!pkix_chain_valid(std::slice::from_ref(&der), ""));
+        assert!(!pkix_chain_valid(&[], "example.com"));
+    }
+
+    #[test]
+    fn tlsa_modes_are_reported_without_escalating_support() {
+        // `pkix_chain_valid` builds a rustls WebPki verifier; the process-wide
+        // provider must be installed explicitly (the workspace enables both
+        // ring and aws-lc-rs, so rustls cannot choose on its own).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let der = cert_der("example.com");
+        let matching = TlsaRecord {
+            usage: 3,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&der)),
+        };
+        let result = evaluate_tlsa_records(
+            std::slice::from_ref(&der),
+            std::slice::from_ref(&matching),
+            "example.com",
+        );
+        assert!(result.supported);
+        assert_eq!(result.mode, DaneMode::DaneEe);
+
+        // DANE-TA followed by DANE-EE keeps the DANE-TA mode.
+        let ta = TlsaRecord {
+            usage: 2,
+            selector: 0,
+            matching_type: 1,
+            certificate_association_data: hex::encode(Sha256::digest(&der)),
+        };
+        let result = evaluate_tlsa_records(
+            std::slice::from_ref(&der),
+            &[ta, matching.clone()],
+            "example.com",
+        );
+        assert_eq!(result.mode, DaneMode::DaneTa);
+        assert!(result.supported);
+
+        // PKIX modes are reported but never supported on a self-signed input.
+        for usage in [0u8, 1u8] {
+            let pkix = TlsaRecord {
+                usage,
+                selector: 0,
+                matching_type: 1,
+                certificate_association_data: hex::encode(Sha256::digest(&der)),
+            };
+            let result = evaluate_tlsa_records(std::slice::from_ref(&der), &[pkix], "example.com");
+            assert_eq!(result.mode, DaneMode::Pkix);
+            assert!(!result.supported);
+        }
+
+        // Only unknown records: recommendation, no support, no error storm.
+        let unknown = TlsaRecord {
+            usage: 9,
+            selector: 9,
+            matching_type: 9,
+            certificate_association_data: "00".into(),
+        };
+        let result = evaluate_tlsa_records(std::slice::from_ref(&der), &[unknown], "example.com");
+        assert!(!result.supported);
+        assert!(result
+            .recommendations
+            .iter()
+            .any(|r| r.contains("No usable TLSA records")));
+    }
+
+    // ── cache: hits re-validate the LIVE certificate ───────────────────────
+
+    #[tokio::test]
+    async fn cache_hit_with_failing_chain_fetch_reports_no_support() {
+        let cert = cert_der("cachefail.example.com");
+        let record =
+            generate_tlsa_record(&pem_of(&cert), "cachefail.example.com", 25, "tcp", 3, 0, 1)
+                .record;
+        let name = "_25._tcp.cachefail.example.com";
+        TLSA_CACHE.insert(
+            name.to_string(),
+            CachedTlsaRecords {
+                records: vec![record],
+                fetched_at: Instant::now(),
+            },
+        );
+        let config = DnsConfig {
+            dnssec_enabled: false,
+            tlsa_cache_ttl_secs: 300,
+        };
+        let result = verify_dane_with_fetcher(
+            "cachefail.example.com",
+            25,
+            "tcp",
+            &config,
+            move |_d: String, _p: u16| async move { Err(anyhow::anyhow!("unreachable peer")) },
+        )
+        .await;
+        assert!(
+            !result.supported,
+            "an unverifiable live certificate must never report DANE support"
+        );
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("Could not fetch target TLS certificate")));
+        assert!(result
+            .recommendations
+            .iter()
+            .any(|r| r.contains("re-validated")));
+        TLSA_CACHE.invalidate(name);
+    }
+}

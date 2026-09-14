@@ -3604,3 +3604,739 @@ mod tests {
         assert!(super::super::inbound::is_valid_helo_hostname("[127.0.0.1]"));
     }
 }
+
+#[cfg(test)]
+mod adversarial_db_tests {
+    //! Adversarial, DB-backed submission tests: a REAL STARTTLS+AUTH session
+    //! through `handle_session` against the canonical provisioned schema, with
+    //! quota reservation, suppression, sender-domain ownership and queue
+    //! durability asserted on the resulting rows. `TEST_DATABASE_URL` gates
+    //! the suite: unset soft-skips, configured-but-broken FAILS.
+
+    use super::*;
+    use sqlx::PgPool;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::net::TcpStream;
+    use tokio_rustls::client::TlsStream as ClientTlsStream;
+
+    fn fixture_dir() -> String {
+        format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn fixture_acceptor() -> TlsAcceptor {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let cert_pem = std::fs::read(format!("{}/cert.pem", fixture_dir())).unwrap();
+        let key_pem = std::fs::read(format!("{}/key.pem", fixture_dir())).unwrap();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&key_pem[..]))
+            .unwrap()
+            .unwrap();
+        let config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        TlsAcceptor::from(Arc::new(config))
+    }
+
+    async fn test_pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn redis_pool() -> deadpool_redis::Pool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    fn test_server(pool: PgPool, acceptor: Option<TlsAcceptor>) -> Arc<SubmissionServer> {
+        Arc::new(SubmissionServer::new(
+            SubmissionConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port: 0,
+                hostname: "submission.test".into(),
+                max_message_size: 1024 * 1024,
+                max_recipients: 100,
+                auth_required: true,
+            },
+            RateLimitConfig {
+                enabled: true,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+                max_recipients_per_message: 100,
+            },
+            pool,
+            redis_pool(),
+            acceptor,
+        ))
+    }
+
+    struct Fixture {
+        tenant: String,
+        user_email: String,
+        password: String,
+        sender: String,
+    }
+
+    /// Seed a tenant/user/verified-domain triple the submission path accepts.
+    async fn seed_fixture(pool: &PgPool, suffix: &str, domain_ready: bool) -> Fixture {
+        let tenant = format!("sub-{}", &Uuid::new_v4().simple().to_string()[..21]);
+        let user_email = format!("submitter-{suffix}@example.test");
+        let domain = format!("{suffix}.submission.test");
+        let sender = format!("sender@{domain}");
+        let password = "correct horse battery staple".to_string();
+
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status)
+             VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("Submission {suffix}"))
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+
+        let password_hash = apexmail_lib::crypto::hash_password(&password).expect("hash password");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, password_hash, status)
+             VALUES ($1, $2, $3, $4, 'active')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&user_email)
+        .bind(password_hash)
+        .execute(pool)
+        .await
+        .expect("insert user");
+
+        sqlx::query(
+            "INSERT INTO domains
+                 (id, tenant_id, name, verified, status, dkim_enabled, dkim_selector,
+                  dkim_public_key, dkim_private_key, ses_verified)
+             VALUES ($1, $2, $3, $4, $5, true, 'sel', 'public-key',
+                     'dkim:v1:private-key', true)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&tenant)
+        .bind(&domain)
+        .bind(domain_ready)
+        .bind(if domain_ready { "verified" } else { "pending" })
+        .execute(pool)
+        .await
+        .expect("insert domain");
+
+        Fixture {
+            tenant,
+            user_email,
+            password,
+            sender,
+        }
+    }
+
+    /// Accept exactly one connection and run the REAL session entry point.
+    fn spawn_session(
+        server: Arc<SubmissionServer>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            server.handle_session(socket, peer).await;
+        });
+        (addr, task)
+    }
+
+    async fn read_reply<S: tokio::io::AsyncRead + Unpin>(
+        stream: &mut tokio::io::BufReader<S>,
+    ) -> String {
+        let mut full = String::new();
+        loop {
+            let mut line = String::new();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                AsyncBufReadExt::read_line(stream, &mut line),
+            )
+            .await
+            .expect("reply must arrive within 10s")
+            .expect("read must not fail");
+            let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !more {
+                return full;
+            }
+        }
+    }
+
+    fn auth_plain_b64(user: &str, pass: &str) -> String {
+        BASE64.encode(format!("\0{user}\0{pass}").as_bytes())
+    }
+
+    /// Connect, upgrade with STARTTLS (asserting the plaintext session never
+    /// advertises AUTH) and authenticate with AUTH PLAIN. Returns the TLS
+    /// stream positioned after the 235 reply.
+    async fn connect_authenticated(
+        addr: std::net::SocketAddr,
+        fixture: &Fixture,
+    ) -> tokio::io::BufStream<ClientTlsStream<TcpStream>> {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let mut stream = tokio::io::BufStream::new(tcp);
+        {
+            let mut reader = tokio::io::BufReader::new(&mut stream);
+            let greeting = read_reply(&mut reader).await;
+            assert!(greeting.starts_with("220"), "greeting: {greeting:?}");
+        }
+
+        stream.write_all(b"EHLO client.example\r\n").await.unwrap();
+        stream.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut stream);
+            let ehlo = read_reply(&mut reader).await;
+            assert!(
+                !ehlo.contains("AUTH"),
+                "plaintext EHLO must not advertise AUTH: {ehlo:?}"
+            );
+            assert!(
+                ehlo.contains("STARTTLS"),
+                "plaintext EHLO must offer STARTTLS"
+            );
+        }
+
+        stream.write_all(b"STARTTLS\r\n").await.unwrap();
+
+        stream.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut stream);
+            let reply = read_reply(&mut reader).await;
+            assert!(reply.contains("220 Go ahead"), "STARTTLS: {reply:?}");
+        }
+
+        let cert_pem = std::fs::read(format!("{}/cert.pem", fixture_dir())).unwrap();
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        roots.add(certs[0].clone()).unwrap();
+        let client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::client::TlsConnector::from(Arc::new(client_config));
+        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
+            .expect("localhost is a valid server name");
+        let tls = connector
+            .connect(server_name, stream.into_inner())
+            .await
+            .expect("client TLS handshake");
+        let mut tls = tokio::io::BufStream::new(tls);
+
+        tls.write_all(b"EHLO client.example\r\n").await.unwrap();
+
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            let ehlo = read_reply(&mut reader).await;
+            assert!(
+                ehlo.contains("250-AUTH PLAIN LOGIN"),
+                "post-STARTTLS EHLO must advertise AUTH: {ehlo:?}"
+            );
+        }
+        let b64 = auth_plain_b64(&fixture.user_email, &fixture.password);
+        tls.write_all(format!("AUTH PLAIN {b64}\r\n").as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            let auth = read_reply(&mut reader).await;
+            assert!(
+                auth.starts_with("235"),
+                "valid credentials must authenticate: {auth:?}"
+            );
+        }
+        tls
+    }
+
+    async fn finish_session<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        stream: &mut S,
+    ) {
+        stream.write_all(b"QUIT\r\n").await.unwrap();
+        stream.flush().await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn queued_rows(pool: &PgPool, tenant: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE tenant_id = $1")
+            .bind(tenant)
+            .fetch_one(pool)
+            .await
+            .expect("queue count")
+    }
+
+    // ── the golden path ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn starttls_authenticated_submission_queues_exactly_one_durable_row() {
+        let Some(pool) = test_pool("submission_golden").await else {
+            return;
+        };
+        let fixture = seed_fixture(&pool, "golden", true).await;
+        let server = test_server(pool.clone(), Some(fixture_acceptor()));
+        let (addr, task) = spawn_session(server);
+
+        let mut tls = connect_authenticated(addr, &fixture).await;
+        tls.write_all(format!("MAIL FROM:<{}>\r\n", fixture.sender).as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"RCPT TO:<recipient@example.test>\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"DATA\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert!(read_reply(&mut reader).await.starts_with("354"));
+        }
+        tls.write_all(b"Message-ID: <golden-1@submission.test>\r\nSubject: golden\r\n\r\nbody\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        tls.write_all(b".\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        let accepted = {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            read_reply(&mut reader).await
+        };
+        assert!(
+            accepted.starts_with("250 2.0.0 Ok id="),
+            "the submission must be acknowledged: {accepted:?}"
+        );
+        finish_session(&mut tls).await;
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+
+        // Exactly one durable queue row with the authenticated tenant and the
+        // explicit server-owned category.
+        assert_eq!(queued_rows(&pool, &fixture.tenant).await, 1);
+        let (from, to, category, headers): (String, Vec<String>, String, Option<String>) =
+            sqlx::query_as(
+                "SELECT from_address, to_addresses, message_category, raw_headers
+                 FROM email_queue WHERE tenant_id = $1",
+            )
+            .bind(&fixture.tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("queue row");
+        assert_eq!(from, fixture.sender);
+        assert_eq!(to, vec!["recipient@example.test".to_string()]);
+        assert_eq!(
+            category, "marketing",
+            "the schema default must never be relied on"
+        );
+        let headers = headers.expect("raw headers stored");
+        assert!(
+            headers.contains("Received: from client.example"),
+            "the trace header must be prepended: {headers:?}"
+        );
+        assert!(
+            headers.contains("submission.test"),
+            "the trace header must name this server"
+        );
+
+        // The reservation stands: exactly one durable metering event.
+        let usage: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+        assert_eq!(
+            usage, 1,
+            "a queued submission must keep its quota reservation"
+        );
+    }
+
+    // ── admission / ownership refusals ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn unowned_sender_domain_is_refused_and_releases_the_reservation() {
+        let Some(pool) = test_pool("submission_unowned").await else {
+            return;
+        };
+        let fixture = seed_fixture(&pool, "unowned", true).await;
+        let server = test_server(pool.clone(), Some(fixture_acceptor()));
+        let (addr, task) = spawn_session(server);
+
+        let mut tls = connect_authenticated(addr, &fixture).await;
+        tls.write_all(b"MAIL FROM:<sender@not-owned.test>\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"RCPT TO:<recipient@example.test>\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"DATA\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert!(read_reply(&mut reader).await.starts_with("354"));
+        }
+        tls.write_all(b"Subject: unowned\r\n\r\nbody\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        tls.write_all(b".\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        let refused = {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            read_reply(&mut reader).await
+        };
+        assert_eq!(
+            refused, "550 5.7.1 sender address not owned by account\r\n",
+            "a foreign MAIL FROM must never be queued"
+        );
+        finish_session(&mut tls).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+
+        assert_eq!(queued_rows(&pool, &fixture.tenant).await, 0);
+        let usage: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE tenant_id = $1")
+                .bind(&fixture.tenant)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+        assert_eq!(
+            usage, 0,
+            "a refused submission must release its reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn unverified_sender_domain_is_refused_with_not_ready() {
+        let Some(pool) = test_pool("submission_unverified").await else {
+            return;
+        };
+        let fixture = seed_fixture(&pool, "unverified", false).await;
+        let server = test_server(pool.clone(), Some(fixture_acceptor()));
+        let (addr, task) = spawn_session(server);
+
+        let mut tls = connect_authenticated(addr, &fixture).await;
+        tls.write_all(format!("MAIL FROM:<{}>\r\n", fixture.sender).as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"RCPT TO:<recipient@example.test>\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"DATA\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert!(read_reply(&mut reader).await.starts_with("354"));
+        }
+        tls.write_all(b"Subject: not-ready\r\n\r\nbody\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        tls.write_all(b".\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        let refused = {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            read_reply(&mut reader).await
+        };
+        assert_eq!(
+            refused,
+            "550 5.7.1 sender domain is not verified and ready for delivery\r\n"
+        );
+        finish_session(&mut tls).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        assert_eq!(queued_rows(&pool, &fixture.tenant).await, 0);
+    }
+
+    #[tokio::test]
+    async fn fully_suppressed_recipients_are_refused_before_any_queue_write() {
+        let Some(pool) = test_pool("submission_suppressed").await else {
+            return;
+        };
+        let fixture = seed_fixture(&pool, "suppressed", true).await;
+        // Suppress the only recipient through the canonical table.
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, subtype, source)
+             VALUES ($1, $2, 'blocked@example.test', 'complaint', 'fbl', 'test')",
+        )
+        .bind(crate::servers::bounce::suppression_row_id())
+        .bind(&fixture.tenant)
+        .execute(&pool)
+        .await
+        .expect("insert suppression");
+
+        let server = test_server(pool.clone(), Some(fixture_acceptor()));
+        let (addr, task) = spawn_session(server);
+        let mut tls = connect_authenticated(addr, &fixture).await;
+        tls.write_all(format!("MAIL FROM:<{}>\r\n", fixture.sender).as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"RCPT TO:<blocked@example.test>\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(b"DATA\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert!(read_reply(&mut reader).await.starts_with("354"));
+        }
+        tls.write_all(b"Subject: suppressed\r\n\r\nbody\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        tls.write_all(b".\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        let refused = {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            read_reply(&mut reader).await
+        };
+        assert_eq!(
+            refused, "550 5.1.1 recipient address suppressed\r\n",
+            "the SMTP path must not bypass the suppression list"
+        );
+        finish_session(&mut tls).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        assert_eq!(queued_rows(&pool, &fixture.tenant).await, 0);
+    }
+
+    // ── protocol sequencing after authentication ───────────────────────────
+
+    #[tokio::test]
+    async fn post_auth_sequencing_errors_never_reach_the_queue() {
+        let Some(pool) = test_pool("submission_sequencing").await else {
+            return;
+        };
+        let fixture = seed_fixture(&pool, "sequencing", true).await;
+        let server = test_server(pool.clone(), Some(fixture_acceptor()));
+        let (addr, task) = spawn_session(server);
+        let mut tls = connect_authenticated(addr, &fixture).await;
+
+        // DATA before MAIL/RCPT.
+        tls.write_all(b"DATA\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(
+                read_reply(&mut reader).await,
+                "503 5.5.1 Need MAIL and RCPT first\r\n"
+            );
+        }
+
+        // A SIZE declaration above the cap is refused before DATA.
+        tls.write_all(b"MAIL FROM:<sender@sequencing.submission.test> SIZE=99999999\r\n")
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(
+                read_reply(&mut reader).await,
+                "552 5.3.4 Message size exceeds fixed maximum message size\r\n"
+            );
+        }
+
+        // Null reverse-path is not valid on submission.
+        tls.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(
+                read_reply(&mut reader).await,
+                "553 5.1.7 Sender address required\r\n"
+            );
+        }
+
+        // Nested MAIL is a sequencing error.
+        tls.write_all(format!("MAIL FROM:<{}>\r\n", fixture.sender).as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(read_reply(&mut reader).await, "250 2.0.0 Ok\r\n");
+        }
+        tls.write_all(format!("MAIL FROM:<{}>\r\n", fixture.sender).as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(
+                read_reply(&mut reader).await,
+                "503 5.5.1 Nested MAIL command\r\n"
+            );
+        }
+
+        // A second AUTH is refused, and AUTH during a transaction too.
+        let b64 = auth_plain_b64(&fixture.user_email, &fixture.password);
+        tls.write_all(format!("AUTH PLAIN {b64}\r\n").as_bytes())
+            .await
+            .unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            let reply = read_reply(&mut reader).await;
+            assert!(
+                reply == "503 5.5.1 Already authenticated\r\n"
+                    || reply == "503 5.5.1 AUTH not permitted during a mail transaction\r\n",
+                "unexpected second-AUTH reply: {reply:?}"
+            );
+        }
+
+        // Nested STARTTLS on the TLS session is refused.
+        tls.write_all(b"STARTTLS\r\n").await.unwrap();
+        tls.flush().await.unwrap();
+        {
+            let mut reader = tokio::io::BufReader::new(&mut tls);
+            assert_eq!(
+                read_reply(&mut reader).await,
+                "503 5.5.1 TLS already active\r\n"
+            );
+        }
+
+        finish_session(&mut tls).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        assert_eq!(queued_rows(&pool, &fixture.tenant).await, 0);
+    }
+
+    #[tokio::test]
+    async fn connection_cap_refuses_with_421_before_the_greeting() {
+        let Some(pool) = test_pool("submission_conn_cap").await else {
+            return;
+        };
+        let mut server = test_server(pool, Some(fixture_acceptor()));
+        Arc::get_mut(&mut server)
+            .expect("unique server")
+            .rate_limit
+            .max_connections_per_ip = 0;
+        let (addr, task) = spawn_session(server);
+
+        let mut tcp = TcpStream::connect(addr).await.unwrap();
+        let mut reader = tokio::io::BufReader::new(&mut tcp);
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            AsyncBufReadExt::read_line(&mut reader, &mut line),
+        )
+        .await
+        .expect("421 must arrive")
+        .expect("read");
+        assert_eq!(
+            line, "421 4.7.0 Too many connections from your IP\r\n",
+            "an over-cap connection must be refused before any greeting"
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+    }
+
+    #[tokio::test]
+    async fn start_binds_the_listener_and_stop_ends_it() {
+        let Some(pool) = test_pool("submission_start_stop").await else {
+            return;
+        };
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let server = Arc::new(SubmissionServer::new(
+            SubmissionConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port,
+                hostname: "submission.test".into(),
+                max_message_size: 1024 * 1024,
+                max_recipients: 100,
+                auth_required: true,
+            },
+            RateLimitConfig {
+                enabled: true,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+                max_recipients_per_message: 100,
+            },
+            pool,
+            redis_pool(),
+            None,
+        ));
+        let running = server.clone();
+        let handle = tokio::spawn(async move { running.start().await });
+
+        let mut client = None;
+        for _ in 0..100 {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(stream) => {
+                    client = Some(stream);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+        let mut client = client.expect("start must bind the configured listener");
+        client.write_all(b"QUIT\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let mut buf = [0u8; 96];
+        let n = tokio::io::AsyncReadExt::read(&mut client, &mut buf)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).starts_with("220"));
+
+        server.stop();
+        let joined = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(joined.is_ok(), "stop() must end the accept loop");
+        let started = joined.expect("checked above");
+        assert!(started.is_ok(), "start must return Ok on shutdown");
+    }
+}

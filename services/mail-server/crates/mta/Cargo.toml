@@ -93,6 +93,11 @@ psl = "2.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen = "0.13"
+# Canonical provisioned schema for the DB-backed server tests
+# (`migrator::test_support::fresh_canonical_pool`), the same fixture the
+# worker-processors suite uses. `TEST_DATABASE_URL` gates the suite:
+# unset soft-skips, configured-but-broken FAILS.
+migrator = { path = "../migrator" }
 # Securely-created temporary directories for the TLS-certificate fixtures
 # (semgrep rust.lang.security.temp-dir: a predictable name under the shared
 # temp dir is an insecure-temp-file pattern, even in a test).

@@ -1269,3 +1269,289 @@ mod tests {
         pool.close().await;
     }
 }
+
+// ─── Adversarial parser / VERP tests ───────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    #[test]
+    fn smtp_response_classifies_by_code_and_enhanced_status() {
+        assert_eq!(
+            parse_smtp_response(550, None, ""),
+            (BounceType::Hard, BounceCategory::InvalidRecipient)
+        );
+        assert_eq!(
+            parse_smtp_response(450, None, ""),
+            (BounceType::Soft, BounceCategory::Technical)
+        );
+        assert_eq!(
+            parse_smtp_response(250, None, ""),
+            (BounceType::Unknown, BounceCategory::Unknown)
+        );
+        // An enhanced code overrides the plain-text heuristic.
+        assert_eq!(
+            parse_smtp_response(550, Some("5.2.2"), "user unknown"),
+            (BounceType::Hard, BounceCategory::MailboxFull)
+        );
+        assert_eq!(
+            parse_smtp_response(450, Some("4.7.26"), "whatever"),
+            (BounceType::Soft, BounceCategory::Blocked)
+        );
+        // Boundary codes.
+        assert_eq!(parse_smtp_response(499, None, "").0, BounceType::Soft);
+        assert_eq!(parse_smtp_response(500, None, "").0, BounceType::Hard);
+        assert_eq!(parse_smtp_response(599, None, "").0, BounceType::Hard);
+        assert_eq!(parse_smtp_response(600, None, "").0, BounceType::Unknown);
+    }
+
+    #[test]
+    fn enhanced_status_codes_cover_the_rfc3463_matrix() {
+        for (code, expected) in [
+            ("5.1.1", BounceCategory::InvalidRecipient),
+            ("5.1.2", BounceCategory::InvalidDomain),
+            ("5.1.3", BounceCategory::InvalidRecipient),
+            ("5.1.8", BounceCategory::InvalidDomain),
+            ("5.2.1", BounceCategory::InvalidRecipient),
+            ("5.2.2", BounceCategory::MailboxFull),
+            ("5.2.3", BounceCategory::Technical),
+            ("5.3.0", BounceCategory::Technical),
+            ("5.4.4", BounceCategory::Technical),
+            ("5.5.1", BounceCategory::Technical),
+            ("5.6.1", BounceCategory::ContentRejected),
+            ("5.7.1", BounceCategory::PolicyRejection),
+            ("5.7.7", BounceCategory::ContentRejected),
+            ("5.7.26", BounceCategory::Blocked),
+            ("5.7.99", BounceCategory::PolicyRejection),
+            // Malformed shapes are Unknown, never a panic.
+            ("5", BounceCategory::Unknown),
+            ("", BounceCategory::Unknown),
+            ("banana", BounceCategory::Unknown),
+            ("5.x.y", BounceCategory::Technical),
+        ] {
+            assert_eq!(parse_enhanced_status_code(code), expected, "{code}");
+        }
+    }
+
+    #[test]
+    fn text_heuristics_use_word_boundaries_not_substrings() {
+        // Positive matches.
+        assert_eq!(
+            parse_from_code_and_text(0, "User unknown"),
+            BounceCategory::InvalidRecipient
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "mailbox full"),
+            BounceCategory::MailboxFull
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "domain does not exist"),
+            BounceCategory::InvalidDomain
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "sender blacklisted by policy"),
+            BounceCategory::Blocked
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "spam content rejected"),
+            BounceCategory::ContentRejected
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "SPF authentication required"),
+            BounceCategory::PolicyRejection
+        );
+        // L-08 traps: substrings of larger words must NOT match.
+        assert_eq!(
+            parse_from_code_and_text(0, "your mailbox is not full, please try again"),
+            BounceCategory::Unknown,
+            "'not full' must not read as MailboxFull"
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "unblocked"),
+            BounceCategory::Unknown,
+            "'unblocked' must not read as Blocked"
+        );
+        assert_eq!(
+            parse_from_code_and_text(0, "spamfiltering is disabled"),
+            BounceCategory::Unknown,
+            "'spamfiltering' must not read as spam"
+        );
+        // Code-only fallback mapping.
+        assert_eq!(
+            parse_from_code_and_text(553, ""),
+            BounceCategory::InvalidRecipient
+        );
+        assert_eq!(
+            parse_from_code_and_text(452, ""),
+            BounceCategory::MailboxFull
+        );
+        assert_eq!(parse_from_code_and_text(451, ""), BounceCategory::Technical);
+        assert_eq!(parse_from_code_and_text(0, ""), BounceCategory::Unknown);
+    }
+
+    #[test]
+    fn verp_disposition_requires_a_matching_nonempty_queue_row() {
+        assert_eq!(
+            verp_bounce_disposition(Some(("ten_a", "user@example.com")), "ten_a"),
+            VerpBounceDisposition::Process("user@example.com".into())
+        );
+        // Case-insensitive tenant comparison.
+        assert_eq!(
+            verp_bounce_disposition(Some(("TEN_A", "u@example.com")), "ten_a"),
+            VerpBounceDisposition::Process("u@example.com".into())
+        );
+        assert_eq!(
+            verp_bounce_disposition(Some(("ten_b", "u@example.com")), "ten_a"),
+            VerpBounceDisposition::Reject,
+            "forged VERP tenant"
+        );
+        assert_eq!(
+            verp_bounce_disposition(None, "ten_a"),
+            VerpBounceDisposition::Reject
+        );
+        assert_eq!(
+            verp_bounce_disposition(Some(("", "u@example.com")), "ten_a"),
+            VerpBounceDisposition::Reject
+        );
+        assert_eq!(
+            verp_bounce_disposition(Some(("ten_a", "")), "ten_a"),
+            VerpBounceDisposition::Reject
+        );
+    }
+
+    #[test]
+    fn return_path_regex_is_anchored_to_the_real_bounce_domain() {
+        let pattern = return_path_regex_pattern();
+        assert!(pattern.contains(r"returns\.apexmail\.ee"));
+        let re = Regex::new(&pattern).expect("pattern compiles");
+        let caps = re
+            .captures("bounce+ten_abc+msg-123@returns.apexmail.ee")
+            .expect("valid VERP address");
+        assert_eq!(&caps[1], "ten_abc");
+        assert_eq!(&caps[2], "msg-123");
+        // The drifted apexmail.io domain must not match (M-4).
+        assert!(re.captures("bounce+t+m@returns.apexmail.io").is_none());
+        // Mail from another tenant domain must not match.
+        assert!(re.captures("bounce+t+m@returns.evil-apexmail.ee").is_none());
+    }
+
+    #[test]
+    fn header_region_helpers_bounds_and_case() {
+        assert_eq!(
+            split_header_body("A: 1\r\nB: 2\r\n\r\nbody"),
+            ("A: 1\r\nB: 2", Some("body"))
+        );
+        assert_eq!(
+            split_header_body("A: 1\nB: 2\n\nbody\rmore"),
+            ("A: 1\nB: 2", Some("body\rmore"))
+        );
+        // No blank line → all headers, no body.
+        assert_eq!(split_header_body("A: 1\nB: 2"), ("A: 1\nB: 2", None));
+        assert_eq!(split_header_body(""), ("", None));
+
+        let region = "final-recipient: rfc822; a@example.com\r\nstatus: 5.1.1";
+        assert_eq!(
+            extract_header_in_region(region, "Final-Recipient").as_deref(),
+            Some("rfc822; a@example.com")
+        );
+        assert_eq!(
+            extract_header_in_region(region, "status").as_deref(),
+            Some("5.1.1")
+        );
+        assert!(extract_header_in_region(region, "X-Status").is_none());
+        // A header name embedded mid-line is not a header.
+        assert!(extract_header_in_region("junk Final-Recipient: x", "Final-Recipient").is_none());
+    }
+
+    #[test]
+    fn mime_boundary_and_part_splitting() {
+        assert_eq!(
+            mime_boundary("multipart/report; boundary=\"abc123\"").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            mime_boundary("multipart/report; boundary=abc123; report-type=delivery-status")
+                .as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            mime_boundary("MULTIPART/REPORT; BOUNDARY=UPPER").as_deref(),
+            Some("UPPER")
+        );
+        assert_eq!(mime_boundary("text/plain"), None);
+        // Unterminated quote → None, never a partial value.
+        assert_eq!(mime_boundary("multipart/report; boundary=\"abc"), None);
+
+        let body = "preamble\n--bnd\r\nContent-Type: text/plain\r\n\r\nhello\r\n--bnd\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; a@x\r\n--bnd--\r\ntrailing";
+        let parts = split_mime_parts(body, "bnd");
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("text/plain"));
+        assert!(parts[1].contains("Final-Recipient"));
+        assert!(!parts[1].contains("trailing"), "closure stops the parse");
+        assert!(split_mime_parts("", "bnd").is_empty());
+        assert!(is_delivery_status_content(
+            "message/delivery-status; charset=utf-8"
+        ));
+        assert!(is_delivery_status_content("Message/Delivery-Status"));
+        assert!(
+            !is_delivery_status_content("multipart/report; report-type=delivery-status"),
+            "the container is not itself delivery-status content"
+        );
+        assert!(!is_delivery_status_content("text/plain"));
+    }
+
+    #[test]
+    fn dsn_lookup_ignores_attacker_text_in_the_bounced_message_body() {
+        // The ONLY Final-Recipient in the message is planted inside the
+        // message/rfc822 body (attacker-controlled) — it must NOT win.
+        let forged = "Content-Type: multipart/report; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: message/rfc822\r\n\r\nFrom: attacker@evil.example\r\n\r\nFinal-Recipient: rfc822; victim@target.example\r\nStatus: 5.1.1\r\n--b--\r\n";
+        assert_eq!(extract_dsn_header(forged, "Final-Recipient"), None);
+        assert_eq!(extract_dsn_header(forged, "Status"), None);
+
+        // A genuine delivery-status part wins.
+        let genuine = "Content-Type: multipart/report; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; real@example.com\r\nStatus: 5.1.1\r\n--b--\r\n";
+        assert_eq!(
+            extract_dsn_header(genuine, "Final-Recipient").as_deref(),
+            Some("rfc822; real@example.com")
+        );
+
+        // A bare (non-multipart) delivery-status message is all headers.
+        let bare = "Content-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; bare@example.com\r\nStatus: 5.2.2\r\n";
+        assert_eq!(
+            extract_dsn_header(bare, "Final-Recipient").as_deref(),
+            Some("rfc822; bare@example.com")
+        );
+    }
+
+    #[test]
+    fn parse_dsn_email_strips_prefixes_and_maps_status_classes() {
+        let hard = b"Content-Type: multipart/report; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: RFC822; User@Example.COM\r\nStatus: 5.1.1\r\nDiagnostic-Code: smtp; 550 5.1.1 User unknown\r\n--b--\r\n";
+        let (recipient, bounce_type, category, diagnostic) =
+            parse_dsn_email(hard).expect("valid DSN");
+        assert_eq!(recipient, "User@Example.COM");
+        assert_eq!(bounce_type, BounceType::Hard);
+        assert_eq!(category, BounceCategory::InvalidRecipient);
+        assert!(diagnostic.unwrap_or_default().contains("550"));
+
+        let soft = b"Content-Type: multipart/report; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; soft@example.com\r\nStatus: 4.2.2\r\n--b--\r\n";
+        let (_, bounce_type, category, _) = parse_dsn_email(soft).expect("soft DSN");
+        assert_eq!(bounce_type, BounceType::Soft);
+        assert_eq!(category, BounceCategory::MailboxFull);
+
+        // No Status header: the diagnostic code drives the fallback.
+        let diagnostic_only = b"Content-Type: multipart/report; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; d@example.com\r\nDiagnostic-Code: smtp; 550 no such user\r\n--b--\r\n";
+        let (_, bounce_type, category, _) = parse_dsn_email(diagnostic_only).expect("diag DSN");
+        assert_eq!(bounce_type, BounceType::Hard);
+        assert_eq!(category, BounceCategory::InvalidRecipient);
+
+        // Nothing parseable → honest unknown recipient placeholder.
+        let empty = b"Content-Type: text/plain\r\n\r\nnothing here\r\n";
+        let (recipient, bounce_type, category, diagnostic) =
+            parse_dsn_email(empty).expect("empty DSN");
+        assert_eq!(recipient, "unknown@unknown.com");
+        assert_eq!(bounce_type, BounceType::Unknown);
+        assert_eq!(category, BounceCategory::Unknown);
+        assert!(diagnostic.is_none());
+    }
+}

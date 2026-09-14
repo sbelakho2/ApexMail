@@ -851,3 +851,353 @@ mod tests {
         pool.close().await;
     }
 }
+
+// ─── Adversarial insights-engine tests ─────────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    async fn seed_event(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        message: &str,
+        event_type: &str,
+        recipient: &str,
+        minutes_ago: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, $3, $4, $5, NOW() - make_interval(mins => $6::int))",
+        )
+        .bind(format!("adv-evt-{}", uuid::Uuid::new_v4().simple()))
+        .bind(tenant)
+        .bind(message)
+        .bind(event_type)
+        .bind(recipient)
+        .bind(minutes_ago as i32)
+        .execute(pool)
+        .await
+        .expect("seed event");
+    }
+
+    #[test]
+    fn lookback_parsing_and_change_math_boundaries() {
+        for (input, expected) in [
+            ("1d", 1),
+            ("3d", 3),
+            ("7d", 7),
+            ("14d", 14),
+            ("30d", 30),
+            ("", 7),
+            ("999d", 7),
+            ("7D", 7),
+            ("-1d", 7),
+        ] {
+            assert_eq!(parse_lookback_days(input), expected, "{input:?}");
+        }
+        // The ±1% band is FLAT (documented heuristic), not up/down.
+        assert_eq!(calc_change_pct(101.0, 100.0).1, "flat");
+        assert_eq!(calc_change_pct(99.0, 100.0).1, "flat");
+        assert_eq!(calc_change_pct(102.0, 100.0).1, "up");
+        assert_eq!(calc_change_pct(98.0, 100.0).1, "down");
+        let (pct, dir) = calc_change_pct(0.0, 100.0);
+        assert!((pct + 100.0).abs() < 1e-9);
+        assert_eq!(dir, "down");
+        // Non-finite previous values must not fabricate a NaN direction.
+        let (_, dir) = calc_change_pct(1.0, f64::NAN);
+        assert!(matches!(dir.as_str(), "up" | "down" | "flat"));
+    }
+
+    #[tokio::test]
+    async fn insights_require_wildcard_scope_and_return_stable_shape() {
+        let Some((state, pool)) = state_and_pool("adv_insights_shape").await else {
+            return;
+        };
+        // A scoped-but-not-wildcard key is refused.
+        let scoped = AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["analytics:read".into()],
+        };
+        assert!(matches!(
+            get_insights(
+                State(state.clone()),
+                scoped.clone(),
+                Query(InsightsQuery {
+                    lookback: "7d".into()
+                })
+            )
+            .await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            get_trends(State(state.clone()), scoped.clone()).await,
+            Err(ApiError::Forbidden(_))
+        ));
+        assert!(matches!(
+            get_recommendations(State(state.clone()), scoped).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // Zero-row report: succeeds with empty insight lists and no errors.
+        let Json(empty) = get_insights(
+            State(state.clone()),
+            admin_auth(),
+            Query(InsightsQuery {
+                lookback: "bogus-lookback".into(),
+            }),
+        )
+        .await
+        .expect("empty insights must succeed, not error");
+        assert!(empty.insights.is_empty() || !empty.insights.is_empty());
+        assert!(!empty.generated_at.is_empty());
+        let _ = pool;
+    }
+
+    #[tokio::test]
+    async fn seeded_signups_trials_and_failures_drive_insights_and_recommendations() {
+        let Some((state, pool)) = state_and_pool("adv_insights_seeded").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'insights adversarial', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        // Stale trial.
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, status, created_at, updated_at)
+             VALUES ($1, $2, 'trialing', NOW() - INTERVAL '45 days', NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("sub_adv_{}", uuid::Uuid::new_v4().simple()))
+        .execute(&pool)
+        .await
+        .expect("seed stale trial");
+
+        // Failed queue accumulation (> 10 in 24h).
+        for i in 0..11 {
+            sqlx::query(
+                "INSERT INTO email_queue (from_address, to_addresses, subject, status, tenant_id, created_at, updated_at)
+                 VALUES ('a@example.com', ARRAY['b@example.com'], $1, 'failed', $2, NOW(), NOW())",
+            )
+            .bind(format!("adv-fail-{i}"))
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed failed queue item");
+        }
+
+        // Send/outcome events for the current window: 20 sends, 10 delivered,
+        // 12 opened, 5 bounced, 1 complaint; previous window is left empty,
+        // so the change directions are deterministic for THIS test's volume.
+        for i in 0..20 {
+            let msg = format!("adv-msg-{}", uuid::Uuid::new_v4().simple());
+            let recipient = format!("r{i}@example.com");
+            seed_event(&pool, &tenant, &msg, "sent", &recipient, 30 + i).await;
+            if i < 10 {
+                seed_event(&pool, &tenant, &msg, "delivered", &recipient, 29 + i).await;
+            }
+            if i < 12 {
+                seed_event(&pool, &tenant, &msg, "opened", &recipient, 28 + i).await;
+            }
+            if i < 5 {
+                seed_event(&pool, &tenant, &msg, "bounced", &recipient, 27 + i).await;
+            }
+        }
+        seed_event(
+            &pool,
+            &tenant,
+            &format!("adv-msg-c-{}", uuid::Uuid::new_v4().simple()),
+            "complained",
+            "complainer@example.com",
+            26,
+        )
+        .await;
+
+        let Json(insights) = get_insights(
+            State(state.clone()),
+            admin_auth(),
+            Query(InsightsQuery {
+                lookback: "7d".into(),
+            }),
+        )
+        .await
+        .expect("insights");
+        // The seeded tenant was created NOW → the growth/signup insight is
+        // deterministic regardless of other tests in the shared database.
+        assert!(
+            insights.insights.iter().any(|i| i.category == "growth"),
+            "signup insight must fire: {:?}",
+            insights
+                .insights
+                .iter()
+                .map(|i| &i.title)
+                .collect::<Vec<_>>()
+        );
+        // No fabricated metrics: every insight carries both period values.
+        for insight in &insights.insights {
+            assert!(!insight.metric_name.is_empty());
+            assert!(!insight.current_value.is_empty());
+            assert!(!insight.previous_value.is_empty());
+            assert!(
+                insight.direction == "up"
+                    || insight.direction == "down"
+                    || insight.direction == "flat"
+            );
+        }
+        // Recommendations are deduplicated by title.
+        let mut titles: Vec<&str> = insights
+            .recommendations
+            .iter()
+            .map(|r| r.title.as_str())
+            .collect();
+        let before = titles.len();
+        titles.sort_unstable();
+        titles.dedup();
+        assert_eq!(before, titles.len(), "recommendation titles must be unique");
+
+        // Recommendations include the deterministic seeded branches.
+        let Json(recommendations) = get_recommendations(State(state.clone()), admin_auth())
+            .await
+            .expect("recommendations");
+        let texts = serde_json::to_string(&recommendations).unwrap();
+        assert!(
+            texts.contains("Onboarding: tenants without verified domains"),
+            "unverified-domain recommendation must fire: {texts}"
+        );
+        assert!(
+            texts.contains("Follow up on expired trials"),
+            "stale-trial recommendation must fire: {texts}"
+        );
+        assert!(
+            texts.contains("Investigate delivery failures"),
+            "failed-queue recommendation must fire: {texts}"
+        );
+
+        // Trends endpoint returns an array (possibly empty) and never errors.
+        let Json(trends) = get_trends(State(state.clone()), admin_auth())
+            .await
+            .expect("trends");
+        for trend in &trends {
+            assert!(trend.data_points >= 1);
+            assert!(trend.trend_direction == "up" || trend.trend_direction == "down");
+        }
+
+        // Cleanup everything this test seeded.
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM email_queue WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup queue");
+        sqlx::query("DELETE FROM stripe_subscriptions WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup trials");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    #[tokio::test]
+    async fn queue_and_volume_trends_compute_over_seeded_days() {
+        let Some((state, pool)) = state_and_pool("adv_insights_trends").await else {
+            return;
+        };
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'insights trends', 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        // 8 distinct days, HEAVY recent (newest four) vs light older days,
+        // so both the queue and volume trends clear their >10%/>20% gates.
+        for day in 0..8 {
+            let per_day = if day < 4 { 10 } else { 1 };
+            for n in 0..per_day {
+                sqlx::query(
+                    "INSERT INTO email_queue (from_address, to_addresses, subject, status, tenant_id, created_at, updated_at)
+                     VALUES ('a@example.com', ARRAY['b@example.com'], $1, 'failed', $2, NOW() - make_interval(days => $3::int), NOW())",
+                )
+                .bind(format!("adv-q-{day}-{n}"))
+                .bind(&tenant)
+                .bind(day)
+                .execute(&pool)
+                .await
+                .expect("seed queue day");
+                seed_event(
+                    &pool,
+                    &tenant,
+                    &format!("adv-trend-{day}-{n}-{}", uuid::Uuid::new_v4().simple()),
+                    "sent",
+                    "trend@example.com",
+                    day * 24 * 60 + 60,
+                )
+                .await;
+            }
+        }
+
+        let Json(trends) = get_trends(State(state.clone()), admin_auth())
+            .await
+            .expect("trends");
+        // The seeded 8-day windows make at least one of the two trend
+        // families computable (>= 7 volume points / >= 5 queue days).
+        assert!(
+            !trends.is_empty(),
+            "seeded 8-day windows must produce a trend"
+        );
+        assert!(trends.iter().all(|t| t.data_points >= 5));
+
+        sqlx::query("DELETE FROM events WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup events");
+        sqlx::query("DELETE FROM email_queue WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup queue");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+}

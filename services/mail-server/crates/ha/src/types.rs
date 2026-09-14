@@ -885,36 +885,148 @@ pub struct ExperimentRow {
     pub name: String,
     pub experiment_type: String,
     pub status: String,
-    pub config: serde_json::Value,
-    pub target: serde_json::Value,
-    pub parameters: serde_json::Value,
-    pub safety_checks: serde_json::Value,
+    // Selected as `::text` in chaos.rs and decoded tolerantly: legacy rows
+    // may hold numbers PostgreSQL cannot hand back as an f64.
+    pub config: String,
+    pub target: String,
+    pub parameters: String,
+    pub safety_checks: String,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<i64>,
-    pub results: Option<serde_json::Value>,
+    pub results: Option<String>,
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
+/// Parse a JSONB column selected as `text`, tolerating numeric literals that
+/// `serde_json` cannot represent.
+///
+/// PostgreSQL JSONB normalizes `f64::MAX` to its full 309-digit decimal
+/// expansion. That is valid JSON for PostgreSQL, but a plain
+/// `serde_json::Value` decode fails with "number out of range", which made
+/// the whole experiment row unreadable. When the direct parse fails,
+/// out-of-range number tokens are clamped to the nearest finite `f64` and
+/// the parse is retried; the original error is only returned when the
+/// document is broken in some other way.
+pub(crate) fn parse_jsonb_tolerant(raw: &str) -> Result<serde_json::Value, String> {
+    match serde_json::from_str(raw) {
+        Ok(value) => Ok(value),
+        Err(original) => serde_json::from_str(&clamp_out_of_range_json_numbers(raw))
+            .map_err(|_| original.to_string()),
+    }
+}
+
+/// Rewrite number literals that `serde_json` cannot represent (integers
+/// beyond its range and PostgreSQL's non-standard `NaN`/`Infinity` JSONB
+/// output) so the document becomes parseable. String contents are copied
+/// verbatim (quote/escape aware).
+fn clamp_out_of_range_json_numbers(raw: &str) -> String {
+    const F64_MAX_LITERAL: &str = "1.7976931348623157e308";
+    const F64_MIN_LITERAL: &str = "-1.7976931348623157e308";
+
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.char_indices().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while let Some((index, ch)) = chars.next() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            out.push(ch);
+            continue;
+        }
+
+        let rest = &raw[index..];
+        // PostgreSQL JSONB can contain these non-JSON extensions; serde_json
+        // rejects them, so map them onto a representable finite value.
+        if rest.starts_with("-Infinity") {
+            for _ in 0.."-Infinity".len() - 1 {
+                chars.next();
+            }
+            out.push_str(F64_MIN_LITERAL);
+            continue;
+        }
+        if rest.starts_with("Infinity") {
+            for _ in 0.."Infinity".len() - 1 {
+                chars.next();
+            }
+            out.push_str(F64_MAX_LITERAL);
+            continue;
+        }
+        if rest.starts_with("NaN") {
+            for _ in 0.."NaN".len() - 1 {
+                chars.next();
+            }
+            out.push_str("0.0");
+            continue;
+        }
+
+        if ch != '-' && !ch.is_ascii_digit() {
+            out.push(ch);
+            continue;
+        }
+
+        // Collect a JSON number token: [-]digits[.digits][(e|E)[+-]digits].
+        let start = index;
+        let mut end = index + ch.len_utf8();
+        while let Some(&(next_index, next)) = chars.peek() {
+            if next.is_ascii_digit() || matches!(next, '.' | 'e' | 'E' | '+' | '-') {
+                chars.next();
+                end = next_index + next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let token = &raw[start..end];
+        // Ask the same parser that will read the repaired document whether
+        // this literal is representable; if not, clamp it to f64::MAX.
+        if serde_json::from_str::<serde_json::Value>(token).is_ok() {
+            out.push_str(token);
+        } else if token.starts_with('-') {
+            out.push_str(F64_MIN_LITERAL);
+        } else {
+            out.push_str(F64_MAX_LITERAL);
+        }
+    }
+    out
+}
+
 impl ExperimentRow {
-    pub fn into_experiment(self) -> Experiment {
-        Experiment {
+    /// Decode the JSONB text columns, clamping legacy unrepresentable
+    /// numbers (see [`parse_jsonb_tolerant`]).
+    pub fn into_experiment(self) -> Result<Experiment, String> {
+        Ok(Experiment {
             id: self.id,
             name: self.name,
             experiment_type: self.experiment_type,
             status: self.status,
-            config: self.config,
-            target: self.target,
-            parameters: self.parameters,
-            safety_checks: self.safety_checks,
+            config: parse_jsonb_tolerant(&self.config)?,
+            target: parse_jsonb_tolerant(&self.target)?,
+            parameters: parse_jsonb_tolerant(&self.parameters)?,
+            safety_checks: parse_jsonb_tolerant(&self.safety_checks)?,
             started_at: self.started_at,
             completed_at: self.completed_at,
             duration_ms: self.duration_ms,
-            results: self.results,
+            results: self
+                .results
+                .as_deref()
+                .map(parse_jsonb_tolerant)
+                .transpose()?,
             created_by: self.created_by,
             created_at: self.created_at,
-        }
+        })
     }
 }
 
@@ -1029,5 +1141,38 @@ mod tests {
         ] {
             assert_eq!(ExperimentStatus::parse(&s.to_string()), *s);
         }
+    }
+
+    // ── Legacy JSONB tolerance ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_jsonb_tolerant_clamps_legacy_huge_numbers() {
+        // PostgreSQL expands f64::MAX to exactly this 309-digit integer.
+        let f64_max_digits = format!("17976931348623157{}", "0".repeat(292));
+        let raw = format!(
+            r#"{{"threshold": {f64_max_digits}, "note": "1{}", "n": 1.5}}"#,
+            "0".repeat(309)
+        );
+        let value = parse_jsonb_tolerant(&raw).expect("legacy row must be readable");
+        assert_eq!(value["threshold"].as_f64(), Some(f64::MAX));
+        assert_eq!(value["note"].as_str().unwrap().len(), 310);
+        assert_eq!(value["n"].as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn test_parse_jsonb_tolerant_handles_nan_and_infinity_extensions() {
+        let value = parse_jsonb_tolerant(r#"{"a": NaN, "b": Infinity, "c": -Infinity}"#)
+            .expect("PostgreSQL JSONB extensions must be readable");
+        assert_eq!(value["a"].as_f64(), Some(0.0));
+        assert_eq!(value["b"].as_f64(), Some(f64::MAX));
+        assert_eq!(value["c"].as_f64(), Some(f64::MIN));
+    }
+
+    #[test]
+    fn test_parse_jsonb_tolerant_keeps_valid_documents_verbatim() {
+        let value = parse_jsonb_tolerant(r#"{"a": 1.5, "b": [true, null], "c": "x"}"#).unwrap();
+        assert_eq!(value["a"].as_f64(), Some(1.5));
+        assert_eq!(value["b"][0], true);
+        assert_eq!(value["c"], "x");
     }
 }

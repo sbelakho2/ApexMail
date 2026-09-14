@@ -588,7 +588,7 @@ impl TrustPortalService {
         request_id: &str,
         granted_by: &str,
     ) -> Result<(), String> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE trust_portal_access_requests
              SET granted = TRUE, granted_at = NOW(), granted_by = $1
              WHERE id = $2",
@@ -598,11 +598,16 @@ impl TrustPortalService {
         .execute(&self.db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
+        if result.rows_affected() == 0 {
+            // A grant for an unknown request must never report success: it
+            // would be a fabricated authorisation in the evidence trail.
+            return Err(format!("access request not found: {request_id}"));
+        }
         Ok(())
     }
 
     pub async fn revoke_access_request(&self, request_id: &str) -> Result<(), String> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE trust_portal_access_requests
              SET granted = FALSE, revoked_at = NOW() WHERE id = $1",
         )
@@ -610,6 +615,9 @@ impl TrustPortalService {
         .execute(&self.db)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
+        if result.rows_affected() == 0 {
+            return Err(format!("access request not found: {request_id}"));
+        }
         Ok(())
     }
 
@@ -870,5 +878,487 @@ mod tests {
             assert!(validate_incident_status(s).is_ok(), "{s}");
         }
         assert!(validate_incident_status("done").is_err());
+    }
+}
+
+// ─── DB-backed adversarial tests ────────────────────────────────────────────
+
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::test_support;
+
+    async fn service(suffix: &str) -> Option<(PgPool, TrustPortalService)> {
+        let pool =
+            test_support::canonical_pool(&format!("trust_{suffix}"), &format!("tp_{suffix}"))
+                .await?;
+        Some((pool.clone(), TrustPortalService::new(pool)))
+    }
+
+    fn slug(prefix: &str) -> String {
+        format!("{prefix}-{}", &Uuid::new_v4().simple().to_string()[..8])
+    }
+
+    fn document(slug: &str, version: &str, content: &str, publish_now: bool) -> DocumentInput {
+        DocumentInput {
+            slug: slug.into(),
+            title: format!("Title for {slug}"),
+            document_type: "whitepaper".into(),
+            version: version.into(),
+            summary: Some("summary".into()),
+            content_md: content.into(),
+            storage_url: None,
+            public: true,
+            requires_nda: false,
+            publish_now,
+        }
+    }
+
+    #[tokio::test]
+    async fn document_versioning_hash_and_public_visibility_are_honest() {
+        let Some((_pool, svc)) = service("doc").await else {
+            return;
+        };
+        let slug = slug("soc2");
+
+        // Draft: not published, so absent from every public view.
+        let draft = svc
+            .upsert_document(document(&slug, "v1", "body one", false))
+            .await
+            .expect("draft upsert");
+        assert!(draft.published_at.is_none());
+        assert_eq!(
+            draft.sha256_hash,
+            hex::encode(Sha256::digest(b"body one")),
+            "the stored hash must be the SHA-256 of the exact content"
+        );
+        assert!(svc
+            .list_documents_public()
+            .await
+            .expect("public")
+            .is_empty());
+        assert!(svc
+            .get_document_by_slug(&slug, None)
+            .await
+            .expect("get")
+            .is_some());
+        assert_eq!(svc.list_documents_admin().await.expect("admin").len(), 1);
+
+        // Publishing preserves the content hash of the new body and stamps
+        // published_at; re-upserting the same (slug, version) must not lose it.
+        let published = svc
+            .upsert_document(document(&slug, "v1", "body two", true))
+            .await
+            .expect("publish");
+        let first_published_at = published.published_at.expect("published");
+        assert_eq!(
+            published.sha256_hash,
+            hex::encode(Sha256::digest(b"body two"))
+        );
+        assert_eq!(svc.list_documents_public().await.expect("public").len(), 1);
+
+        let republished = svc
+            .upsert_document(document(&slug, "v1", "body three", false))
+            .await
+            .expect("re-upsert");
+        assert_eq!(
+            republished.published_at,
+            Some(first_published_at),
+            "an unpublished upsert must not retract the publication timestamp"
+        );
+        assert_eq!(
+            republished.sha256_hash,
+            hex::encode(Sha256::digest(b"body three"))
+        );
+
+        // A second version supersedes v1: only the newest reaches the public.
+        let v2 = svc
+            .upsert_document(document(&slug, "v2", "body four", true))
+            .await
+            .expect("v2");
+        svc.supersede(&slug, "v1", &v2.id).await.expect("supersede");
+        let public = svc.list_documents_public().await.expect("public");
+        assert_eq!(public.len(), 1, "{public:?}");
+        assert_eq!(public[0].version, "v2");
+        // Version-pinned lookups still find the superseded text (an auditor
+        // must be able to retrieve exactly what was published).
+        let pinned = svc
+            .get_document_by_slug(&slug, Some("v1"))
+            .await
+            .expect("pinned")
+            .expect("v1 must remain retrievable");
+        assert_eq!(pinned.content_md, "body three");
+        assert_eq!(pinned.superseded_by.as_deref(), Some(v2.id.as_str()));
+        // And the unpinned lookup resolves to the live version only.
+        let latest = svc
+            .get_document_by_slug(&slug, None)
+            .await
+            .expect("latest")
+            .expect("latest");
+        assert_eq!(latest.version, "v2");
+
+        assert!(svc
+            .get_document_by_slug(&slug, Some("v99"))
+            .await
+            .expect("missing version")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn subprocessor_upsert_removal_and_visibility() {
+        let Some((_pool, svc)) = service("subproc").await else {
+            return;
+        };
+        let name = format!("Processor {}", &Uuid::new_v4().simple().to_string()[..8]);
+        let input = SubprocessorInput {
+            name: name.clone(),
+            purpose: "email delivery".into(),
+            location: "EE".into(),
+            data_categories: vec!["email".into(), "logs".into()],
+            dpa_url: Some("https://dpa.example.test".into()),
+            certifications: vec!["ISO 27001".into()],
+            public: true,
+        };
+        let created = svc
+            .upsert_subprocessor(input.clone())
+            .await
+            .expect("upsert");
+        assert_eq!(
+            created.data_categories,
+            serde_json::json!(["email", "logs"])
+        );
+        assert_eq!(created.certifications, serde_json::json!(["ISO 27001"]));
+
+        // Upsert updates in place (same id) and can turn a listing private.
+        let private = svc
+            .upsert_subprocessor(SubprocessorInput {
+                public: false,
+                purpose: "email delivery (secondary)".into(),
+                ..input.clone()
+            })
+            .await
+            .expect("private upsert");
+        assert_eq!(private.id, created.id);
+        assert!(!private.public);
+        assert!(svc
+            .list_subprocessors_public()
+            .await
+            .expect("public")
+            .iter()
+            .all(|s| s.name != name));
+        assert!(svc
+            .list_subprocessors_admin()
+            .await
+            .expect("admin")
+            .iter()
+            .any(|s| s.name == name));
+
+        // Removal is a soft delete and is idempotent; re-upserting revives.
+        svc.remove_subprocessor(&name).await.expect("remove");
+        svc.remove_subprocessor(&name)
+            .await
+            .expect("idempotent remove");
+        assert!(svc
+            .list_subprocessors_admin()
+            .await
+            .expect("admin")
+            .iter()
+            .find(|s| s.name == name)
+            .expect("present")
+            .removed_at
+            .is_some());
+        let revived = svc
+            .upsert_subprocessor(SubprocessorInput {
+                public: true,
+                ..input
+            })
+            .await
+            .expect("revive");
+        assert!(revived.removed_at.is_none());
+
+        // Unknown names are a no-op, not an error.
+        svc.remove_subprocessor("never-existed")
+            .await
+            .expect("no-op");
+    }
+
+    #[tokio::test]
+    async fn incidents_reject_unknown_enums_before_writing_anything() {
+        let Some((pool, svc)) = service("incident").await else {
+            return;
+        };
+        let incident_slug = slug("outage");
+        let base = IncidentInput {
+            slug: incident_slug.clone(),
+            title: "API degradation".into(),
+            severity: "high".into(),
+            status: "investigating".into(),
+            started_at: Utc::now(),
+            summary_md: "We are investigating.".into(),
+            impact: None,
+            customer_data_affected: false,
+            public: true,
+        };
+
+        for (severity, status) in [
+            ("catastrophic", "investigating"),
+            ("", "investigating"),
+            ("HIGH", "investigating"),
+            ("high", "closed"),
+            ("high", ""),
+        ] {
+            let invalid = IncidentInput {
+                severity: severity.into(),
+                status: status.into(),
+                ..base.clone()
+            };
+            let err = svc
+                .create_incident(invalid)
+                .await
+                .expect_err("invalid enum must be refused");
+            assert!(
+                err.contains("invalid"),
+                "severity={severity:?} status={status:?}: {err}"
+            );
+        }
+        // A refused create must not have written a row.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM trust_portal_incidents WHERE slug = $1")
+                .bind(&incident_slug)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0, "a rejected write must change nothing");
+
+        // Happy path + update roll-up.
+        let incident = svc.create_incident(base.clone()).await.expect("create");
+        assert!(incident.resolved_at.is_none());
+        let update = svc
+            .post_incident_update(
+                &incident.id,
+                "monitoring",
+                "Mitigation applied.",
+                "oncall@apexmail.ee",
+            )
+            .await
+            .expect("update");
+        assert_eq!(update.status, "monitoring");
+        let after = svc
+            .get_incident_by_slug(&incident_slug)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(after.status, "monitoring");
+        assert!(after.resolved_at.is_none());
+
+        svc.post_incident_update(&incident.id, "resolved", "Recovered.", "oncall@apexmail.ee")
+            .await
+            .expect("resolve");
+        let resolved = svc
+            .get_incident_by_slug(&incident_slug)
+            .await
+            .expect("get")
+            .expect("present");
+        assert!(resolved.resolved_at.is_some());
+        assert_eq!(
+            svc.list_incident_updates(&incident.id)
+                .await
+                .expect("updates")
+                .len(),
+            2
+        );
+
+        // An invalid status on an update is refused without touching the row.
+        assert!(svc
+            .post_incident_update(&incident.id, "gone", "x", "a")
+            .await
+            .is_err());
+        let still = svc
+            .get_incident_by_slug(&incident_slug)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(still.status, "resolved");
+
+        // Public/private visibility.
+        let private_slug = slug("private");
+        svc.create_incident(IncidentInput {
+            slug: private_slug.clone(),
+            public: false,
+            ..base
+        })
+        .await
+        .expect("private incident");
+        assert!(svc
+            .list_incidents_public(50)
+            .await
+            .expect("public")
+            .iter()
+            .all(|i| i.slug != private_slug));
+        assert_eq!(
+            svc.list_incidents_admin(50)
+                .await
+                .expect("admin")
+                .iter()
+                .filter(|i| i.slug == private_slug)
+                .count(),
+            1
+        );
+        // A zero limit is a legal SQL query (explicit empty), not an error.
+        assert!(svc
+            .list_incidents_public(0)
+            .await
+            .expect("zero limit")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn access_requests_fail_closed_on_bad_input_and_unknown_ids() {
+        let Some((_pool, svc)) = service("access").await else {
+            return;
+        };
+        // Malformed email is refused and writes nothing.
+        let err = svc
+            .submit_access_request(AccessRequestInput {
+                document_slug: "soc2-report".into(),
+                requester_name: "Mallory".into(),
+                requester_email: "not-an-email".into(),
+                company: None,
+                purpose: None,
+                nda_accepted: false,
+            })
+            .await
+            .expect_err("malformed email must be refused");
+        assert!(err.contains("invalid email"), "{err}");
+
+        let request = svc
+            .submit_access_request(AccessRequestInput {
+                document_slug: "soc2-report".into(),
+                requester_name: "Alice <script>alert(1)</script>".into(),
+                requester_email: "alice@example.test".into(),
+                company: Some("Acme".into()),
+                purpose: Some("vendor review".into()),
+                nda_accepted: true,
+            })
+            .await
+            .expect("submit");
+        assert!(request.nda_accepted_at.is_some());
+        assert!(!request.granted);
+        let pending = svc.list_access_requests_pending().await.expect("pending");
+        assert!(pending.iter().any(|r| r.id == request.id));
+
+        // Granting and revoking unknown ids must be reported, not faked.
+        assert!(svc
+            .grant_access_request("no-such-request", "admin@apexmail.ee")
+            .await
+            .is_err());
+        assert!(svc.revoke_access_request("no-such-request").await.is_err());
+
+        svc.grant_access_request(&request.id, "admin@apexmail.ee")
+            .await
+            .expect("grant");
+        assert!(
+            svc.list_access_requests_pending()
+                .await
+                .expect("pending")
+                .iter()
+                .all(|r| r.id != request.id),
+            "a granted request must leave the pending queue"
+        );
+        svc.revoke_access_request(&request.id)
+            .await
+            .expect("revoke");
+        assert!(
+            svc.list_access_requests_pending()
+                .await
+                .expect("pending")
+                .iter()
+                .all(|r| r.id != request.id),
+            "a revoked request must not look pending"
+        );
+        // Revoking twice is idempotent for a known id.
+        svc.revoke_access_request(&request.id)
+            .await
+            .expect("revoke again");
+    }
+
+    #[tokio::test]
+    async fn overview_is_explicit_when_there_is_no_data() {
+        let Some((pool, svc)) = service("overview").await else {
+            return;
+        };
+        // A pristine trust portal returns explicit empty collections plus the
+        // company's own attestations — never an error, never fabricated docs.
+        let overview = svc.overview().await.expect("overview");
+        assert!(overview.published_documents.is_empty());
+        assert!(overview.subprocessors.is_empty());
+        assert!(overview.recent_incidents.is_empty());
+        assert!(overview
+            .certifications
+            .contains(&"SOC 2 Type II".to_string()));
+        assert!(overview
+            .certifications
+            .contains(&"HIPAA (BAA available)".to_string()));
+        assert!(overview
+            .certifications
+            .contains(&"GDPR (Article 28 DPA)".to_string()));
+
+        // Certifications from public subprocessors are aggregated and sorted.
+        svc.upsert_subprocessor(SubprocessorInput {
+            name: format!("P{}", &Uuid::new_v4().simple().to_string()[..8]),
+            purpose: "storage".into(),
+            location: "EU".into(),
+            data_categories: vec![],
+            dpa_url: None,
+            certifications: vec!["ISO 27001".into(), "SOC 2 Type II".into()],
+            public: true,
+        })
+        .await
+        .expect("subprocessor");
+        let overview = svc.overview().await.expect("overview");
+        assert_eq!(overview.subprocessors.len(), 1);
+        assert!(overview.certifications.contains(&"ISO 27001".to_string()));
+        let mut sorted = overview.certifications.clone();
+        sorted.sort();
+        assert_eq!(overview.certifications, sorted, "deduplicated and stable");
+
+        // Non-array certifications (operator corruption) are skipped, not fatal.
+        sqlx::query(
+            "UPDATE trust_portal_subprocessors SET certifications = '\"oops\"'::jsonb
+             WHERE id = $1",
+        )
+        .bind(&overview.subprocessors[0].id)
+        .execute(&pool)
+        .await
+        .expect("corrupt certifications");
+        let overview = svc.overview().await.expect("overview survives");
+        assert!(overview
+            .certifications
+            .contains(&"SOC 2 Type II".to_string()));
+    }
+
+    #[tokio::test]
+    async fn hostile_document_content_is_stored_verbatim_and_hashed_exactly() {
+        let Some((_pool, svc)) = service("hostile_doc").await else {
+            return;
+        };
+        let slug = slug("hostile");
+        // RTL/emoji/very long markdown must round-trip byte-for-byte and the
+        // hash must cover exactly those bytes.
+        let content = format!(
+            "{}\n# \u{202e}gnitfar\u{202e} \u{1f50f}\n{}",
+            "a".repeat(64_000),
+            "b".repeat(1_000)
+        );
+        let stored = svc
+            .upsert_document(document(&slug, "v1", &content, true))
+            .await
+            .expect("upsert");
+        assert_eq!(stored.content_md, content);
+        assert_eq!(
+            stored.sha256_hash,
+            hex::encode(Sha256::digest(content.as_bytes()))
+        );
+        assert_eq!(stored.content_md.len(), content.len());
     }
 }

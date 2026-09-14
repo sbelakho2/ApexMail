@@ -273,7 +273,7 @@ impl SesIpProvider {
               billing_status, allocated_at, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, 'pending', 0.0, $6, NOW(), NOW(), NOW())",
         )
-        .bind(id)
+        .bind(id.to_string())
         .bind(tenant_id)
         .bind(&ip_address)
         .bind(&aws_region)
@@ -324,7 +324,7 @@ impl SesIpProvider {
             "SELECT ip_address, ses_pool_name FROM dedicated_ips
              WHERE id = $1 AND tenant_id = $2 AND status NOT IN ('retired', 'releasing')",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .bind(tenant_id)
         .fetch_optional(&self.db)
         .await?;
@@ -360,7 +360,7 @@ impl SesIpProvider {
                  updated_at = NOW()
              WHERE id = $1",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .execute(&self.db)
         .await?;
 
@@ -400,7 +400,7 @@ impl SesIpProvider {
             "SELECT ip_address FROM dedicated_ips
              WHERE id = $1 AND tenant_id = $2",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .bind(tenant_id)
         .fetch_optional(&self.db)
         .await?;
@@ -427,7 +427,7 @@ impl SesIpProvider {
                  updated_at = NOW()
              WHERE id = $1",
         )
-        .bind(dedicated_ip_id)
+        .bind(dedicated_ip_id.to_string())
         .execute(&self.db)
         .await?;
 
@@ -472,7 +472,9 @@ impl SesIpProvider {
     /// Sync warmup progress from SES into the local database for all warming IPs.
     /// Called periodically by the ops service.
     pub async fn sync_warmup_progress(&self) -> Result<u32, SesProviderError> {
-        let rows: Vec<(Uuid, String)> =
+        // `dedicated_ips.id` is VARCHAR(64), not UUID: decode/bind as text so
+        // every stored id shape (uuid-text included) round-trips.
+        let rows: Vec<(String, String)> =
             sqlx::query_as("SELECT id, ip_address FROM dedicated_ips WHERE status = 'warming'")
                 .fetch_all(&self.db)
                 .await?;
@@ -496,7 +498,7 @@ impl SesIpProvider {
                              updated_at = NOW()
                          WHERE id = $1",
                     )
-                    .bind(id)
+                    .bind(id.to_string())
                     .bind(progress)
                     .bind(new_status)
                     .execute(&self.db)
@@ -514,5 +516,200 @@ impl SesIpProvider {
             info!(synced = synced, "Synced warmup progress from SES");
         }
         Ok(synced)
+    }
+}
+
+// ─── Adversarial SES-provider tests (no AWS network) ───────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    async fn provider_and_pool(name: &str) -> Option<(SesIpProvider, PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state.ses_provider.clone(), pool))
+    }
+
+    async fn seed_tenant(pool: &PgPool, tenant: &str, plan: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+             VALUES ($1, 'ses adversarial', $2, 'active', NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(plan)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    #[tokio::test]
+    async fn plan_gating_and_active_ip_counting_are_db_driven() {
+        let Some((provider, pool)) = provider_and_pool("adv_ses_gating").await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let plan_name = format!("adv-ses-plan-{tag}");
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
+            .bind(apexmail_lib::id::generate_id("", 26))
+            .bind(&plan_name)
+            .bind(serde_json::json!({"dedicated_ip": true, "dedicated_ip_count": 3}).to_string())
+            .execute(&pool)
+            .await
+            .expect("seed plan");
+        seed_tenant(&pool, &tenant, &plan_name).await;
+
+        // Pool-name derivation: dash-stripped, 12-char truncation, stable.
+        assert_eq!(provider.pool_name_for_tenant("ab-cd-ef"), "apexmail-abcdef");
+        assert_eq!(
+            provider.pool_name_for_tenant("abcdefghijklmnop"),
+            "apexmail-abcdefghijkl"
+        );
+        assert_eq!(provider.pool_name_for_tenant(""), "apexmail-");
+
+        let (allowed, included) = provider
+            .check_plan_eligibility(&tenant)
+            .await
+            .expect("eligibility");
+        assert!(allowed);
+        assert_eq!(included, 3);
+
+        // Unknown tenant → not eligible; nothing fabricated.
+        let ghost = apexmail_lib::id::generate_id("", 26);
+        assert_eq!(
+            provider
+                .check_plan_eligibility(&ghost)
+                .await
+                .expect("ghost"),
+            (false, 0)
+        );
+
+        // Counting excludes retired/releasing rows. IPs are unique per run
+        // (partial unique index on active ip_address values).
+        let octet = (uuid::Uuid::new_v4().as_u128() % 200 + 10) as u32;
+        for (status, ip) in [
+            ("pending", format!("203.0.113.{octet}")),
+            ("active", format!("203.0.114.{octet}")),
+            ("retired", format!("203.0.115.{octet}")),
+            ("releasing", format!("203.0.116.{octet}")),
+        ] {
+            sqlx::query(
+                "INSERT INTO dedicated_ips (id, tenant_id, ip_address, region, status)
+                 VALUES ($1, $2, $3, 'us-east-1', $4)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&tenant)
+            .bind(ip)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("seed dedicated ip");
+        }
+        assert_eq!(provider.count_active_ips(&tenant).await.expect("count"), 2);
+
+        sqlx::query("DELETE FROM dedicated_ips WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup ips");
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
+    }
+
+    #[tokio::test]
+    async fn ineligible_plan_and_exhausted_inventory_refuse_before_any_aws_call() {
+        let Some((provider, pool)) = provider_and_pool("adv_ses_allocate").await else {
+            return;
+        };
+        // Free plan (no dedicated_ip feature) → PlanNotEligible.
+        let free = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &free, "free").await;
+        assert!(matches!(
+            provider.allocate_ip(&free, None).await,
+            Err(SesProviderError::PlanNotEligible)
+        ));
+
+        // Eligible plan but an empty inventory in the target region → a
+        // region-named NoAvailableIps (still no AWS call, no partial state).
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let plan_name = format!("adv-ses-plan2-{tag}");
+        let region = format!("adv-region-{tag}");
+        let eligible = apexmail_lib::id::generate_id("", 26);
+        sqlx::query("INSERT INTO plans (id, name, features) VALUES ($1, $2, $3::jsonb)")
+            .bind(apexmail_lib::id::generate_id("", 26))
+            .bind(&plan_name)
+            .bind(serde_json::json!({"dedicated_ip": true, "dedicated_ip_count": 2}).to_string())
+            .execute(&pool)
+            .await
+            .expect("seed plan");
+        seed_tenant(&pool, &eligible, &plan_name).await;
+        match provider.allocate_ip(&eligible, Some(&region)).await {
+            Err(SesProviderError::NoAvailableIps { region: named }) => {
+                assert_eq!(named, region)
+            }
+            other => panic!("expected NoAvailableIps, got {other:?}"),
+        }
+
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+        sqlx::query("DELETE FROM tenants WHERE id = ANY($1)")
+            .bind(vec![free, eligible])
+            .execute(&pool)
+            .await
+            .expect("cleanup tenants");
+    }
+
+    #[tokio::test]
+    async fn unknown_ip_ids_are_honest_not_found_and_sync_is_a_noop() {
+        let Some((provider, pool)) = provider_and_pool("adv_ses_ids").await else {
+            return;
+        };
+        let ghost = Uuid::new_v4();
+        assert!(matches!(
+            provider.release_ip(ghost, "ten_none").await,
+            Err(SesProviderError::IpNotFound { .. })
+        ));
+        assert!(matches!(
+            provider.start_warmup(ghost, "ten_none").await,
+            Err(SesProviderError::IpNotFound { .. })
+        ));
+        let _ = pool;
+    }
+}
+
+// ─── Sync on a private canonical fixture (no shared warming rows) ──
+
+#[cfg(test)]
+mod sync_tests {
+    /// `sync_warmup_progress` on a FRESH canonical database: no warming rows
+    /// exist, so it must return 0 without any SES (network) call.
+    #[tokio::test]
+    async fn sync_warmup_progress_is_a_noop_without_warming_rows() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_ses_sync").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        assert_eq!(
+            state
+                .ses_provider
+                .sync_warmup_progress()
+                .await
+                .expect("sync"),
+            0
+        );
+        pool.close().await;
     }
 }

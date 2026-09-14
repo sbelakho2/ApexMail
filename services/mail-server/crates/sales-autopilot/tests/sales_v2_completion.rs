@@ -209,7 +209,6 @@ async fn insert_reply_classification(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn outcome_replay_is_idempotent_and_revenue_is_not_double_counted() {
     let Some(pool) = common::test_pool("outcome_replay").await else {
         return;
@@ -292,7 +291,6 @@ async fn outcome_replay_is_idempotent_and_revenue_is_not_double_counted() {
 }
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn attribution_zero_denominator_is_none_not_zero_or_infinity() {
     let Some(pool) = common::test_pool("attribution_zero").await else {
         return;
@@ -344,7 +342,6 @@ async fn attribution_zero_denominator_is_none_not_zero_or_infinity() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn coordination_race_at_cap_never_exceeds_budget() {
     let Some(pool) = common::test_pool("coordination_race").await else {
         return;
@@ -417,7 +414,6 @@ async fn coordination_race_at_cap_never_exceeds_budget() {
 }
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn coordination_rules_against_live_state() {
     let Some(pool) = common::test_pool("coordination_rules").await else {
         return;
@@ -471,7 +467,6 @@ async fn coordination_rules_against_live_state() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn score_persist_and_latest_roundtrip() {
     let Some(pool) = common::test_pool("score_persist").await else {
         return;
@@ -527,7 +522,6 @@ async fn score_persist_and_latest_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "live Postgres: set TEST_DATABASE_URL"]
 async fn signals_respect_expiry_and_link_evidence() {
     let Some(pool) = common::test_pool("signals").await else {
         return;

@@ -42,6 +42,10 @@ services:
       POSTGRES_DB: apexmail_ci
   - name: redis
     image: redis:7-alpine
+  # The analytics and tracking-service suites are gated on a live ClickHouse
+  # (they were `#[ignore]`d before 2026-09-14 and CI never ran them).
+  - name: clickhouse
+    image: clickhouse/clickhouse-server:24.8-alpine
 
 steps:
   # --- static validation gates (env-file/compose sanity, repo gates, migration lint) ---
@@ -63,7 +67,20 @@ steps:
       # CREATEROLE connection; the postgres service user IS the superuser.
       TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
       TEST_REDIS_URL: redis://redis:6379
+      REDIS_TEST_URL: redis://redis:6379
+      CLICKHOUSE_TEST_URL: http://clickhouse:8123
+      CLICKHOUSE_TEST_USER: default
     commands:
+      # Apply the canonical ClickHouse schema (the same file the compose stack
+      # mounts) before the tests that read it.
+      - |
+        for i in $(seq 1 30); do
+          if curl -fsS "http://clickhouse:8123/ping" >/dev/null 2>&1; then break; fi
+          sleep 2
+        done
+      - >
+        curl -fsS "http://clickhouse:8123/?multiquery"
+        --data-binary @deploy/clickhouse/initdb/001_schema.sql >/dev/null
       - ./ci/woodpecker/stage.sh test
 
   # --- security + supply chain (gitleaks, cargo audit/vet, semgrep,
@@ -76,5 +93,6 @@ steps:
       TEST_DATABASE_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
       TEST_DATABASE_ADMIN_URL: postgresql://postgres:apexmail_ci@postgres:5432/apexmail_ci
       TEST_REDIS_URL: redis://redis:6379
+      CLICKHOUSE_TEST_URL: http://clickhouse:8123
     commands:
       - ./ci/woodpecker/stage.sh security

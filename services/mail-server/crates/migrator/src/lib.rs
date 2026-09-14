@@ -621,16 +621,53 @@ pub mod test_support {
                 format!("clone {db_name} from {template_db}: {error}"),
             ));
         }
+        // Connect with a bounded retry that RE-CREATES the clone when it has
+        // vanished: another process provisioning the same name (nextest runs
+        // every test in its own process) can drop it between the CREATE above
+        // and this connect, which surfaced as the confusing
+        // `clone-connect: database "…" does not exist`. The advisory lock held
+        // above serializes same-name provisioning, so a retry converges.
+        let mut pool = None;
+        let mut last_connect_error: Option<sqlx::Error> = None;
+        for attempt in 0..5 {
+            match PgPoolOptions::new()
+                .max_connections(4)
+                .acquire_timeout(Duration::from_secs(5))
+                .connect(&format!("{server_part}/{db_name}"))
+                .await
+            {
+                Ok(connected) => {
+                    pool = Some(connected);
+                    break;
+                }
+                Err(error) => {
+                    let missing = error.to_string().contains("does not exist");
+                    last_connect_error = Some(error);
+                    if !missing || attempt == 4 {
+                        break;
+                    }
+                    let _ = sqlx::query(&format!(
+                        r#"CREATE DATABASE "{db_name}" TEMPLATE "{template_db}""#
+                    ))
+                    .execute(&admin)
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
         admin.close().await;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect(&format!("{server_part}/{db_name}"))
-            .await
-            .map_err(|error| {
-                ProvisionError::new("clone-connect", format!("connect {db_name}: {error}"))
-            })?;
+        let pool = match pool {
+            Some(pool) => pool,
+            None => {
+                let error = last_connect_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "unknown connect failure".to_string());
+                return Err(ProvisionError::new(
+                    "clone-connect",
+                    format!("connect {db_name}: {error}"),
+                ));
+            }
+        };
 
         // Verify the clone's migration ledger BEFORE returning it (audit
         // F01): the pinned chain, complete, canonical, no dirty rows.

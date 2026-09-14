@@ -2140,7 +2140,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_health() {
         let Some(app) = test_app("routes::tests::test_health").await else {
@@ -2165,7 +2164,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_create_and_list_leads() {
         let Some(app) = test_app("routes::tests::test_create_and_list_leads").await else {
@@ -2209,7 +2207,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_enrich_endpoint() {
         let Some(app) = test_app("routes::tests::test_enrich_endpoint").await else {
@@ -2255,7 +2252,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_campaign_lifecycle_endpoints() {
         // A working test dispatcher is attached so start exercises the REAL
@@ -2401,7 +2397,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_campaign_routes_reject_cross_tenant_mutation() {
         // The dispatcher must be wired, otherwise the unconditional Fix I-1
@@ -2458,7 +2453,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_list_leads_respects_pagination() {
         let Some(app) = test_app("routes::tests::test_list_leads_respects_pagination").await else {
@@ -2509,7 +2503,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_protected_routes_reject_requests_when_service_token_missing() {
         let Some(app) = test_app_with_service_token(
@@ -2529,7 +2522,6 @@ mod tests {
     }
 
     /// Integration test requiring local Postgres and Redis. Run with infrastructure.
-    #[ignore]
     #[tokio::test]
     async fn test_enrich_requires_tenant_scope() {
         let Some(app) = test_app("routes::tests::test_enrich_requires_tenant_scope").await else {
@@ -2888,5 +2880,555 @@ mod tests {
             .bind(&tenant_id)
             .execute(&db)
             .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Adversarial router proofs (run by default; soft-skip only when the
+    // canonical test database is unconfigured).
+    // -----------------------------------------------------------------------
+
+    async fn json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// `/health` is public; every other route demands the service token, and
+    /// a caller presenting no credential never reaches a handler.
+    #[tokio::test]
+    async fn health_is_public_and_protected_routes_require_the_service_token() {
+        // Health must answer on the REAL provisioned pool (the auth-behaviour
+        // checks below deliberately use the lazy pool so they never touch a
+        // database).
+        let Some(canonical) = test_app("routes_health_public").await else {
+            return;
+        };
+        let health = canonical
+            .clone()
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK, "health is public");
+        let health_body = json_body(health).await;
+        assert_eq!(health_body["database"], "up");
+        assert_eq!(health_body["service"], "sales-autopilot");
+
+        let app = lazy_test_app();
+
+        let no_token = app
+            .clone()
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_token = app
+            .clone()
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-api-key", "not-the-token")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_bearer = app
+            .clone()
+            .oneshot(
+                Request::get("/leads")
+                    .header(axum::http::header::AUTHORIZATION, "Bearer not-the-token")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_bearer.status(), StatusCode::UNAUTHORIZED);
+
+        // The public unsubscribe route is NOT behind the token (it answers on
+        // its own terms — a malformed token is a 400/404, never a 401).
+        let public_unsubscribe = app
+            .clone()
+            .oneshot(
+                Request::get("/u/not-a-real-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            public_unsubscribe.status(),
+            StatusCode::UNAUTHORIZED,
+            "recipient clicks arrive without a service token"
+        );
+
+        // A valid credential passes the middleware (then fails on the dead
+        // lazy database with a 500 — proving it got past auth).
+        let authed = app
+            .oneshot(
+                Request::get("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(authed.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(authed.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The lead lifecycle through the real router: create scores the lead,
+    /// listing is paged/searched/filtered, reads are tenant-scoped, and
+    /// malformed or cross-tenant payloads are refused before any write.
+    #[tokio::test]
+    async fn lead_lifecycle_is_scored_paged_and_tenant_scoped() {
+        let Some(app) = test_app("routes_lead_lifecycle").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-lead");
+        let other = crate::test_db::unique_test_tenant("routes-lead-other");
+        let email = format!(
+            "alice-{}@acme.example",
+            &Uuid::new_v4().simple().to_string()[..10]
+        );
+
+        let create = |app: Router, email: String, tenant: String| async move {
+            app.oneshot(
+                Request::post("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "email": email,
+                            "name": "Alice",
+                            "company": "Acme",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        let resp = create(app.clone(), email.clone(), tenant.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK, "create lead");
+        let created = json_body(resp).await;
+        let lead_id = created["id"].as_str().expect("a lead id").to_string();
+        assert!(
+            created["score"].as_u64().unwrap_or(0) >= 10,
+            "the scoring pipeline is live: {created}"
+        );
+        assert_eq!(created["email"], email);
+
+        // A replay of the same address is a conflict, not a second lead.
+        let duplicate = create(app.clone(), email.clone(), tenant.clone()).await;
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+
+        // Malformed JSON and a missing required field are rejections.
+        let malformed = app
+            .clone()
+            .oneshot(
+                Request::post("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::post("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "email": "x@y.z" })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Header/payload tenant mismatch is refused.
+        let mismatch = app
+            .clone()
+            .oneshot(
+                Request::post("/leads")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "email": format!("bob-{}@acme.example", &Uuid::new_v4().simple().to_string()[..10]),
+                            "name": "Bob",
+                            "company": "Acme",
+                            "tenant_id": other,
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+
+        // Read back: own tenant sees it, another tenant gets a 404.
+        let own = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/leads/{lead_id}"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(own.status(), StatusCode::OK);
+        let foreign = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/leads/{lead_id}"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", other.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        let unknown = app
+            .clone()
+            .oneshot(
+                Request::get("/leads/lead_does_not_exist")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+        // Pagination is clamped and the search/status filters are real
+        // queries, not 500s.
+        for url in [
+            "/leads?limit=1&offset=0",
+            "/leads?limit=99999&offset=-5",
+            "/leads?status=new&limit=10",
+            "/leads?status=nonsense&limit=10",
+            "/leads?source=api&limit=10",
+            "/leads?q=alice&limit=10",
+            "/leads?limit=0",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::get(url)
+                        .header("x-api-key", "test-key")
+                        .header("x-tenant-id", tenant.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{url}");
+            let body = json_body(resp).await;
+            assert!(body.is_array(), "{url}: {body}");
+            if url.starts_with("/leads?limit=1&") {
+                assert_eq!(body.as_array().unwrap().len(), 1, "limit=1");
+            }
+        }
+
+        // Companies is tenant-scoped and paged.
+        let companies = app
+            .clone()
+            .oneshot(
+                Request::get("/companies?limit=5&industry=saas")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(companies.status(), StatusCode::OK);
+
+        // Cleanup.
+        if let Some(db) = crate::test_db::canonical_test_pool("routes_lead_lifecycle_cleanup").await
+        {
+            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = ANY($1)")
+                .bind(vec![tenant.clone(), other.clone()])
+                .execute(&db)
+                .await;
+        }
+    }
+
+    /// Enrichment validates its input and always lands on the tenant-scoped
+    /// persisted path (or an explicit unpersisted warning), never a panic.
+    #[tokio::test]
+    async fn enrich_validates_input_and_answers_by_email_or_domain() {
+        let Some(app) = test_app("routes_enrich_input").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-enrich");
+
+        let no_input = app
+            .clone()
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_input.status(), StatusCode::BAD_REQUEST);
+
+        let bad_email = app
+            .clone()
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "email": "not-an-email" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad_email.status(), StatusCode::BAD_REQUEST);
+
+        let by_domain = app
+            .clone()
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "domain": "acme.example" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_domain.status(), StatusCode::OK);
+        let company = json_body(by_domain).await;
+        assert!(company.is_object(), "{company}");
+
+        let by_email = app
+            .clone()
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "email": "bob@beta.example" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_email.status(), StatusCode::OK);
+
+        // Missing tenant scope is refused before any work.
+        let no_tenant = app
+            .clone()
+            .oneshot(
+                Request::post("/enrich")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "domain": "acme.example" }))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_tenant.status(), StatusCode::BAD_REQUEST);
+
+        if let Some(db) = crate::test_db::canonical_test_pool("routes_enrich_input_cleanup").await {
+            let _ = sqlx::query("DELETE FROM enriched_companies WHERE tenant_id = $1")
+                .bind(&tenant)
+                .execute(&db)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_evidence WHERE tenant_id = $1")
+                .bind(&tenant)
+                .execute(&db)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_enrichment_facts WHERE tenant_id = $1")
+                .bind(&tenant)
+                .execute(&db)
+                .await;
+        }
+    }
+
+    /// Conversions can only be created against a campaign AND a lead that both
+    /// belong to the calling tenant, and the read model filters by either
+    /// relation without leaking across tenants.
+    #[tokio::test]
+    async fn conversions_require_same_tenant_campaign_and_lead() {
+        let Some(app) = test_app("routes_conversions").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-conv");
+        let other = crate::test_db::unique_test_tenant("routes-conv-other");
+        let auth = |builder: axum::http::request::Builder| {
+            builder
+                .header("x-api-key", "test-key")
+                .header("x-tenant-id", tenant.clone())
+                .header("content-type", "application/json")
+        };
+
+        // A lead and a campaign for this tenant.
+        let lead_request = auth(Request::post("/leads"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "email": format!(
+                        "conv-{}@acme.example",
+                        &Uuid::new_v4().simple().to_string()[..10]
+                    ),
+                    "name": "Convertible",
+                    "company": "Acme",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let lead_resp = app.clone().oneshot(lead_request).await.unwrap();
+        assert_eq!(lead_resp.status(), StatusCode::OK);
+        let lead = json_body(lead_resp).await;
+        let lead_id = Uuid::parse_str(lead["id"].as_str().expect("lead id")).unwrap();
+
+        let campaign_request = auth(Request::post("/campaigns"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "name": "Conversion source",
+                    "template_id": "tmpl_conv",
+                    "audience": "all",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let campaign_resp = app.clone().oneshot(campaign_request).await.unwrap();
+        assert_eq!(campaign_resp.status(), StatusCode::OK);
+        let campaign = json_body(campaign_resp).await;
+        let campaign_id = Uuid::parse_str(campaign["id"].as_str().expect("campaign id")).unwrap();
+
+        // A missing campaign or lead is a 404, never a dangling row.
+        let missing_campaign_request = auth(Request::post("/conversions"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "campaign_id": Uuid::new_v4(),
+                    "lead_id": lead_id,
+                    "revenue": 1.0,
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let missing_campaign = app.clone().oneshot(missing_campaign_request).await.unwrap();
+        assert_eq!(missing_campaign.status(), StatusCode::NOT_FOUND);
+        let missing_lead_request = auth(Request::post("/conversions"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "campaign_id": campaign_id,
+                    "lead_id": Uuid::new_v4(),
+                    "revenue": 1.0,
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let missing_lead = app.clone().oneshot(missing_lead_request).await.unwrap();
+        assert_eq!(missing_lead.status(), StatusCode::NOT_FOUND);
+
+        // The real conversion records and is listed by tenant, campaign and
+        // lead.
+        let created_request = auth(Request::post("/conversions"))
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "campaign_id": campaign_id,
+                    "lead_id": lead_id,
+                    "revenue": 1234.5,
+                    "description": "closed won",
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let created = app.clone().oneshot(created_request).await.unwrap();
+        assert_eq!(created.status(), StatusCode::OK);
+        let created = json_body(created).await;
+        assert_eq!(created["revenue"], 1234.5);
+        assert_eq!(created["campaign_id"], campaign_id.to_string());
+
+        for url in [
+            "/conversions".to_string(),
+            format!("/conversions?campaign_id={campaign_id}"),
+            format!("/conversions?lead_id={lead_id}"),
+            "/conversions?limit=1&offset=0".to_string(),
+        ] {
+            let request = auth(Request::get(url.clone())).body(Body::empty()).unwrap();
+            let resp = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{url}");
+            let rows = json_body(resp).await;
+            assert_eq!(rows.as_array().unwrap().len(), 1, "{url}: {rows}");
+        }
+
+        // Another tenant sees none of it.
+        let foreign = app
+            .clone()
+            .oneshot(
+                Request::get("/conversions")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", other.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreign.status(), StatusCode::OK);
+        assert!(json_body(foreign).await.as_array().unwrap().is_empty());
+
+        if let Some(db) = crate::test_db::canonical_test_pool("routes_conversions_cleanup").await {
+            let _ = sqlx::query("DELETE FROM sales_conversions WHERE tenant_id = ANY($1)")
+                .bind(vec![tenant.clone(), other.clone()])
+                .execute(&db)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_campaigns WHERE tenant_id = ANY($1)")
+                .bind(vec![tenant.clone(), other.clone()])
+                .execute(&db)
+                .await;
+            let _ = sqlx::query("DELETE FROM sales_leads WHERE tenant_id = ANY($1)")
+                .bind(vec![tenant.clone(), other.clone()])
+                .execute(&db)
+                .await;
+        }
     }
 }

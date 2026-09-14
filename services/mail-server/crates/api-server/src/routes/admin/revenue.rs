@@ -627,3 +627,247 @@ mod tests {
         assert!(sql.contains("timestamp >= $1"));
     }
 }
+
+// ─── Adversarial revenue-analytics tests ───────────────────────
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    fn admin_auth() -> AuthUser {
+        AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: Some("key_adversarial".into()),
+            session_id: None,
+            scopes: vec!["*".into()],
+        }
+    }
+
+    async fn state_and_pool(name: &str) -> Option<(AppState, sqlx::PgPool)> {
+        let pool = crate::test_db::optional_pg_pool(name).await?;
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        Some((state, pool))
+    }
+
+    #[test]
+    fn dynamic_column_allowlist_refuses_injection_shaped_input() {
+        for good in [
+            "spent_at",
+            "date",
+            "created_at",
+            "timestamp",
+            "canceled_at",
+            "s.canceled_at",
+        ] {
+            assert!(validated_column(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "timestamp; DROP TABLE audit_logs",
+            "1=1",
+            "s.canceled_at) OR TRUE --",
+            "",
+            "TIMESTAMP",
+        ] {
+            assert!(
+                matches!(validated_column(bad), Err(ApiError::Internal(_))),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_status_and_interval_helpers_are_exact() {
+        for active in ["active", "trialing", "past_due"] {
+            assert!(is_active_subscription_status(active));
+        }
+        for inactive in ["canceled", "unpaid", "incomplete", "", "ACTIVE"] {
+            assert!(!is_active_subscription_status(inactive), "{inactive}");
+        }
+        assert!(is_yearly_interval("yearly"));
+        assert!(is_yearly_interval("YEAR"));
+        assert!(is_yearly_interval("Year"));
+        assert!(!is_yearly_interval("monthly"));
+        assert!(!is_yearly_interval(""));
+    }
+
+    #[test]
+    fn money_math_is_round_half_up_and_zero_safe() {
+        assert_eq!(monthly_price_cents("yearly", 1, 25_000), 2_083);
+        assert_eq!(monthly_price_cents("year", 1, 12_000), 1_000);
+        assert_eq!(monthly_price_cents("monthly", 2_500, 25_000), 2_500);
+        assert_eq!(monthly_price_cents("", 2_500, 25_000), 2_500);
+        assert_eq!(cents_to_dollars(0), 0.0);
+        assert_eq!(cents_to_dollars(-250), -2.5);
+        // LTV guards: no customers or no churn → 0, never inf/NaN.
+        assert_eq!(calculate_ltv(1_000, 0, 0.1), 0.0);
+        assert_eq!(calculate_ltv(1_000, 10, 0.0), 0.0);
+        assert_eq!(calculate_ltv(1_000, 10, -0.1), 0.0);
+        assert_eq!(calculate_ltv(1_000, 10, 0.1), 10.0);
+    }
+
+    #[test]
+    fn month_boundaries_roll_over_and_stay_ordered() {
+        use chrono::TimeZone as _;
+        let dec = Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap();
+        assert_eq!(
+            month_start(dec),
+            Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap()
+        );
+        assert_eq!(
+            next_month_start(dec),
+            Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap()
+        );
+        let jan31 = Utc.with_ymd_and_hms(2024, 1, 31, 12, 0, 0).unwrap();
+        assert_eq!(
+            next_month_start(jan31),
+            Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap(),
+            "leap February boundary"
+        );
+        let months = recent_month_starts(dec, 6);
+        assert_eq!(months.len(), 6);
+        assert!(months.windows(2).all(|w| w[0] < w[1]), "ascending order");
+        assert_eq!(months[5].month(), 12);
+        assert_eq!(months[0].month(), 7);
+        assert!(recent_month_starts(dec, 0).is_empty());
+    }
+
+    #[test]
+    fn cac_is_omitted_without_spend_or_new_customers() {
+        assert_eq!(calculate_cac(None, 10), None);
+        assert_eq!(calculate_cac(Some(10_000), 0), None);
+        assert_eq!(calculate_cac(Some(10_000), -3), None);
+        assert_eq!(calculate_cac(Some(10_000), 4), Some(25.0));
+    }
+
+    #[test]
+    fn audit_spend_sql_uses_the_validated_column() {
+        let sql = audit_log_spend_sql("timestamp").expect("valid column");
+        assert!(sql.contains("timestamp >= $1"));
+        assert!(sql.contains("jsonb_typeof(details->'spendCents')"));
+        assert!(sql.contains("marketing.spend.recorded"));
+        assert!(audit_log_spend_sql("evil; --").is_err());
+    }
+
+    #[tokio::test]
+    async fn revenue_response_aggregates_seeded_subscriptions_and_omits_fabrications() {
+        let Some((state, pool)) = state_and_pool("adv_revenue").await else {
+            return;
+        };
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let plan_name = format!("adv-rev-plan-{tag}");
+        let tenant_new = apexmail_lib::id::generate_id("", 26);
+        let tenant_old = apexmail_lib::id::generate_id("", 26);
+        for tenant in [&tenant_new, &tenant_old] {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, plan, status, created_at, updated_at)
+                 VALUES ($1, 'revenue adversarial', $2, 'active', NOW(), NOW())",
+            )
+            .bind(tenant)
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
+        }
+        sqlx::query(
+            "INSERT INTO plans (id, name, price_monthly, price_yearly, features)
+             VALUES ($1, $2, 2000, 24000, '{}'::jsonb)",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+        // One active yearly subscription created today, one 60-day-old
+        // active monthly (previous MRR), one canceled 10 days ago.
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+             VALUES ($1, $2, $3, 'active', 'yearly', NOW(), NOW(), NULL)",
+        )
+        .bind(&tenant_new)
+        .bind(format!("sub_new_{tag}"))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed new sub");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+             VALUES ($1, $2, $3, 'active', 'monthly', NOW() - INTERVAL '60 days', NOW(), NULL)",
+        )
+        .bind(&tenant_old)
+        .bind(format!("sub_old_{tag}"))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed old sub");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions (tenant_id, stripe_subscription_id, plan, status, billing_interval, created_at, updated_at, canceled_at)
+             VALUES ($1, $2, $3, 'canceled', 'monthly', NOW() - INTERVAL '90 days', NOW(), NOW() - INTERVAL '10 days')",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(format!("sub_canceled_{tag}"))
+        .bind(&plan_name)
+        .execute(&pool)
+        .await
+        .expect("seed canceled sub");
+
+        let Json(revenue) = get_revenue(State(state.clone()), admin_auth())
+            .await
+            .expect("revenue");
+        // 24000/12 = 2000 + 2000 = 4000 cents = $40.00 current MRR.
+        assert!(
+            revenue.stats.mrr >= 40.0,
+            "seeded yearly+monthly MRR must be included: {}",
+            revenue.stats.mrr
+        );
+        assert!(revenue.stats.arr >= revenue.stats.mrr * 11.9);
+        assert!(revenue.monthly_data.len() == 6);
+        assert!(
+            revenue
+                .revenue_by_plan
+                .iter()
+                .any(|p| p.plan == plan_name && p.mrr >= 40.0 && p.customers >= 2),
+            "plans: {:?}",
+            revenue.revenue_by_plan
+        );
+        assert!(!revenue.notes.is_empty(), "omission notes are mandatory");
+        // The CAC block is omitted when no spend source exists.
+        assert_eq!(revenue.stats.cac, None);
+        assert!(revenue
+            .notes
+            .iter()
+            .any(|n| n.contains("plan-change velocity")));
+
+        // Access gates.
+        let mut customer = admin_auth();
+        customer.tenant_id = tenant_new.clone();
+        assert!(matches!(
+            get_revenue(State(state.clone()), customer).await,
+            Err(ApiError::Forbidden(_))
+        ));
+        let mut no_scope = admin_auth();
+        no_scope.scopes = vec![];
+        assert!(matches!(
+            get_revenue(State(state.clone()), no_scope).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        sqlx::query("DELETE FROM stripe_subscriptions WHERE stripe_subscription_id LIKE $1")
+            .bind(format!("sub_%_{tag}"))
+            .execute(&pool)
+            .await
+            .expect("cleanup subs");
+        sqlx::query("DELETE FROM plans WHERE name = $1")
+            .bind(&plan_name)
+            .execute(&pool)
+            .await
+            .expect("cleanup plan");
+        for tenant in [&tenant_new, &tenant_old] {
+            sqlx::query("DELETE FROM tenants WHERE id = $1")
+                .bind(tenant)
+                .execute(&pool)
+                .await
+                .expect("cleanup tenant");
+        }
+    }
+}

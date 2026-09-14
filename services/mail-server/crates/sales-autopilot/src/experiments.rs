@@ -3057,4 +3057,862 @@ mod tests {
         assert_eq!(counts.get("do_nothing"), Some(&2));
         assert_eq!(counts.get("contact"), Some(&1));
     }
+
+    // -----------------------------------------------------------------------
+    // Adversarial proofs: ladder, posteriors, status, contexts, engine.
+    // Run by default; DB tests soft-skip only when the canonical test
+    // database is unconfigured.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reward_ladder_wire_names_round_trip_through_attribution() {
+        use crate::attribution::OutcomeKind;
+        let pairs = [
+            (RewardKind::Delivered, OutcomeKind::Delivered),
+            (RewardKind::Open, OutcomeKind::Open),
+            (RewardKind::Click, OutcomeKind::Click),
+            (RewardKind::Reply, OutcomeKind::Reply),
+            (RewardKind::PositiveReply, OutcomeKind::PositiveReply),
+            (RewardKind::MeetingBooked, OutcomeKind::MeetingBooked),
+            (RewardKind::MeetingAttended, OutcomeKind::MeetingAttended),
+            (RewardKind::Trial, OutcomeKind::Trial),
+            (RewardKind::PaidSubscription, OutcomeKind::PaidSubscription),
+            (RewardKind::RetainedMrr, OutcomeKind::RetainedMrr),
+            (RewardKind::Bounce, OutcomeKind::Bounce),
+            (RewardKind::Complaint, OutcomeKind::Complaint),
+            (RewardKind::Unsubscribe, OutcomeKind::Unsubscribe),
+        ];
+        for (kind, outcome) in pairs {
+            let wire = kind.as_str();
+            assert_eq!(RewardKind::parse(wire), Some(kind), "{wire}");
+            assert_eq!(
+                RewardKind::parse(&format!("  {}  ", wire.to_uppercase())),
+                Some(kind),
+                "parsing is trimmed and case-insensitive"
+            );
+            assert_eq!(RewardKind::from_outcome_kind(outcome), kind);
+            assert_eq!(kind.to_string(), wire, "Display matches the wire name");
+        }
+        assert_eq!(RewardKind::parse("unknown"), None);
+        assert_eq!(RewardKind::parse(""), None);
+        // The ladder has exactly thirteen rungs, matching the outcome CHECK.
+        assert_eq!(POSITIVE_REWARD_LADDER.len(), 8);
+    }
+
+    #[test]
+    fn reward_classification_is_operational_negative_and_bounded() {
+        for kind in [RewardKind::Delivered, RewardKind::Open] {
+            assert!(kind.is_operational(), "{kind:?}");
+            assert!(!kind.is_informative(), "{kind:?}");
+            assert_eq!(
+                kind.reward(),
+                0.0,
+                "operational outcomes never move the posterior"
+            );
+            assert!(!kind.is_negative());
+        }
+        for kind in [
+            RewardKind::Bounce,
+            RewardKind::Complaint,
+            RewardKind::Unsubscribe,
+        ] {
+            assert!(kind.is_negative(), "{kind:?}");
+            assert!(kind.is_informative());
+            assert!(kind.reward() < 0.0, "{kind:?}");
+        }
+        // The strictly-increasing positive ladder.
+        let mut previous = 0.0;
+        for kind in POSITIVE_REWARD_LADDER {
+            let reward = kind.reward();
+            assert!(reward > previous, "{kind:?} must beat the rung below");
+            assert!(!kind.is_negative());
+            assert!(kind.is_informative());
+            previous = reward;
+        }
+    }
+
+    #[test]
+    fn arm_specs_and_constructors_default_to_challenger() {
+        let challenger = ArmSpec::new("variant_b");
+        assert!(!challenger.is_control);
+        assert_eq!(challenger.variant, "variant_b");
+        let control = ArmSpec::control("control");
+        assert!(control.is_control);
+
+        let arm = ArmPosterior::new("a", 2.0, 3.0, false);
+        assert_eq!(arm.mean(), 0.4);
+        assert_eq!(arm.trials, 0);
+        assert_eq!(arm.contacts, 0);
+        let (low, high) = arm.credible_interval();
+        assert!(
+            low < arm.mean() && arm.mean() < high,
+            "{low} < 0.4 < {high}"
+        );
+        // A non-finite posterior degrades to 0.0 rather than NaN.
+        let mut hostile = ArmPosterior::new("a", f64::NAN, 1.0, false);
+        assert_eq!(hostile.mean(), 0.0);
+        hostile.alpha = 1.0;
+        hostile.beta = 0.0;
+        assert_eq!(hostile.mean(), 1.0);
+    }
+
+    #[test]
+    fn probability_challenger_beats_is_bounded_and_monotone() {
+        let control = ArmPosterior::new("control", 11.0, 11.0, true);
+        let weak = ArmPosterior::new("weak", 2.0, 20.0, false);
+        let strong = ArmPosterior::new("strong", 40.0, 2.0, false);
+
+        let p_weak = probability_challenger_beats(&control, &weak, 2_000).unwrap();
+        let p_strong = probability_challenger_beats(&control, &strong, 2_000).unwrap();
+        assert!((0.0..=1.0).contains(&p_weak), "{p_weak}");
+        assert!((0.0..=1.0).contains(&p_strong), "{p_strong}");
+        assert!(
+            p_strong > p_weak,
+            "a stronger challenger must be more likely to beat control: {p_strong} vs {p_weak}"
+        );
+        assert!(p_weak < 0.5, "a dominated arm cannot be favored: {p_weak}");
+        assert!(p_strong > 0.9, "a dominant arm must be favored: {p_strong}");
+
+        // Identical posteriors are a coin flip.
+        let twin = ArmPosterior::new("twin", 11.0, 11.0, false);
+        let p_twin = probability_challenger_beats(&control, &twin, 2_000).unwrap();
+        assert!(
+            (0.35..=0.65).contains(&p_twin),
+            "identical arms must be near 50%: {p_twin}"
+        );
+
+        // Hostile posteriors are rejected before any sampling.
+        let hostile = ArmPosterior::new("bad", f64::INFINITY, 1.0, false);
+        assert!(probability_challenger_beats(&control, &hostile, 100).is_err());
+    }
+
+    #[test]
+    fn experiment_status_parses_case_insensitively_and_fails_closed() {
+        for (raw, expected) in [
+            ("draft", ExperimentStatus::Draft),
+            (" RUNNING ", ExperimentStatus::Running),
+            ("Paused", ExperimentStatus::Paused),
+            ("promoted", ExperimentStatus::Promoted),
+            ("stopped", ExperimentStatus::Stopped),
+            ("nonsense", ExperimentStatus::Stopped),
+            ("", ExperimentStatus::Stopped),
+        ] {
+            assert_eq!(ExperimentStatus::parse(raw), expected, "'{raw}'");
+        }
+        assert!(ExperimentStatus::Running.explores());
+        for status in [
+            ExperimentStatus::Draft,
+            ExperimentStatus::Paused,
+            ExperimentStatus::Promoted,
+            ExperimentStatus::Stopped,
+        ] {
+            assert!(!status.explores(), "{status:?}");
+            assert_eq!(ExperimentStatus::parse(status.as_str()), status);
+        }
+    }
+
+    #[test]
+    fn exploration_verdicts_carry_a_human_readable_reason() {
+        assert!(ExplorationVerdict::Allowed.allows_exploration());
+        assert_eq!(ExplorationVerdict::Allowed.reason(), None);
+        let paused = ExplorationVerdict::ExploitOnly("budget spent".into());
+        assert!(!paused.allows_exploration());
+        assert_eq!(paused.reason(), Some("budget spent"));
+        let halted = ExplorationVerdict::Halted("harm".into());
+        assert!(!halted.allows_exploration());
+        assert_eq!(halted.reason(), Some("harm"));
+    }
+
+    #[test]
+    fn context_bucket_key_is_sanitized_and_stable() {
+        let dimensions = vec!["country".to_string(), "persona".to_string()];
+        let context = ExperimentContext {
+            country: Some("US".into()),
+            persona: Some("technical".into()),
+            ..ExperimentContext::default()
+        };
+        let bucket = context.bucket_key(&dimensions).expect("a bucket");
+        assert!(bucket.contains("us"), "{bucket}");
+        assert!(bucket.contains("technical"), "{bucket}");
+        // Stability: same inputs, same key.
+        assert_eq!(context.bucket_key(&dimensions), Some(bucket.clone()));
+        // Hostile characters cannot forge a different bucket boundary.
+        let hostile = ExperimentContext {
+            country: Some("US::persona=technical".into()),
+            persona: Some("technical".into()),
+            ..ExperimentContext::default()
+        };
+        let hostile_key = hostile.bucket_key(&dimensions).expect("a bucket");
+        assert_ne!(
+            hostile_key, bucket,
+            "injected separators must not collide with a genuine bucket"
+        );
+        assert!(
+            !hostile_key.contains("::persona="),
+            "separator characters are sanitized: {hostile_key}"
+        );
+        // An empty dimension list means "all ten dimensions"; a context with
+        // no values has no bucket at all (the caller then uses the global
+        // posterior rather than a random arm).
+        assert_eq!(ExperimentContext::default().bucket_key(&[]), None);
+        assert_eq!(ExperimentContext::default().bucket_key(&dimensions), None);
+        // Unknown dimension names are dropped; a bucket still forms from the
+        // known ones.
+        let only_known = context
+            .bucket_key(&["not_a_dimension".to_string(), "country".to_string()])
+            .expect("the known dimension still buckets");
+        assert!(only_known.contains("us"), "{only_known}");
+    }
+
+    // -- Engine (live DB) ---------------------------------------------------
+
+    async fn live_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_db::canonical_test_pool(test_name).await
+    }
+
+    /// Provisioning is idempotent, tenant-scoped and validates every hostile
+    /// arm specification before writing.
+    #[tokio::test]
+    async fn experiment_engine_provisions_idempotently_and_validates_arms() {
+        let Some(pool) = live_pool("experiments_provision").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-prov");
+        let other = crate::test_db::unique_test_tenant("exp-other");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-prov-{}", Uuid::new_v4().simple());
+
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Provisioning",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("provision");
+        let again = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Provisioning renamed",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("idempotent provision");
+        assert_eq!(
+            id, again,
+            "the same key must resolve to the same experiment"
+        );
+
+        // Hostile inputs are refused before any write.
+        for (tenant_arg, key_arg, name_arg) in
+            [("", "k", "n"), (&tenant, "", "n"), (&tenant, "k", "")]
+        {
+            assert!(
+                engine
+                    .ensure_experiment(
+                        tenant_arg,
+                        key_arg,
+                        name_arg,
+                        &serde_json::json!({}),
+                        &serde_json::json!({}),
+                    )
+                    .await
+                    .is_err(),
+                "({tenant_arg:?}, {key_arg:?}, {name_arg:?})"
+            );
+        }
+        assert!(
+            engine
+                .ensure_experiment(
+                    &tenant,
+                    "hostile-budget",
+                    "Hostile",
+                    &serde_json::json!({}),
+                    &serde_json::json!("not-an-object"),
+                )
+                .await
+                .is_err(),
+            "a non-object budget must not be stored"
+        );
+
+        // Arm provisioning: control first on read, idempotent, validated.
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .expect("arms");
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .expect("idempotent arms");
+        let arms = engine.load_arms(&tenant, id).await.expect("load arms");
+        assert_eq!(arms.len(), 2, "no duplicate arms: {arms:?}");
+        assert_eq!(arms[0].variant, "control");
+        assert!(arms[0].is_control);
+        assert_eq!(arms[1].variant, "variant_b");
+        assert_eq!(arms[0].alpha, 1.0);
+        assert_eq!(arms[0].beta, 1.0);
+        assert_eq!(arms[0].trials, 0);
+
+        assert!(engine.ensure_arms(&tenant, id, &[]).await.is_err());
+        assert!(engine
+            .ensure_arms(&tenant, id, &[ArmSpec::new(""), ArmSpec::new("b")])
+            .await
+            .is_err());
+        assert!(engine
+            .ensure_arms(&tenant, id, &[ArmSpec::new("same"), ArmSpec::new("same")])
+            .await
+            .is_err());
+        assert!(engine
+            .ensure_arms(&tenant, id, &[ArmSpec::new(&"x".repeat(129))])
+            .await
+            .is_err());
+        let too_many: Vec<ArmSpec> = (0..=MAX_ARMS_PER_EXPERIMENT)
+            .map(|index| ArmSpec::new(&format!("arm{index}")))
+            .collect();
+        assert!(engine.ensure_arms(&tenant, id, &too_many).await.is_err());
+
+        // Tenant isolation: another tenant cannot see or mutate the arms.
+        assert!(engine.load_arms(&other, id).await.unwrap().is_empty());
+        assert!(engine
+            .ensure_arms(&other, id, &[ArmSpec::new("x")])
+            .await
+            .is_err());
+        assert!(engine
+            .set_status(&other, id, ExperimentStatus::Running)
+            .await
+            .is_err());
+        assert!(engine
+            .load_experiment(&other, &key)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(engine.load_experiment("", &key).await.is_err());
+        assert!(engine.load_experiment(&tenant, "").await.is_err());
+
+        // Status is operator-controlled and durable.
+        engine
+            .set_status(&tenant, id, ExperimentStatus::Running)
+            .await
+            .expect("set running");
+        let loaded = engine
+            .load_experiment(&tenant, &key)
+            .await
+            .unwrap()
+            .expect("experiment exists");
+        assert_eq!(loaded.status, ExperimentStatus::Running);
+        assert_eq!(loaded.id, id);
+        assert!(!loaded.context_dimensions.is_empty(), "default dimensions");
+    }
+
+    /// Thompson sampling must never starve an arm with zero trials: across
+    /// repeated selections from a running experiment, both arms are drawn.
+    /// Pausing flips to deterministic exploit-only selection.
+    #[tokio::test]
+    async fn select_variant_never_starves_a_zero_trial_arm_and_pauses_deterministically() {
+        let Some(pool) = live_pool("experiments_select").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-sel");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-sel-{}", Uuid::new_v4().simple());
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Selection",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .unwrap();
+        engine
+            .set_status(&tenant, id, ExperimentStatus::Running)
+            .await
+            .unwrap();
+        let experiment = engine
+            .load_experiment(&tenant, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        let context = VariantContext::default();
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut explored = false;
+        for _ in 0..64 {
+            let selection = engine
+                .select_variant(&tenant, &experiment, &context)
+                .await
+                .expect("selection");
+            assert!(
+                selection.explore,
+                "running experiment explores: {selection:?}"
+            );
+            assert!(
+                selection.reason.contains("Thompson sampling"),
+                "{}",
+                selection.reason
+            );
+            assert_eq!(selection.experiment_id, id);
+            seen.insert(selection.variant.clone());
+            explored = true;
+        }
+        assert!(explored);
+        assert_eq!(
+            seen.len(),
+            2,
+            "both a zero-trial and a control arm must be selectable (no starvation): {seen:?}"
+        );
+
+        // Paused: exploit-only, deterministic, and the reason says so.
+        engine
+            .set_status(&tenant, id, ExperimentStatus::Paused)
+            .await
+            .unwrap();
+        let paused = engine
+            .load_experiment(&tenant, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        let first = engine
+            .select_variant(&tenant, &paused, &context)
+            .await
+            .unwrap();
+        let second = engine
+            .select_variant(&tenant, &paused, &context)
+            .await
+            .unwrap();
+        assert!(!first.explore);
+        assert_eq!(
+            first.variant, second.variant,
+            "exploit-only is deterministic"
+        );
+        assert!(first.reason.contains("not running"), "{}", first.reason);
+
+        // A draft experiment is a configuration error, never a send.
+        let draft_key = format!("lib-draft-{}", Uuid::new_v4().simple());
+        let draft_id = engine
+            .ensure_experiment(
+                &tenant,
+                &draft_key,
+                "Draft",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .ensure_arms(&tenant, draft_id, &[ArmSpec::control("control")])
+            .await
+            .unwrap();
+        let draft = engine
+            .load_experiment(&tenant, &draft_key)
+            .await
+            .unwrap()
+            .unwrap();
+        let error = engine
+            .select_variant(&tenant, &draft, &context)
+            .await
+            .expect_err("a draft experiment must never send");
+        assert!(error.to_string().contains("draft"), "{error}");
+
+        // An experiment with no arms is refused.
+        let empty_key = format!("lib-empty-{}", Uuid::new_v4().simple());
+        let empty_id = engine
+            .ensure_experiment(
+                &tenant,
+                &empty_key,
+                "Empty",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .set_status(&tenant, empty_id, ExperimentStatus::Running)
+            .await
+            .unwrap();
+        let empty = engine
+            .load_experiment(&tenant, &empty_key)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(engine
+            .select_variant(&tenant, &empty, &context)
+            .await
+            .is_err());
+        // Tenant isolation: another tenant cannot select from this experiment.
+        assert!(engine
+            .select_variant(
+                &crate::test_db::unique_test_tenant("exp-outsider"),
+                &experiment,
+                &context
+            )
+            .await
+            .is_err());
+    }
+
+    /// The reward projection is exactly-once per `outcome_key`, moves the
+    /// posterior once, and rejects hostile inputs before any write.
+    #[tokio::test]
+    async fn reward_projection_is_exactly_once_and_validates_hostile_inputs() {
+        let Some(pool) = live_pool("experiments_reward").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-reward");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-reward-{}", Uuid::new_v4().simple());
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Reward",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .unwrap();
+
+        let outcome_key = format!("step:{}:positive_reply", Uuid::new_v4());
+        record_reward(
+            &pool,
+            &tenant,
+            id,
+            "variant_b",
+            RewardKind::PositiveReply,
+            &outcome_key,
+            0.0,
+        )
+        .await
+        .expect("first projection");
+
+        let arm = engine
+            .load_arms(&tenant, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|arm| arm.variant == "variant_b")
+            .unwrap();
+        assert_eq!(arm.trials, 1);
+        assert_eq!(arm.successes, 1);
+        assert_eq!(arm.alpha, 1.5, "alpha += positive reward");
+        assert_eq!(arm.contacts, 1);
+
+        // Replay: the posterior must not move again.
+        record_reward(
+            &pool,
+            &tenant,
+            id,
+            "variant_b",
+            RewardKind::PositiveReply,
+            &outcome_key,
+            0.0,
+        )
+        .await
+        .expect("replay is a no-op");
+        let arm = engine
+            .load_arms(&tenant, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|arm| arm.variant == "variant_b")
+            .unwrap();
+        assert_eq!(arm.trials, 1, "replay must not increment trials");
+        assert_eq!(arm.alpha, 1.5, "replay must not move alpha");
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_experiment_outcomes WHERE experiment_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger, 1, "exactly one ledger row per outcome key");
+
+        // A negative outcome moves beta and the harm counter.
+        let negative_key = format!("step:{}:bounce", Uuid::new_v4());
+        record_reward(
+            &pool,
+            &tenant,
+            id,
+            "variant_b",
+            RewardKind::Bounce,
+            &negative_key,
+            0.0,
+        )
+        .await
+        .unwrap();
+        let arm = engine
+            .load_arms(&tenant, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|arm| arm.variant == "variant_b")
+            .unwrap();
+        assert_eq!(arm.beta, 1.2);
+        assert_eq!(arm.negative_outcomes, 1);
+        assert_eq!(arm.trials, 2);
+
+        // An operational outcome (open) records exposure only.
+        let open_key = format!("step:{}:open", Uuid::new_v4());
+        record_reward(
+            &pool,
+            &tenant,
+            id,
+            "variant_b",
+            RewardKind::Open,
+            &open_key,
+            0.0,
+        )
+        .await
+        .unwrap();
+        let arm = engine
+            .load_arms(&tenant, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|arm| arm.variant == "variant_b")
+            .unwrap();
+        assert_eq!(arm.contacts, 3);
+        assert_eq!(arm.trials, 2, "opens are not informative trials");
+        assert_eq!(arm.alpha, 1.5);
+        assert_eq!(arm.beta, 1.2);
+
+        // Hostile inputs are refused before any write.
+        let long_key = "k".repeat(MAX_OUTCOME_KEY_LEN + 1);
+        for (label, result) in [
+            (
+                "empty tenant",
+                record_reward(&pool, "", id, "variant_b", RewardKind::Click, "x", 0.0).await,
+            ),
+            (
+                "empty outcome key",
+                record_reward(&pool, &tenant, id, "variant_b", RewardKind::Click, " ", 0.0).await,
+            ),
+            (
+                "oversized outcome key",
+                record_reward(
+                    &pool,
+                    &tenant,
+                    id,
+                    "variant_b",
+                    RewardKind::Click,
+                    &long_key,
+                    0.0,
+                )
+                .await,
+            ),
+            (
+                "empty variant",
+                record_reward(&pool, &tenant, id, "", RewardKind::Click, "x", 0.0).await,
+            ),
+            (
+                "negative value",
+                record_reward(
+                    &pool,
+                    &tenant,
+                    id,
+                    "variant_b",
+                    RewardKind::Click,
+                    "x",
+                    -1.0,
+                )
+                .await,
+            ),
+            (
+                "non-finite value",
+                record_reward(
+                    &pool,
+                    &tenant,
+                    id,
+                    "variant_b",
+                    RewardKind::Click,
+                    "x",
+                    f64::NAN,
+                )
+                .await,
+            ),
+            (
+                "unknown arm",
+                record_reward(&pool, &tenant, id, "ghost", RewardKind::Click, "x", 0.0).await,
+            ),
+            (
+                "wrong tenant",
+                record_reward(
+                    &pool,
+                    &crate::test_db::unique_test_tenant("exp-outsider"),
+                    id,
+                    "variant_b",
+                    RewardKind::Click,
+                    "x",
+                    0.0,
+                )
+                .await,
+            ),
+        ] {
+            assert!(result.is_err(), "{label} must be refused");
+        }
+        let ledger_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_experiment_outcomes WHERE experiment_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger_after, 3, "hostile inputs wrote nothing");
+
+        // Enrichment spend accumulates on the arm and refuses hostile input.
+        record_enrichment_spend(&pool, &tenant, id, "variant_b", 0.25)
+            .await
+            .unwrap();
+        record_enrichment_spend(&pool, &tenant, id, "variant_b", 0.25)
+            .await
+            .unwrap();
+        let arm = engine
+            .load_arms(&tenant, id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|arm| arm.variant == "variant_b")
+            .unwrap();
+        assert!((arm.enrichment_cost_eur - 0.5).abs() < 1e-9, "{arm:?}");
+        assert!(
+            record_enrichment_spend(&pool, &tenant, id, "variant_b", -1.0)
+                .await
+                .is_err()
+        );
+        assert!(record_enrichment_spend(&pool, &tenant, id, "ghost", 1.0)
+            .await
+            .is_err());
+    }
+
+    /// Promotion requires a control arm, a real sample and confidence; it
+    /// persists the promoted status only when the §37 gate passes.
+    #[tokio::test]
+    async fn promotion_gate_requires_evidence_before_persisting_promoted() {
+        let Some(pool) = live_pool("experiments_promote").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("exp-promote");
+        let engine = ExperimentEngine::new(pool.clone());
+        let key = format!("lib-promote-{}", Uuid::new_v4().simple());
+        let id = engine
+            .ensure_experiment(
+                &tenant,
+                &key,
+                "Promotion",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        engine
+            .ensure_arms(
+                &tenant,
+                id,
+                &[ArmSpec::control("control"), ArmSpec::new("variant_b")],
+            )
+            .await
+            .unwrap();
+        engine
+            .set_status(&tenant, id, ExperimentStatus::Running)
+            .await
+            .unwrap();
+        let experiment = engine
+            .load_experiment(&tenant, &key)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // No evidence: promotion must be refused and the status untouched.
+        let verdict = engine
+            .promote_arm(&tenant, &experiment, "variant_b")
+            .await
+            .expect("a verdict, not an error");
+        assert!(!verdict.allowed, "{verdict:?}");
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("sample")));
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM sales_experiments WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "running", "a refused promotion changes nothing");
+
+        // Unknown arm / control-only experiment errors.
+        assert!(engine
+            .promote_arm(&tenant, &experiment, "ghost")
+            .await
+            .is_err());
+
+        // Overwhelming evidence (bulk-set to the same columns record_reward
+        // maintains): the challenger's interval clears the control's.
+        sqlx::query(
+            "UPDATE sales_experiment_arms SET alpha = 11.0, beta = 11.0, trials = 20, \
+                    successes = 10 WHERE experiment_id = $1 AND variant = 'control'",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE sales_experiment_arms SET alpha = 102.0, beta = 1.0, trials = 101, \
+                    successes = 101 WHERE experiment_id = $1 AND variant = 'variant_b'",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let verdict = engine
+            .promote_arm(&tenant, &experiment, "variant_b")
+            .await
+            .expect("verdict");
+        assert!(verdict.allowed, "{verdict:?}");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM sales_experiments WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "promoted");
+
+        // A second tenant cannot promote it.
+        assert!(engine
+            .promote_arm(
+                &crate::test_db::unique_test_tenant("exp-outsider"),
+                &experiment,
+                "variant_b"
+            )
+            .await
+            .is_err());
+    }
 }
