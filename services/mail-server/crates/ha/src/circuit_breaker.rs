@@ -516,4 +516,48 @@ mod tests {
             assert!(allowed);
         });
     }
+
+    /// Adversarial: the OPEN → HALF_OPEN transition is time-gated and the
+    /// half-open probe budget is enforced exactly.
+    #[test]
+    fn open_recovers_to_half_open_after_timeout_and_caps_probes() {
+        test_runtime().block_on(async {
+            let svc = CircuitBreakerService::new(test_config());
+            svc.configure(CircuitConfig {
+                name: "probe".into(),
+                failure_threshold: 1,
+                success_threshold: 1,
+                timeout_ms: 1,
+                half_open_max_calls: 2,
+                enabled: true,
+            })
+            .await
+            .unwrap();
+
+            svc.report_failure("probe").await.unwrap();
+            let stats = svc.get_stats("probe").await.unwrap();
+            assert_eq!(stats.state, "open");
+
+            // The timeout (1ms) elapses; the next probe is admitted and the
+            // circuit becomes HALF_OPEN.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert!(svc.allow_request("probe").await.unwrap(), "probe 1");
+            assert_eq!(svc.get_stats("probe").await.unwrap().state, "half_open");
+            // The transition probe does not consume the budget; the next
+            // two do (half_open_max_calls = 2).
+            assert!(svc.allow_request("probe").await.unwrap(), "probe 2");
+            assert!(svc.allow_request("probe").await.unwrap(), "probe 3");
+            // Budget exhausted: further probes are refused.
+            assert!(!svc.allow_request("probe").await.unwrap(), "probe 4");
+
+            // One success in half-open (threshold 1) closes the circuit.
+            svc.report_success("probe").await.unwrap();
+            assert_eq!(svc.get_stats("probe").await.unwrap().state, "closed");
+
+            // Every state mutation on an unknown circuit is a typed error.
+            assert!(svc.report_success("ghost").await.is_err());
+            assert!(svc.report_failure("ghost").await.is_err());
+            assert!(svc.reset("ghost").await.is_err());
+        });
+    }
 }

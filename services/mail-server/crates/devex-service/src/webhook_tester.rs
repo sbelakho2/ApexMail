@@ -527,4 +527,112 @@ mod tests {
         };
         assert!(validate_resolved_addrs("example.com", &addrs).is_ok());
     }
+
+    // ── Adversarial: rotation, tamper, SSRF refusal without network ──────
+
+    #[test]
+    fn signing_and_rotation_verify_every_active_secret() {
+        let tester = WebhookTester::new(vec!["old-secret".into()]).expect("tester");
+        let body = b"{\"hello\":\"world\"}";
+        let signature = tester.sign_payload(body);
+        assert!(signature.starts_with("t="));
+        assert!(signature.contains(",v1="));
+        assert!(tester.verify_signature(body, &signature));
+
+        // Rotation: the new secret signs, the old one still verifies.
+        let rotated = WebhookTester::new(vec!["new-secret".into(), "old-secret".into()])
+            .expect("rotated tester");
+        let new_signature = rotated.sign_payload(body);
+        assert!(rotated.verify_signature(body, &new_signature));
+        assert!(
+            rotated.verify_signature(body, &signature),
+            "old key must still verify"
+        );
+
+        // Tampering with the body/header breaks verification.
+        assert!(!rotated.verify_signature(b"{\"hello\":\"evil\"}", &new_signature));
+        assert!(!rotated.verify_signature(body, ""));
+        assert!(!rotated.verify_signature(body, "t=,v1="));
+        assert!(!rotated.verify_signature(body, "v1=deadbeef"));
+        assert!(!rotated.verify_signature(body, "t=123"));
+        assert!(!rotated.verify_signature(body, "t=123,v1=nothex"));
+
+        // Empty secret list is refused at construction.
+        assert!(WebhookTester::new(vec![]).is_err());
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_refuses_hostile_urls_without_any_network() {
+        let tester = WebhookTester::new(vec!["secret".into()]).expect("tester");
+        // Non-http scheme.
+        let error = tester
+            .send_test_webhook("file:///etc/passwd", "message.delivered")
+            .await
+            .expect_err("scheme");
+        assert!(error.to_string().contains("http/https"), "{error}");
+
+        // Private hostnames and IP literals are refused before resolution.
+        for url in [
+            "http://127.0.0.1/hook",
+            "http://localhost/hook",
+            "http://[::1]/hook",
+            "http://10.1.2.3/hook",
+            "http://169.254.169.254/latest",
+            "http://192.168.0.1/hook",
+        ] {
+            let error = tester
+                .send_test_webhook(url, "message.delivered")
+                .await
+                .expect_err("private host must be refused");
+            assert!(
+                error.to_string().contains("private/internal"),
+                "{url}: {error}"
+            );
+        }
+
+        // Invalid URL text is a typed validation error.
+        let error = tester
+            .send_test_webhook("not a url", "message.delivered")
+            .await
+            .expect_err("invalid url");
+        assert!(error.to_string().contains("Invalid webhook URL"), "{error}");
+    }
+
+    #[test]
+    fn private_ip_predicate_covers_reserved_ranges() {
+        use std::net::IpAddr;
+        let private = [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "0.0.0.0",
+            "100.64.0.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+        ];
+        for raw in private {
+            let ip: IpAddr = raw.parse().expect("ip");
+            assert!(is_private_ip(&ip), "{raw} must be private/reserved");
+        }
+        for raw in ["8.8.8.8", "93.184.216.34", "2606:4700::1111"] {
+            let ip: IpAddr = raw.parse().expect("ip");
+            assert!(!is_private_ip(&ip), "{raw} must be public");
+        }
+    }
+
+    #[test]
+    fn test_payload_shape_is_stable_and_marked_as_test() {
+        let payload = WebhookTester::build_test_payload("message.bounced");
+        assert_eq!(payload["type"], "message.bounced");
+        assert_eq!(payload["test"], true);
+        assert!(payload["id"].as_str().unwrap().starts_with("evt_"));
+        assert!(payload["data"]["email_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("msg_"));
+        assert!(payload["created_at"].as_str().is_some());
+    }
 }

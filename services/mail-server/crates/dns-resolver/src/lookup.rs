@@ -455,4 +455,95 @@ mod tests {
         let e = DnsError::Timeout("slow.example.com".into());
         assert!(e.to_string().contains("Timeout"));
     }
+
+    // ── Adversarial: transient failures stay transient for every family ──
+
+    /// Every lookup family must surface an unreachable nameserver as a
+    /// transient error — never as a definitive NoRecords, and never as a
+    /// silent empty answer.
+    #[tokio::test]
+    async fn unreachable_nameserver_is_never_a_definitive_no_records() {
+        let config = crate::config::DnsConfig {
+            nameservers: vec!["127.0.0.1:1".to_string()],
+            query_timeout_ms: 50,
+            retries: 0,
+            ..crate::config::DnsConfig::default()
+        };
+        let lookup = DnsLookup::from_config(&config).expect("lookup");
+
+        let mx = lookup.lookup_mx("example.com").await;
+        assert!(mx.is_err());
+        assert!(
+            !matches!(mx, Err(DnsError::NoRecords(_))),
+            "a network failure must not masquerade as NXDOMAIN: {mx:?}"
+        );
+        assert!(lookup.lookup_txt("example.com").await.is_err());
+        assert!(lookup.lookup_spf("example.com").await.is_err());
+        assert!(lookup.lookup_dkim("sel", "example.com").await.is_err());
+        assert!(lookup.lookup_dmarc("example.com").await.is_err());
+        assert!(lookup.lookup_a("example.com").await.is_err());
+        assert!(lookup.lookup_aaaa("example.com").await.is_err());
+        assert!(lookup
+            .reverse_lookup(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)))
+            .await
+            .is_err());
+        assert_eq!(
+            lookup.can_receive_email("example.com").await,
+            Deliverability::Transient,
+            "a resolver failure must be Transient, not No"
+        );
+    }
+
+    /// A nameserver entry that is neither a socket nor an IP is skipped with
+    /// a warning; the resolver still builds (and other entries survive).
+    #[test]
+    fn unparseable_nameservers_are_skipped_not_fatal() {
+        let config = crate::config::DnsConfig {
+            nameservers: vec![
+                "not-an-ip-or-socket".to_string(),
+                "127.0.0.1:53".to_string(),
+                "8.8.8.8".to_string(),
+            ],
+            ..crate::config::DnsConfig::default()
+        };
+        assert!(DnsLookup::from_config(&config).is_ok());
+        // An empty nameserver list falls back to the system configuration.
+        let system = crate::config::DnsConfig {
+            nameservers: Vec::new(),
+            ..crate::config::DnsConfig::default()
+        };
+        assert!(DnsLookup::from_config(&system).is_ok());
+    }
+
+    #[test]
+    fn invalid_config_is_reported_before_building() {
+        let config = crate::config::DnsConfig {
+            cache_ttl_secs: 0,
+            ..crate::config::DnsConfig::default()
+        };
+        match DnsLookup::from_config(&config) {
+            Err(DnsError::InvalidConfig(message)) => {
+                assert!(message.contains("cache_ttl_secs"), "{message}");
+            }
+            Err(other) => panic!("expected InvalidConfig, got {other}"),
+            Ok(_) => panic!("expected InvalidConfig, got a built resolver"),
+        }
+    }
+
+    #[test]
+    fn all_lookup_error_displays_are_distinguishable() {
+        for (error, needle) in [
+            (DnsError::ResolveFailed("x".into()), "DNS resolution failed"),
+            (DnsError::NoRecords("x".into()), "No records found"),
+            (
+                DnsError::MultipleSpfRecords("x".into()),
+                "Multiple SPF records",
+            ),
+            (DnsError::Timeout("x".into()), "Timeout"),
+            (DnsError::InvalidDomain("x".into()), "Invalid domain"),
+            (DnsError::InvalidConfig("x".into()), "Invalid config"),
+        ] {
+            assert!(error.to_string().contains(needle), "{error}");
+        }
+    }
 }

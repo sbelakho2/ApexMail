@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use native_tls::TlsConnector;
@@ -32,15 +33,134 @@ struct Hit {
     raw_headers: Option<String>,
 }
 
+// ── Explicit IMAP seam ──────────────────────────────────────────────────────
+//
+// The production connector wraps `imap::Session` over TLS (synchronous, so it
+// runs inside `spawn_blocking`). Tests inject a scripted stub via
+// [`ImapPoller::with_connector`] / `PlacementEngine::with_imap_connector`,
+// so auth failures, timeouts, malformed responses and folder-search logic are
+// all exercised without any network egress.
+
+/// FETCH `(RFC822.HEADER INTERNALDATE)` → (raw headers, internal date).
+pub type FetchedHeader = (Option<Vec<u8>>, Option<chrono::DateTime<chrono::Utc>>);
+
+/// A connected IMAP session, reduced to the operations the poller performs.
+pub trait ImapSession: Send {
+    /// LIST `*` → folder names (no delimiter handling needed by callers).
+    fn list_folders(&mut self) -> Result<Vec<String>, String>;
+    fn select_folder(&mut self, folder: &str) -> Result<(), String>;
+    fn search(&mut self, query: &str) -> Result<Vec<u32>, String>;
+    /// FETCH `id` `(RFC822.HEADER INTERNALDATE)` → (raw headers, internal date).
+    fn fetch_header_and_date(&mut self, id: u32) -> Result<Option<FetchedHeader>, String>;
+    fn logout(&mut self);
+}
+
+/// Creates a session for a seed account's mail server.
+pub trait ImapConnector: Send + Sync + 'static {
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<Box<dyn ImapSession>, String>;
+}
+
+struct TlsImapConnector;
+
+struct TlsImapSession {
+    session: imap::Session<native_tls::TlsStream<std::net::TcpStream>>,
+}
+
+impl ImapConnector for TlsImapConnector {
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> Result<Box<dyn ImapSession>, String> {
+        let tls = TlsConnector::builder()
+            .build()
+            .map_err(|e| format!("TLS connector build error: {e}"))?;
+        let client = imap::connect((host, port), host, &tls)
+            .map_err(|e| format!("IMAP connect error to {host}:{port}: {e}"))?;
+        let session = client
+            .login(username, password)
+            .map_err(|(e, _)| format!("IMAP login error for {username}: {e}"))?;
+        Ok(Box::new(TlsImapSession { session }))
+    }
+}
+
+impl ImapSession for TlsImapSession {
+    fn list_folders(&mut self) -> Result<Vec<String>, String> {
+        let names = self
+            .session
+            .list(None, Some("*"))
+            .map_err(|e| format!("IMAP LIST failed: {e}"))?;
+        Ok(names.iter().map(|n| n.name().to_string()).collect())
+    }
+
+    fn select_folder(&mut self, folder: &str) -> Result<(), String> {
+        self.session
+            .select(folder)
+            .map(|_| ())
+            .map_err(|e| format!("IMAP SELECT {folder} failed: {e}"))
+    }
+
+    fn search(&mut self, query: &str) -> Result<Vec<u32>, String> {
+        // The session returns a set; the poller's callers process ids in
+        // ascending order (IMAP sequence semantics).
+        self.session
+            .search(query)
+            .map(|ids| {
+                let mut ids: Vec<u32> = ids.into_iter().collect();
+                ids.sort_unstable();
+                ids
+            })
+            .map_err(|e| format!("IMAP SEARCH failed: {e}"))
+    }
+
+    fn fetch_header_and_date(&mut self, id: u32) -> Result<Option<FetchedHeader>, String> {
+        let fetches = self
+            .session
+            .fetch(id.to_string(), "(RFC822.HEADER INTERNALDATE)")
+            .map_err(|e| format!("IMAP FETCH failed: {e}"))?;
+        Ok(fetches.iter().next().map(|f| {
+            (
+                f.header().map(|h| h.to_vec()),
+                f.internal_date().map(|d| d.with_timezone(&chrono::Utc)),
+            )
+        }))
+    }
+
+    fn logout(&mut self) {
+        let _ = self.session.logout();
+    }
+}
+
 /// Polls seed account IMAP inboxes to detect delivery of test messages.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ImapPoller {
     pub config: PlacementConfig,
+    connector: Arc<dyn ImapConnector>,
+}
+
+impl std::fmt::Debug for ImapPoller {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImapPoller")
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl ImapPoller {
     pub fn new(config: PlacementConfig) -> Self {
-        Self { config }
+        Self::with_connector(config, Arc::new(TlsImapConnector))
+    }
+
+    pub fn with_connector(config: PlacementConfig, connector: Arc<dyn ImapConnector>) -> Self {
+        Self { config, connector }
     }
 
     /// Connect to the account's IMAP server, search for a recent message
@@ -91,11 +211,13 @@ impl ImapPoller {
                 .await
             {
                 Ok(Some(hit)) => {
-                    let elapsed = start.elapsed().as_millis() as i64;
                     return Ok(InboxPollResult {
                         delivered: true,
                         folder: Some(hit.folder),
-                        response_time_ms: Some(hit.response_time_ms.unwrap_or(elapsed)),
+                        response_time_ms: Some(
+                            hit.response_time_ms
+                                .unwrap_or_else(|| start.elapsed().as_millis() as i64),
+                        ),
                         raw_headers: hit.raw_headers,
                         error: None,
                     });
@@ -147,8 +269,6 @@ impl ImapPoller {
         })
     }
 
-    /// A located test message.
-    ///
     /// Perform a single IMAP connection, login, and search.
     ///
     /// Folders to search are derived from the server's `LIST` response:
@@ -177,107 +297,19 @@ impl ImapPoller {
         let password_owned = password.to_owned();
         let subject_owned = subject_pattern.to_owned();
         let timeout_secs = self.config.imap_connection_timeout_secs;
+        let connector = self.connector.clone();
 
         let poll_fut = tokio::task::spawn_blocking(move || {
-            let tls = TlsConnector::builder()
-                .build()
-                .map_err(|e| format!("TLS connector build error: {}", e))?;
-
-            // Connect via TLS on the given port.
-            let client = imap::connect((host_owned.as_str(), port), host_owned.as_str(), &tls)
-                .map_err(|e| format!("IMAP connect error to {}:{}: {}", host_owned, port, e))?;
-
-            let mut session = client
-                .login(&username, &password_owned)
-                .map_err(|(e, _)| format!("IMAP login error for {}: {}", email, e))?;
-
-            // Discover folders from LIST: INBOX first, then provider spam/
-            // junk/bulk/promotions folders, then every other folder. Search
-            // order follows classification priority so a copy sitting in both
-            // INBOX and a spam folder is reported from INBOX. Non-conventional
-            // folders are classified downstream via the provider classifier.
-            let folders_to_check = discover_folders(&mut session);
-
-            for folder in &folders_to_check {
-                match session.select(folder) {
-                    Ok(_) => {
-                        // Search for the message by subject: it embeds the
-                        // unique test id, which is sufficient to locate it.
-                        let search_query = format!("(SUBJECT \"{}\")", subject_owned);
-
-                        match session.search(&search_query) {
-                            Ok(ids) if !ids.is_empty() => {
-                                // Message found. Fetch its headers (for
-                                // Authentication-Results parsing) and
-                                // INTERNALDATE (true delivery latency).
-                                let mut raw_headers = None;
-                                let mut response_time = None;
-                                if let Some(first) = ids.iter().min() {
-                                    match session
-                                        .fetch(first.to_string(), "(RFC822.HEADER INTERNALDATE)")
-                                    {
-                                        Ok(fetches) => {
-                                            if let Some(f) = fetches.iter().next() {
-                                                if let Some(hdr) = f.header() {
-                                                    raw_headers = Some(
-                                                        String::from_utf8_lossy(hdr).into_owned(),
-                                                    );
-                                                }
-                                                if let Some(date) = f.internal_date() {
-                                                    let latency = chrono::Utc::now()
-                                                        .signed_duration_since(
-                                                            date.with_timezone(&chrono::Utc),
-                                                        )
-                                                        .num_milliseconds();
-                                                    response_time = Some(latency.max(0));
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                folder = %folder,
-                                                error = %e,
-                                                "IMAP fetch headers failed"
-                                            );
-                                        }
-                                    }
-                                }
-
-                                let _ = session.logout();
-                                return Ok(Some(Hit {
-                                    folder: folder.clone(),
-                                    response_time_ms: response_time,
-                                    raw_headers,
-                                }));
-                            }
-                            Ok(_) => {
-                                // Not found in this folder; try next.
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    folder = %folder,
-                                    error = %e,
-                                    "IMAP search failed"
-                                );
-                                continue;
-                            }
-                        }
+            let mut session = connector
+                .connect(&host_owned, port, &username, &password_owned)
+                .map_err(|e| {
+                    if e.contains("login") {
+                        format!("IMAP login error for {email}: {e}")
+                    } else {
+                        e
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            folder = %folder,
-                            error = %e,
-                            "IMAP select failed"
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            // Message not found in any of the checked folders.
-            let _ = session.logout();
-            Ok(None)
+                })?;
+            poll_session(&mut *session, &subject_owned)
         });
 
         // RS-M-03: Apply configurable timeout to prevent long-lived IMAP connections
@@ -292,6 +324,133 @@ impl ImapPoller {
             )),
         }
     }
+
+    /// Perform a lightweight liveness check against a seed account: connect,
+    /// login, SELECT INBOX, then logout. Used by the placement scheduler's
+    /// periodic health-check loop. Does not search for any messages.
+    pub async fn health_check(&self, account: &SeedAccount, password: &str) -> Result<(), String> {
+        let domain = extract_domain(&account.email)
+            .ok_or_else(|| format!("invalid email address: {}", account.email))?;
+        let host = account
+            .imap_host
+            .clone()
+            .unwrap_or_else(|| format!("imap.{}", domain));
+        let port = account.imap_port.unwrap_or(993) as u16;
+        let username = account
+            .imap_username
+            .clone()
+            .unwrap_or_else(|| account.email.clone());
+        let password_owned = password.to_owned();
+        let timeout_secs = self.config.imap_connection_timeout_secs;
+        let connector = self.connector.clone();
+        let host_owned = host.clone();
+
+        let health_fut = tokio::task::spawn_blocking(move || {
+            let mut session = connector.connect(&host_owned, port, &username, &password_owned)?;
+            session
+                .select_folder("INBOX")
+                .map_err(|e| format!("IMAP SELECT INBOX failed: {e}"))?;
+            session.logout();
+            Ok::<(), String>(())
+        });
+
+        // RS-M-03: Apply configurable timeout for health checks as well.
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), health_fut).await {
+            Ok(result) => result.map_err(|e| format!("IMAP health-check task panicked: {}", e))?,
+            Err(_) => Err(format!(
+                "IMAP health check timed out after {} seconds",
+                timeout_secs
+            )),
+        }
+    }
+}
+
+/// The session-level poll logic, shared by every connector.
+fn poll_session(
+    session: &mut dyn ImapSession,
+    subject_pattern: &str,
+) -> Result<Option<Hit>, String> {
+    // Discover folders from LIST: INBOX first, then provider spam/
+    // junk/bulk/promotions folders, then every other folder. Search
+    // order follows classification priority so a copy sitting in both
+    // INBOX and a spam folder is reported from INBOX. Non-conventional
+    // folders are classified downstream via the provider classifier.
+    let folders_to_check = discover_folders(session);
+
+    for folder in &folders_to_check {
+        match session.select_folder(folder) {
+            Ok(_) => {
+                // Search for the message by subject: it embeds the
+                // unique test id, which is sufficient to locate it.
+                let search_query = format!("(SUBJECT \"{}\")", subject_pattern);
+
+                match session.search(&search_query) {
+                    Ok(ids) if !ids.is_empty() => {
+                        // Message found. Fetch its headers (for
+                        // Authentication-Results parsing) and
+                        // INTERNALDATE (true delivery latency).
+                        let mut raw_headers = None;
+                        let mut response_time = None;
+                        if let Some(first) = ids.iter().min() {
+                            match session.fetch_header_and_date(*first) {
+                                Ok(Some((hdr, date))) => {
+                                    if let Some(hdr) = hdr {
+                                        raw_headers =
+                                            Some(String::from_utf8_lossy(&hdr).into_owned());
+                                    }
+                                    if let Some(date) = date {
+                                        let latency = chrono::Utc::now()
+                                            .signed_duration_since(date)
+                                            .num_milliseconds();
+                                        response_time = Some(latency.max(0));
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    tracing::warn!(
+                                        folder = %folder,
+                                        error = %e,
+                                        "IMAP fetch headers failed"
+                                    );
+                                }
+                            }
+                        }
+
+                        session.logout();
+                        return Ok(Some(Hit {
+                            folder: folder.clone(),
+                            response_time_ms: response_time,
+                            raw_headers,
+                        }));
+                    }
+                    Ok(_) => {
+                        // Not found in this folder; try next.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            folder = %folder,
+                            error = %e,
+                            "IMAP search failed"
+                        );
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    folder = %folder,
+                    error = %e,
+                    "IMAP select failed"
+                );
+                continue;
+            }
+        }
+    }
+
+    // Message not found in any of the checked folders.
+    session.logout();
+    Ok(None)
 }
 
 /// Extract the domain portion from an email address.
@@ -347,14 +506,9 @@ fn select_folders_from_list(listed: &[String]) -> Vec<String> {
 }
 
 /// Run LIST on the session and build the folder search list.
-fn discover_folders(
-    session: &mut imap::Session<native_tls::TlsStream<std::net::TcpStream>>,
-) -> Vec<String> {
-    match session.list(None, Some("*")) {
-        Ok(names) => {
-            let listed: Vec<String> = names.iter().map(|n| n.name().to_string()).collect();
-            select_folders_from_list(&listed)
-        }
+fn discover_folders(session: &mut dyn ImapSession) -> Vec<String> {
+    match session.list_folders() {
+        Ok(listed) => select_folders_from_list(&listed),
         Err(e) => {
             // LIST is required by RFC 3501; if a server misbehaves, fall back
             // to INBOX plus the conventional names.
@@ -369,59 +523,11 @@ fn discover_folders(
     }
 }
 
-impl ImapPoller {
-    /// Perform a lightweight liveness check against a seed account: connect,
-    /// login, SELECT INBOX, then logout. Used by the placement scheduler's
-    /// periodic health-check loop. Does not search for any messages.
-    pub async fn health_check(&self, account: &SeedAccount, password: &str) -> Result<(), String> {
-        let domain = extract_domain(&account.email)
-            .ok_or_else(|| format!("invalid email address: {}", account.email))?;
-        let host = account
-            .imap_host
-            .clone()
-            .unwrap_or_else(|| format!("imap.{}", domain));
-        let port = account.imap_port.unwrap_or(993) as u16;
-        let username = account
-            .imap_username
-            .clone()
-            .unwrap_or_else(|| account.email.clone());
-        let password_owned = password.to_owned();
-        let timeout_secs = self.config.imap_connection_timeout_secs;
-
-        let health_fut = tokio::task::spawn_blocking(move || {
-            let tls = TlsConnector::builder()
-                .build()
-                .map_err(|e| format!("TLS connector build error: {}", e))?;
-
-            let client = imap::connect((host.as_str(), port), host.as_str(), &tls)
-                .map_err(|e| format!("IMAP connect error to {}:{}: {}", host, port, e))?;
-
-            let mut session = client
-                .login(&username, &password_owned)
-                .map_err(|(e, _)| format!("IMAP login error: {}", e))?;
-
-            session
-                .select("INBOX")
-                .map_err(|e| format!("IMAP SELECT INBOX failed: {}", e))?;
-
-            let _ = session.logout();
-            Ok::<(), String>(())
-        });
-
-        // RS-M-03: Apply configurable timeout for health checks as well.
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), health_fut).await {
-            Ok(result) => result.map_err(|e| format!("IMAP health-check task panicked: {}", e))?,
-            Err(_) => Err(format!(
-                "IMAP health check timed out after {} seconds",
-                timeout_secs
-            )),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::SeedAccount;
+    use std::sync::Mutex;
 
     #[test]
     fn test_extract_domain() {
@@ -431,6 +537,7 @@ mod tests {
             Some("outlook.com".into())
         );
         assert_eq!(extract_domain("noatsign"), None);
+        assert_eq!(extract_domain("user@"), None);
     }
 
     #[test]
@@ -483,5 +590,387 @@ mod tests {
         assert!(is_spam_like("Promotions"));
         assert!(!is_spam_like("INBOX"));
         assert!(!is_spam_like("Sent Mail"));
+    }
+
+    // ── Scripted connector (no network) ───────────────────────────────
+
+    struct Script {
+        /// connect() result: Err abort, Ok(folders) then per-folder behaviour.
+        connect_error: Option<String>,
+        /// Deterministic stall for the zero-timeout tests: connect signals it
+        /// started, then parks on the gate until the test drops the sender.
+        connect_started: Option<tokio::sync::mpsc::Sender<()>>,
+        connect_gate: Option<std::sync::Mutex<std::sync::mpsc::Receiver<()>>>,
+        folders: Result<Vec<String>, String>,
+        select_errors: Vec<String>,
+        search_results: std::collections::HashMap<String, Vec<u32>>,
+        search_error: Option<String>,
+        fetch: Option<FetchedHeader>,
+        fetch_error: Option<String>,
+    }
+
+    // `Result` has no `Default` impl — the derive cannot express "no
+    // folders listed yet" (Ok(empty)), so the default is spelled out.
+    impl Default for Script {
+        fn default() -> Self {
+            Self {
+                connect_error: None,
+                connect_started: None,
+                connect_gate: None,
+                folders: Ok(Vec::new()),
+                select_errors: Vec::new(),
+                search_results: std::collections::HashMap::new(),
+                search_error: None,
+                fetch: None,
+                fetch_error: None,
+            }
+        }
+    }
+
+    struct StubSession {
+        script: Arc<Script>,
+        folder: String,
+    }
+
+    impl ImapSession for StubSession {
+        fn list_folders(&mut self) -> Result<Vec<String>, String> {
+            self.script.folders.clone()
+        }
+
+        fn select_folder(&mut self, folder: &str) -> Result<(), String> {
+            if self.script.select_errors.iter().any(|f| f == folder) {
+                return Err(format!("SELECT {folder} failed (stub)"));
+            }
+            self.folder = folder.to_string();
+            Ok(())
+        }
+
+        fn search(&mut self, _query: &str) -> Result<Vec<u32>, String> {
+            if let Some(err) = &self.script.search_error {
+                return Err(err.clone());
+            }
+            Ok(self
+                .script
+                .search_results
+                .get(&self.folder)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn fetch_header_and_date(&mut self, _id: u32) -> Result<Option<FetchedHeader>, String> {
+            if let Some(err) = &self.script.fetch_error {
+                return Err(err.clone());
+            }
+            Ok(self.script.fetch.clone())
+        }
+
+        fn logout(&mut self) {}
+    }
+
+    struct StubConnector {
+        script: Arc<Script>,
+        connects: Mutex<u32>,
+        seen: Mutex<Vec<(String, u16, String, String)>>,
+    }
+
+    impl ImapConnector for StubConnector {
+        fn connect(
+            &self,
+            host: &str,
+            port: u16,
+            username: &str,
+            password: &str,
+        ) -> Result<Box<dyn ImapSession>, String> {
+            *self.connects.lock().unwrap() += 1;
+            self.seen.lock().unwrap().push((
+                host.to_string(),
+                port,
+                username.to_string(),
+                password.to_string(),
+            ));
+            if let Some(started) = &self.script.connect_started {
+                // Inside spawn_blocking: the sync send of the async channel.
+                let _ = started.blocking_send(());
+            }
+            if let Some(gate) = &self.script.connect_gate {
+                // Park until the test releases the gate; a dropped sender
+                // also releases (recv errs) so the blocking task always ends.
+                let _ = gate.lock().unwrap().recv();
+            }
+            if let Some(err) = &self.script.connect_error {
+                return Err(err.clone());
+            }
+            Ok(Box::new(StubSession {
+                script: self.script.clone(),
+                folder: String::new(),
+            }))
+        }
+    }
+
+    fn account(email: &str) -> SeedAccount {
+        SeedAccount {
+            id: Uuid::new_v4(),
+            provider_id: Uuid::new_v4(),
+            email: email.to_string(),
+            imap_host: Some("imap.test.invalid".into()),
+            imap_port: Some(993),
+            imap_username: None,
+            is_active: true,
+            last_checked_at: None,
+            health_status: "ok".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn scripted_config() -> PlacementConfig {
+        PlacementConfig {
+            polling_interval_secs: 0, // no real waiting between attempts
+            imap_connection_timeout_secs: 2,
+            ..PlacementConfig::default()
+        }
+    }
+
+    fn stub_connector(script: Script) -> Arc<StubConnector> {
+        Arc::new(StubConnector {
+            script: Arc::new(script),
+            connects: Mutex::new(0),
+            seen: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn scripted_poller(script: Script) -> (ImapPoller, Arc<StubConnector>) {
+        let connector = stub_connector(script);
+        (
+            ImapPoller::with_connector(scripted_config(), connector.clone()),
+            connector,
+        )
+    }
+
+    #[tokio::test]
+    async fn poll_finds_message_in_spam_folder_with_headers_and_latency() {
+        let mut script = Script {
+            folders: Ok(vec!["INBOX".into(), "[Gmail]/Spam".into()]),
+            ..Script::default()
+        };
+        script.search_results.insert("[Gmail]/Spam".into(), vec![7]);
+        script.fetch = Some((
+            Some(b"Authentication-Results: mx.test; spf=pass".to_vec()),
+            Some(chrono::Utc::now() - chrono::Duration::milliseconds(1500)),
+        ));
+        let (poller, _connector) = scripted_poller(script);
+
+        let test_id = Uuid::new_v4();
+        let result = poller
+            .poll_inbox(&account("seed@example.com"), "pw", test_id, 3)
+            .await
+            .expect("poll ok");
+        assert!(result.delivered);
+        assert_eq!(result.folder.as_deref(), Some("[Gmail]/Spam"));
+        assert!(result.response_time_ms.unwrap() >= 1400);
+        assert!(result.raw_headers.as_deref().unwrap().contains("spf=pass"));
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_returns_absent_when_message_is_never_found() {
+        let script = Script {
+            folders: Ok(vec!["INBOX".into(), "[Gmail]/Spam".into()]),
+            ..Script::default()
+        };
+        let (poller, connector) = scripted_poller(script);
+
+        let result = poller
+            .poll_inbox(&account("seed@example.com"), "pw", Uuid::new_v4(), 2)
+            .await
+            .expect("poll ok");
+        assert!(!result.delivered);
+        assert!(result.folder.is_none());
+        assert!(
+            result.response_time_ms.is_none(),
+            "absent deliveries carry no latency (speed-score poisoning)"
+        );
+        assert!(result.error.is_none());
+        assert_eq!(
+            *connector.connects.lock().unwrap(),
+            2,
+            "one connection per attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_reports_auth_failure_after_the_final_attempt() {
+        let script = Script {
+            connect_error: Some(
+                "IMAP login error for seed@example.com: NO [AUTHENTICATIONFAILED]".into(),
+            ),
+            ..Script::default()
+        };
+        let (poller, connector) = scripted_poller(script);
+
+        let result = poller
+            .poll_inbox(&account("seed@example.com"), "wrong", Uuid::new_v4(), 3)
+            .await
+            .expect("poll ok");
+        assert!(!result.delivered);
+        let error = result.error.expect("error surfaced");
+        assert!(error.contains("after 3 attempts"), "{error}");
+        assert!(error.contains("AUTHENTICATIONFAILED"), "{error}");
+        assert_eq!(
+            *connector.connects.lock().unwrap(),
+            3,
+            "retries then gives up"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_survives_select_search_and_fetch_errors() {
+        // SELECT fails on INBOX; SEARCH fails elsewhere; FETCH fails in Spam.
+        let mut script = Script {
+            folders: Ok(vec!["INBOX".into(), "[Gmail]/Spam".into()]),
+            ..Script::default()
+        };
+        script.select_errors = vec!["INBOX".into()];
+        script.search_results.insert("[Gmail]/Spam".into(), vec![1]);
+        script.fetch_error = Some("FETCH failed (stub)".into());
+        let (poller, _) = scripted_poller(script);
+
+        let result = poller
+            .poll_inbox(&account("seed@example.com"), "pw", Uuid::new_v4(), 1)
+            .await
+            .unwrap();
+        assert!(result.delivered, "a fetch error still reports the folder");
+        assert_eq!(result.folder.as_deref(), Some("[Gmail]/Spam"));
+        assert!(result.raw_headers.is_none());
+
+        // LIST failure falls back to the conventional folder names.
+        let script = Script {
+            folders: Err("LIST failed (stub)".into()),
+            search_error: Some("SEARCH failed (stub)".into()),
+            ..Script::default()
+        };
+        let (poller, _) = scripted_poller(script);
+        let result = poller
+            .poll_inbox(&account("seed@example.com"), "pw", Uuid::new_v4(), 1)
+            .await
+            .unwrap();
+        assert!(!result.delivered);
+    }
+
+    #[tokio::test]
+    async fn poll_with_zero_timeout_reports_the_timeout_honestly() {
+        // The connector parks inside connect (spawn_blocking) so the zero
+        // deadline CANNOT be met — without the park the stub can win the race
+        // and the assertion would depend on thread scheduling.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let script = Script {
+            connect_started: Some(started_tx),
+            connect_gate: Some(std::sync::Mutex::new(gate_rx)),
+            ..Script::default()
+        };
+        let config = PlacementConfig {
+            imap_connection_timeout_secs: 0,
+            ..scripted_config()
+        };
+        let poller = ImapPoller::with_connector(config, stub_connector(script));
+        let acct = account("seed@example.com");
+        let mut poll = std::pin::pin!(poller.poll_inbox(&acct, "pw", Uuid::new_v4(), 1));
+        // Drive the poll future until the connector reports it started —
+        // only then can the zero deadline be judged deterministically.
+        tokio::select! {
+            _ = &mut poll => panic!("poll completed while the connector was parked on the gate"),
+            started = started_rx.recv() => assert!(started.is_some(), "connector started"),
+        }
+        let result = poll.await.unwrap();
+        drop(gate_tx);
+        assert!(!result.delivered);
+        let error = result.error.expect("timeout surfaced");
+        assert!(error.contains("timed out after 0 seconds"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn invalid_email_address_is_rejected_before_connecting() {
+        let (poller, connector) = scripted_poller(Script::default());
+        let mut acct = account("not-an-email");
+        acct.imap_host = None;
+        let result = poller.poll_inbox(&acct, "pw", Uuid::new_v4(), 1).await;
+        assert!(result.is_err());
+        assert_eq!(*connector.connects.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn health_check_reports_success_and_failures() {
+        let (poller, connector) = scripted_poller(Script::default());
+        poller
+            .health_check(&account("seed@example.com"), "pw")
+            .await
+            .expect("healthy");
+        let seen = connector.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].0, "imap.test.invalid");
+        assert_eq!(seen[0].1, 993);
+        assert_eq!(seen[0].2, "seed@example.com", "username defaults to email");
+
+        // Login failure is reported, not swallowed.
+        let script = Script {
+            connect_error: Some("IMAP login error: auth failed".into()),
+            ..Script::default()
+        };
+        let (poller, _) = scripted_poller(script);
+        let error = poller
+            .health_check(&account("seed@example.com"), "bad")
+            .await
+            .expect_err("auth failure");
+        assert!(error.contains("auth failed"), "{error}");
+
+        // SELECT failure is reported.
+        let script = Script {
+            select_errors: vec!["INBOX".into()],
+            ..Script::default()
+        };
+        let (poller, _) = scripted_poller(script);
+        let error = poller
+            .health_check(&account("seed@example.com"), "pw")
+            .await
+            .expect_err("select failure");
+        assert!(error.contains("SELECT INBOX failed"), "{error}");
+
+        // Zero timeout reports the timeout. The connector parks inside
+        // connect so the zero deadline cannot be met — a free-running stub
+        // could win the race and make this arm scheduling-dependent.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let script = Script {
+            connect_started: Some(started_tx),
+            connect_gate: Some(std::sync::Mutex::new(gate_rx)),
+            ..Script::default()
+        };
+        let config = PlacementConfig {
+            imap_connection_timeout_secs: 0,
+            ..scripted_config()
+        };
+        let poller = ImapPoller::with_connector(config, stub_connector(script));
+        let acct = account("seed@example.com");
+        let mut health = std::pin::pin!(poller.health_check(&acct, "pw"));
+        tokio::select! {
+            _ = &mut health => panic!("health check completed while the connector was parked"),
+            started = started_rx.recv() => assert!(started.is_some(), "connector started"),
+        }
+        let error = health.await.expect_err("timeout");
+        drop(gate_tx);
+        assert!(error.contains("timed out after 0 seconds"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn implicit_host_defaults_to_imap_domain_and_configured_username() {
+        let (poller, connector) = scripted_poller(Script::default());
+        let mut acct = account("Custom@Example.COM");
+        acct.imap_host = None;
+        acct.imap_port = None;
+        acct.imap_username = Some("custom-login".into());
+        poller.health_check(&acct, "pw").await.unwrap();
+        let seen = connector.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "imap.example.com", "default host convention");
+        assert_eq!(seen[0].1, 993, "default port");
+        assert_eq!(seen[0].2, "custom-login");
     }
 }

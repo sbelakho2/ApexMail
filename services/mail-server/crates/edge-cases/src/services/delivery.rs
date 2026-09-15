@@ -597,6 +597,17 @@ impl DeliveryService {
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
+// ── helpers ────────────────────────────────────────────────────────────────────
+
+/// Test-only seam: prime the MX cache so resolution logic is exercised
+/// without any DNS egress. Compiled only under `cfg(test)`.
+#[cfg(test)]
+impl DeliveryService {
+    pub(crate) fn prime_mx_cache(&self, domain: &str, records: Vec<MXRecord>) {
+        self.mx_cache.insert(domain.to_string(), records);
+    }
+}
+
 fn extract_enhanced_status(message: &str) -> Option<String> {
     let re =
         ENHANCED_STATUS_RE.get_or_init(|| Regex::new(r"(\d\.\d+\.\d+)").expect("status regex"));
@@ -846,6 +857,443 @@ mod tests {
         failed.insert("mx2.example.com".into());
         let selected = DeliveryService::select_next_mx(&records, &failed, None).unwrap();
         assert_eq!(selected.exchange, "mx3.example.com");
+    }
+
+    // ── adversarial: real service (lazy pools; no network for pure logic) ──
+
+    fn offline_service() -> DeliveryService {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .expect("lazy pool never connects");
+        let redis = deadpool_redis::Config::from_url("redis://localhost:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        DeliveryService::new(
+            pool,
+            redis,
+            RetryConfig::default(),
+            LoopDetectionConfig::default(),
+            &crate::config::AutoResponderConfig::default().subject_patterns,
+        )
+    }
+
+    async fn canonical_pool(test_name: &str) -> Option<sqlx::PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn real_redis_pool() -> deadpool_redis::Pool {
+        let url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    #[tokio::test]
+    async fn parse_smtp_response_classifies_and_extracts_metadata() {
+        let svc = offline_service();
+        // Connection-level codes are neither transient nor permanent.
+        let resp = svc.parse_smtp_response(100, "banner");
+        assert_eq!(resp.response_type, ResponseType::ConnectionError);
+
+        // Success wins even if the message text mentions greylisting.
+        let resp = svc.parse_smtp_response(250, "OK greylist cleared");
+        assert_eq!(resp.response_type, ResponseType::Success);
+        assert!(!resp.is_greylist);
+
+        // A greylist phrase without any retry hint.
+        let resp = svc.parse_smtp_response(451, "please retry later");
+        assert_eq!(resp.response_type, ResponseType::Greylist);
+        assert!(resp.is_greylist);
+        assert_eq!(resp.enhanced, None);
+
+        // Rate limit outranks greylist when both phrases appear.
+        let resp = svc.parse_smtp_response(421, "too many connections: rate limited");
+        assert_eq!(resp.response_type, ResponseType::RateLimit);
+        assert!(!resp.is_greylist);
+
+        // Enhanced status is extracted from the message.
+        let resp = svc.parse_smtp_response(550, "5.1.1 User unknown");
+        assert_eq!(resp.response_type, ResponseType::PermanentFailure);
+        assert_eq!(resp.enhanced.as_deref(), Some("5.1.1"));
+    }
+
+    #[tokio::test]
+    async fn retry_delay_is_parsed_from_human_text() {
+        let svc = offline_service();
+        let resp = svc.parse_smtp_response(421, "try again in 5 minutes");
+        assert_eq!(resp.suggested_retry_delay, Some(300));
+        let resp = svc.parse_smtp_response(421, "retry after 2 hours");
+        assert_eq!(resp.suggested_retry_delay, Some(7200));
+        let resp = svc.parse_smtp_response(421, "wait 30 second(s)");
+        assert_eq!(resp.suggested_retry_delay, Some(30));
+        let resp = svc.parse_smtp_response(421, "slow down");
+        assert_eq!(resp.suggested_retry_delay, None);
+    }
+
+    #[tokio::test]
+    async fn retry_schedule_honours_suggested_delay_and_budgets() {
+        let svc = offline_service();
+        // Rate limit with a server-suggested delay uses that delay.
+        let mut resp = svc.parse_smtp_response(421, "retry after 2 minutes");
+        resp.response_type = ResponseType::RateLimit;
+        let schedule = svc.calculate_retry_schedule(&resp, 0).unwrap();
+        assert_eq!(schedule.delay_secs, 120);
+        assert_eq!(schedule.reason, "rate_limit");
+        assert_eq!(schedule.attempt_number, 1);
+
+        // Rate limit without a hint falls back to initial_delay * 5.
+        resp.suggested_retry_delay = None;
+        let schedule = svc.calculate_retry_schedule(&resp, 0).unwrap();
+        assert_eq!(schedule.delay_secs, 5);
+
+        // The exponential delay is capped at max_delay_secs (needs a retry
+        // budget larger than the default three to reach the cap at all).
+        let long_budget = DeliveryService::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_millis(100))
+                .connect_lazy("postgres://fake:fake@localhost:1/fake")
+                .expect("lazy pool never connects"),
+            deadpool_redis::Config::from_url("redis://localhost:1")
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool"),
+            RetryConfig {
+                max_retries: 40,
+                ..RetryConfig::default()
+            },
+            LoopDetectionConfig::default(),
+            &[],
+        );
+        let temp = SMTPResponse {
+            code: 451,
+            message: "try again later".into(),
+            enhanced: None,
+            response_type: ResponseType::TemporaryFailure,
+            is_greylist: false,
+            suggested_retry_delay: None,
+        };
+        let schedule = long_budget.calculate_retry_schedule(&temp, 29).unwrap();
+        assert_eq!(schedule.delay_secs, long_budget.retry_config.max_delay_secs);
+
+        // Retry budget exhausted → no schedule.
+        assert!(svc
+            .calculate_retry_schedule(&temp, svc.retry_config.max_retries)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn loop_detection_edge_cases() {
+        let svc = offline_service();
+        // Headers without a "from" host are ignored, not counted as loops.
+        let result = svc.detect_loop(&["by relay.example.com".into()]);
+        assert!(!result.is_loop);
+        assert_eq!(result.loop_path, None);
+
+        // Exactly max_hops is fine; max_hops + 1 is a loop and carries no path.
+        let at_limit: Vec<String> = (0..svc.loop_config.max_hops)
+            .map(|i| format!("from host{i}.example.com"))
+            .collect();
+        assert!(!svc.detect_loop(&at_limit).is_loop);
+        let over: Vec<String> = (0..=svc.loop_config.max_hops)
+            .map(|i| format!("from host{i}.example.com"))
+            .collect();
+        let result = svc.detect_loop(&over);
+        assert!(result.is_loop);
+        assert_eq!(result.loop_path, None);
+
+        // Four occurrences of one host is a loop and reports the path.
+        let repeated: Vec<String> = (0..4)
+            .map(|_| "from looping.example.com with ESMTP".into())
+            .collect();
+        let result = svc.detect_loop(&repeated);
+        assert!(result.is_loop);
+        let expected: Vec<String> = vec!["looping.example.com".to_string(); 4];
+        assert_eq!(result.loop_path.as_deref(), Some(expected.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn auto_responder_scoring_is_explainable_and_thresholded() {
+        let svc = offline_service();
+        // A single weak signal stays below the 50-point threshold and is not
+        // labelled.
+        let mut headers = HashMap::new();
+        headers.insert("Precedence".into(), "bulk".into());
+        let result = svc.detect_auto_responder(&headers, "Hello", None);
+        assert!(!result.is_auto_responder);
+        assert_eq!(result.auto_type, None);
+        assert_eq!(result.confidence, 30);
+
+        // Auto-Submitted: auto-replied → 40 + Return-Path <> → 20 = 60.
+        let mut headers = HashMap::new();
+        headers.insert("Auto-Submitted".into(), "auto-replied".into());
+        headers.insert("Return-Path".into(), "<>".into());
+        let result = svc.detect_auto_responder(&headers, "Re: hi", None);
+        assert!(result.is_auto_responder);
+        assert_eq!(result.auto_type.as_deref(), Some("ooo"));
+        assert_eq!(result.confidence, 60);
+
+        // X-Autorespond + subject pattern.
+        let mut headers = HashMap::new();
+        headers.insert("x-autorespond".into(), "yes".into());
+        let result = svc.detect_auto_responder(&headers, "Automatic reply: gone", None);
+        assert!(result.is_auto_responder);
+        assert_eq!(result.confidence, 60);
+
+        // Body keyword only (15) → below threshold; with header it is labelled
+        // from the body.
+        let result =
+            svc.detect_auto_responder(&HashMap::new(), "hi", Some("I am on vacation until Monday"));
+        assert!(!result.is_auto_responder);
+        assert!(result.indicators.iter().any(|i| i.contains("on vacation")));
+
+        // Non-matching Auto-Submitted value must not score.
+        let mut headers = HashMap::new();
+        headers.insert("Auto-Submitted".into(), "no".into());
+        let result = svc.detect_auto_responder(&headers, "hi", None);
+        assert_eq!(result.confidence, 0);
+
+        // mailer-daemon Return-Path scores as a bounce signal.
+        let mut headers = HashMap::new();
+        headers.insert("Return-Path".into(), "<mailer-daemon@example.com>".into());
+        headers.insert("Precedence".into(), "auto_reply".into());
+        let result = svc.detect_auto_responder(&headers, "Undeliverable", None);
+        assert!(result.is_auto_responder);
+
+        // X-Auto-Response-Suppress contributes 25 and is reported.
+        let mut headers = HashMap::new();
+        headers.insert("X-Auto-Response-Suppress".into(), "All".into());
+        headers.insert("x-auto-response-suppress".into(), "All".into());
+        let result = svc.detect_auto_responder(&headers, "hi", None);
+        assert_eq!(result.confidence, 25);
+        assert!(result
+            .indicators
+            .iter()
+            .any(|i| i.contains("X-Auto-Response-Suppress")));
+
+        // Auto-Submitted variants select the right auto-type: generated →
+        // system, notified → notification.
+        let mut headers = HashMap::new();
+        headers.insert("Auto-Submitted".into(), "auto-generated".into());
+        headers.insert("Precedence".into(), "bulk".into());
+        let result = svc.detect_auto_responder(&headers, "hi", None);
+        assert_eq!(result.auto_type.as_deref(), Some("system"));
+
+        let mut headers = HashMap::new();
+        headers.insert("Auto-Submitted".into(), "auto-notified".into());
+        headers.insert("Precedence".into(), "junk".into());
+        let result = svc.detect_auto_responder(&headers, "hi", None);
+        assert_eq!(result.auto_type.as_deref(), Some("notification"));
+
+        // Subject classification: vacation and bounce (each needs a second
+        // signal to cross the 50-point threshold).
+        let mut headers = HashMap::new();
+        headers.insert("Precedence".into(), "bulk".into());
+        let result = svc.detect_auto_responder(&headers, "Vacation: away", None);
+        assert_eq!(result.auto_type.as_deref(), Some("vacation"));
+
+        let mut headers = HashMap::new();
+        headers.insert("Precedence".into(), "bulk".into());
+        let result = svc.detect_auto_responder(&headers, "Auto: bounce notice", None);
+        assert_eq!(result.auto_type.as_deref(), Some("bounce"));
+
+        // A matched subject with an unclassifiable body falls back to system.
+        let mut headers = HashMap::new();
+        headers.insert("x-autorespond".into(), "yes".into());
+        let result = svc.detect_auto_responder(
+            &headers,
+            "Auto: hello",
+            Some("this is an automated message"),
+        );
+        assert_eq!(result.auto_type.as_deref(), Some("system"));
+
+        // Out-of-office subject is classified from the subject text (needs a
+        // second signal to cross the 50-point threshold).
+        let mut headers = HashMap::new();
+        headers.insert("Precedence".into(), "bulk".into());
+        let result = svc.detect_auto_responder(&headers, "Out of Office: back Monday", None);
+        assert_eq!(result.auto_type.as_deref(), Some("ooo"));
+        assert!(result.is_auto_responder);
+    }
+
+    #[tokio::test]
+    async fn mx_selection_prefers_requested_priority_and_reports_exhaustion() {
+        let records = vec![
+            MXRecord {
+                exchange: "mx1.example.com".into(),
+                priority: 10,
+                ttl: None,
+            },
+            MXRecord {
+                exchange: "mx2.example.com".into(),
+                priority: 20,
+                ttl: None,
+            },
+        ];
+        let selected =
+            DeliveryService::select_next_mx(&records, &HashSet::new(), Some(20)).unwrap();
+        assert_eq!(selected.exchange, "mx2.example.com");
+
+        // Requested priority is unavailable → lowest priority wins.
+        let selected =
+            DeliveryService::select_next_mx(&records, &HashSet::new(), Some(99)).unwrap();
+        assert_eq!(selected.exchange, "mx1.example.com");
+
+        // All hosts failed → None, never a fabricated host.
+        let failed: HashSet<String> = records.iter().map(|r| r.exchange.clone()).collect();
+        assert!(DeliveryService::select_next_mx(&records, &failed, None).is_none());
+        assert!(DeliveryService::select_next_mx(&[], &HashSet::new(), None).is_none());
+    }
+
+    #[tokio::test]
+    async fn ip_validation_rejects_oversized_prefixes() {
+        assert!(!is_valid_ip("10.0.0.0/33"));
+        assert!(!is_valid_ip("10.0.0.0/abc"));
+        assert!(!is_valid_ip("2001:db8::/129"));
+        assert!(is_valid_ip("2001:db8::/128"));
+        assert!(is_valid_ip("0.0.0.0/0"));
+        assert!(!is_valid_ip(""));
+    }
+
+    #[tokio::test]
+    async fn resolve_mx_returns_cached_records_sorted_and_typed_errors() {
+        let svc = offline_service();
+        // Empty cached record set is returned as-is (a resolvable domain with
+        // no MX and no A record is reported through the error type instead).
+        svc.prime_mx_cache("empty.example", vec![]);
+        assert!(svc.resolve_mx("empty.example").await.unwrap().is_empty());
+
+        svc.prime_mx_cache(
+            "multi.example",
+            vec![
+                MXRecord {
+                    exchange: "b.example".into(),
+                    priority: 20,
+                    ttl: None,
+                },
+                MXRecord {
+                    exchange: "a.example".into(),
+                    priority: 10,
+                    ttl: None,
+                },
+            ],
+        );
+        let records = svc.resolve_mx("multi.example").await.unwrap();
+        // A primed cache is returned verbatim (sorting happens on live
+        // resolution, before the records are cached).
+        assert_eq!(records[0].exchange, "b.example");
+        assert_eq!(records[1].exchange, "a.example");
+    }
+
+    #[tokio::test]
+    async fn delivery_attempts_round_trip_through_the_canonical_schema() {
+        let Some(pool) = canonical_pool("edge_delivery_attempts").await else {
+            return;
+        };
+        let svc = DeliveryService::new(
+            pool,
+            real_redis_pool(),
+            RetryConfig::default(),
+            LoopDetectionConfig::default(),
+            &[],
+        );
+        let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        for attempt in 1..=2 {
+            svc.record_delivery_attempt(&DeliveryAttempt {
+                message_id: message_id.clone(),
+                attempt,
+                mx_host: "mx.example.com".into(),
+                mx_priority: 10,
+                response_code: if attempt == 1 { 451 } else { 250 },
+                response_message: if attempt == 1 {
+                    "try again later"
+                } else {
+                    "OK"
+                }
+                .into(),
+                response_type: if attempt == 1 {
+                    "temporary_failure"
+                } else {
+                    "success"
+                }
+                .into(),
+                timestamp: chrono::Utc::now(),
+                duration_ms: 12 * attempt as i64,
+            })
+            .await
+            .expect("record attempt");
+        }
+
+        let history = svc.get_delivery_history(&message_id).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].attempt, 1);
+        assert_eq!(history[0].mx_priority, 10);
+        assert_eq!(history[0].response_code, 451);
+        assert_eq!(history[1].duration_ms, 24);
+        assert!(svc
+            .get_delivery_history("msg_does_not_exist")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn greylister_is_learned_from_history_and_cached_in_redis() {
+        let Some(pool) = canonical_pool("edge_greylister").await else {
+            return;
+        };
+        let redis = real_redis_pool();
+        let svc = DeliveryService::new(
+            pool.clone(),
+            redis.clone(),
+            RetryConfig::default(),
+            LoopDetectionConfig::default(),
+            &[],
+        );
+        let domain = format!("grey-{}.example", uuid::Uuid::new_v4().simple());
+
+        // Clear any stale cache key first.
+        if let Ok(mut conn) = redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(format!("greylist:known:{domain}"))
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        // Unknown with no history.
+        assert!(!svc.is_known_greylister(&domain).await.unwrap());
+
+        // 11 greylist responses in the last 30 days → known greylister.
+        for attempt in 1..=11 {
+            sqlx::query(
+                "INSERT INTO edge_delivery_attempts
+                   (id, message_id, attempt_number, mx_host, mx_priority, response_code,
+                    response_message, response_type, attempt_time, duration_ms)
+                 VALUES (gen_random_uuid(), $1, $2, $3, 10, 450, 'greylisted',
+                         'greylist', NOW(), 1)",
+            )
+            .bind(format!("msg_{}", uuid::Uuid::new_v4().simple()))
+            .bind(attempt)
+            .bind(format!("mx1.{domain}"))
+            .execute(&pool)
+            .await
+            .expect("insert greylist attempt");
+        }
+
+        // Delete the cache entry written by the first call, then re-derive.
+        if let Ok(mut conn) = redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(format!("greylist:known:{domain}"))
+                .query_async(&mut *conn)
+                .await;
+        }
+        assert!(svc.is_known_greylister(&domain).await.unwrap());
+        // The second call is served from the Redis cache (still true).
+        assert!(svc.is_known_greylister(&domain).await.unwrap());
     }
 
     /// Lightweight test helper – no DB/Redis pools needed for pure-logic tests.

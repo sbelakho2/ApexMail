@@ -17,3 +17,7 @@ hex = "0.4"
 url = "2"
 chrono = "0.4"
 apexmail-lib = { path = "../apexmail-lib" }
+
+[dev-dependencies]
+# DB-backed tests bootstrap through the REAL production migrator (audit F01).
+migrator = { path = "../migrator" }

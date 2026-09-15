@@ -255,4 +255,45 @@ mod tests {
         assert_eq!(reg.compare_versions("2023-10", "2023-10"), Ordering::Equal);
         assert_eq!(reg.compare_versions("2022-10", "2023-01"), Ordering::Less);
     }
+
+    // ── Adversarial: version lookup, deprecation, ordering ──────────────
+
+    #[test]
+    fn version_lookup_and_deprecation_are_closed_sets() {
+        let registry = VersionRegistry::new();
+        assert!(!registry.list_versions().is_empty());
+        // Known current version resolves; unknown versions are typed errors.
+        let current = registry.get_version("2024-01").expect("current version");
+        assert!(matches!(
+            current.status,
+            VersionStatus::Current | VersionStatus::Supported
+        ));
+        assert!(registry.get_version("1999-01").is_err());
+        // Deprecated versions are recognised but flagged.
+        if let Some(deprecated) = registry
+            .list_versions()
+            .iter()
+            .find(|v| v.status == VersionStatus::Deprecated)
+        {
+            assert!(registry.is_deprecated(&deprecated.version));
+        }
+        assert!(!registry.is_deprecated("1999-01"));
+        assert_eq!(
+            registry.compare_versions("2024-01", "2023-10"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            registry.compare_versions("2023-10", "2024-01"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            registry.compare_versions("2024-01", "2024-01"),
+            std::cmp::Ordering::Equal
+        );
+        // The Default impl mirrors new().
+        assert_eq!(
+            VersionRegistry::default().list_versions().len(),
+            registry.list_versions().len()
+        );
+    }
 }

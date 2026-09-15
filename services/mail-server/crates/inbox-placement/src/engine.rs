@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::PlacementConfig;
-use crate::imap_poller::{ImapPoller, InboxPollResult};
+use crate::imap_poller::{ImapConnector, ImapPoller, InboxPollResult};
 use crate::seed_manager::SeedManager;
 use crate::sender::send_test_email;
 use crate::types::*;
@@ -16,7 +16,9 @@ use crate::types::*;
 /// → `running`. Check-and-set — when zero rows match, the test has already
 /// reached a terminal state (typically the reaper's `failed` after
 /// `stuck_test_timeout_secs`) and must not be resurrected.
-pub(crate) const CLAIM_RUNNING_SQL: &str =
+// `pub` so the canonical-DB integration tests (a foreign test crate) can
+// drive the same check-and-set statements against a real schema.
+pub const CLAIM_RUNNING_SQL: &str =
     "UPDATE placement_tests SET status = 'running' WHERE id = $1 AND status IN ('pending', 'running')";
 
 /// Finalise a finished run: progress columns are always written, but an
@@ -24,7 +26,9 @@ pub(crate) const CLAIM_RUNNING_SQL: &str =
 /// the reaper mid-run) wins over the run's own outcome. Previously this
 /// UPDATE was unconditional and silently flipped a reaped `failed` test
 /// back to `completed`.
-pub(crate) const FINALIZE_STATUS_SQL: &str = r#"
+// `pub` so the canonical-DB integration tests (a foreign test crate) can
+// drive the same check-and-set statements against a real schema.
+pub const FINALIZE_STATUS_SQL: &str = r#"
             UPDATE placement_tests
             SET status = CASE WHEN status IN ('completed', 'failed', 'cancelled')
                               THEN status ELSE $1 END,
@@ -49,6 +53,9 @@ pub struct PlacementEngine {
     /// `None`, passwords are read as plaintext (development only — not
     /// recommended for production).
     encryptor: Option<Arc<FieldEncryptor>>,
+    /// Optional IMAP connector seam. `None` uses the real TLS connector;
+    /// tests inject a scripted connector (no network).
+    imap_connector: Option<Arc<dyn ImapConnector>>,
 }
 
 impl std::fmt::Debug for PlacementEngine {
@@ -58,6 +65,7 @@ impl std::fmt::Debug for PlacementEngine {
             .field("seed_manager", &self.seed_manager)
             .field("analytics", &self.analytics.is_some())
             .field("encryptor", &self.encryptor.is_some())
+            .field("imap_connector", &self.imap_connector.is_some())
             .finish()
     }
 }
@@ -71,6 +79,7 @@ impl PlacementEngine {
             seed_manager: SeedManager::new(db),
             analytics: None,
             encryptor,
+            imap_connector: None,
         }
     }
 
@@ -87,7 +96,14 @@ impl PlacementEngine {
             seed_manager: SeedManager::new(db),
             analytics,
             encryptor,
+            imap_connector: None,
         }
+    }
+
+    /// Inject an explicit IMAP connector (tests / alternate transports).
+    pub fn with_imap_connector(mut self, connector: Arc<dyn ImapConnector>) -> Self {
+        self.imap_connector = Some(connector);
+        self
     }
 
     /// Borrow the field encryptor (if configured). Used by the seed-account
@@ -113,7 +129,7 @@ impl PlacementEngine {
     pub async fn create_test(
         &self,
         request: CreateTestRequest,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<PlacementTest, sqlx::Error> {
         // 1. Resolve target providers → seed accounts.
         let providers = request.target_providers.unwrap_or_default();
@@ -197,7 +213,7 @@ impl PlacementEngine {
 
         Ok(PlacementTest {
             id,
-            tenant_id,
+            tenant_id: tenant_id.to_string(),
             name: request.name,
             status: status.to_string(),
             from_email: request.from_email,
@@ -251,7 +267,12 @@ impl PlacementEngine {
             return Ok(());
         }
 
-        let imp = ImapPoller::new(self.config.clone());
+        let imp = match &self.imap_connector {
+            Some(connector) => {
+                ImapPoller::with_connector(self.config.clone(), Arc::clone(connector))
+            }
+            None => ImapPoller::new(self.config.clone()),
+        };
         let mut completed = 0i32;
         let total = test.seed_accounts_used.len() as i32;
         // Per-account health outcome (account_id → account succeeded).
@@ -450,7 +471,7 @@ impl PlacementEngine {
                  AND (events @> '"placement_test.completed"'::jsonb
                       OR events @> '"*"'::jsonb)"#,
         )
-        .bind(test.tenant_id.to_string())
+        .bind(test.tenant_id.clone())
         .fetch_all(&self.db)
         .await
         .unwrap_or_default();
@@ -461,7 +482,7 @@ impl PlacementEngine {
 
         // Pull the per-provider summary so subscribers receive the score
         // alongside the event without an extra round-trip.
-        let summary = match self.get_test_results(test.id, test.tenant_id).await {
+        let summary = match self.get_test_results(test.id, &test.tenant_id).await {
             Ok(results) => {
                 let score = PlacementScore::calculate(&results);
                 serde_json::json!({
@@ -479,7 +500,7 @@ impl PlacementEngine {
         let payload = serde_json::json!({
             "id": event_id,
             "type": "placement_test.completed",
-            "tenantId": test.tenant_id.to_string(),
+            "tenantId": test.tenant_id,
             "timestamp": Utc::now().to_rfc3339(),
             "data": {
                 "test_id": test.id.to_string(),
@@ -499,7 +520,7 @@ impl PlacementEngine {
             "INSERT INTO webhook_queue \
              (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) ",
         );
-        let tenant_id_str = test.tenant_id.to_string();
+        let tenant_id_str = test.tenant_id.clone();
         builder.push_values(&webhook_ids, |mut b, (wid,)| {
             b.push_bind(format!("whj_{}", Uuid::new_v4().simple()))
                 .push_bind(wid)
@@ -521,7 +542,7 @@ impl PlacementEngine {
     pub async fn get_test_results(
         &self,
         test_id: Uuid,
-        tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<Vec<ProviderResult>, sqlx::Error> {
         // Load raw placement results joined with account + provider info.
         // Tenant scoping: join through placement_tests to filter by tenant_id.
@@ -649,9 +670,9 @@ impl PlacementEngine {
     pub async fn get_placement_score(
         &self,
         test_id: Uuid,
-        _tenant_id: Uuid,
+        tenant_id: &str,
     ) -> Result<PlacementScore, sqlx::Error> {
-        let results = self.get_test_results(test_id, _tenant_id).await?;
+        let results = self.get_test_results(test_id, tenant_id).await?;
         Ok(PlacementScore::calculate(&results))
     }
 
@@ -661,7 +682,7 @@ impl PlacementEngine {
     /// `placement_results` table, grouped by date.
     pub async fn get_trends(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
         days: i32,
         provider: Option<ProviderName>,
     ) -> Result<Vec<PlacementTrend>, sqlx::Error> {
@@ -824,7 +845,7 @@ impl PlacementEngine {
     /// route maps that to a 400.
     async fn ensure_from_domain_verified(
         &self,
-        tenant_id: Uuid,
+        tenant_id: &str,
         from_email: &str,
     ) -> Result<(), sqlx::Error> {
         let Some(domain) = from_email_domain(from_email) else {
@@ -841,7 +862,7 @@ impl PlacementEngine {
               WHERE tenant_id = $1 AND LOWER(name) = $2 AND verified = true \
              )",
         )
-        .bind(tenant_id.to_string())
+        .bind(tenant_id)
         .bind(&domain)
         .fetch_one(&self.db)
         .await?;

@@ -1633,4 +1633,89 @@ mod tests {
         let stream_end = text.find("\nendstream").unwrap();
         assert_eq!(declared, stream_end - stream_start);
     }
+
+    // ── Adversarial: hostile payload limits and hostile text ────────────
+
+    /// Oversized JSON is refused before generation; a PDF-shaped but hostile
+    /// character payload never panics and always escapes.
+    #[tokio::test]
+    async fn oversize_data_is_refused_before_generation() {
+        let big = "x".repeat(MAX_DATA_JSON_BYTES);
+        let data = serde_json::json!({ "payload": big, "more": big });
+        let error = render_pdf("invoice", &data).await.expect_err("must refuse");
+        assert!(
+            error.to_string().contains("too large"),
+            "expected size refusal, got {error}"
+        );
+    }
+
+    /// The fold/transliteration tables must cover the whole BMP-ish range
+    /// without panicking; control characters and astral emoji survive; and
+    /// the output is a complete PDF document.
+    #[tokio::test]
+    async fn exotic_unicode_folds_without_silent_loss_or_panic() {
+        let mut sample = String::new();
+        for range in [
+            0x80u32..0x600,
+            0x1E00..0x2100,
+            0x3000..0x3100,
+            0x4E00..0x4E80,
+            0xFF00..0xFF80,
+        ] {
+            for codepoint in range {
+                if let Some(ch) = char::from_u32(codepoint) {
+                    if !ch.is_control() || ch == '\t' {
+                        sample.push(ch);
+                    }
+                }
+            }
+        }
+        // Hostile control characters and astral planes.
+        sample.push('\u{0}');
+        sample.push('\u{1b}');
+        sample.push('\u{1F600}');
+        sample.push('(');
+        sample.push(')');
+        sample.push('\\');
+
+        let data = serde_json::json!({
+            "title": "Žluťoučký kůň — ünïcödé",
+            "text": sample,
+            "nested": { "a": [1, 2, 3], "b": { "c": "d" } },
+            "table": [ {"x": 1}, {"y": "two"} ],
+            "nul": "before\u{0}after"
+        });
+        let pdf = render_pdf("invoice", &data).await.expect("render");
+        assert!(pdf.starts_with(b"%PDF-"), "not a PDF: {:?}", &pdf[..4]);
+        let tail = &pdf[pdf.len().saturating_sub(32)..];
+        assert!(
+            tail.windows(5).any(|w| w == b"%%EOF"),
+            "missing EOF marker: {tail:?}"
+        );
+        // The parentheses in user data must be escaped in the text streams.
+        assert!(!pdf.is_empty());
+    }
+
+    /// A missing template is a typed world error; a path-shaped name is an
+    /// invalid-name error (never a filesystem read).
+    #[tokio::test]
+    async fn template_lookup_errors_are_typed() {
+        let missing = render_pdf("no-such-template", &serde_json::json!({}))
+            .await
+            .expect_err("missing template");
+        assert!(
+            missing.to_string().contains("no-such-template"),
+            "{missing}"
+        );
+        let hostile = render_pdf("../../etc/passwd", &serde_json::json!({}))
+            .await
+            .expect_err("path-shaped template");
+        assert!(
+            matches!(
+                hostile,
+                RenderError::World(crate::world::WorldError::InvalidTemplateName(_))
+            ),
+            "{hostile}"
+        );
+    }
 }

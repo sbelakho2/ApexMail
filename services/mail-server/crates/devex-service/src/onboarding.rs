@@ -336,4 +336,80 @@ mod tests {
         // Unknown step returns false.
         assert!(!svc.mark_step_complete(&mut cl, "nonexistent"));
     }
+
+    // ── Adversarial: language matrix + checklist honesty ────────────────
+
+    #[test]
+    fn quickstart_covers_every_advertised_language() {
+        let service = OnboardingService::new();
+        for language in [
+            "python",
+            "javascript",
+            "go",
+            "ruby",
+            "php",
+            "java",
+            "csharp",
+        ] {
+            let guide = service.create_quickstart(language);
+            assert!(
+                guide.steps.len() >= 3,
+                "{language} quickstart is suspiciously thin: {:?}",
+                guide.steps
+            );
+            assert!(
+                guide.steps.iter().all(|step| !step.title.is_empty()),
+                "{language} has an untitled step"
+            );
+            let code = guide
+                .steps
+                .iter()
+                .filter_map(|step| step.code_snippet.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.is_empty(),
+                "{language} quickstart must carry a code snippet"
+            );
+            assert!(
+                !code.contains("<script"),
+                "{language} snippet must not embed script tags"
+            );
+        }
+        // The default arm (unknown language) still returns a usable guide.
+        let fallback = service.create_quickstart("brainfuck");
+        assert!(!fallback.steps.is_empty());
+        // Default::default() is the same service.
+        let default_service = OnboardingService;
+        assert!(!default_service.create_quickstart("python").steps.is_empty());
+    }
+
+    #[test]
+    fn every_checklist_item_is_completable_exactly_once() {
+        let service = OnboardingService::new();
+        let mut checklist = service.get_checklist("tenant-adv");
+        assert!(!checklist.items.is_empty());
+        assert!(checklist.items.iter().any(|item| item.completed));
+        for item in checklist.items.clone() {
+            assert!(
+                service.mark_step_complete(&mut checklist, &item.id),
+                "{} must be completable",
+                item.id
+            );
+            // Completion is idempotent (a retried webhook/report re-marks).
+            assert!(
+                service.mark_step_complete(&mut checklist, &item.id),
+                "{} must stay completed on a retry",
+                item.id
+            );
+            assert!(
+                !service.mark_step_complete(&mut checklist, "no-such-step"),
+                "unknown steps are refused"
+            );
+        }
+        assert!(checklist.items.iter().all(|item| item.completed));
+        // The service updates the progress snapshot after each completion.
+        assert!((checklist.progress_pct - 100.0).abs() < 1e-9);
+        assert!(service.generate_api_key_guide().contains("am_live_"));
+    }
 }

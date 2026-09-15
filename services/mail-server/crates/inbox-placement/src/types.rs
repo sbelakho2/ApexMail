@@ -79,7 +79,8 @@ pub enum TestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct PlacementTest {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// Canonical VARCHAR(26) tenant key (TEXT in Rust) — see migration 064.
+    pub tenant_id: String,
     pub name: Option<String>,
     pub status: String,
     pub from_email: String,

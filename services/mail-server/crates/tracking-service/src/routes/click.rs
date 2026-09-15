@@ -232,15 +232,19 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
         }
     }
 
-    // 2. Redis
+    // 2. Redis — an AUTHORITATIVE cached verdict only. A key MISS
+    // (`Ok(None)`) is not a "deny": returning early on it made this cache
+    // the whole authorization and the Postgres tier below unreachable
+    // whenever Redis was up, denying every tenant-owned redirect domain on
+    // first click (and recording no click events at all).
     let redis_key = format!("redirect_domain:{cache_key}");
     if let Ok(mut conn) = state.redis.get().await {
-        if let Ok(cached) = redis::cmd("GET")
+        if let Ok(Some(cached)) = redis::cmd("GET")
             .arg(&redis_key)
             .query_async::<Option<String>>(&mut *conn)
             .await
         {
-            let result = cached.as_deref() == Some("1");
+            let result = cached == "1";
             state.domain_cache.insert(cache_key.clone(), result).await;
             return result;
         }
@@ -294,7 +298,11 @@ async fn query_domain_authorization(
 ) -> Result<bool, sqlx::Error> {
     // Migration 070 renamed `domains.domain` to `domains.name` — the old
     // column reference made this query fail on every deployment.
-    let owned = sqlx::query_as::<_, (i64,)>(
+    // The `1` literal is INT4: decode as i32 — sqlx does not coerce INT4
+    // into i64, and an i64 tuple made this probe (and therefore EVERY
+    // database-backed domain authorization) fail with a type error,
+    // denying all owned-domain redirects on cache miss.
+    let owned = sqlx::query_as::<_, (i32,)>(
         "SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2 LIMIT 1",
     )
     .bind(tenant_id)
@@ -306,7 +314,11 @@ async fn query_domain_authorization(
         return Ok(true);
     }
 
-    let patterns = sqlx::query_as::<_, (Vec<String>,)>(
+    // `allowed_redirect_domains` is a JSONB array (migration 093): decode
+    // through sqlx's Json wrapper — a bare Vec<String> expects TEXT[] and
+    // failed to decode, erroring (and therefore denying) every wildcard-
+    // pattern redirect.
+    let patterns = sqlx::query_as::<_, (sqlx::types::Json<Vec<String>>,)>(
         "SELECT allowed_redirect_domains FROM tenant_settings WHERE tenant_id = $1",
     )
     .bind(tenant_id)
@@ -314,7 +326,7 @@ async fn query_domain_authorization(
     .await?;
 
     if let Some((patterns,)) = patterns {
-        for pattern in &patterns {
+        for pattern in patterns.0.iter() {
             if match_domain_pattern(domain, pattern) {
                 return Ok(true);
             }

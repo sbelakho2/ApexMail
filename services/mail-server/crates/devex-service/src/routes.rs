@@ -326,4 +326,159 @@ mod tests {
         let sdks = json["sdks"].as_array().unwrap();
         assert_eq!(sdks.len(), 5);
     }
+
+    // ── Adversarial: auth matrix, listing surfaces, hostile webhook URL ──
+
+    fn state_with_token(token: &str) -> Result<AppState, crate::types::DevExError> {
+        let mut state = AppState::from_config(DevExConfig::default())?;
+        state.service_token = token.into();
+        Ok(state)
+    }
+
+    #[tokio::test]
+    async fn auth_matrix_guards_everything_but_health() {
+        use tower::ServiceExt;
+        let state = state_with_token("test-key").expect("state");
+        let app = build_router(state);
+
+        for uri in [
+            "/versions",
+            "/sdks",
+            "/openapi.json",
+            "/onboarding/checklist",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
+        // Bearer and x-api-key both work.
+        let mut request = Request::builder().uri("/sdks").body(Body::empty()).unwrap();
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-key".parse().unwrap(),
+        );
+        let resp = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // x-api-key is accepted too; the checklist additionally requires a
+        // tenant header, so its absence is a caller error (400), proving the
+        // request got PAST auth.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/onboarding/checklist")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // An unconfigured token locks everything but /health.
+        let locked = build_router(state_with_token("").expect("state"));
+        let resp = locked
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = locked
+            .oneshot(
+                Request::builder()
+                    .uri("/sdks")
+                    .header("x-api-key", "anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sdks_and_openapi_surfaces_answer_with_real_payloads() {
+        use tower::ServiceExt;
+        let app = build_router(state_with_token("test-key").expect("state"));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sdks")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_array() || json["sdks"].is_array(), "{json}");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["openapi"].is_string() || json["info"].is_object(),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_test_endpoint_refuses_private_targets() {
+        use tower::ServiceExt;
+        let app = build_router(state_with_token("test-key").expect("state"));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/test")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "url": "http://127.0.0.1:9/hook",
+                            "event_type": "message.delivered"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"].as_str().unwrap().contains("private/internal"),
+            "{json}"
+        );
+    }
 }

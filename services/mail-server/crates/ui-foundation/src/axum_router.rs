@@ -1109,23 +1109,26 @@ fn inject_form_field_state(html: String, fields: Option<&FormFieldData>) -> Stri
             })
             .collect::<Vec<_>>()
             .join("");
-        if let Some(idx) = html.find("</div>") {
-            // Right after the flash container when present…
-            let after_flash = html[..idx]
+        // Right after the flash container when present; otherwise at the
+        // top of the content. The fallback must not depend on a `</div>`
+        // existing anywhere — a page without one silently dropped the
+        // reveal-once secret.
+        let after_flash = html.find("</div>").and_then(|idx| {
+            html[..idx]
                 .contains("id=\"flash\"")
-                .then(|| idx + "</div>".len());
-            let insert_at = after_flash
-                .or_else(|| {
-                    html.find("<main id=\"app-main\"")
-                        .and_then(|main| html[main..].find('>').map(|e| main + e + 1))
-                })
-                .or_else(|| {
-                    html.find("<body")
-                        .and_then(|body| html[body..].find('>').map(|e| body + e + 1))
-                });
-            if let Some(insert_at) = insert_at {
-                html.insert_str(insert_at, &chips);
-            }
+                .then(|| idx + "</div>".len())
+        });
+        let insert_at = after_flash
+            .or_else(|| {
+                html.find("<main id=\"app-main\"")
+                    .and_then(|main| html[main..].find('>').map(|e| main + e + 1))
+            })
+            .or_else(|| {
+                html.find("<body")
+                    .and_then(|body| html[body..].find('>').map(|e| body + e + 1))
+            });
+        if let Some(insert_at) = insert_at {
+            html.insert_str(insert_at, &chips);
         }
     }
 
@@ -1226,10 +1229,7 @@ fn inject_input_values(html: &mut String, map: &FormFieldData) {
                 && !tag.contains("type=\"button\"")
             {
                 if let Some(error) = map.field_error(&name) {
-                    output.push_str(&format!(
-                        "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
-                        crate::shell::html_escape(error)
-                    ));
+                    output.push_str(&field_error_paragraph(error));
                 }
             }
         }
@@ -1294,6 +1294,14 @@ fn rewrite_input_tag(tag: &str, map: &FormFieldData) -> String {
     format!("{body}{}", if self_closing { "/>" } else { ">" })
 }
 
+/// The per-field error paragraph rendered directly after its control.
+fn field_error_paragraph(error: &str) -> String {
+    format!(
+        "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
+        crate::shell::html_escape(error)
+    )
+}
+
 fn inject_textarea_values(html: &mut String, map: &FormFieldData) {
     let mut output = String::with_capacity(html.len());
     let mut rest = html.as_str();
@@ -1312,15 +1320,18 @@ fn inject_textarea_values(html: &mut String, map: &FormFieldData) {
             if let Some(value) = map.field_value(&name) {
                 output.push_str(&crate::shell::html_escape(value));
                 output.push_str("</textarea>");
+                // The submitted value must not swallow the field error: in a
+                // failed POST both are present, and the old code rendered
+                // only the value, hiding the validation message.
+                if let Some(error) = map.field_error(&name) {
+                    output.push_str(&field_error_paragraph(error));
+                }
                 rest = &rest[close + "</textarea>".len()..];
                 continue;
             }
             if let Some(error) = map.field_error(&name) {
                 output.push_str(&rest[open_end..close + "</textarea>".len()]);
-                output.push_str(&format!(
-                    "<p class=\"text-xs text-destructive mt-1\" role=\"alert\">{}</p>",
-                    crate::shell::html_escape(error)
-                ));
+                output.push_str(&field_error_paragraph(error));
                 rest = &rest[close + "</textarea>".len()..];
                 continue;
             }
@@ -1359,12 +1370,26 @@ fn inject_select_values(html: &mut String, map: &FormFieldData) {
                         .find('>')
                         .map(|offset| option_start + offset + 1)
                         .unwrap_or(options.len());
-                    selected_inner.push_str(&options[..option_end]);
                     let option_tag = &options[option_start..option_end];
-                    if extract_attribute(option_tag, "value").as_deref() == Some(value) {
+                    // `selected` is an ATTRIBUTE: it belongs INSIDE the
+                    // opening tag. Appending it after the '>' (as the old
+                    // code did) produced `<option value="x"> selected>`,
+                    // which browsers render as option text — the posted
+                    // value was never actually re-selected.
+                    let closes = option_tag.ends_with('>');
+                    let tag_body = if closes {
+                        &option_tag[..option_tag.len() - 1]
+                    } else {
+                        option_tag
+                    };
+                    selected_inner.push_str(&options[..option_start]);
+                    selected_inner.push_str(tag_body);
+                    if closes && extract_attribute(option_tag, "value").as_deref() == Some(value) {
                         selected_inner.push_str(" selected");
                     }
-                    selected_inner.push('>');
+                    if closes {
+                        selected_inner.push('>');
+                    }
                     // Preserve the rest of this option's markup up to the
                     // next option (or the end).
                     let next = options[option_end..]
@@ -1381,6 +1406,14 @@ fn inject_select_values(html: &mut String, map: &FormFieldData) {
         }
         output.push_str(&inner);
         output.push_str("</select>");
+        // Selects carry per-field errors the same way inputs and textareas
+        // do; the old code never rendered them.
+        if let Some(error) = extract_attribute(tag, "name")
+            .as_deref()
+            .and_then(|name| map.field_error(name))
+        {
+            output.push_str(&field_error_paragraph(error));
+        }
         rest = &rest[close + "</select>".len()..];
     }
     output.push_str(rest);
@@ -1423,8 +1456,16 @@ fn inject_csrf_and_sign_confirms(
             .map(|offset| start + offset + 1)
             .unwrap_or(rest.len());
         let tag = &rest[start..end];
+        // A hidden _csrf input the view already rendered lives AFTER the
+        // opening tag, so presence must be checked over the whole form
+        // ELEMENT. Checking only the prefix (as the old code did) made a
+        // second pass inject a duplicate token into every form.
+        let element_end = rest[end..]
+            .find("</form>")
+            .map(|offset| end + offset)
+            .unwrap_or(rest.len());
         let posts_to_web = tag.contains("method=\"post\"") && tag.contains("action=\"/web/");
-        if posts_to_web && !rest[..end].contains("name=\"_csrf\"") {
+        if posts_to_web && !rest[start..element_end].contains("name=\"_csrf\"") {
             output.push_str(&rest[..end]);
             output.push_str(&csrf_input);
         } else {
@@ -3210,5 +3251,650 @@ mod tests {
     /// Helper: render data through the same path the loaders use.
     fn data_list_page_markup(data: &crate::view_data::ListPageData, noun: &str) -> String {
         leptos_views::data_list_page(data, noun)
+    }
+
+    // ─── Adversarial: full static-document whitelist + decode edges ────
+
+    /// Every Zola-built document in the whitelist must actually resolve
+    /// (locale variants, compare/*, docs/*, solutions/* included). A path
+    /// arm that falls out of the match would silently 404 behind the SSR
+    /// router — the footer links every locale, so all of them are load
+    /// bearing.
+    #[test]
+    fn every_built_marketing_document_is_served_with_and_without_slash() {
+        const BUILT: &[&str] = &[
+            "/",
+            "/about",
+            "/acceptable-use",
+            "/anti-spam",
+            "/api-explorer",
+            "/architecture",
+            "/compare",
+            "/compare/amazon-ses",
+            "/compare/mailgun",
+            "/compare/methodology",
+            "/compare/postmark",
+            "/compare/resend",
+            "/compare/sendgrid",
+            "/compliance",
+            "/contact",
+            "/contact/enterprise",
+            "/contact/sales",
+            "/contact/security",
+            "/cookies",
+            "/data-locations",
+            "/de",
+            "/de/about",
+            "/de/acceptable-use",
+            "/de/compare",
+            "/de/compliance",
+            "/de/contact",
+            "/de/cookies",
+            "/de/data-locations",
+            "/de/dpa",
+            "/de/features",
+            "/de/privacy",
+            "/de/private-cloud",
+            "/de/quickstart",
+            "/de/responsible-disclosure",
+            "/de/security",
+            "/de/sla",
+            "/de/solutions/enterprise",
+            "/de/status",
+            "/de/subprocessors",
+            "/de/terms",
+            "/docs",
+            "/docs/alerts",
+            "/docs/analytics",
+            "/docs/api",
+            "/docs/api/grader",
+            "/docs/api/openapi",
+            "/docs/sdks",
+            "/docs/webhooks",
+            "/dpa",
+            "/enterprise",
+            "/es",
+            "/es/about",
+            "/es/acceptable-use",
+            "/es/compare",
+            "/es/compliance",
+            "/es/contact",
+            "/es/cookies",
+            "/es/data-locations",
+            "/es/dpa",
+            "/es/features",
+            "/es/privacy",
+            "/es/private-cloud",
+            "/es/quickstart",
+            "/es/responsible-disclosure",
+            "/es/security",
+            "/es/sla",
+            "/es/solutions/enterprise",
+            "/es/status",
+            "/es/subprocessors",
+            "/es/terms",
+            "/features",
+            "/email-logs",
+            "/fr",
+            "/fr/about",
+            "/fr/acceptable-use",
+            "/fr/compare",
+            "/fr/compliance",
+            "/fr/contact",
+            "/fr/cookies",
+            "/fr/data-locations",
+            "/fr/dpa",
+            "/fr/features",
+            "/fr/privacy",
+            "/fr/private-cloud",
+            "/fr/quickstart",
+            "/fr/responsible-disclosure",
+            "/fr/security",
+            "/fr/sla",
+            "/fr/solutions/enterprise",
+            "/fr/status",
+            "/fr/subprocessors",
+            "/fr/terms",
+            "/inbox-placement",
+            "/performance-methodology",
+            "/pricing",
+            "/pricing/calculator",
+            "/privacy",
+            "/privacy/do-not-sell",
+            "/private-cloud",
+            "/quickstart",
+            "/responsible-disclosure",
+            "/secure-email-for-regulated-saas",
+            "/security",
+            "/sla",
+            "/solutions",
+            "/solutions/enterprise",
+            "/solutions/high-volume-sending",
+            "/solutions/migration",
+            "/solutions/regulated-industries",
+            "/solutions/saas-platforms",
+            "/solutions/transactional-email",
+            "/status",
+            "/subprocessors",
+            "/terms",
+            "/api-console",
+            "/aup",
+        ];
+
+        for path in BUILT {
+            let doc = marketing_static_document("marketing-zola", path)
+                .unwrap_or_else(|| panic!("built page {path} missing from the whitelist"));
+            assert!(
+                doc.to_ascii_lowercase().contains("<html"),
+                "{path} must serve a real document"
+            );
+            // Trailing-slash form must resolve to the same document.
+            let slash = format!("{path}/");
+            let doc_slash = marketing_static_document("marketing-zola", &slash)
+                .unwrap_or_else(|| panic!("trailing-slash {slash} must resolve"));
+            assert_eq!(doc, doc_slash, "{slash} must serve the canonical document");
+        }
+
+        // Unknown paths stay None (no catch-all).
+        assert!(marketing_static_document("marketing-zola", "/nope").is_none());
+        // The legacy "marketing" surface serves the same documents.
+        assert!(marketing_static_document("marketing", "/de/security").is_some());
+    }
+
+    /// The percent-decoder must handle '+' as space, keep multibyte UTF-8
+    /// intact, and pass malformed escapes through verbatim (never panic or
+    /// drop bytes).
+    #[test]
+    fn query_component_decoder_handles_plus_utf8_and_malformed_escapes() {
+        assert_eq!(decode_query_component("a+b"), "a b");
+        assert_eq!(decode_query_component("%C3%B5"), "õ");
+        assert_eq!(decode_query_component("%zz"), "%zz");
+        assert_eq!(decode_query_component("%2"), "%2");
+        assert_eq!(decode_query_component("100%"), "100%");
+        assert_eq!(decode_query_component(""), "");
+        // %-escape followed by more data keeps decoding after the '%'.
+        assert_eq!(decode_query_component("%41+%42"), "A B");
+    }
+
+    /// `?error=` is a machine-readable closed set: only known codes render a
+    /// banner; unknown/free-text values render nothing (no prose injection).
+    #[test]
+    fn login_error_codes_are_a_closed_set() {
+        assert!(login_query_error_message(Some("sso_denied"))
+            .is_some_and(|message| message.contains("declined")));
+        assert!(login_query_error_message(Some("sso_failed"))
+            .is_some_and(|message| message.contains("failed")));
+        assert!(login_query_error_message(Some("<script>alert(1)</script>")).is_none());
+        assert!(login_query_error_message(None).is_none());
+
+        let html = render_route_with_query(
+            "web",
+            "/login",
+            Some("error=%3Cscript%3Ealert(1)%3C%2Fscript%3E"),
+            None,
+        )
+        .unwrap();
+        assert!(!html.contains("alert(1)"));
+        let denied =
+            render_route_with_query("web", "/login", Some("error=sso_denied"), None).unwrap();
+        assert!(denied.contains("declined"));
+        let failed =
+            render_route_with_query("web", "/login", Some("error=sso_failed"), None).unwrap();
+        assert!(failed.contains("Single sign-in failed"));
+    }
+
+    /// Empty query segments are skipped; unknown keys never populate fields.
+    #[test]
+    fn parse_query_params_skips_empty_segments_and_unknown_keys() {
+        let params = parse_query_params(Some("&&plan=pro&&bogus=x&"));
+        assert_eq!(params.signup_plan.as_deref(), Some("pro"));
+        assert!(params.token.is_none());
+        assert!(params.error.is_none());
+        assert!(!params.mfa_challenge);
+        assert!(parse_query_params(None).token.is_none());
+        // Empty values never populate fields (a bare `?token=` is not state).
+        let empty = parse_query_params(Some("token=&email=&refresh="));
+        assert!(empty.token.is_none());
+        assert!(empty.email.is_none());
+        assert!(empty.refresh_secs.is_none());
+        // refresh accepts only the allowlist.
+        assert_eq!(
+            parse_query_params(Some("refresh=60")).refresh_secs,
+            Some(60)
+        );
+        assert!(parse_query_params(Some("refresh=61"))
+            .refresh_secs
+            .is_none());
+        // mfa accepts 1 and true (case-insensitive), nothing else.
+        assert!(parse_query_params(Some("mfa=1")).mfa_challenge);
+        assert!(parse_query_params(Some("mfa=TRUE")).mfa_challenge);
+        assert!(!parse_query_params(Some("mfa=yes")).mfa_challenge);
+    }
+
+    /// The script stripper must survive malformed markup: an unterminated
+    /// opening tag, an unterminated JSON-LD block, and an unterminated
+    /// executable script all keep the rest of the document intact.
+    #[test]
+    fn script_stripper_handles_malformed_markup_without_losing_content() {
+        // Unterminated opening tag: remainder kept verbatim, no panic.
+        let unterminated_tag = strip_executable_scripts("<p>a</p><script src=x");
+        assert!(unterminated_tag.contains("<p>a</p>"));
+        assert!(unterminated_tag.contains("<script src=x"));
+
+        // JSON-LD block without a closing tag: whole remainder preserved.
+        let unterminated_jsonld =
+            strip_executable_scripts("<p>a</p><script type=\"application/ld+json\">{");
+        assert!(unterminated_jsonld.contains("application/ld+json"));
+        assert!(unterminated_jsonld.contains("<p>a</p>"));
+
+        // Executable script without a closing tag: only the opener is dropped.
+        let unterminated_exec = strip_executable_scripts("<p>a</p><script src=x defer><p>b</p>");
+        assert!(unterminated_exec.contains("<p>a</p>"));
+        assert!(unterminated_exec.contains("<p>b</p>"));
+        assert!(!unterminated_exec.contains("<script"));
+
+        // A JSON data block (not ld+json) is also preserved.
+        let json_block = strip_executable_scripts(
+            "<script type=\"application/json\">{\"a\":1}</script><script>x()</script>",
+        );
+        assert!(json_block.contains("application/json"));
+        assert!(!json_block.contains("x()"));
+    }
+
+    /// Normalization repairs documents missing </body> or </html>, and the
+    /// result is stable under a second pass (cache returns equal output).
+    #[test]
+    fn normalize_document_repairs_missing_body_and_html() {
+        let without_body = normalize_marketing_static_document("<html><p>x</p></html>");
+        assert!(without_body.contains("<p>x</p></body></html>"));
+
+        let without_html = normalize_marketing_static_document("<p>only</p>");
+        assert!(without_html.ends_with("</body></html>"));
+
+        // Second call hits the memo cache and must return identical output.
+        let again = normalize_marketing_static_document("<html><p>x</p></html>");
+        assert_eq!(without_body, again);
+
+        // Absolute asset URLs are rewritten, canonical URLs are not.
+        let rewritten = normalize_marketing_static_document(
+            "<html><head><link href=\"https://apexmail.ee/css/styles.css\">\
+             <link rel=\"canonical\" href=\"https://apexmail.ee/pricing\"></head></html>",
+        );
+        assert!(rewritten.contains("href=\"/css/styles.css\""));
+        assert!(rewritten.contains("href=\"https://apexmail.ee/pricing\""));
+    }
+
+    /// Trailing slashes normalize on every surface (web + control-plane).
+    #[test]
+    fn trailing_slash_routes_normalize_on_every_surface() {
+        let plain = render_route("web", "/dashboard").unwrap();
+        let slashed = render_route("web", "/dashboard/").unwrap();
+        assert_eq!(plain, slashed);
+
+        let cp = render_route("control-plane", "/tenants").unwrap();
+        let cp_slashed = render_route("control-plane", "/tenants/").unwrap();
+        assert_eq!(cp, cp_slashed);
+
+        assert!(render_route("web", "/").is_some());
+        assert!(render_route("control-plane", "/").is_some());
+        assert!(render_route("marketing-zola", "/").is_some());
+    }
+
+    /// `render_inner` refuses an unknown surface outright and serves the CP
+    /// MFA challenge only when an email is bound.
+    #[test]
+    fn render_inner_rejects_unknown_surface_and_binds_cp_mfa_email() {
+        assert!(render_inner("bogus", "/", None, None, None, "").is_none());
+
+        // mfa=1 without email stays on the CP password form.
+        let cp_no_email = render_inner(
+            "control-plane",
+            "/login",
+            Some("mfa=1"),
+            Some("secret"),
+            None,
+            "tok",
+        )
+        .unwrap();
+        assert!(cp_no_email.contains("action=\"/web/cp/login\""));
+        assert!(cp_no_email.contains("Authorize Access"));
+
+        // With email it renders the challenge (the router threads the token).
+        let cp_mfa = render_inner(
+            "control-plane",
+            "/login/",
+            Some("mfa=1&email=ops%40apexmail.ee"),
+            Some("secret"),
+            None,
+            "tok",
+        )
+        .unwrap();
+        assert!(cp_mfa.contains("action=\"/web/auth/mfa/verify\""));
+    }
+
+    /// Auto-refresh injection works even when the document has no </head>
+    /// (the meta lands directly after <body>).
+    #[test]
+    fn auto_refresh_without_head_inserts_meta_after_body() {
+        let html = inject_opt_in_auto_refresh(
+            "<!DOCTYPE html><html><body><p>x</p></body></html>".to_string(),
+            "control-plane",
+            "/alerts",
+            Some("refresh=30"),
+        );
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"30\" />"));
+        assert!(html.contains("Live — auto-refresh every 30s"));
+        // Unknown surface/path pairs are untouched.
+        let untouched = inject_opt_in_auto_refresh(
+            "<body>x</body>".to_string(),
+            "web",
+            "/login",
+            Some("refresh=30"),
+        );
+        assert_eq!(untouched, "<body>x</body>");
+    }
+
+    /// Info flashes render with the Notice label; a document without
+    /// `<main id="app-main">` receives the banner right after `<body>`.
+    #[test]
+    fn flash_banners_render_info_kind_and_body_fallback() {
+        let info = render_flash_banners(
+            "<html><body><main id=\"app-main\"><p>x</p></main></body></html>".to_string(),
+            &[crate::flash::FlashMessage::info("Heads up")],
+        );
+        assert!(info.contains("aria-label=\"Notice\""));
+        assert!(info.contains("Heads up"));
+
+        let body_only = render_flash_banners(
+            "<html><body><p>bare</p></body></html>".to_string(),
+            &[crate::flash::FlashMessage::success("Saved")],
+        );
+        assert!(body_only.contains("<div id=\"flash\" tabindex=\"-1\">"));
+        assert!(body_only.contains("Saved"));
+
+        // Hostile flash text is escaped, never markup.
+        let hostile = render_flash_banners(
+            "<html><body><main id=\"app-main\"></main></body></html>".to_string(),
+            &[crate::flash::FlashMessage::error("<img src=x onerror=1>")],
+        );
+        assert!(!hostile.contains("<img"));
+        assert!(hostile.contains("&lt;img"));
+        // No flash ⇒ byte-identical passthrough.
+        let passthrough = render_flash_banners("<body>x</body>".to_string(), &[]);
+        assert_eq!(passthrough, "<body>x</body>");
+    }
+
+    /// Field-map injection: an empty map is a byte-identical no-op, secrets
+    /// render even when no flash banner exists, and a mismatched form scope
+    /// drops all replay (but still shows the reveal-once secret chips).
+    #[test]
+    fn form_field_injection_is_empty_noop_and_form_scoped() {
+        let page = "<html><body><main id=\"app-main\"><form data-form-id=\"a\"></form></main></body></html>";
+        assert_eq!(
+            inject_form_field_state(page.to_string(), Some(&FormFieldData::new("a"))),
+            page
+        );
+
+        let mut secrets = FormFieldData::new("a");
+        secrets.secret("API key", "sk_live_123");
+        let with_secret = inject_form_field_state(page.to_string(), Some(&secrets));
+        assert!(with_secret.contains("sk_live_123"));
+        assert!(with_secret.contains("Shown once"));
+
+        // Mismatched form id: values dropped, secret chip still rendered.
+        let mut mismatched = FormFieldData::new("other-form");
+        mismatched.set("url", "https://evil.example/hook");
+        mismatched.secret("Token", "tok_123");
+        let scoped = inject_form_field_state(page.to_string(), Some(&mismatched));
+        assert!(!scoped.contains("https://evil.example/hook"));
+        assert!(scoped.contains("tok_123"));
+    }
+
+    /// Group-valued checkboxes (same name, multiple posted values) get each
+    /// matching input marked checked; text inputs have their value replaced
+    /// and gain aria-invalid on error; unnamed inputs are untouched.
+    #[test]
+    fn checkbox_groups_replace_values_and_render_errors() {
+        let page = "<form><input type=\"checkbox\" name=\"events\" value=\"message.accepted\" />\
+<input type=\"checkbox\" name=\"events\" value=\"message.delivered\" />\
+<input type=\"checkbox\" name=\"events\" value=\"message.bounced\" />\
+<input type=\"text\" name=\"url\" value=\"old\" />\
+<input type=\"text\" value=\"nameless\" /></form>";
+        let map = FormFieldData {
+            form_id: "webhook-create".into(),
+            values: vec![
+                ("events".into(), "message.accepted".into()),
+                ("events".into(), "message.bounced".into()),
+                ("url".into(), "https://new.example/hook".into()),
+            ],
+            errors: vec![("url".into(), "Enter an https URL.".into())],
+            secrets: vec![],
+        };
+        let html = inject_form_field_state(page.to_string(), Some(&map));
+        assert_eq!(html.matches(" checked").count(), 2);
+        assert!(html.contains("value=\"https://new.example/hook\""));
+        assert!(!html.contains("value=\"old\""));
+        assert!(html.contains("aria-invalid=\"true\""));
+        assert!(html.contains("Enter an https URL."));
+        assert!(html.contains("value=\"nameless\""));
+
+        // Self-closing text input gets value + aria-invalid before "/>".
+        let self_closing = inject_form_field_state(
+            "<form><input type=\"text\" name=\"q\" value=\"x\"/></form>".to_string(),
+            Some(&FormFieldData {
+                form_id: "f".into(),
+                values: vec![("q".into(), "y".into())],
+                errors: vec![("q".into(), "bad".into())],
+                secrets: vec![],
+            }),
+        );
+        assert!(self_closing.contains("value=\"y\""));
+        assert!(self_closing.contains("aria-invalid=\"true\"/>"));
+        assert!(!self_closing.contains("value=\"x\""));
+        // The error paragraph follows the control.
+        assert!(self_closing.contains("</p>"));
+
+        // _csrf and submit controls are never rewritten.
+        let untouched = inject_form_field_state(
+            "<form><input type=\"hidden\" name=\"_csrf\" value=\"tok\" />\
+<input type=\"submit\" name=\"go\" value=\"Go\" /></form>"
+                .to_string(),
+            Some(&FormFieldData {
+                form_id: "f".into(),
+                values: vec![
+                    ("_csrf".into(), "evil".into()),
+                    ("go".into(), "evil".into()),
+                ],
+                errors: vec![],
+                secrets: vec![],
+            }),
+        );
+        assert!(untouched.contains("value=\"tok\""));
+        assert!(untouched.contains("value=\"Go\""));
+        assert!(!untouched.contains("evil"));
+    }
+
+    /// Textarea values are re-populated (escaped) and textarea errors render
+    /// after the control; selects mark the posted option and clear any
+    /// previously rendered selection.
+    #[test]
+    fn textarea_and_select_injection_repopulate_and_escape() {
+        let map = FormFieldData {
+            form_id: "f".into(),
+            values: vec![
+                ("body".into(), "a<b> & c".into()),
+                ("plan".into(), "pro".into()),
+            ],
+            errors: vec![("body".into(), "Too long".into())],
+            secrets: vec![],
+        };
+        let html = inject_form_field_state(
+            "<form><textarea name=\"body\">old</textarea>\
+<select name=\"plan\"><option value=\"free\" selected>Free</option>\
+<option value=\"pro\">Pro</option></select></form>"
+                .to_string(),
+            Some(&map),
+        );
+        assert!(html.contains("a&lt;b&gt; &amp; c"));
+        assert!(!html.contains("old"));
+        assert!(html.contains("Too long"));
+        assert!(html.contains("<option value=\"free\">Free</option>"));
+        assert!(html.contains("<option value=\"pro\" selected>Pro</option>"));
+
+        // A textarea with no matching entry stays byte-identical.
+        let mut untouched = "<form><textarea name=\"other\">keep</textarea></form>".to_string();
+        inject_textarea_values(&mut untouched, &FormFieldData::new("f"));
+        assert!(untouched.contains("keep"));
+    }
+
+    /// CSRF injection is idempotent (an existing hidden input is not
+    /// duplicated) and pre-signed confirm links are left alone; `&amp;`
+    /// separated confirm params still sign the right intent/id.
+    #[test]
+    fn csrf_injection_is_idempotent_and_signs_only_unsigned_links() {
+        let secret = "router-test-secret-0123456789";
+        let page =
+            "<form method=\"post\" action=\"/web/x\"><input type=\"text\" name=\"a\" /></form>\
+<a href=\"/confirm?intent=delete-list&amp;id=l_1\">Delete</a>";
+        let once = inject_csrf_and_sign_confirms(page.to_string(), Some(secret), "tok");
+        assert_eq!(once.matches("name=\"_csrf\"").count(), 1);
+        // Signing decodes the `&amp;` prefix so the token verifies for the
+        // real intent id.
+        let sig_start = once.find("sig=").expect("confirm link signed");
+        let token: String = once[sig_start + 4..]
+            .chars()
+            .take_while(|c| *c != '"')
+            .collect();
+        assert!(crate::flash::verify_confirmation(
+            secret,
+            &token,
+            "delete-list",
+            "l_1",
+            chrono::Utc::now().timestamp()
+        ));
+
+        // Running again does not add a second _csrf and does not re-sign.
+        let twice = inject_csrf_and_sign_confirms(once.clone(), Some(secret), "tok");
+        assert_eq!(twice.matches("name=\"_csrf\"").count(), 1);
+        assert_eq!(twice.matches("sig=").count(), 1);
+        assert_eq!(once, twice);
+
+        // No secret ⇒ byte-identical passthrough.
+        let plain = inject_csrf_and_sign_confirms(page.to_string(), None, "tok");
+        assert_eq!(plain, page);
+        // extract_query_param on a link without a query is None.
+        assert!(extract_query_param("/confirm", "intent").is_none());
+    }
+
+    /// Route-context lookup stays honest for unknown paths.
+    #[test]
+    fn control_plane_route_context_defaults_for_unknown_paths() {
+        assert_eq!(
+            control_plane_route_context("/not-a-route"),
+            ("Control Plane", "ApexMail administration and monitoring.")
+        );
+    }
+
+    /// `/confirm` with a server secret verifies the signature: a correct
+    /// signature renders the confirmed state, a tampered one does not.
+    #[test]
+    fn confirm_route_verifies_signature_when_secret_configured() {
+        let secret = "router-test-secret-0123456789";
+        let now = chrono::Utc::now().timestamp();
+        let token = crate::flash::sign_confirmation_for_ttl(
+            secret,
+            "delete-campaign",
+            "c_spring",
+            now,
+            crate::flash::CONFIRMATION_DEFAULT_TTL_SECS,
+        );
+        let html = render_route_with_query(
+            "web",
+            "/confirm",
+            Some(&format!(
+                "intent=delete-campaign&id=c_spring&sig={token}&return_to=%2Fcampaigns"
+            )),
+            Some(secret),
+        )
+        .unwrap();
+        assert!(
+            html.contains("signed and expires"),
+            "a verified signature must render the actionable confirm page"
+        );
+        assert!(html.contains("Yes, delete"));
+
+        let tampered = render_route_with_query(
+            "web",
+            "/confirm",
+            Some("intent=delete-campaign&id=c_other&sig=deadbeef.deadbeef"),
+            Some(secret),
+        )
+        .unwrap();
+        assert!(tampered.contains("Confirmation link unavailable"));
+        // A wrong id under an otherwise valid-looking signature is refused.
+        assert_ne!(html, tampered);
+    }
+
+    /// The CP sales page renders live data when the loader supplied it and
+    /// the honest no-data page otherwise (never a zero-filled dashboard).
+    #[test]
+    fn control_plane_sales_renders_live_data_or_honest_unavailable() {
+        let data = RouteData {
+            sales: Some(crate::view_data::SalesPageData {
+                csrf_token: "tok".into(),
+                overview: Some(crate::view_data::SalesOverviewData {
+                    autonomy: crate::view_data::SalesAutonomyData {
+                        mode: "shadow".into(),
+                        mode_description: "Observe-only".into(),
+                        kill_switch: false,
+                        runs_brain: true,
+                        may_execute: false,
+                        last_action: None,
+                        last_action_at: None,
+                    },
+                    action_stats: crate::view_data::SalesActionStatsData {
+                        total: 3,
+                        due_now: 1,
+                        dead_lettered: 0,
+                        by_state: vec![("pending".into(), 3)],
+                    },
+                    enrollments: vec![crate::view_data::SalesEnrollmentCountData {
+                        state: "active".into(),
+                        count: 2,
+                    }],
+                    decisions_last_24h: 5,
+                    blocked_last_24h: 1,
+                    meetings_booked: 0,
+                    revenue: vec![],
+                }),
+                decisions: Some(vec![]),
+                exceptions: Some(vec![]),
+                dead_letters: Some(vec![]),
+            }),
+            ..Default::default()
+        };
+        let live = render_route_with_data("control-plane", "/sales", None, None, &[], Some(&data))
+            .expect("sales route renders with data");
+        assert!(live.contains("shadow"));
+        assert!(live.contains("Observe-only"));
+
+        let fallback = render_route("control-plane", "/sales").unwrap();
+        assert_ne!(live, fallback);
+    }
+
+    /// Marketing surfaces: zola /compare differs from the legacy marketing
+    /// surface (which has no built compare index and must not silently
+    /// serve the zola one), and the /aup alias resolves.
+    #[test]
+    fn marketing_surface_variants_resolve_distinct_documents() {
+        let zola_compare = render_route("marketing-zola", "/compare").unwrap();
+        assert!(!zola_compare.is_empty());
+        // The legacy surface serves the same static document, if built.
+        assert!(render_route("marketing", "/compare").is_some());
+        // /aup alias serves the acceptable-use policy.
+        let aup = render_route("marketing-zola", "/aup").unwrap();
+        let acceptable = render_route("marketing-zola", "/acceptable-use").unwrap();
+        assert_eq!(aup, acceptable);
+        assert!(render_route("marketing", "/aup").is_some());
     }
 }

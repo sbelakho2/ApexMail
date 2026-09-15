@@ -1921,6 +1921,12 @@ pub(crate) mod test_support {
     /// [`test_state_over_lazy`] with an explicit Redis URL (dead endpoint for
     /// fail-open/fail-closed paths).
     pub(crate) async fn test_state_over_lazy_with_redis(redis_url: &str) -> AppState {
+        // The lazy pool never touches test_db's pool helpers, so the
+        // deterministic TLS-root environment must be ensured here too: the
+        // AppState still builds an AWS SES client, whose rustls trust store
+        // otherwise reads the macOS keychain (flaky "no valid root
+        // certificates parsed" under parallel load).
+        crate::test_db::ensure_aws_test_env();
         let database_url = std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -2078,6 +2084,11 @@ mod tests {
 
     async fn test_state() -> TestState {
         install_test_metrics_recorder();
+        // This fixture builds an AWS SES client directly (below), so the
+        // deterministic TLS-root environment must be ensured before it: the
+        // SDK's rustls trust store otherwise reads the macOS keychain, which
+        // intermittently yields zero parseable roots under parallel load.
+        crate::test_db::ensure_aws_test_env();
 
         let database_url = std::env::var("TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://apexmail:apexmail@127.0.0.1:5433/apexmail".to_string());

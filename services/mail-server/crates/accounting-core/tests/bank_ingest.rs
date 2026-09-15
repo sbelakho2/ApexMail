@@ -566,3 +566,301 @@ async fn ingested_lines_sweep_into_the_posted_ledger_once() {
     );
     assert_eq!(outcome.line_count, 4);
 }
+
+// ---------------------------------------------------------------------------
+// 4. Request-level refusals and account-resolution edges
+// ---------------------------------------------------------------------------
+
+/// Every request-level problem is a typed refusal (never a partial import),
+/// and the per-row `bank_account` column is validated against the statement
+/// account — unknown, ambiguous, and foreign accounts are reported, not
+/// silently accepted.
+#[tokio::test]
+async fn ingest_request_level_refusals_and_account_resolution_edges() {
+    let Some(pool) = provision("req_refusals").await else {
+        return;
+    };
+    let entity = seed_entity(&pool, "req_refusals").await;
+    let account = seed_bank_account(&pool, entity, "EE00BANK0000000003", "EUR").await;
+    let account_ref = account.to_string();
+    let good_rows = ["external_id,statement_date,amount", "R-1,2026-06-05,10.00"].join("\n") + "\n";
+
+    // bank_account (IBAN or UUID) is required.
+    let missing_account = BankStatementImport {
+        bank_account: "   ",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &good_rows,
+        imported_by: "test-operator",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &missing_account).await,
+        Err(IngestError::Invalid(message)) if message.contains("bank_account")
+    ));
+
+    // period_end before period_start.
+    let reversed = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 30),
+        period_end: date(2026, 6, 1),
+        filename: None,
+        csv: &good_rows,
+        imported_by: "test-operator",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &reversed).await,
+        Err(IngestError::Invalid(message)) if message.contains("period_end")
+    ));
+
+    // Empty CSV body.
+    let empty = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: "   \n",
+        imported_by: "test-operator",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &empty).await,
+        Err(IngestError::Invalid(message)) if message.contains("csv")
+    ));
+
+    // Missing operator identity (audit trail).
+    let anonymous = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &good_rows,
+        imported_by: " ",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &anonymous).await,
+        Err(IngestError::Invalid(message)) if message.contains("imported_by")
+    ));
+
+    // Unknown account reference.
+    let unknown = BankStatementImport {
+        bank_account: "EE99NOTREGISTERED0000",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &good_rows,
+        imported_by: "test-operator",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &unknown).await,
+        Err(IngestError::UnknownAccount(reference)) if reference == "EE99NOTREGISTERED0000"
+    ));
+
+    // Missing required header columns are named in one refusal.
+    let no_external = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: "statement_date,amount\n2026-06-05,10.00\n",
+        imported_by: "test-operator",
+    };
+    match ingest_bank_statement(&pool, &no_external).await {
+        Err(IngestError::Invalid(message)) => {
+            // The refusal names exactly the missing columns (statement_date
+            // and amount are present in this header).
+            assert!(message.contains("external_id"), "{message}");
+            assert!(
+                !message.contains("statement_date") && !message.contains("amount"),
+                "only missing columns are named: {message}"
+            );
+        }
+        other => panic!("expected Invalid header refusal, got {other:?}"),
+    }
+    let no_date = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: "external_id,amount\nR-1,10.00\n",
+        imported_by: "test-operator",
+    };
+    match ingest_bank_statement(&pool, &no_date).await {
+        Err(IngestError::Invalid(message)) => {
+            assert!(message.contains("statement_date"), "{message}");
+        }
+        other => panic!("expected Invalid header refusal, got {other:?}"),
+    }
+
+    // Malformed CSV record (unterminated quote) is a row error, not a panic.
+    let malformed = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: "external_id,statement_date,amount\n\"unterminated,2026-06-05,10.00\n",
+        imported_by: "test-operator",
+    };
+    match ingest_bank_statement(&pool, &malformed).await {
+        Err(IngestError::Rejected { errors }) => {
+            // The unterminated quoted field swallows the rest of the line,
+            // so the row surfaces as per-column errors on its own line — a
+            // malformed record is reported, never silently dropped or
+            // partially imported. (The reader runs in flexible mode, so a
+            // length mismatch is not an error; the defensive csv::Error arm
+            // needs invalid UTF-8, which a `&str` input cannot carry.)
+            assert_eq!(errors[0].row, 2, "the malformed line is named: {errors:?}");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.column == "statement_date" || error.column == "amount"),
+                "the malformed record's fields are reported: {errors:?}"
+            );
+        }
+        other => panic!("expected Rejected for malformed CSV, got {other:?}"),
+    }
+
+    // Missing values and an unparseable value_date are per-row errors.
+    let bad_rows = [
+        "external_id,statement_date,value_date,amount",
+        ",2026-06-05,,10.00",
+        "R-VD,2026-06-05,not-a-date,10.00",
+    ]
+    .join("\n")
+        + "\n";
+    let bad = BankStatementImport {
+        bank_account: "EE00BANK0000000003",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &bad_rows,
+        imported_by: "test-operator",
+    };
+    match ingest_bank_statement(&pool, &bad).await {
+        Err(IngestError::Rejected { errors }) => {
+            let pairs: Vec<(u32, &str)> = errors
+                .iter()
+                .map(|error| (error.row, error.column.as_str()))
+                .collect();
+            assert_eq!(
+                pairs,
+                vec![(2, "external_id"), (3, "value_date")],
+                "{errors:?}"
+            );
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+
+    // Per-row bank_account edges: unknown UUID, foreign account (UUID and
+    // IBAN), and ambiguous IBAN.
+    let foreign_entity = seed_entity(&pool, "req_refusals_foreign").await;
+    let foreign = seed_bank_account(&pool, foreign_entity, "EE00FOREIGN00000001", "EUR").await;
+    let _ambiguous_a = seed_bank_account(&pool, entity, "EE00AMBIG000000001", "EUR").await;
+    // A second account on the same IBAN (different entity) makes the IBAN
+    // ambiguous for row-level resolution.
+    let _ambiguous_b = seed_bank_account(&pool, foreign_entity, "EE00AMBIG000000001", "EUR").await;
+    let row_accounts = [
+        "external_id,statement_date,amount,bank_account".to_string(),
+        format!("RA-1,2026-06-05,10.00,{}", Uuid::new_v4()),
+        format!("RA-2,2026-06-05,10.00,{foreign}"),
+        "RA-3,2026-06-05,10.00,EE00FOREIGN00000001".to_string(),
+        "RA-4,2026-06-05,10.00,EE00AMBIG000000001".to_string(),
+        format!("RA-5,2026-06-05,10.00,{_ambiguous_a}"),
+        format!("RA-6,2026-06-05,10.00,{account}"),
+    ]
+    .join("\n")
+        + "\n";
+    let row_account_input = BankStatementImport {
+        bank_account: &account_ref,
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &row_accounts,
+        imported_by: "test-operator",
+    };
+    match ingest_bank_statement(&pool, &row_account_input).await {
+        Err(IngestError::Rejected { errors }) => {
+            let by_row: Vec<(u32, &str)> = errors
+                .iter()
+                .map(|error| (error.row, error.column.as_str()))
+                .collect();
+            assert_eq!(
+                by_row.len(),
+                5,
+                "5 of 6 rows carry a bad account: {errors:?}"
+            );
+            assert!(errors.iter().any(|e| e.message.contains("not registered")));
+            assert!(errors
+                .iter()
+                .any(|e| e.message.contains("not the statement's account")));
+            assert!(errors
+                .iter()
+                .any(|e| e.message.contains("ambiguous across legal entities")));
+            // The row naming the statement's own UUID is accepted (row 7).
+            assert!(
+                !errors.iter().any(|e| e.row == 7),
+                "the statement's own account must be accepted: {errors:?}"
+            );
+        }
+        other => panic!("expected Rejected for row-account edges, got {other:?}"),
+    }
+
+    // An IBAN shared by two legal entities is ambiguous at the statement
+    // level: import by UUID instead.
+    let ambiguous = BankStatementImport {
+        bank_account: "EE00AMBIG000000001",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &good_rows,
+        imported_by: "test-operator",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &ambiguous).await,
+        Err(IngestError::Invalid(message)) if message.contains("more than one bank account")
+    ));
+
+    // Nothing above was written.
+    let imports: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM bank_statement_imports")
+        .fetch_one(&pool)
+        .await
+        .expect("import count");
+    let lines: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM bank_statement_lines")
+        .fetch_one(&pool)
+        .await
+        .expect("line count");
+    assert_eq!((imports, lines), (0, 0), "refusals must write nothing");
+}
+
+/// The line cap is enforced before anything is written (a hostile file
+/// cannot OOM or partially import).
+#[tokio::test]
+async fn ingest_line_cap_refuses_oversize_statement() {
+    let Some(pool) = provision("line_cap").await else {
+        return;
+    };
+    let entity = seed_entity(&pool, "line_cap").await;
+    seed_bank_account(&pool, entity, "EE00BANK0000000004", "EUR").await;
+
+    let mut csv = String::from("external_id,statement_date,amount,currency\n");
+    for index in 0..=accounting_core::bank_ingest::MAX_IMPORT_LINES {
+        csv.push_str(&format!("CAP-{index},2026-06-05,1.00,EUR\n"));
+    }
+    let input = BankStatementImport {
+        bank_account: "EE00BANK0000000004",
+        period_start: date(2026, 6, 1),
+        period_end: date(2026, 6, 30),
+        filename: None,
+        csv: &csv,
+        imported_by: "test-operator",
+    };
+    assert!(matches!(
+        ingest_bank_statement(&pool, &input).await,
+        Err(IngestError::Invalid(message)) if message.contains("maximum")
+    ));
+
+    let imports: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM bank_statement_imports")
+        .fetch_one(&pool)
+        .await
+        .expect("import count");
+    assert_eq!(imports, 0);
+}

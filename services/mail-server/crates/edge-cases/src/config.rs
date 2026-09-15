@@ -270,4 +270,135 @@ mod tests {
         assert_eq!(cfg.loop_detection.max_hops, 25);
         assert!(cfg.clamav.enabled);
     }
+
+    /// Serializes env-mutating tests in this module.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with the given env overrides applied, restoring the previous
+    /// values afterwards (even on panic).
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, v) in saved {
+            match v {
+                Some(value) => std::env::set_var(&k, value),
+                None => std::env::remove_var(&k),
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    #[test]
+    fn from_env_parses_overrides_and_clamps_chunk_size() {
+        let cfg = with_env(
+            &[
+                ("NODE_ENV", Some("development")),
+                ("EDGE_CASES_PORT", Some("9999")),
+                ("REDIS_URL", Some("redis://127.0.0.1:6390/2")),
+                ("DATABASE_URL", Some("postgres://u@h/db")),
+                ("INTERNAL_API_KEY", Some("k")),
+                ("CLAMAV_HOST", Some("clam.internal")),
+                ("CLAMAV_PORT", Some("3311")),
+                ("CLAMAV_ENABLED", Some("false")),
+                ("CLAMAV_CHUNK_SIZE", Some("0")),
+                ("EDGE_CASES_ALLOW_ANONYMOUS", None),
+            ],
+            EdgeCasesConfig::from_env,
+        )
+        .expect("development config never fails");
+        assert_eq!(cfg.port, 9999);
+        assert_eq!(cfg.redis_url, "redis://127.0.0.1:6390/2");
+        assert_eq!(cfg.database_url, "postgres://u@h/db");
+        assert_eq!(cfg.api_key, "k");
+        assert!(!cfg.allow_anonymous);
+        assert_eq!(cfg.clamav.host, "clam.internal");
+        assert_eq!(cfg.clamav.port, 3311);
+        assert!(!cfg.clamav.enabled);
+        // A zero chunk size would loop forever: it falls back to 8192.
+        assert_eq!(cfg.clamav.chunk_size, 8192);
+
+        let cfg = with_env(
+            &[
+                ("NODE_ENV", Some("development")),
+                ("CLAMAV_CHUNK_SIZE", Some("4096")),
+                ("EDGE_CASES_ALLOW_ANONYMOUS", Some("1")),
+            ],
+            EdgeCasesConfig::from_env,
+        )
+        .expect("anonymous dev opt-in is allowed");
+        assert!(cfg.allow_anonymous);
+        assert_eq!(cfg.clamav.chunk_size, 4096);
+    }
+
+    #[test]
+    fn from_env_refuses_missing_api_key_outside_development() {
+        let err = with_env(
+            &[
+                ("NODE_ENV", Some("production")),
+                ("INTERNAL_API_KEY", Option::Some("")),
+                ("EDGE_CASES_ALLOW_ANONYMOUS", None),
+            ],
+            EdgeCasesConfig::from_env,
+        )
+        .expect_err("production without an API key must be refused");
+        assert!(matches!(err, ConfigError::SecurityViolation(_)));
+    }
+
+    #[test]
+    fn from_env_refuses_anonymous_outside_development() {
+        let err = with_env(
+            &[
+                ("NODE_ENV", Some("staging")),
+                ("INTERNAL_API_KEY", Some("configured")),
+                ("EDGE_CASES_ALLOW_ANONYMOUS", Some("true")),
+            ],
+            EdgeCasesConfig::from_env,
+        )
+        .expect_err("anonymous access outside development must be refused");
+        assert!(matches!(err, ConfigError::SecurityViolation(_)));
+    }
+
+    #[test]
+    fn default_config_is_deny_unknown_fields() {
+        let json = serde_json::json!({
+            "port": 4600,
+            "database_url": "",
+            "redis_url": "redis://localhost:6379",
+            "api_key": "",
+            "node_env": "development",
+            "allow_anonymous": false,
+            "attachments": {
+                "max_single_size": 1, "max_total_size": 1, "max_count": 1,
+                "blocked_extensions": [], "blocked_mime_types": []
+            },
+            "retry": {
+                "max_retries": 1, "initial_delay_secs": 1, "max_delay_secs": 1,
+                "backoff_multiplier": 1.0, "greylist_retry_delay_secs": 1
+            },
+            "loop_detection": { "max_hops": 1, "max_received_headers": 1 },
+            "auto_responder": { "patterns": [], "header_indicators": [], "subject_patterns": [] },
+            "clamav": { "host": "h", "port": 1, "timeout_secs": 1, "enabled": false, "chunk_size": 1 }
+        });
+        let cfg: EdgeCasesConfig = serde_json::from_value(json.clone()).expect("valid config");
+        assert_eq!(cfg.port, 4600);
+        let mut with_extra = json;
+        with_extra["surprise"] = serde_json::json!(true);
+        assert!(
+            serde_json::from_value::<EdgeCasesConfig>(with_extra).is_err(),
+            "unknown fields must be rejected"
+        );
+    }
 }

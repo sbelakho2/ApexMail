@@ -1089,4 +1089,202 @@ mod tests {
             .read()
             .contains_key(ids.last().expect("ids non-empty")));
     }
+
+    // ── Adversarial: config switches, queue bounds, drift, tenant blend ──
+
+    #[test]
+    fn disabled_analyzers_contribute_exactly_zero() {
+        let config = SpamConfig {
+            enable_bayesian: false,
+            enable_header_analysis: false,
+            enable_url_analysis: false,
+            enable_content_scoring: false,
+            ..SpamConfig::default()
+        };
+        let engine = SpamEngine::with_config(config);
+        let verdict = engine.analyze(
+            "FREE CRYPTO VIAGRA!!! http://evil.example",
+            &[("Subject".to_string(), "spam".to_string())],
+            Some("spf=fail dkim=fail dmarc=fail"),
+        );
+        assert_eq!(verdict.bayesian_probability, 0.5, "disabled ⇒ neutral");
+        assert_eq!(verdict.header_score.score, 0.0);
+        assert_eq!(verdict.url_score.score, 0.0);
+        assert_eq!(verdict.content_score.score, 0.0);
+        assert_eq!(verdict.url_score.url_count, 0);
+        assert!(verdict.header_score.findings.is_empty());
+        // What remains is the neutral Bayesian term (0.5 × 10 × weight) plus
+        // the deliberately kept DMARC-failure penalty.
+        let expected = 0.5 * 10.0 * 0.3 + 2.5;
+        assert!((verdict.score - expected).abs() < 1e-9, "{verdict:?}");
+        assert_eq!(verdict.classification, SpamClass::Ham);
+    }
+
+    #[test]
+    fn training_queue_is_bounded_and_review_is_guarded() {
+        let config = SpamConfig {
+            enable_guarded_training: true,
+            max_pending_training_samples: 2,
+            ..SpamConfig::default()
+        };
+        let engine = SpamEngine::with_config(config);
+        let sample_text = "buy cheap pills now buy cheap pills now";
+        let first = engine
+            .submit_training_sample(TrainingLabel::Spam, sample_text, "reporter")
+            .expect("first sample accepted");
+        let second = engine
+            .submit_training_sample(TrainingLabel::Ham, sample_text, "reporter")
+            .expect("second sample accepted");
+        assert_eq!(
+            engine.submit_training_sample(TrainingLabel::Spam, sample_text, "reporter"),
+            None,
+            "queue cap must refuse, not grow"
+        );
+        assert_eq!(engine.pending_training_samples().len(), 2);
+        assert_ne!(first, second);
+
+        // Guarded training: an unknown reviewer cannot approve.
+        assert!(!engine.approve_training_sample(&first, "stranger"));
+        // Unknown sample ids are refused for both approve and reject.
+        assert!(!engine.approve_training_sample("no-such-sample", "stranger"));
+        assert!(!engine.reject_training_sample("no-such-sample"));
+        assert_eq!(
+            engine.pending_training_samples().len(),
+            2,
+            "failed approvals must not consume the queue"
+        );
+
+        // An added reviewer can approve both labels.
+        engine.add_reviewer("ops");
+        assert!(engine.approve_training_sample(&first, "ops"));
+        assert!(engine.approve_training_sample(&second, "ops"));
+        assert!(engine.pending_training_samples().is_empty());
+        // Rejecting an already-consumed sample is false, not a panic.
+        assert!(!engine.reject_training_sample(&first));
+
+        // Unguarded engines accept any reviewer.
+        let open = SpamEngine::new();
+        let id = open
+            .submit_training_sample(TrainingLabel::Spam, sample_text, "anyone")
+            .expect("accepted");
+        assert!(open.approve_training_sample(&id, "anyone"));
+    }
+
+    #[test]
+    fn snapshot_rollback_and_unknown_ids() {
+        let engine = SpamEngine::new();
+        engine
+            .train_spam("cheap pills cheap pills cheap pills")
+            .expect("train spam");
+        let snapshot = engine.create_model_snapshot("before-ham-training");
+        let spam_prob_before = engine.bayesian().classify("cheap pills");
+        engine
+            .train_ham("cheap pills cheap pills cheap pills")
+            .expect("train ham");
+        assert!(engine.rollback_to_snapshot(&snapshot));
+        let spam_prob_after = engine.bayesian().classify("cheap pills");
+        assert!(
+            (spam_prob_before - spam_prob_after).abs() < 1e-9,
+            "rollback restores the exact model"
+        );
+        assert!(!engine.rollback_to_snapshot("no-such-snapshot"));
+        // Snapshots are LRU-bounded (50): the oldest is evicted.
+        for index in 0..60 {
+            engine.create_model_snapshot(&format!("snap-{index}"));
+        }
+    }
+
+    #[test]
+    fn drift_monitor_sets_baseline_then_alerts_on_shift() {
+        let config = SpamConfig {
+            min_samples_for_drift: 2,
+            drift_alert_delta: 0.1,
+            min_training_samples: 1,
+            ..SpamConfig::default()
+        };
+        let engine = SpamEngine::with_config(config);
+        // Train both classes so the classifier actually scores (the model
+        // returns a neutral 0.5 until it has seen spam AND ham).
+        for _ in 0..5 {
+            engine
+                .train_spam("buy cheap viagra pills now buy cheap viagra pills now")
+                .expect("train spam");
+            engine
+                .train_ham("hello team attached is the quarterly report for review")
+                .expect("train ham");
+        }
+        let spam_body = "buy cheap viagra pills now buy cheap viagra pills now";
+        let ham_body = "hello team attached is the quarterly report for review";
+        // Two spam observations establish a high baseline (tenant-scoped so
+        // the per-class windows are populated as well).
+        for _ in 0..2 {
+            engine.analyze_for_tenant(spam_body, &[], None, "drift-tenant");
+        }
+        let established = engine.drift_status();
+        assert!(established.sample_count >= 2);
+        let baseline = established.baseline_mean.expect("baseline established");
+        assert!(baseline > 0.5, "spam baseline should be high: {baseline}");
+
+        // A run of ham observations drags the rolling mean down; the delta
+        // eventually trips the alert.
+        for _ in 0..12 {
+            engine.analyze_for_tenant(ham_body, &[], None, "drift-tenant");
+        }
+        let drifted = engine.drift_status();
+        assert!(drifted.rolling_mean < baseline);
+        assert!(
+            drifted.delta > 0.1,
+            "delta {} must exceed the threshold",
+            drifted.delta
+        );
+        assert!(drifted.alert);
+
+        // Per-class windows split ham and spam observations (analyze_for_tenant
+        // records them per class).
+        let per_class = engine.per_class_drift_status();
+        assert!(per_class.ham_sample_count > 0);
+        assert!(per_class.overall.sample_count > 0);
+        assert_eq!(per_class.overall.alert, drifted.alert);
+
+        // Empty windows report 0.5 means and Stable direction.
+        let fresh = SpamEngine::new();
+        let empty = fresh.per_class_drift_status();
+        assert_eq!(empty.spam_sample_count, 0);
+        assert_eq!(empty.ham_sample_count, 0);
+        assert_eq!(empty.spam_rolling_mean, 0.5);
+        assert_eq!(empty.ham_rolling_mean, 0.5);
+        assert_eq!(empty.direction, DriftDirection::Stable);
+        let empty_global = fresh.drift_status();
+        assert_eq!(empty_global.rolling_mean, 0.5);
+        assert!(empty_global.baseline_mean.is_none());
+        assert!(!empty_global.alert);
+    }
+
+    #[test]
+    fn tenant_analysis_blends_without_cross_tenant_bleed() {
+        let engine = SpamEngine::new();
+        let spam_body = "buy cheap viagra pills now buy cheap viagra pills now";
+
+        // Unknown tenant: no tenant model yet ⇒ blends global with itself.
+        let unknown = engine.analyze_for_tenant(spam_body, &[], None, "tenant-unknown");
+        assert!((unknown.bayesian_probability - engine.bayesian().classify(spam_body)).abs() < 0.5);
+
+        // Train one tenant towards spam; another stays at the global prior.
+        for _ in 0..5 {
+            engine
+                .train_tenant_spam("tenant-a", spam_body)
+                .expect("tenant train");
+        }
+        let tenant_a = engine.analyze_for_tenant(spam_body, &[], None, "tenant-a");
+        let tenant_b = engine.analyze_for_tenant(spam_body, &[], None, "tenant-b");
+        assert!(
+            tenant_a.bayesian_probability >= tenant_b.bayesian_probability,
+            "tenant-a's own training must not lower its score below tenant-b's"
+        );
+
+        // Per-tenant analyses record per-class windows.
+        let per_class = engine.per_class_drift_status();
+        assert!(per_class.overall.sample_count >= 3);
+        assert!(per_class.spam_sample_count + per_class.ham_sample_count >= 3);
+    }
 }

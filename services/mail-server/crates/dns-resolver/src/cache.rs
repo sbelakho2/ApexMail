@@ -511,4 +511,47 @@ mod tests {
             Some(CachedResult::Records(_))
         ));
     }
+
+    // ── Adversarial: re-insert TTL refresh, cross-invalidation ──────────
+
+    #[test]
+    fn reinsert_refreshes_ttl_and_cross_invalidates() {
+        let cache = DnsCache::new(&DnsConfig {
+            max_ttl_ceiling_secs: 86_400,
+            ..DnsConfig::default()
+        });
+        // Positive then re-positive: the update expiry path applies the new
+        // record TTL (200ms) rather than the original default.
+        cache.insert_with_ttl("k", vec!["a".into()], Duration::from_secs(3600));
+        cache.insert_with_ttl("k", vec!["b".into()], Duration::from_millis(30));
+        assert!(matches!(cache.get("k"), Some(CachedResult::Records(_))));
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(cache.get("k").is_none(), "the refresh TTL must apply");
+
+        // A positive insert clears a negative entry for the same key.
+        cache.insert_negative("k2");
+        assert!(matches!(cache.get("k2"), Some(CachedResult::NxDomain)));
+        cache.insert("k2", vec!["v".into()]);
+        assert!(matches!(cache.get("k2"), Some(CachedResult::Records(_))));
+
+        // A negative insert clears a positive entry for the same key.
+        cache.insert_negative("k2");
+        assert!(matches!(cache.get("k2"), Some(CachedResult::NxDomain)));
+
+        // Invalidating a key that does not exist is a no-op.
+        cache.invalidate("never-inserted");
+        // Suffix invalidation with nothing tracked is a no-op.
+        cache.invalidate_by_domain_suffix("untracked.example");
+    }
+
+    #[test]
+    fn empty_cache_reports_empty() {
+        let cache = DnsCache::default_cache();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        cache.insert("k", vec!["v".into()]);
+        cache.clear();
+        assert!(cache.get("k").is_none());
+        assert!(cache.is_empty());
+    }
 }

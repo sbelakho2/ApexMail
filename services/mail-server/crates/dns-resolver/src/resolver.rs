@@ -450,4 +450,87 @@ mod tests {
             "plain domain keys must be invalidated as before"
         );
     }
+
+    // ── Adversarial: cached replay without any resolver traffic ─────────
+
+    #[tokio::test]
+    async fn negative_cached_mx_and_deliverability_never_hit_the_network() {
+        // The resolver's inner lookup points at an unreachable nameserver; a
+        // cache hit must short-circuit before any lookup.
+        let config = crate::config::DnsConfig {
+            nameservers: vec!["127.0.0.1:1".to_string()],
+            query_timeout_ms: 50,
+            retries: 0,
+            ..crate::config::DnsConfig::default()
+        };
+        let resolver = CachedDnsResolver::new(&config).expect("resolver");
+
+        // Negative MX cache → typed NoRecords, no network.
+        resolver.cache.insert_negative("mx:nx.example");
+        match resolver.mx("nx.example").await {
+            Err(DnsError::NoRecords(domain)) => assert_eq!(domain, "nx.example"),
+            other => panic!("expected NoRecords from negative cache, got {other:?}"),
+        }
+
+        // Deliverability replay: "true" → Ok(true), anything else → Ok(false).
+        resolver
+            .cache
+            .insert("can_receive:yes.example", vec!["true".into()]);
+        assert!(matches!(
+            resolver.can_receive_email("yes.example").await,
+            Ok(true)
+        ));
+        resolver
+            .cache
+            .insert("can_receive:weird.example", vec!["TRUE ".into()]);
+        assert!(matches!(
+            resolver.can_receive_email("weird.example").await,
+            Ok(false)
+        ));
+        resolver.cache.insert_negative("can_receive:nx.example");
+        assert!(matches!(
+            resolver.can_receive_email("nx.example").await,
+            Ok(false)
+        ));
+
+        // SPF/DKIM/DMARC replay parses the cached raw record.
+        resolver.cache.insert(
+            "spf:replay.example",
+            vec!["v=spf1 include:_spf.example.com -all".into()],
+        );
+        let spf = resolver.spf("replay.example").await.expect("spf");
+        assert!(spf.is_some_and(|record| record.is_hard_fail()));
+        // A cached garbage entry parses to None rather than erroring.
+        resolver
+            .cache
+            .insert("spf:bad.example", vec!["not-spf".into()]);
+        assert!(resolver
+            .spf("bad.example")
+            .await
+            .is_ok_and(|record| record.is_none()));
+
+        resolver.cache.insert(
+            "dkim:sel1._domainkey.replay.example",
+            vec!["v=DKIM1; k=rsa; p=AAAA".into()],
+        );
+        let dkim = resolver.dkim("sel1", "replay.example").await.expect("dkim");
+        assert!(dkim.is_some_and(|record| record.public_key == "AAAA"));
+
+        resolver
+            .cache
+            .insert("dmarc:replay.example", vec!["v=DMARC1; p=reject".into()]);
+        let dmarc = resolver.dmarc("replay.example").await.expect("dmarc");
+        assert!(dmarc.is_some_and(|policy| policy.is_reject()));
+
+        // Invalidation drops every family for the domain, including DKIM
+        // selector keys; the cache ends empty.
+        resolver.invalidate_domain("replay.example");
+        assert!(resolver.cache.get("mx:replay.example").is_none());
+        assert!(resolver
+            .cache
+            .get("dkim:sel1._domainkey.replay.example")
+            .is_none());
+        resolver.clear_cache();
+        assert_eq!(resolver.cache_size(), 0);
+    }
 }

@@ -145,4 +145,21 @@ mod tests {
             Err(CryptoError::MalformedCiphertext)
         ));
     }
+
+    #[test]
+    fn rejects_wrong_nonce_length_before_decrypting() {
+        let c = Cipher::from_base64_key(&test_key()).unwrap();
+        let short_nonce = B64.encode([0u8; 8]);
+        let blob = format!("v1:{short_nonce}:{}", B64.encode([0u8; 16]));
+        assert!(matches!(
+            c.decrypt(&blob),
+            Err(CryptoError::MalformedCiphertext)
+        ));
+
+        // A key whose bytes are not valid base64.
+        assert!(matches!(
+            Cipher::from_base64_key("!!!not-base64!!!"),
+            Err(CryptoError::InvalidKeyEncoding(_))
+        ));
+    }
 }

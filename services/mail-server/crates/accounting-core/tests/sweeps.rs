@@ -559,3 +559,179 @@ fn policy_trait_accepts_closures_and_named_types() {
     let named: &dyn PayrollAmountsPolicy = &Named;
     assert!(named.amounts_for(&facts).expect("policy").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// 5. Failure paths are counted and rolled back; the combined sweep reports.
+// ---------------------------------------------------------------------------
+
+/// A policy that fails, and a record the adapter refuses, are both counted as
+/// `failed` and rolled back — the rows stay unposted and are retried. A sweep
+/// with no default legal entity (or no open period) also reports instead of
+/// posting a guessed entry.
+#[tokio::test]
+async fn sweep_failures_are_counted_rolled_back_and_retried() {
+    let Some(pool) = provision("failures").await else {
+        return;
+    };
+
+    // Two gross>0 payroll rows. The first policy call returns ERR (policy
+    // failure); the second returns amounts that do not sum to gross (adapter
+    // refusal). Neither may post.
+    let first_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_records (employee_name, personal_code, gross_salary_cents, \
+            funded_pension_rate, pay_period) \
+         VALUES ('Fail A', 'FAIL-A', 100000, 0.02, TIMESTAMPTZ '2026-01-31 12:00:00+00') \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("payroll A");
+    let second_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_records (employee_name, personal_code, gross_salary_cents, \
+            funded_pension_rate, pay_period) \
+         VALUES ('Fail B', 'FAIL-B', 100000, 0.02, TIMESTAMPTZ '2026-02-28 12:00:00+00') \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("payroll B");
+
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let policy = |_facts: &PayrollRecordFacts| -> accounting_core::Result<Option<PayrollAmounts>> {
+        if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            Err(accounting_core::AccountingError::Invalid(
+                "policy exploded".to_string(),
+            ))
+        } else {
+            // Gross does not equal net + withheld: the adapter must refuse.
+            Ok(Some(PayrollAmounts {
+                income_tax_cents: 1,
+                social_tax_cents: 1,
+                unemployment_employee_cents: 1,
+                unemployment_employer_cents: 1,
+                pension_cents: 1,
+                net_cents: 1,
+            }))
+        }
+    };
+    let config = SweepConfig { batch_size: 10 };
+    let report = sweeps::sweep_unposted_payroll(&pool, &config, &policy)
+        .await
+        .expect("payroll sweep");
+    assert_eq!(report.claimed, 2, "{report:?}");
+    assert_eq!(
+        report.failed, 2,
+        "both refusals are failed, not posted: {report:?}"
+    );
+    assert_eq!(report.posted, 0, "{report:?}");
+
+    let postings: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE idempotency_key IN ($1, $2)",
+    )
+    .bind(format!("payroll:{first_id}"))
+    .bind(format!("payroll:{second_id}"))
+    .fetch_one(&pool)
+    .await
+    .expect("postings");
+    assert_eq!(postings, 0, "failed payroll claims must roll back");
+
+    // A second tick retries both (nothing was marked posted).
+    let report = sweeps::sweep_unposted_payroll(&pool, &config, &policy)
+        .await
+        .expect("retry sweep");
+    assert_eq!(report.claimed, 2, "failed rows are retried next tick");
+    assert_eq!(report.failed, 2);
+
+    // Expenses: with the optional store present but no default legal entity,
+    // the positive row is claimed and the posting failure is reported.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS operating_costs ( \
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(), \
+            category TEXT, \
+            amount_cents BIGINT NOT NULL, \
+            incurred_at TIMESTAMPTZ NOT NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect("expense store");
+    sqlx::query(
+        "INSERT INTO operating_costs (category, amount_cents, incurred_at) \
+         VALUES ('hosting', 1234, TIMESTAMPTZ '2026-03-01 00:00:00+00')",
+    )
+    .execute(&pool)
+    .await
+    .expect("expense row");
+    let report = sweeps::sweep_unposted_expenses(&pool, &config)
+        .await
+        .expect("expense sweep");
+    assert_eq!(report.claimed, 1, "{report:?}");
+    assert_eq!(
+        report.failed, 1,
+        "no default entity ⇒ reported failure, not a guessed posting: {report:?}"
+    );
+    assert!(!report.source_table_missing);
+
+    // Bank: a non-zero line whose date has no open period fails the posting
+    // and is reported (the entity/account exist, the period does not).
+    let mut conn = pool.acquire().await.expect("conn");
+    let entity = chart::create_legal_entity(
+        &mut conn,
+        &LegalEntityInput {
+            legal_name: "No Period OÜ".to_string(),
+            trading_name: None,
+            registry_code: "SWEEP-NO-PERIOD".to_string(),
+            vat_number: None,
+            address_line1: None,
+            city: None,
+            postal_code: None,
+            country_code: "EE".to_string(),
+            default_currency: "EUR".to_string(),
+            fiscal_year_start_month: 1,
+            is_default: false,
+        },
+    )
+    .await
+    .expect("entity");
+    chart::ensure_standard_chart(&mut conn, entity)
+        .await
+        .expect("chart");
+    let bank_ledger = chart::resolve_account_role(&mut conn, entity, ROLE_BANK)
+        .await
+        .expect("bank role");
+    drop(conn);
+    let account_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO bank_accounts (legal_entity_id, name, iban, currency, account_id) \
+         VALUES ($1, 'No Period', 'EE00NOPERIOD000001', 'EUR', $2) RETURNING id",
+    )
+    .bind(entity)
+    .bind(bank_ledger)
+    .fetch_one(&pool)
+    .await
+    .expect("bank account");
+    sqlx::query(
+        "INSERT INTO bank_statement_lines (bank_account_id, external_id, statement_date, amount_cents, currency, reference) \
+         VALUES ($1, 'NOPERIOD-1', DATE '2031-05-05', 700, 'EUR', 'R')",
+    )
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .expect("line");
+    let report = sweeps::sweep_unposted_bank_statement_lines(&pool, &config)
+        .await
+        .expect("bank sweep");
+    assert_eq!(report.claimed, 1, "{report:?}");
+    assert_eq!(
+        report.failed, 1,
+        "no open period ⇒ reported failure: {report:?}"
+    );
+    assert_eq!(report.posted, 0);
+
+    // Combined sweep folds the three reports and reports nothing posted.
+    let combined = sweeps::sweep_all_unposted(&pool, &config, &policy)
+        .await
+        .expect("combined sweep");
+    assert_eq!(combined.total_posted(), 0);
+    assert!(combined.payroll.failed >= 2);
+    assert!(!combined.expenses.is_idle() || combined.expenses.claimed == 1);
+    let _ = second_id;
+}

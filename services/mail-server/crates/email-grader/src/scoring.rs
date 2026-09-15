@@ -464,4 +464,233 @@ mod tests {
         assert_eq!(score, 100);
         assert_eq!(grade.to_string(), "A+");
     }
+
+    // ── adversarial: every dimension's boundaries ─────────────────────
+
+    fn spf(hard: bool, soft: bool) -> crate::grader::SpfInfo {
+        crate::grader::SpfInfo {
+            raw: "v=spf1 -all".into(),
+            hard_fail: hard,
+            soft_fail: soft,
+        }
+    }
+
+    fn dmarc(policy: &str, pct: u8) -> crate::grader::DmarcInfo {
+        crate::grader::DmarcInfo {
+            policy: policy.into(),
+            pct,
+        }
+    }
+
+    fn mx(priority: u16) -> crate::grader::MxInfo {
+        crate::grader::MxInfo {
+            priority,
+            exchange: format!("mx{priority}.example"),
+        }
+    }
+
+    #[test]
+    fn score_spf_boundaries() {
+        let (score, details) = score_spf(None);
+        assert_eq!(score, 0);
+        assert_eq!(details["exists"], false);
+
+        let (score, _) = score_spf(Some(&spf(false, false)));
+        assert_eq!(score, 15);
+        let (score, _) = score_spf(Some(&spf(false, true)));
+        assert_eq!(score, 20);
+        let (score, details) = score_spf(Some(&spf(true, false)));
+        assert_eq!(score, 25);
+        assert_eq!(details["hard_fail"], true);
+        // Both flags still cap at 30.
+        let (score, _) = score_spf(Some(&spf(true, true)));
+        assert_eq!(score, 30);
+    }
+
+    #[test]
+    fn score_dmarc_boundaries() {
+        let (score, details) = score_dmarc(None);
+        assert_eq!(score, 0);
+        assert_eq!(details["exists"], false);
+
+        // Base 15; reject +10; quarantine +5; unknown policy +0; pct<100 no bonus.
+        assert_eq!(score_dmarc(Some(&dmarc("reject", 100))).0, 30);
+        assert_eq!(score_dmarc(Some(&dmarc("REJECT", 100))).0, 30);
+        assert_eq!(score_dmarc(Some(&dmarc("quarantine", 100))).0, 25);
+        assert_eq!(score_dmarc(Some(&dmarc("none", 100))).0, 20);
+        assert_eq!(score_dmarc(Some(&dmarc("weird", 50))).0, 15);
+    }
+
+    #[test]
+    fn score_mx_boundaries() {
+        assert_eq!(score_mx(&[]).0, 0);
+        assert_eq!(score_mx(&[mx(50)]).0, 25, "no redundancy/priority bonus");
+        assert_eq!(score_mx(&[mx(10)]).0, 40, "priority <= 10 adds 15");
+        assert_eq!(score_mx(&[mx(10), mx(20)]).0, 50);
+        // Even a huge list never exceeds the 50-point MX ceiling.
+        let many: Vec<_> = (0..10).map(mx).collect();
+        assert_eq!(score_mx(&many).0, 50);
+        assert_eq!(score_mx(&[mx(11)]).0, 25, "priority 11 misses the bonus");
+    }
+
+    #[test]
+    fn score_dns_health_composition_and_ceiling() {
+        let keys = vec![DkimInfo {
+            selector: "s".into(),
+            key_type: "rsa".into(),
+            key_size: 1024,
+            is_ed25519: false,
+        }];
+        // No MX but an A record: fallback credit only.
+        let (score, details) = score_dns_health(&[], None, &[], None, true);
+        assert_eq!(score, 10);
+        assert_eq!(details["mx"]["count"], 0);
+        // No MX and no A record: zero.
+        assert_eq!(score_dns_health(&[], None, &[], None, false).0, 0);
+        // Everything present. (The A-record fallback credit only applies
+        // when there is no MX, so this composition tops out at 90.)
+        let (score, details) = score_dns_health(
+            &[mx(10), mx(20)],
+            Some(&spf(true, true)),
+            &keys,
+            Some(&dmarc("reject", 100)),
+            true,
+        );
+        assert_eq!(score, 90);
+        assert_eq!(details["spf_record"], true);
+        assert_eq!(details["dkim_record"], true);
+        assert_eq!(details["dmarc_record"], true);
+    }
+
+    #[test]
+    fn score_reputation_ladder() {
+        assert_eq!(score_reputation(0, "none").0, 100);
+        assert_eq!(score_reputation(1, "low").0, 60);
+        assert_eq!(score_reputation(1, "medium").0, 20);
+        assert_eq!(score_reputation(1, "high").0, 20);
+        assert_eq!(score_reputation(3, "low").0, 20);
+        let (_, details) = score_reputation(2, "high");
+        assert_eq!(details["blocklists"], 2);
+        assert_eq!(details["highest_confidence"], "high");
+    }
+
+    #[test]
+    fn modern_security_modes_are_weighted() {
+        let mta = |mode: &str| MtaStsInfo {
+            policy_id: "id".into(),
+            mode: mode.into(),
+            max_age_seconds: 1,
+            mx_patterns: vec![],
+        };
+        assert_eq!(
+            score_modern_security(None, Some(&mta("enforce")), None).0,
+            10
+        );
+        assert_eq!(
+            score_modern_security(None, Some(&mta("testing")), None).0,
+            5
+        );
+        assert_eq!(score_modern_security(None, Some(&mta("none")), None).0, 0);
+        assert_eq!(score_modern_security(None, Some(&mta("bogus")), None).0, 0);
+        let tls = TlsRptInfo {
+            raw: "v=TLSRPTv1".into(),
+            rua: vec!["mailto:a@b".into()],
+        };
+        assert_eq!(score_modern_security(None, None, Some(&tls)).0, 5);
+        let bimi = BimiInfo {
+            raw: "v=BIMI1".into(),
+            logo_url: None,
+            vmc_url: None,
+        };
+        assert_eq!(score_modern_security(Some(&bimi), None, None).0, 5);
+        // Everything at once still caps at 20.
+        assert_eq!(
+            score_modern_security(Some(&bimi), Some(&mta("enforce")), Some(&tls)).0,
+            20
+        );
+    }
+
+    #[test]
+    fn invert_helpers_handle_nan_and_negative_penalties() {
+        assert_eq!(invert_content_score(0.0), 100);
+        assert_eq!(invert_content_score(10.0), 67);
+        assert_eq!(invert_content_score(100.0), 0);
+        // Only the lower bound is clamped: a negative penalty (which the spam
+        // engine never produces) can exceed 100 here.
+        assert_eq!(invert_content_score(-5.0), 117);
+        // A NaN float-to-int cast saturates to 0 in Rust.
+        assert_eq!(invert_spam_score(f64::NAN), 0);
+    }
+
+    #[test]
+    fn composite_redistributes_content_weight_and_clamps() {
+        // No content score: its weight is split across dns/auth.
+        let (score, grade, breakdown, _, _) =
+            GradeCalculator::calculate(100, None, 0, None, 0, None, 0, None, vec![]);
+        // dns .2 + .075 = .275 → 27.5 → 28.
+        assert_eq!(score, 28);
+        assert_eq!(grade.to_string(), "F");
+        assert!(breakdown.content_quality.is_none());
+        assert_eq!(breakdown.dns_health.max, 100);
+
+        // Out-of-range inputs clamp into 0..=100.
+        let (score, grade, _, _, _) =
+            GradeCalculator::calculate(500, None, 500, None, 500, Some(500), 500, None, vec![]);
+        assert_eq!(score, 100);
+        assert_eq!(grade.to_string(), "A+");
+
+        // Recommendations cover each band and dedupe identical finding text.
+        let finding = |severity: FindingSeverity| Finding {
+            severity,
+            category: "auth".into(),
+            message: "Fix the thing".into(),
+        };
+        let findings = vec![
+            finding(FindingSeverity::Critical),
+            finding(FindingSeverity::Error),
+            finding(FindingSeverity::Warning),
+            finding(FindingSeverity::Info),
+        ];
+        let (_, _, _, findings_out, recs) =
+            GradeCalculator::calculate(0, None, 0, None, 0, None, 0, None, findings);
+        assert_eq!(findings_out.len(), 4);
+        let action = recs
+            .iter()
+            .filter(|r| r.starts_with("[Action Required]"))
+            .count();
+        let suggestion = recs
+            .iter()
+            .filter(|r| r.starts_with("[Suggestion]"))
+            .count();
+        // Critical and Error render identically, so the final sort+dedup
+        // collapses them into one action item (the dedup is intentional).
+        assert_eq!(action, 1, "critical + error dedupe: {recs:?}");
+        assert_eq!(suggestion, 1, "warning maps to a suggestion");
+        assert!(
+            recs.iter()
+                .any(|r| r.contains("Configure MX, SPF, DKIM, and DMARC")),
+            "dns 0 <60 branch: {recs:?}"
+        );
+        assert!(recs
+            .iter()
+            .any(|r| r.contains("Implement email authentication")));
+        assert!(recs.iter().any(|r| r.contains("High spam-likelihood")));
+
+        // The 60..80 bands.
+        let (_, _, _, _, recs) =
+            GradeCalculator::calculate(70, None, 70, None, 70, Some(70), 70, None, vec![]);
+        assert!(recs.iter().any(|r| r.contains("Review DNS records")));
+        assert!(recs.iter().any(|r| r.contains("Strengthen authentication")));
+        assert!(!recs.iter().any(|r| r.contains("High spam-likelihood")));
+
+        // The >=80 bands.
+        let (_, _, _, _, recs) =
+            GradeCalculator::calculate(90, None, 90, None, 90, Some(90), 90, None, vec![]);
+        assert!(recs
+            .iter()
+            .any(|r| r.contains("DNS configuration looks good")));
+        assert!(recs
+            .iter()
+            .any(|r| r.contains("Email authentication is well configured")));
+    }
 }

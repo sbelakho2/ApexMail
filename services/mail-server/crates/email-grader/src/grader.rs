@@ -1,11 +1,11 @@
 use crate::config::GraderConfig;
+use crate::dns_provider::DnsProvider;
 use crate::network_checks::{
     lookup_bimi, lookup_mta_sts, lookup_tls_rpt, BimiInfo, MtaStsInfo, TlsRptInfo,
 };
 use crate::scoring;
 use crate::scoring::GradeCalculator;
 use crate::types::*;
-use apexmail_dns_resolver::lookup::DnsLookup;
 use apexmail_dns_resolver::records::{DmarcPolicy, MxRecord, SpfRecord};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -147,7 +147,7 @@ impl SingleFlight {
 
 pub struct GraderEngine {
     config: GraderConfig,
-    dns_lookup: DnsLookup,
+    dns_lookup: Arc<dyn DnsProvider>,
     blocklist: Option<Arc<DomainBlocklist>>,
     cache: DomainCache,
     flight: SingleFlight,
@@ -191,7 +191,10 @@ impl GraderEngine {
                 .map_err(|e| format!("encryption master key rejected: {e}"))?;
         }
 
-        let dns_lookup = DnsLookup::new().map_err(|e| format!("DNS resolver init failed: {e}"))?;
+        let dns_lookup: Arc<dyn DnsProvider> = Arc::new(
+            apexmail_dns_resolver::lookup::DnsLookup::new()
+                .map_err(|e| format!("DNS resolver init failed: {e}"))?,
+        );
         // NOTE: no shared HTTP client anymore — the MTA-STS policy fetch
         // builds a per-request client pinned to pre-validated IPs (SSRF
         // hardening; see network_checks::lookup_mta_sts).
@@ -265,12 +268,13 @@ impl GraderEngine {
         let spf_fut = tokio::time::timeout(net_to, self.dns_lookup.lookup_spf(domain));
         let dmarc_fut = tokio::time::timeout(net_to, self.dns_lookup.lookup_dmarc(domain));
         let a_fut = tokio::time::timeout(net_to, self.dns_lookup.lookup_a(domain));
-        let bimi_fut = tokio::time::timeout(net_to, lookup_bimi(&self.dns_lookup, domain));
-        let tls_rpt_fut = tokio::time::timeout(net_to, lookup_tls_rpt(&self.dns_lookup, domain));
+        let bimi_fut = tokio::time::timeout(net_to, lookup_bimi(self.dns_lookup.as_ref(), domain));
+        let tls_rpt_fut =
+            tokio::time::timeout(net_to, lookup_tls_rpt(self.dns_lookup.as_ref(), domain));
         let mta_sts_fut = tokio::time::timeout(
             net_to.saturating_mul(2), // policy fetch may take a bit longer
             lookup_mta_sts(
-                &self.dns_lookup,
+                self.dns_lookup.as_ref(),
                 domain,
                 self.config.mta_sts_policy_max_bytes,
                 net_to,
@@ -333,7 +337,7 @@ impl GraderEngine {
         let concurrency = self.config.dkim_lookup_concurrency.max(1);
         let dkim: Vec<DkimInfo> = {
             let mut out: Vec<DkimInfo> = Vec::new();
-            let dns = &self.dns_lookup;
+            let dns = Arc::clone(&self.dns_lookup);
             // Process selectors in chunks of `concurrency` so in-flight DNS
             // queries are bounded regardless of input size.
             for chunk in selectors.chunks(concurrency) {
@@ -341,6 +345,7 @@ impl GraderEngine {
                     .iter()
                     .map(|sel| {
                         let sel = sel.clone();
+                        let dns = Arc::clone(&dns);
                         async move {
                             let r =
                                 tokio::time::timeout(net_to, dns.lookup_dkim(&sel, domain)).await;
@@ -862,6 +867,15 @@ impl GraderEngine {
     /// just no longer inflate the auth score.
     fn compute_auth_score(&self, domain_check: &GraderResponse) -> u16 {
         domain_check.breakdown.authentication.score.min(100)
+    }
+}
+
+/// Test-only seam: point the engine at a fake resolver so DNS-dependent
+/// paths run without network egress. Compiled only under `cfg(test)`.
+#[cfg(test)]
+impl GraderEngine {
+    pub(crate) fn set_dns_lookup_for_tests(&mut self, dns: Arc<dyn DnsProvider>) {
+        self.dns_lookup = dns;
     }
 }
 
@@ -1498,5 +1512,740 @@ mod tests {
             !json.to_lowercase().contains("alice@example.com"),
             "From address leaked into response JSON"
         );
+    }
+
+    // ── DNS-backed engine paths (fake resolver, no network) ───────────
+
+    use crate::test_dns::StubDns;
+
+    /// A fully-signalled domain: two MX, SPF hard-fail, 2048-bit RSA DKIM,
+    /// DMARC reject, A record, BIMI, TLS-RPT, and MTA-STS TXT whose policy
+    /// host resolves to a private IP (so the fetch is refused).
+    fn full_signal_dns() -> StubDns {
+        let dkim_key = "A".repeat(2800); // len*6/8 = 2100 bits → strong
+        StubDns::new()
+            .mx("example.com", 5, "mx1.example.com")
+            .mx("example.com", 10, "mx2.example.com")
+            .a("example.com", "93.184.216.34")
+            .spf("example.com", "v=spf1 include:_spf.example.com -all")
+            .dmarc("example.com", "v=DMARC1; p=reject; pct=100")
+            .dkim(
+                "default",
+                "example.com",
+                &format!("v=DKIM1; k=rsa; p={dkim_key}"),
+            )
+            .txt(
+                "default._bimi.example.com",
+                &["v=BIMI1; l=https://example.com/logo.svg; a=https://example.com/vmc.pem"],
+            )
+            .txt(
+                "_smtp._tls.example.com",
+                &["v=TLSRPTv1; rua=mailto:tls@example.com,https://example.com/tls"],
+            )
+            .txt("_mta-sts.example.com", &["v=STSv1; id=20250101T000000"])
+            .a("mta-sts.example.com", "127.0.0.1")
+    }
+
+    fn engine_with(fake: &StubDns, tune: impl FnOnce(&mut GraderConfig)) -> GraderEngine {
+        let mut c = cfg();
+        tune(&mut c);
+        let mut engine = GraderEngine::new(c, None).expect("engine");
+        engine.set_dns_lookup_for_tests(Arc::new(fake.clone()));
+        engine
+    }
+
+    /// A stub where every lookup fails, as if the resolver were down.
+    fn broken_dns() -> StubDns {
+        StubDns {
+            fail_all: true,
+            ..StubDns::new()
+        }
+    }
+
+    fn submit_request(domain: &str) -> EmailSubmitRequest {
+        EmailSubmitRequest {
+            domain: Some(domain.into()),
+            from: Some(format!("sender@{domain}")),
+            to: vec!["recipient@example.net".into()],
+            subject: Some("Hello".into()),
+            body_text: Some("A perfectly ordinary message body.".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn full_signal_domain_scores_at_the_top() {
+        let fake = full_signal_dns();
+        let engine = engine_with(&fake, |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            })
+            .await
+            .expect("domain check");
+
+        let dns = &response.breakdown.dns_health;
+        assert_eq!(dns.score, 90, "mx(50)+spf(15)+dkim(15)+dmarc(10): {dns:?}");
+        let details = dns.details.as_ref().unwrap();
+        assert_eq!(details["mx"]["count"], 2);
+        assert_eq!(details["spf_record"], true);
+        assert_eq!(details["dkim_record"], true);
+        assert_eq!(details["dmarc_record"], true);
+
+        let auth = &response.breakdown.authentication;
+        // spf 25 (hard fail) + dkim 20 + dmarc 30 + modern 10 = 85.
+        assert_eq!(auth.score, 85, "auth components: {auth:?}");
+        let auth_details = auth.details.as_ref().unwrap();
+        assert_eq!(auth_details["spf"]["hard_fail"], true);
+        assert_eq!(auth_details["dmarc"]["policy"], "reject");
+        assert_eq!(
+            auth_details["modern_security"]["bimi"]["logo_url"],
+            "https://example.com/logo.svg"
+        );
+        // MTA-STS TXT exists but the policy host is private → no signal.
+        assert!(auth_details["modern_security"]["mta_sts"].is_null());
+
+        assert_eq!(response.score, 89, "composite: {response:?}");
+        assert_eq!(response.grade, "A");
+        assert_eq!(response.domain, "example.com");
+        assert!(response.id.is_none(), "domain checks do not persist");
+
+        // Only the two transport-security Info findings; no errors.
+        assert!(
+            response
+                .findings
+                .iter()
+                .all(|f| format!("{:?}", f.severity) == "Info"),
+            "{:?}",
+            response.findings
+        );
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("DNS configuration looks good")));
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Email authentication is well configured")));
+    }
+
+    #[tokio::test]
+    async fn minimal_domain_scores_at_the_bottom_with_actionable_findings() {
+        let fake = StubDns::new(); // every name → NXDOMAIN
+        let engine = engine_with(&fake, |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "nowhere.invalid".into(),
+                selectors: vec!["default".into()],
+            })
+            .await
+            .expect("domain check");
+
+        assert_eq!(response.breakdown.dns_health.score, 0);
+        assert_eq!(response.breakdown.authentication.score, 0);
+        assert_eq!(response.grade, "F");
+        assert!(response.score < 40, "{response:?}");
+
+        let categories: Vec<&str> = response
+            .findings
+            .iter()
+            .map(|f| f.category.as_str())
+            .collect();
+        for expected in ["dns", "authentication", "transport_security"] {
+            assert!(categories.contains(&expected), "{categories:?}");
+        }
+        assert!(response
+            .findings
+            .iter()
+            .any(|f| f.message.contains("No MX records")));
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.starts_with("[Action Required]")));
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Configure MX, SPF, DKIM, and DMARC")));
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Implement email authentication")));
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("High spam-likelihood")));
+    }
+
+    #[tokio::test]
+    async fn single_mx_and_weak_dmarc_are_reported_without_inflation() {
+        let fake = StubDns::new()
+            .mx("weak.example", 20, "mx1.weak.example")
+            .spf("weak.example", "v=spf1 ~all")
+            .dmarc("weak.example", "v=DMARC1; p=none")
+            .dkim("default", "weak.example", "v=DKIM1; k=rsa; p=short");
+        let engine = engine_with(&fake, |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "weak.example".into(),
+                selectors: vec!["default".into()],
+            })
+            .await
+            .expect("domain check");
+
+        // MX 25 (present, single, priority >10) + spf 15 + dkim 15 + dmarc 10.
+        assert_eq!(response.breakdown.dns_health.score, 65);
+        // SPF soft-fail 20, weak DKIM 15, DMARC none + pct100 → 20, modern 0.
+        assert_eq!(response.breakdown.authentication.score, 55);
+        let details = response.breakdown.dns_health.details.as_ref().unwrap();
+        assert_eq!(details["mx"]["count"], 1);
+        assert!(response
+            .findings
+            .iter()
+            .any(|f| f.message.contains("Only one MX record")));
+        assert!(response
+            .findings
+            .iter()
+            .any(|f| f.message.contains("DMARC policy is 'none'")));
+        // auth 55 < 60 → the stronger "implement" recommendation.
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Implement email authentication")));
+    }
+
+    #[tokio::test]
+    async fn a_record_only_domain_gets_the_implicit_mx_credit() {
+        let fake = StubDns::new().a("aonly.example", "93.184.216.34");
+        let engine = engine_with(&fake, |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "aonly.example".into(),
+                selectors: vec![],
+            })
+            .await
+            .expect("domain check");
+        // No MX, but the A record grants the 10-point fallback credit.
+        assert_eq!(response.breakdown.dns_health.score, 10);
+    }
+
+    #[tokio::test]
+    async fn domain_cache_hits_and_expires() {
+        let fake = full_signal_dns();
+        // TTL 0 → every entry is already expired when read (the cache still
+        // stores it; the next read evicts and recomputes).
+        let engine = engine_with(&fake, |c| c.cache_ttl_seconds = 0);
+        let request = DomainCheckRequest {
+            domain: "example.com".into(),
+            selectors: vec![],
+        };
+        let first = engine.check_domain(&request).await.unwrap();
+        let second = engine.check_domain(&request).await.unwrap();
+        assert_eq!(first.domain, second.domain);
+        assert_eq!(first.score, second.score);
+
+        // Non-zero TTL → the cached clone is returned unchanged.
+        let engine = engine_with(&fake, |c| c.cache_ttl_seconds = 300);
+        let first = engine.check_domain(&request).await.unwrap();
+        let second = engine.check_domain(&request).await.unwrap();
+        assert_eq!(first.score, second.score);
+    }
+
+    #[tokio::test]
+    async fn blocklist_hits_feed_reputation_and_findings() {
+        let fake = full_signal_dns();
+        let blocklist =
+            std::sync::Arc::new(threat_intel::domain_blocklist::DomainBlocklist::new(10));
+        let entry =
+            |confidence: f64, source: &str| threat_intel::domain_blocklist::DomainBlockEntry {
+                domain: "example.com".into(),
+                source: source.into(),
+                confidence,
+                category: "spam".into(),
+                added_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::days(1),
+            };
+        blocklist.add("example.com", entry(9.0, "test-feed"));
+
+        let mut c = cfg();
+        let mut engine = GraderEngine::new(c.clone(), Some(blocklist)).expect("engine");
+        engine.set_dns_lookup_for_tests(Arc::new(fake.clone()));
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.breakdown.reputation.score, 20, "blocked domain");
+        assert!(response
+            .findings
+            .iter()
+            .any(|f| f.message.contains("test-feed") && f.message.contains("high")));
+
+        // Low-confidence single hit: partial reputation credit.
+        let blocklist =
+            std::sync::Arc::new(threat_intel::domain_blocklist::DomainBlocklist::new(10));
+        blocklist.add("example.com", entry(1.0, "weak-feed"));
+        c.cache_ttl_seconds = 0; // avoid cross-test cache reuse
+        let mut engine = GraderEngine::new(c, Some(blocklist)).expect("engine");
+        engine.set_dns_lookup_for_tests(Arc::new(fake.clone()));
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.breakdown.reputation.score, 60);
+        assert!(response
+            .findings
+            .iter()
+            .any(|f| f.message.contains("confidence: low")));
+
+        // No blocklist configured → full reputation, no finding.
+        let engine = engine_with(&fake, |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.breakdown.reputation.score, 100);
+    }
+
+    #[tokio::test]
+    async fn analyze_email_covers_spam_content_and_dns_without_network_auth() {
+        let fake = full_signal_dns();
+        let mut c = cfg();
+        c.cache_ttl_seconds = 0;
+        let mut engine = GraderEngine::new(c, None).expect("engine");
+        engine.set_dns_lookup_for_tests(Arc::new(fake.clone()));
+
+        let request = EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("alice@example.com".into()),
+            to: vec!["bob@example.net".into()],
+            subject: Some("Act now — free money!!!".into()),
+            body_text: Some(
+                "Congratulations! You have won a FREE prize. Click here now to claim \
+                 your cash reward. Limited time offer! Viagra cheap pills."
+                    .into(),
+            ),
+            body_html: Some(
+                "<html><body><a href=\"http://spam.example\">click</a></body></html>".into(),
+            ),
+            headers: Some(std::collections::HashMap::from([(
+                "X-Custom".to_string(),
+                "1".to_string(),
+            )])),
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        };
+        let submission = engine.validate_submission(&request).unwrap();
+        let response = engine.analyze_email(&submission, "tenant-a").await.unwrap();
+
+        assert!(response.id.is_some(), "analyze_email mints an id");
+        assert!(response.created_at.is_some());
+        assert!(response
+            .findings
+            .iter()
+            .any(|f| f.message.contains("was not evaluated because sender_ip")));
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Spam engine classification:")));
+        let spam_details = response.breakdown.spam_likelihood.details.as_ref().unwrap();
+        assert!(spam_details["classification"].is_string());
+        assert!(spam_details["url_count"].is_number());
+
+        // The tenant DNS budget was charged by the engine.
+        assert!(!engine.check_tenant_dns_budget("tenant-a", 10));
+        // Another tenant is unaffected (isolation).
+        assert!(engine.check_tenant_dns_budget("tenant-b", 10));
+    }
+
+    #[test]
+    fn singleflight_lock_release_prunes_large_tables() {
+        let flight = SingleFlight::new();
+        for i in 0..2_100 {
+            let key = format!("k{i}");
+            let _lock = flight.lock_for(&key);
+            flight.release(&key);
+        }
+        // After pruning only the currently-referenced entries remain; the
+        // table is far below the insertion count.
+        assert!(flight.inner.len() < 2_100);
+    }
+
+    #[test]
+    fn domain_cache_set_prunes_when_over_capacity() {
+        let cache = DomainCache::new(0); // everything is instantly stale
+        for i in 0..1_050 {
+            cache.set(
+                format!("d{i}.example"),
+                GraderResponse {
+                    id: None,
+                    domain: format!("d{i}.example"),
+                    score: 50,
+                    grade: "D".into(),
+                    breakdown: scoring::GradeCalculator::calculate(
+                        50,
+                        None,
+                        50,
+                        None,
+                        50,
+                        Some(50),
+                        50,
+                        None,
+                        vec![],
+                    )
+                    .2,
+                    findings: vec![],
+                    recommendations: vec![],
+                    created_at: None,
+                },
+            );
+        }
+        assert!(cache.get("d1049.example").is_none(), "ttl 0 never serves");
+        assert!(cache.inner.len() <= 1_000, "pruned: {}", cache.inner.len());
+    }
+
+    #[test]
+    fn normalize_domain_bounds_and_idna_failures() {
+        let long = format!("{}.com", "a".repeat(250));
+        assert!(normalize_domain(&long).is_err(), "over 253 chars");
+        assert!(normalize_domain("a..com").is_err(), "empty label");
+        assert!(normalize_domain("*").is_err(), "dotless wildcard");
+        assert!(
+            normalize_domain("\u{FFFD}.com").is_err(),
+            "IDNA rejects U+FFFD"
+        );
+        // A 253-char domain that is syntactically fine is accepted.
+        let labels = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(57)
+        );
+        assert_eq!(labels.len(), 249);
+        assert!(normalize_domain(&labels).is_ok());
+    }
+
+    #[test]
+    fn normalize_selectors_unicode_and_skip_rules() {
+        // Unicode case folding and a Turkish selector.
+        let s = normalize_selectors(&["İSTANBUL".into(), "İstanbul".into()], &[]).unwrap();
+        assert_eq!(s.len(), 1, "both fold to the same selector: {s:?}");
+        assert!(s[0].to_lowercase().contains('i'));
+
+        // Invalid entries are skipped; empty result falls back to "default".
+        let s = normalize_selectors(
+            &[
+                "has space".into(),
+                "semi;colon".into(),
+                "x".repeat(MAX_DKIM_SELECTOR_LEN + 1),
+                String::new(),
+            ],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(s, vec!["default".to_string()]);
+
+        // Dots, underscores and hyphens are legal selector characters.
+        let s = normalize_selectors(&["My_Selector-1.v2".into()], &[]).unwrap();
+        assert_eq!(s, vec!["my_selector-1.v2".to_string()]);
+    }
+
+    #[test]
+    fn submission_validation_edges() {
+        let mut c = cfg();
+        c.max_body_size = 10;
+
+        // Too many recipients.
+        let mut req = submit_request("example.com");
+        req.to = (0..=MAX_RECIPIENTS).map(|i| format!("u{i}@x.y")).collect();
+        assert!(validate_submission(&req, &c).is_err());
+
+        // Subject over the cap and with CR/LF.
+        let mut req = submit_request("example.com");
+        req.subject = Some("a".repeat(MAX_SUBJECT_LEN + 1));
+        assert!(validate_submission(&req, &c).is_err());
+        let mut req = submit_request("example.com");
+        req.subject = Some("bad\r\nBcc: x@y.z".into());
+        assert!(validate_submission(&req, &c).is_err());
+
+        // Body cap (text + html).
+        let mut req = submit_request("example.com");
+        req.body_text = Some("x".repeat(6));
+        req.body_html = Some("y".repeat(6));
+        assert!(matches!(
+            validate_submission(&req, &c),
+            Err(GraderError::BodyTooLarge(12, 10))
+        ));
+
+        // Header hygiene: long name/value, colon in name, control chars and
+        // CRLF are all dropped, legal ones kept. (Restore the body cap so the
+        // placeholder body does not short-circuit validation.)
+        c.max_body_size = 1024;
+        let mut req = submit_request("example.com");
+        req.headers = Some(std::collections::HashMap::from([
+            ("a".repeat(MAX_HEADER_NAME_LEN + 1), "v".to_string()),
+            ("X-Long".to_string(), "v".repeat(MAX_HEADER_VALUE_LEN + 1)),
+            ("X-Colon:Name".to_string(), "v".to_string()),
+            ("X-Ctrl".to_string(), "bad\u{7}value".to_string()),
+            ("X-CRLF".to_string(), "bad\r\nvalue".to_string()),
+            ("  ".to_string(), "empty-name".to_string()),
+            ("X-Good".to_string(), " fine ".to_string()),
+        ]));
+        let v = validate_submission(&req, &c).unwrap();
+        // X-Good survives (trimmed). A BEL control character in a *value* is
+        // not a header-injection vector and is kept; only name-side controls
+        // and CR/LF anywhere are dropped.
+        let names: Vec<&str> = v.headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names.contains(&"X-Good"));
+        assert!(names.contains(&"X-Ctrl"));
+        assert_eq!(
+            v.headers
+                .iter()
+                .find(|(k, _)| k == "X-Good")
+                .map(|(_, val)| val.as_str()),
+            Some("fine")
+        );
+
+        // A recipient with CR/LF is dropped, not spliced.
+        let mut req = submit_request("example.com");
+        req.to = vec![
+            "good@example.net".into(),
+            "evil@example.net\r\nBcc: leak@example.net".into(),
+            "  ".into(),
+        ];
+        let v = validate_submission(&req, &c).unwrap();
+        assert_eq!(v.to, vec!["good@example.net"]);
+        let raw = String::from_utf8(build_raw_message(&v)).unwrap();
+        assert!(!raw.contains("leak@example.net"));
+
+        // `from` CR/LF is a hard error (not a skip).
+        let mut req = submit_request("example.com");
+        req.from = Some("a@b.c\r\nX-Evil: 1".into());
+        assert!(validate_submission(&req, &c).is_err());
+    }
+
+    #[tokio::test]
+    async fn broken_dns_degrades_to_zero_without_panicking() {
+        // Resolver outage: every lookup errors; the response must be a
+        // bottom score, never a panic or a fabricated pass.
+        let engine = engine_with(&broken_dns(), |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            })
+            .await
+            .expect("a resolver outage is reported, not fatal");
+        assert_eq!(response.breakdown.dns_health.score, 0);
+        assert_eq!(response.breakdown.authentication.score, 0);
+        assert_eq!(response.grade, "F");
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.starts_with("[Action Required]")));
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_one_flight_result() {
+        // Two overlapping checks: the second must wait on the singleflight
+        // lock and then read the freshly-cached response (the double-check
+        // path), not run a second DNS sweep.
+        let fake = full_signal_dns();
+        let engine = std::sync::Arc::new(engine_with(&fake, |c| c.cache_ttl_seconds = 300));
+        let request = DomainCheckRequest {
+            domain: "example.com".into(),
+            selectors: vec![],
+        };
+        let (first, second) =
+            tokio::join!(engine.check_domain(&request), engine.check_domain(&request));
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(first.score, second.score);
+        assert_eq!(first.domain, "example.com");
+    }
+
+    #[tokio::test]
+    async fn ed25519_dkim_is_reported_at_the_equivalent_strength() {
+        let fake = StubDns::new()
+            .mx("ed.example", 5, "mx.ed.example")
+            .spf("ed.example", "v=spf1 -all")
+            .dkim("s1", "ed.example", "v=DKIM1; k=ed25519; p=AAAA");
+        let engine = engine_with(&fake, |_| {});
+        let response = engine
+            .check_domain(&DomainCheckRequest {
+                domain: "ed.example".into(),
+                selectors: vec!["s1".into()],
+            })
+            .await
+            .unwrap();
+        let details = response.breakdown.authentication.details.as_ref().unwrap();
+        assert_eq!(details["dkim"]["details"][0]["key_type"], "ed25519");
+        assert_eq!(details["dkim"]["details"][0]["key_size"], 256);
+        assert_eq!(details["dkim"]["details"][0]["strong"], true);
+    }
+
+    #[tokio::test]
+    async fn tenant_weight_overrides_change_the_composite() {
+        let fake = full_signal_dns();
+        let mut weights = std::collections::HashMap::new();
+        weights.insert(
+            "tenant-heavy-dns".to_string(),
+            crate::config::ScoringWeights {
+                dns_health: 10.0,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+        );
+        // Also register a broken override so the startup validation loop runs
+        // its fallback branch.
+        weights.insert(
+            "tenant-broken".to_string(),
+            crate::config::ScoringWeights {
+                dns_health: 0.0,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+        );
+        let engine = engine_with(&fake, |c| {
+            c.tenant_weights = weights.clone();
+            c.cache_ttl_seconds = 0;
+        });
+
+        let request = EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("alice@example.com".into()),
+            to: vec!["bob@example.net".into()],
+            subject: Some("Hello".into()),
+            body_text: Some("ordinary".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec!["default".into()],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        };
+        let submission = engine.validate_submission(&request).unwrap();
+        let heavy = engine
+            .analyze_email(&submission, "tenant-heavy-dns")
+            .await
+            .unwrap();
+        let fallback = engine
+            .analyze_email(&submission, "tenant-broken")
+            .await
+            .unwrap();
+        // DNS 90 dominates the heavy-DNS tenant (all other weight is 0); the
+        // broken override fell back to the default distribution.
+        assert_eq!(heavy.score, 90);
+        assert!(
+            (60..90).contains(&fallback.score),
+            "default weighted composite expected, got {}",
+            fallback.score
+        );
+    }
+
+    #[tokio::test]
+    async fn spam_findings_fire_for_risky_content() {
+        let fake = full_signal_dns();
+        let engine = engine_with(&fake, |c| c.cache_ttl_seconds = 0);
+        let urls = (0..25)
+            .map(|i| format!("http://spam{i}.example/x"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let request = EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("alice@example.com".into()),
+            to: vec!["bob@example.net".into()],
+            subject: Some("FREE MONEY NOW!!! ACT NOW!!!".into()),
+            body_text: Some(format!(
+                "Congratulations winner! Free cash prize claim now. Viagra cheap. {urls}"
+            )),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        };
+        let submission = engine.validate_submission(&request).unwrap();
+        let response = engine.analyze_email(&submission, "t").await.unwrap();
+        assert!(
+            response
+                .findings
+                .iter()
+                .any(|f| f.category == "spam" || f.message.contains("High URL count")),
+            "{:?}",
+            response.findings
+        );
+        assert!(response
+            .recommendations
+            .iter()
+            .any(|r| r.contains("Spam engine classification")));
+    }
+
+    #[test]
+    fn authenticate_email_requires_both_sender_ip_and_helo() {
+        let fake = full_signal_dns();
+        let engine = engine_with(&fake, |_| {});
+        // sender_ip without helo → no message-level authentication attempt.
+        let request = EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("alice@example.com".into()),
+            to: vec![],
+            subject: None,
+            body_text: Some("hi".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: Some("93.184.216.34".into()),
+            helo_hostname: None,
+            mail_from: None,
+        };
+        let submission = engine.validate_submission(&request).unwrap();
+        assert!(submission.sender_ip.is_some());
+        assert!(submission.helo_hostname.is_none());
+        let raw = build_raw_message(&submission);
+        assert!(raw.starts_with(b"From: alice@example.com\r\n"));
+    }
+
+    #[test]
+    fn skipped_recipients_are_logged_and_never_spliced() {
+        // Exercise the skip-warning path with a body of legal size.
+        let c = GraderConfig {
+            max_body_size: 1024,
+            ..cfg()
+        };
+        let mut req = submit_request("example.com");
+        req.to = vec!["ok@example.net".into(), "bad@example.net\r\nBcc: x".into()];
+        let v = validate_submission(&req, &c).unwrap();
+        assert_eq!(v.to, vec!["ok@example.net"]);
+    }
+
+    #[test]
+    fn strip_html_tags_removes_markup_and_keeps_text() {
+        assert_eq!(strip_html_tags("<p>Hello <b>world</b></p>"), "Hello world");
+        // An unclosed '<' swallows the rest (documented lenient behaviour).
+        assert_eq!(strip_html_tags("a < b and c > d"), "a  d");
+        assert_eq!(strip_html_tags(""), "");
+        assert_eq!(strip_html_tags("no tags"), "no tags");
     }
 }

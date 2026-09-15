@@ -282,3 +282,75 @@ mod tests {
         assert!(hostile.contains("&lt;script&gt;"));
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    /// Hostile values must be HTML-escaped on every rendered page — a token
+    /// or email is attacker-controlled input reflected into HTML.
+    #[test]
+    fn rendered_pages_escape_all_interpolated_values() {
+        let evil = "\"><script>alert(1)</script>";
+        let error = render_error_page(evil);
+        assert!(!error.contains("<script>"), "{error}");
+        assert!(error.contains("&lt;script&gt;"));
+
+        let success = render_success_page(evil);
+        assert!(!success.contains("<script>"), "{success}");
+        assert!(success.contains("&lt;script&gt;"));
+
+        let confirm = render_confirmation_page(evil, evil, evil);
+        assert!(!confirm.contains("<script>"), "{confirm}");
+        assert!(confirm.contains("&lt;script&gt;"));
+        // The form action is built from the escaped path + token.
+        assert!(confirm.contains("confirm"));
+
+        let cats = [
+            Category {
+                name: evil,
+                description: evil,
+                subscribed: true,
+            },
+            Category {
+                name: "plain",
+                description: "d",
+                subscribed: false,
+            },
+        ];
+        let prefs = render_preferences_page(evil, evil, evil, &cats, false);
+        assert!(!prefs.contains("<script>"), "{prefs}");
+        assert!(prefs.contains("&lt;script&gt;"));
+        assert!(prefs.contains("plain"));
+
+        // Globally unsubscribed state is surfaced (categories section is
+        // replaced by the suppressed notice).
+        let suppressed = render_preferences_page(evil, evil, evil, &cats, true);
+        assert!(
+            suppressed.to_lowercase().contains("unsubscrib")
+                || suppressed.to_lowercase().contains("suppress"),
+            "global state shown: {suppressed}"
+        );
+        assert!(!suppressed.contains("<script>"), "{suppressed}");
+    }
+
+    #[test]
+    fn preferences_page_renders_checked_and_unchecked_categories() {
+        let cats = [
+            Category {
+                name: "marketing",
+                description: "Promos",
+                subscribed: true,
+            },
+            Category {
+                name: "product",
+                description: "News",
+                subscribed: false,
+            },
+        ];
+        let html = render_preferences_page("/tok", "u@example.com", "/p", &cats, false);
+        assert!(html.contains("marketing") && html.contains("product"));
+        assert!(html.contains("checked") || html.contains("CHECKED"));
+        assert!(html.contains("u@example.com"));
+    }
+}

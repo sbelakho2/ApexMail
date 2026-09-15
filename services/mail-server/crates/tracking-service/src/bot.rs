@@ -272,4 +272,26 @@ mod tests {
         // 64.235.150.1 mapped as ::ffff:64.235.150.1 should still be detected
         assert!(d.is_bot_ip("::ffff:64.235.150.1"));
     }
+
+    #[test]
+    fn short_ua_is_treated_as_a_bot() {
+        let d = detector();
+        assert!(d.is_bot_ua(Some("x")));
+        // Empty UA is explicitly "not a bot" (no user agent to classify).
+        assert!(!d.is_bot_ua(Some("")));
+    }
+
+    #[test]
+    fn bot_predicate_ors_ua_and_ip_signals() {
+        let d = detector();
+        assert!(d.is_bot(Some("curl/8.4.0"), Some("203.0.113.9")));
+        assert!(d.is_bot(None, Some("66.102.1.2")));
+        assert!(!d.is_bot(
+            Some("Mozilla/5.0 (Windows NT 10.0) Gecko/20100101 Firefox/126.0"),
+            Some("203.0.113.9")
+        ));
+        assert!(!d.is_bot(None, None));
+        // Unparseable IPs are not bot IPs (and never panic).
+        assert!(!d.is_bot_ip("not-an-ip"));
+    }
 }

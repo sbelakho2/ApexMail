@@ -1995,6 +1995,7 @@ mod tests {
     /// the relay.
     #[tokio::test]
     async fn test_create_transport_from_config_smtp() {
+        crate::common::ensure_aws_test_env();
         let config = EmailConfig {
             transport_type: TransportType::Smtp,
             ..Default::default()
@@ -2016,6 +2017,7 @@ mod tests {
     /// address. The `smtp.unset.invalid` sentinel is the marker.
     #[tokio::test]
     async fn test_create_transport_from_config_ses_without_relay_has_no_dedicated_slot() {
+        crate::common::ensure_aws_test_env();
         let config = EmailConfig {
             transport_type: TransportType::Ses,
             ..Default::default()
@@ -2046,6 +2048,7 @@ mod tests {
     /// gate instead of deferring forever.
     #[tokio::test]
     async fn outbound_mta_backed_dedicated_slot_claims_verifiable_source_binding() {
+        crate::common::ensure_aws_test_env();
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost/unused")

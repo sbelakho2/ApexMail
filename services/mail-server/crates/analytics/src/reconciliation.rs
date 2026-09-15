@@ -103,9 +103,15 @@ impl ReconciliationWorker {
         .await
         .map_err(|e| anyhow::anyhow!("reconciliation orphaned_count query failed: {e}"))?;
 
-        // Event lag:average time between events
+        // Event lag:average time between events.
+        //
+        // `EXTRACT`/`AVG` are NUMERIC in Postgres; sqlx does not decode
+        // NUMERIC into f64, so the old query failed to decode on every
+        // canonical database and the whole health check errored out. Casting
+        // the average to double precision keeps the value exact enough for a
+        // lag metric and decodable.
         let event_lag: (Option<f64>,) = sqlx::query_as(
-            "SELECT AVG(EXTRACT(EPOCH FROM (NOW() - timestamp))) as avg_lag \
+            "SELECT AVG(EXTRACT(EPOCH FROM (NOW() - timestamp)))::double precision as avg_lag \
              FROM events WHERE timestamp >= NOW() - INTERVAL '1 hour'",
         )
         .fetch_one(&self.pool)

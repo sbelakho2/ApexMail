@@ -946,4 +946,114 @@ mod tests {
         let result = store.import_ndjson(std::io::BufReader::new(buf2.as_slice()));
         assert!(matches!(result, Err(EmbeddingError::MissingTenantScope)));
     }
+
+    // ── Adversarial: norm/scope gates, LRU eviction, tampered NDJSON ────
+
+    #[test]
+    fn zero_norm_and_missing_scope_vectors_are_refused() {
+        let store = make_store();
+        // Zero vector: cannot be normalized, refused.
+        let err = store
+            .add(
+                "zero".into(),
+                vec![0.0, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::ZeroNormVector));
+        // NaN vector: not finite, refused.
+        let err = store
+            .add(
+                "nan".into(),
+                vec![f32::NAN, 0.0, 0.0],
+                tenant_metadata("tenant-a"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::ZeroNormVector));
+        // Non-object metadata carries no tenant scope.
+        let err = store
+            .add(
+                "text".into(),
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!("nope"),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::MissingTenantScope));
+        // Blank tenant id is not a scope either.
+        let err = store
+            .add(
+                "text".into(),
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"tenant_id": "   "}),
+            )
+            .unwrap_err();
+        assert!(matches!(err, EmbeddingError::MissingTenantScope));
+        assert!(store.is_empty(), "refused writes must not land");
+    }
+
+    #[test]
+    fn eviction_keeps_store_within_max_vectors() {
+        // max 10 vectors, evict at 5 → adding beyond evicts the oldest.
+        let store = VectorStore::new(3, 10, 5, Vec::new());
+        for index in 0..12 {
+            store
+                .add(
+                    format!("v{index}"),
+                    vec![1.0, 0.0, 0.0],
+                    tenant_metadata("tenant-a"),
+                )
+                .unwrap();
+        }
+        assert!(
+            store.len() <= 10,
+            "store exceeded max_vectors: {}",
+            store.len()
+        );
+        assert!(!store.is_empty());
+        let stats = store.stats();
+        assert_eq!(stats.dimension, 3);
+        assert!(stats.total_vectors <= 10);
+        assert!(stats.memory_bytes > 0);
+        assert!(stats.oldest_access.is_some());
+        assert!(stats.newest_access.is_some());
+    }
+
+    #[test]
+    fn ndjson_import_rejects_tampered_payload() {
+        let source = make_store_with_hmac("secret-key");
+        for index in 0..3 {
+            source
+                .add(
+                    format!("text {index}"),
+                    vec![1.0, 0.0, 0.0],
+                    tenant_metadata("tenant-a"),
+                )
+                .unwrap();
+        }
+        let mut exported: Vec<u8> = Vec::new();
+        let count = source.export_ndjson(&mut exported).unwrap();
+        assert_eq!(count, 3);
+        let text = String::from_utf8(exported).unwrap();
+        assert!(text.contains("# hmac-sha256:"));
+
+        // A hash-valid copy round-trips.
+        let target = make_store_with_hmac("secret-key");
+        let imported = target.import_ndjson(text.as_bytes()).unwrap();
+        assert_eq!(imported, 3);
+        assert_eq!(target.len(), 3);
+
+        // Flipping one payload byte breaks the signature and the import is
+        // refused before deserialization.
+        let tampered = text.replacen("text 0", "text X", 1);
+        let victim = make_store_with_hmac("secret-key");
+        assert!(
+            victim.import_ndjson(tampered.as_bytes()).is_err(),
+            "tampered NDJSON must be refused"
+        );
+        assert!(victim.is_empty(), "tampered import must write nothing");
+
+        // The wrong key cannot verify either.
+        let wrong_key = make_store_with_hmac("other-key");
+        assert!(wrong_key.import_ndjson(text.as_bytes()).is_err());
+    }
 }

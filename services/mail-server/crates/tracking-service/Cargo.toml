@@ -88,3 +88,5 @@ urlencoding.workspace = true
 [dev-dependencies]
 axum-test = "14"
 tokio = { version = "1", features = ["full", "test-util"] }
+# DB-backed tests bootstrap through the REAL production migrator (audit F01).
+migrator = { path = "../migrator" }

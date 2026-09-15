@@ -398,4 +398,142 @@ mod tests {
             "slow render must be cut off by the HTTP timeout layer"
         );
     }
+
+    // ── Adversarial: auth matrix + handler contracts ────────────────────
+
+    fn state_with_token(token: &str) -> Arc<AppState> {
+        let config = test_config();
+        Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool"),
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_token: token.into(),
+        })
+    }
+
+    #[tokio::test]
+    async fn auth_matrix_and_public_health() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = router(state_with_token("test-key"));
+        // /health is public.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Everything else requires the token.
+        for uri in ["/starter"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+        // Bearer token accepted.
+        let mut request = Request::builder()
+            .uri("/starter")
+            .body(Body::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-key".parse().unwrap(),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+
+        // An unconfigured token locks everything but /health.
+        let locked = router(state_with_token(""));
+        let response = locked
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = locked
+            .oneshot(
+                Request::builder()
+                    .uri("/starter")
+                    .header("x-api-key", "anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn render_and_validate_handlers_answer_with_json() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let app = router(state_with_token("test-key"));
+        let post = |uri: &'static str, body: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("x-api-key", "test-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let response = post(
+            "/render",
+            serde_json::json!({
+                "source": "<h1>{{ title }}</h1>",
+                "props": { "title": "Hello" },
+                "subject": "T: {{ title }}"
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["html"].as_str().unwrap().contains("Hello"), "{json}");
+
+        let response = post("/validate", serde_json::json!({ "source": "<p>ok</p>" })).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Oversized source is refused by the sandbox length cap.
+        let huge = "a".repeat(600_000);
+        let response = post("/validate", serde_json::json!({ "source": huge })).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["valid"], false, "{json}");
+    }
 }

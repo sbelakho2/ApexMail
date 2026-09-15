@@ -54,6 +54,24 @@ pub(crate) mod test_db {
             std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
             std::env::set_var("AWS_ACCESS_KEY_ID", "test");
             std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+            // rustls-native-certs (the AWS SDK's rustls trust source) honours
+            // SSL_CERT_FILE: without it every test process re-reads the macOS
+            // keychain through the Security framework, which under parallel load
+            // intermittently yields zero parseable roots and aborts SDK client
+            // construction ("no valid root certificates parsed"). A plain PEM
+            // file is deterministic.
+            if std::env::var_os("SSL_CERT_FILE").is_none() {
+                for candidate in [
+                    "/etc/ssl/cert.pem",
+                    "/etc/ssl/certs/ca-certificates.crt",
+                    "/etc/pki/tls/certs/ca-bundle.crt",
+                ] {
+                    if std::path::Path::new(candidate).is_file() {
+                        std::env::set_var("SSL_CERT_FILE", candidate);
+                        break;
+                    }
+                }
+            }
             if std::env::var_os("AWS_CA_BUNDLE").is_none() {
                 for candidate in [
                     "/etc/ssl/cert.pem",

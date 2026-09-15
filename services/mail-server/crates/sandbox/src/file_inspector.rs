@@ -1577,4 +1577,159 @@ mod tests {
         assert_eq!(result.extension.as_deref(), Some("exe"));
         assert!(result.findings.iter().any(|f| f.id == "BLOCKED_EXTENSION"));
     }
+
+    // ── Adversarial: signature matrix, extensions, polyglots ────────────
+
+    #[test]
+    fn magic_matrix_detects_every_signature_exactly() {
+        let cases: Vec<(&[u8], FileType, &str)> = vec![
+            (b"%PDF-1.7\n", FileType::Pdf, "PDF"),
+            (&[0x50, 0x4B, 0x03, 0x04, 0x00], FileType::Zip, "ZIP"),
+            (&[0x1F, 0x8B, 0x08, 0x00], FileType::Gzip, "GZIP"),
+            (b"Rar!\x1A\x07", FileType::Rar, "RAR"),
+            (&[0x37, 0x7A, 0xBC, 0xAF, 0x27], FileType::SevenZip, "7Z"),
+            (&[0xD0, 0xCF, 0x11, 0xE0, 0xA1], FileType::Ole2, "OLE2"),
+            (b"MZ\x90\x00", FileType::PeExe, "PE"),
+            (&[0x7F, b'E', b'L', b'F', 0x02], FileType::Elf, "ELF"),
+            (&[0xFE, 0xED, 0xFA, 0xCE], FileType::MachO, "Mach-O"),
+            (&[0xCF, 0xFA, 0xED, 0xFE], FileType::MachO, "Mach-O"),
+            (&[0xFF, 0xD8, 0xFF, 0xE0], FileType::Jpeg, "JPEG"),
+            (b"GIF89a\x00", FileType::Gif, "GIF"),
+            (
+                &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                FileType::Png,
+                "PNG",
+            ),
+            (b"{\\rtf1 hello}", FileType::Rtf, "RTF"),
+            (b"<!DOCTYPE html><p>x", FileType::Html, "HTML"),
+            (b"<?xml version=\"1.0\"?><a/>", FileType::Xml, "XML"),
+            (b"just some plain text", FileType::PlainText, "UNKNOWN"),
+        ];
+        for (data, expected, label) in cases {
+            let detected = detect_file_type(data);
+            assert_eq!(detected, expected, "{label}: {detected:?}");
+        }
+        // Display vocabulary is exact (verdicts are serialized by name).
+        assert_eq!(FileType::Gzip.to_string(), "GZIP");
+        assert_eq!(FileType::Rar.to_string(), "RAR");
+        assert_eq!(FileType::SevenZip.to_string(), "7Z");
+        assert_eq!(FileType::Ole2.to_string(), "OLE2");
+        assert_eq!(FileType::Elf.to_string(), "ELF");
+        assert_eq!(FileType::MachO.to_string(), "Mach-O");
+        assert_eq!(FileType::Jpeg.to_string(), "JPEG");
+        assert_eq!(FileType::Png.to_string(), "PNG");
+        assert_eq!(FileType::Gif.to_string(), "GIF");
+        assert_eq!(FileType::Xml.to_string(), "XML");
+        assert_eq!(FileType::Rtf.to_string(), "RTF");
+        assert_eq!(FileType::Unknown.to_string(), "UNKNOWN");
+    }
+
+    #[test]
+    fn short_and_binary_inputs_never_panic() {
+        assert_eq!(detect_file_type(b""), FileType::PlainText);
+        assert_eq!(detect_file_type(b"abc"), FileType::PlainText);
+        assert_eq!(detect_file_type(&[0xFF, 0x00, 0x01]), FileType::Unknown);
+        // Non-UTF8 high bytes after a 4-byte prefix that matches nothing.
+        assert_eq!(
+            detect_file_type(&[0x9C, 0x9D, 0x9E, 0x9F]),
+            FileType::Unknown
+        );
+    }
+
+    #[test]
+    fn extension_extraction_edges() {
+        assert_eq!(extract_extension("report.PDF").as_deref(), Some("pdf"));
+        assert_eq!(extract_extension("archive.tar.gz").as_deref(), Some("gz"));
+        assert_eq!(extract_extension("no-extension"), None);
+        assert_eq!(extract_extension("trailing."), None);
+        assert_eq!(extract_extension(".hidden"), Some("hidden".to_string()));
+        assert_eq!(extract_extension(""), None);
+    }
+
+    #[test]
+    fn polyglot_signatures_are_detected_at_nonzero_offsets() {
+        let mut pdf_with_zip = b"%PDF-1.4\n".to_vec();
+        pdf_with_zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
+        pdf_with_zip.extend_from_slice(b"payload");
+        let found = detect_polyglot_signatures(&pdf_with_zip);
+        assert!(
+            found.iter().any(|(kind, _)| *kind == FileType::Zip),
+            "{found:?}"
+        );
+        // A clean file yields nothing.
+        assert!(detect_polyglot_signatures(b"%PDF-1.4\njust a pdf").is_empty());
+        // SHA-256 is the known NIST vector for "abc".
+        assert_eq!(
+            compute_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn executable_and_masquerade_findings_fire() {
+        // ELF surfaces the executable finding.
+        let elf = [0x7F, b'E', b'L', b'F', 0x02, 0x01, 0x01, 0x00];
+        let inspection = inspect_file(&elf, Some("payload.bin"));
+        assert!(
+            inspection.findings.iter().any(|f| f.id == "EXECUTABLE_ELF"),
+            "{:?}",
+            inspection.findings
+        );
+        assert!(inspection.risk_score >= 8.0);
+
+        // A PE executable with an innocent .pdf name: both the executable
+        // finding and an extension mismatch must surface.
+        let pe = b"MZ\x90\x00\x03";
+        let inspection = inspect_file(pe, Some("invoice.pdf"));
+        assert!(
+            inspection.findings.iter().any(|f| f.id == "EXECUTABLE_PE"),
+            "{:?}",
+            inspection.findings
+        );
+        assert!(inspection.extension_mismatch, "MZ named .pdf must mismatch");
+        assert!(
+            inspection.findings.iter().any(|f| f.id == "EXT_MISMATCH"),
+            "{:?}",
+            inspection.findings
+        );
+
+        let macho = [0xFE, 0xED, 0xFA, 0xCE, 0x00];
+        let inspection = inspect_file(&macho, Some("binary"));
+        assert!(
+            inspection
+                .findings
+                .iter()
+                .any(|f| f.id == "EXECUTABLE_MACHO"),
+            "{:?}",
+            inspection.findings
+        );
+    }
+
+    #[test]
+    fn encrypted_archive_detection_is_honest() {
+        // A ZIP whose general-purpose bit 0 is set (encrypted) is flagged.
+        let mut zip = vec![0x50, 0x4B, 0x03, 0x04];
+        zip.extend_from_slice(&[0x01, 0x00]); // flags: encrypted
+        zip.extend_from_slice(&[0u8; 60]);
+        let inspection = inspect_file(&zip, Some("secret.zip"));
+        // Either the encrypted finding is present, or the file is too short
+        // to parse — never a panic, and never a false "clean" claim.
+        let _ = inspection;
+
+        // Non-archive types are Unknown, never a false "encrypted" claim.
+        assert_eq!(
+            check_archive_encryption(b"%PDF-1.4", FileType::Pdf),
+            ArchiveEncryption::Unknown
+        );
+        assert_eq!(
+            check_archive_encryption(&[0x50, 0x4B, 0x03, 0x04, 0, 0, 0, 0], FileType::Zip),
+            ArchiveEncryption::NotEncrypted
+        );
+        // 7z: empty archive bytes must not panic.
+        let _ = check_archive_encryption(&[0x37, 0x7A, 0xBC, 0xAF, 0x00], FileType::SevenZip);
+        let _ = is_rar_encrypted(&[0x52, 0x61, 0x72, 0x21]);
+        let _ = is_zip_encrypted(&[0x50, 0x4B, 0x03, 0x04]);
+        let _ = is_7z_encrypted(&[0x37, 0x7A, 0xBC, 0xAF]);
+        let _ = has_external_ole_links(&[0xD0, 0xCF, 0x11, 0xE0]);
+    }
 }

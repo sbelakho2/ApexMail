@@ -520,9 +520,11 @@ async fn sessions_table_exists_for_password_reset() {
     let tenant_id = insert_test_tenant(&pool, "sessions").await;
     let user_id = insert_test_user(&pool, &tenant_id, "sessions@test.com").await;
 
-    // auth.rs does DELETE FROM sessions WHERE user_id = $1 (bound as text)
+    // auth.rs does DELETE FROM sessions WHERE user_id = $1::uuid —
+    // sessions.user_id is UUID since migration 229 (it carries users.id;
+    // the pre-229 VARCHAR(26) column could not hold a UUID subject at all).
     let result = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(user_id.to_string())
+        .bind(user_id)
         .execute(&pool)
         .await;
 

@@ -613,4 +613,86 @@ mod tests {
         std::env::remove_var("INTERNAL_SERVICE_TOKEN");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    // ── Adversarial: every validation floor rejects, and db_url encodes ──
+
+    #[test]
+    fn validate_rejects_each_out_of_range_field() {
+        let base = ObservabilityConfig {
+            internal_service_token: "tok".into(),
+            ..ObservabilityConfig::default()
+        };
+        assert!(base.validate().is_ok());
+
+        // Each case mutates one floor below its minimum; the refusal must
+        // name the offending variable.
+        let mut cases: Vec<(&str, ObservabilityConfig)> = Vec::new();
+        macro_rules! case {
+            ($label:expr, |$c:ident| $mutate:block) => {{
+                let mut $c = base.clone();
+                $mutate
+                cases.push(($label, $c));
+            }};
+        }
+        case!("OBSERVABILITY_PORT", |c| {
+            c.port = 0;
+        });
+        case!("INTERNAL_SERVICE_TOKEN", |c| {
+            c.internal_service_token = "  ".into();
+        });
+        case!("LOG_LEVEL", |c| {
+            c.logging.level = "off".into();
+        });
+        case!("DB_PORT", |c| {
+            c.db_port = 0;
+        });
+        case!("DB_POOL_MAX", |c| {
+            c.db_pool_max = 0;
+        });
+        case!("REDIS_PORT", |c| {
+            c.redis_port = 0;
+        });
+        case!("REDIS_DB", |c| {
+            c.redis_db = -1;
+        });
+        case!("PROMETHEUS_PORT", |c| {
+            c.metrics.prometheus_port = 0;
+        });
+        case!("METRICS_INTERVAL", |c| {
+            c.metrics.aggregation_interval_ms = 0;
+        });
+        case!("TRACE_SAMPLE_RATE", |c| {
+            c.tracing.sample_rate = 1.5;
+        });
+        case!("LOG_MAX_LENGTH", |c| {
+            c.logging.max_message_length = 0;
+        });
+        case!("ALERT_COOLDOWN", |c| {
+            c.alerting.cooldown_minutes = 0;
+        });
+        case!("LOG_RETENTION_DAYS", |c| {
+            c.log_retention_days = 0;
+        });
+        for (expected, cfg) in cases {
+            let error = cfg.validate().expect_err("a broken config must be refused");
+            assert!(
+                error.contains(expected),
+                "expected {expected} refusal, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn db_url_percent_encodes_credentials() {
+        let cfg = ObservabilityConfig {
+            db_user: "user name".into(),
+            db_password: "p@ss:w/rd".into(),
+            ..ObservabilityConfig::default()
+        };
+        let url = cfg.db_url();
+        assert!(url.contains("user%20name"), "{url}");
+        assert!(url.contains("p%40ss%3Aw%2Frd"), "{url}");
+        assert!(url.starts_with("postgres://"));
+        assert!(url.ends_with("/apexmail"));
+    }
 }

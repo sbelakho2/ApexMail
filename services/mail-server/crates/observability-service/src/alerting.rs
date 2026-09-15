@@ -509,4 +509,71 @@ mod tests {
         assert_eq!(mgr.list_all_alerts().len(), 1);
         assert_eq!(mgr.list_all_alerts()[0].status, AlertStatus::Resolved);
     }
+
+    // ── Adversarial: operator matrix, webhook fail-safety ─────────────
+
+    #[test]
+    fn comparison_operators_are_total_and_displayed() {
+        // Every operator evaluates at, below, and above its threshold.
+        assert!(ComparisonOperator::Gt.evaluate(1.0, 0.5));
+        assert!(!ComparisonOperator::Gt.evaluate(0.5, 0.5));
+        assert!(ComparisonOperator::Lt.evaluate(0.4, 0.5));
+        assert!(!ComparisonOperator::Lt.evaluate(0.5, 0.5));
+        assert!(ComparisonOperator::Gte.evaluate(0.5, 0.5));
+        assert!(ComparisonOperator::Gte.evaluate(0.6, 0.5));
+        assert!(!ComparisonOperator::Gte.evaluate(0.4, 0.5));
+        assert!(ComparisonOperator::Lte.evaluate(0.5, 0.5));
+        assert!(ComparisonOperator::Lte.evaluate(0.4, 0.5));
+        assert!(!ComparisonOperator::Lte.evaluate(0.6, 0.5));
+        assert!(ComparisonOperator::Eq.evaluate(0.5, 0.5));
+        assert!(!ComparisonOperator::Eq.evaluate(0.5, 0.500001));
+
+        assert_eq!(ComparisonOperator::Gt.to_string(), ">");
+        assert_eq!(ComparisonOperator::Lt.to_string(), "<");
+        assert_eq!(ComparisonOperator::Gte.to_string(), ">=");
+        assert_eq!(ComparisonOperator::Lte.to_string(), "<=");
+        assert_eq!(ComparisonOperator::Eq.to_string(), "==");
+        // Serialization round-trips (rules are persisted/deserialized).
+        let json = serde_json::to_string(&ComparisonOperator::Gte).unwrap();
+        let back: ComparisonOperator = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ComparisonOperator::Gte);
+    }
+
+    #[tokio::test]
+    async fn webhook_dispatch_is_fail_safe_and_bounded_to_configured_urls() {
+        let mgr = AlertManager::new();
+        mgr.set_webhook_urls(vec![]);
+        let alert = firing_alert("WebhookRule");
+        // No URLs configured: dispatch is a no-op, not an error.
+        mgr.dispatch_alerts(std::slice::from_ref(&alert)).await;
+        mgr.dispatch_alerts(&[]).await;
+        // An unreachable endpoint is logged and swallowed — alerting must
+        // never take down the evaluation loop.
+        mgr.set_webhook_urls(vec!["http://127.0.0.1:1/hook".to_string()]);
+        mgr.dispatch_alerts(std::slice::from_ref(&alert)).await;
+        assert_eq!(mgr.list_all_alerts().len(), 0, "dispatch does not mutate");
+    }
+
+    fn firing_alert(name: &str) -> Alert {
+        Alert {
+            id: Uuid::new_v4().to_string(),
+            rule_id: Uuid::new_v4().to_string(),
+            rule_name: name.to_string(),
+            status: AlertStatus::Firing,
+            severity: AlertSeverity::Warning,
+            summary: "test".into(),
+            description: "test".into(),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            value: 1.0,
+            threshold: 0.5,
+            fired_at: Utc::now(),
+            resolved_at: None,
+            acknowledged_at: None,
+            acknowledged_by: None,
+            silenced_until: None,
+            notifications_sent: 0,
+            last_notification_at: None,
+        }
+    }
 }

@@ -1340,7 +1340,6 @@ mod tests {
             .recover_unapplied_claims(DEFAULT_LEASE_SECS, DEFAULT_RECOVERY_WINDOW_SECS)
             .await
             .expect("recovery sweep");
-        assert!(recovered >= 1, "the sweep must re-open the crashed claim");
         let reopened: bool = sqlx::query_scalar(
             "SELECT processed_at IS NULL FROM sales_sender_events WHERE id = $1",
         )
@@ -1348,6 +1347,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("read B's claim");
+        // The sweep is GLOBAL over the SHARED canonical test database: a
+        // parallel process's sweep may re-open B first, in which case this
+        // sweep's counter is 0. The invariant is B's own claim being open —
+        // proven here — not which process's sweep re-opened it.
+        assert!(
+            recovered >= 1 || reopened,
+            "the sweep must re-open the crashed claim (recovered={recovered})"
+        );
         assert!(
             reopened,
             "the crashed claim for the same sender must be re-opened even though \

@@ -62,3 +62,6 @@ anyhow.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "macros"] }
+# Canonical test fixtures: a PRIVATE migration-chain database per DB test
+# (the shared-table variant raced under nextest's process-per-test model).
+migrator = { path = "../migrator" }

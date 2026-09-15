@@ -36,6 +36,19 @@
 //! * 5xx at MAIL FROM / after DATA → the whole message permanently fails;
 //! * source-IP or TLS-required refusals happen BEFORE DATA.
 //!
+//! # Partial acceptance
+//!
+//! When a domain accepts the message (post-DATA 250) but some recipients were
+//! only temporarily deferred — a per-recipient 4xx, or an unsettled domain
+//! while another accepted — the unit is pinned `accepted`: a whole-unit retry
+//! would duplicate the accepted copies. The deferred recipients are never
+//! dropped: they continue on their OWN follow-up unit
+//! (`{send_unit}#deferred{attempt}`, see [`deferred_retry_unit`]), carrying
+//! only them plus the original envelope and message and the inherited
+//! attempt ladder, committed in the SAME ledger transaction as the acceptance
+//! evidence. When the retry budget is exhausted the deferred subset receives
+//! a 4.4.7 DSN instead.
+//!
 //! A permanent failure generates an RFC 3464 DSN back to the original
 //! envelope sender and queues it as a new submission with a null return path
 //! (never for a message that itself had a null return path). Once ANY
@@ -207,6 +220,41 @@ pub struct AcceptanceRecord {
     /// Ledger keys of DSNs enqueued for permanent recipient failures.
     #[serde(default)]
     pub dsn_send_units: Vec<String>,
+    /// Follow-up unit for recipients that received a per-recipient temporary
+    /// deferral while the unit itself was accepted (partial acceptance).
+    ///
+    /// The unit is pinned `accepted` the moment ANY recipient gets the
+    /// post-DATA 250 — a whole-unit retry would duplicate the accepted
+    /// copies. The deferred recipients are therefore retried as their OWN
+    /// ledger row, carrying only them, the ORIGINAL envelope and message,
+    /// and the inherited attempt counter. The ledger commits that row in
+    /// the SAME transaction as this evidence, so a crash can neither
+    /// duplicate the accepted copies nor silently drop the deferred subset.
+    /// `None` when there is nothing left to retry (budget exhausted: those
+    /// recipients are DSN'd via `dsn_send_units` instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_retry: Option<DeferredRetryPlan>,
+}
+
+/// The follow-up unit a partially accepted send schedules for its deferred
+/// recipients (see [`AcceptanceRecord::deferred_retry`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredRetryPlan {
+    /// Deterministic child id: `{parent}#deferred{attempt}` — stable across
+    /// replays so the child is enqueued exactly once.
+    pub send_unit: String,
+    /// Only the recipients whose verdict was a temporary deferral.
+    pub recipients: Vec<String>,
+    /// Attempts already made, inherited from the parent (the child's first
+    /// execution is therefore attempt + 1, on the same budget ladder).
+    pub attempt: u32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub reason: String,
+}
+
+/// Deterministic ledger key for a partial acceptance's follow-up unit.
+pub fn deferred_retry_unit(parent: &str, attempt: u32) -> String {
+    format!("{parent}#deferred{attempt}")
 }
 
 impl AcceptanceRecord {
@@ -327,7 +375,7 @@ impl Relay {
             .await?
         {
             ClaimOutcome::Claimed(row) => self.deliver(*row).await,
-            ClaimOutcome::AlreadyAccepted(record) => Ok(record),
+            ClaimOutcome::AlreadyAccepted(record) => Ok(*record),
             ClaimOutcome::InFlight {
                 attempt,
                 next_attempt_at,
@@ -545,11 +593,10 @@ impl Relay {
         if !accepted_results.is_empty() {
             // Recipients an unsettled domain left without a per-recipient
             // verdict must not vanish from the acceptance record: the unit is
-            // pinned accepted below, so they will never be retried, and a
-            // silent drop would leave no trace and no DSN. A retryable cause
-            // becomes Deferred (never retried — a retry would duplicate the
-            // accepted copy); a permanent one becomes Rejected and is DSN'd
-            // with the rest.
+            // pinned accepted below, and a silent drop would leave no trace,
+            // no DSN and no retry. A retryable cause becomes Deferred (and
+            // continues on the follow-up unit built below); a permanent one
+            // becomes Rejected and is DSN'd with the rest.
             let accounted: std::collections::HashSet<String> = accepted_results
                 .iter()
                 .chain(rejected_results.iter())
@@ -577,9 +624,11 @@ impl Relay {
                     }
                 }
             }
-            // Post-DATA 250 recorded: pin the unit accepted. Deferred
-            // recipients are deliberately NOT retried — a retry would
-            // duplicate the accepted copy.
+            // Post-DATA 250 recorded: pin the unit accepted. The deferred
+            // recipients cannot be retried as part of THIS unit (a retry
+            // would duplicate the accepted copies), so they continue on a
+            // follow-up unit of their own — never dropped. When the retry
+            // budget is already exhausted they are DSN'd (4.4.7) instead.
             let mut dsn_send_units = Vec::new();
             for result in &rejected_results {
                 if let Some(unit) = self
@@ -589,6 +638,43 @@ impl Relay {
                     dsn_send_units.push(unit);
                 }
             }
+            let deferred_retry = if deferred_results.is_empty() {
+                None
+            } else {
+                let deferred_recipients: Vec<String> = deferred_results
+                    .iter()
+                    .map(|result| result.recipient.clone())
+                    .collect();
+                let reason = summarize_failures(&transient_failures, &deferred_results);
+                match self.config.retry.next_attempt_at(attempt, Utc::now()) {
+                    Some(next_attempt_at) => Some(DeferredRetryPlan {
+                        send_unit: deferred_retry_unit(&row.send_unit, attempt),
+                        recipients: deferred_recipients,
+                        attempt,
+                        next_attempt_at,
+                        reason,
+                    }),
+                    None => {
+                        // Budget exhausted for the deferred subset: delivery
+                        // has expired for them, which is a DSN — not a silent
+                        // drop.
+                        for recipient in &deferred_recipients {
+                            let inputs = DsnInputs::delivery_expired(
+                                recipient.clone(),
+                                arrival,
+                                "smtp; 4.4.7 delivery time expired at the relay (retry \
+                                 ceiling reached for a deferred recipient of a partially \
+                                 accepted send)"
+                                    .to_string(),
+                            );
+                            if let Some(unit) = self.enqueue_dsn(&row, inputs, recipient).await {
+                                dsn_send_units.push(unit);
+                            }
+                        }
+                        None
+                    }
+                }
+            };
             let mut recipients = accepted_results;
             recipients.extend(rejected_results);
             recipients.extend(deferred_results);
@@ -603,6 +689,7 @@ impl Relay {
                 actual_source_ip,
                 recipients,
                 dsn_send_units,
+                deferred_retry,
             };
             self.ledger.record_accepted(&row.send_unit, &record).await?;
             tracing::info!(
@@ -2737,35 +2824,170 @@ mod tests {
         );
     }
 
+    /// The audit regression: a multi-recipient send pinned `accepted` as soon
+    /// as ANY recipient got the post-DATA 250, and recipients that received a
+    /// temporary deferral were deliberately never retried — silently dropped
+    /// mail with only a ledger note. The deferred subset must continue on its
+    /// own follow-up unit, and the accepted copies must never be re-sent.
     #[tokio::test]
-    async fn recipient_verdicts_mix_accepted_and_deferred_without_retrying() {
+    async fn partial_acceptance_retries_only_the_deferred_recipients() {
         let mut server_config = FakeSmtpConfig::default();
-        server_config.rcpt_replies("b@example.com", vec![ReplySpec::new(450, "4.2.1 busy")]);
+        // First RCPT for b is a temporary deferral; the follow-up delivery
+        // then gets the fallback (250).
+        server_config.rcpt_replies(
+            "b@example.com",
+            vec![
+                ReplySpec::new(450, "4.2.1 busy"),
+                ReplySpec::new(250, "ok on retry"),
+            ],
+        );
         let harness = harness(relay_config(), server_config).await;
         let mut request = request();
         request.recipients = vec!["a@example.com".to_string(), "b@example.com".to_string()];
 
-        let record = harness.relay.submit(request).await.expect("accepted for a");
+        let record = harness
+            .relay
+            .submit(request.clone())
+            .await
+            .expect("accepted for a");
         assert_eq!(record.recipients.len(), 2);
+        assert!(record
+            .recipients
+            .iter()
+            .any(|r| r.recipient == "a@example.com" && r.outcome == RecipientOutcome::Accepted));
         assert!(record
             .recipients
             .iter()
             .any(|r| r.recipient == "b@example.com" && r.outcome == RecipientOutcome::Deferred));
         assert!(
             record.dsn_send_units.is_empty(),
-            "a deferred recipient is not DSN'd"
+            "a deferred recipient with budget left is not DSN'd"
         );
+
+        // The follow-up unit is committed WITH the acceptance, carries only
+        // b, keeps the original envelope, and inherits the attempt ladder.
+        let plan = record
+            .deferred_retry
+            .as_ref()
+            .expect("the deferred subset must be scheduled for retry");
         assert_eq!(
-            harness.server.messages().len(),
-            1,
-            "the deferred recipient is not retried once the unit is pinned accepted"
+            plan.send_unit,
+            deferred_retry_unit(&record.send_unit, record.attempt)
         );
+        assert_eq!(plan.recipients, vec!["b@example.com".to_string()]);
+        let child = harness
+            .ledger
+            .get(&plan.send_unit)
+            .await
+            .expect("ledger read")
+            .expect("the follow-up unit is committed with the acceptance");
+        assert_eq!(child.state, "pending");
+        assert_eq!(child.recipients, vec!["b@example.com".to_string()]);
+        assert_eq!(child.envelope_from.as_deref(), Some("sender@apexmail.ee"));
+        assert_eq!(child.attempt, record.attempt);
+        assert!(
+            !child.message.is_empty(),
+            "the child carries the message bytes"
+        );
+
+        // Not due before the backoff elapses.
+        let early = harness
+            .relay
+            .process_due(Utc::now(), 10)
+            .await
+            .expect("early sweep");
+        assert_eq!(
+            early.claimed, 0,
+            "the follow-up is not due before its backoff"
+        );
+
+        // After the backoff the child delivers b — and only b.
         let report = harness
             .relay
-            .process_due(Utc::now() + chrono::Duration::days(1), 10)
+            .process_due(plan.next_attempt_at + chrono::Duration::seconds(1), 10)
             .await
-            .expect("second sweep");
-        assert_eq!(report.claimed, 0, "nothing is retried");
+            .expect("backoff sweep");
+        assert_eq!(report.claimed, 1, "the follow-up unit is claimed");
+        assert_eq!(report.accepted, 1, "the follow-up unit is accepted");
+        let messages = harness.server.messages();
+        assert_eq!(
+            messages.len(),
+            2,
+            "exactly two deliveries: original + retry"
+        );
+        assert_eq!(
+            messages[0].recipients,
+            vec!["a@example.com".to_string()],
+            "the original delivery carried only the accepted recipient"
+        );
+        assert_eq!(
+            messages[1].recipients,
+            vec!["b@example.com".to_string()],
+            "the retry must re-send ONLY the deferred recipient"
+        );
+        let child_after = harness
+            .ledger
+            .get(&plan.send_unit)
+            .await
+            .expect("ledger read")
+            .expect("follow-up row");
+        assert_eq!(child_after.state, "accepted");
+        assert_eq!(
+            child_after.attempt,
+            record.attempt + 1,
+            "the child's delivery is the next attempt on the same ladder"
+        );
+        assert!(child_after
+            .acceptance
+            .as_ref()
+            .expect("child acceptance")
+            .recipients
+            .iter()
+            .any(|r| r.recipient == "b@example.com" && r.outcome == RecipientOutcome::Accepted));
+
+        // Replaying the original submit returns the STORED record: a is never
+        // re-sent and the child is not duplicated.
+        let mut replay_request = request.clone();
+        replay_request.recipients = vec!["a@example.com".to_string(), "b@example.com".to_string()];
+        let replay = harness
+            .relay
+            .submit(replay_request)
+            .await
+            .expect("replay returns the stored acceptance");
+        assert_eq!(replay.send_unit, record.send_unit);
+        assert_eq!(
+            harness.server.messages().len(),
+            2,
+            "a replay never re-sends"
+        );
+    }
+
+    /// When the retry budget is already exhausted, the deferred subset is
+    /// DSN'd (4.4.7) rather than dropped.
+    #[tokio::test]
+    async fn deferred_subset_past_the_retry_ceiling_is_dsned_not_dropped() {
+        let mut server_config = FakeSmtpConfig::default();
+        server_config.rcpt_replies("b@example.com", vec![ReplySpec::new(450, "4.2.1 busy")]);
+        let mut config = relay_config();
+        config.retry.max_attempts = 1;
+        let harness = harness(config, server_config).await;
+        let mut request = request();
+        request.recipients = vec!["a@example.com".to_string(), "b@example.com".to_string()];
+
+        let record = harness.relay.submit(request).await.expect("accepted for a");
+        assert!(
+            record.deferred_retry.is_none(),
+            "no budget left: there must be no follow-up unit"
+        );
+        assert_eq!(
+            record.dsn_send_units.len(),
+            1,
+            "the expired deferred recipient is DSN'd"
+        );
+        assert!(record
+            .recipients
+            .iter()
+            .any(|r| r.recipient == "b@example.com" && r.outcome == RecipientOutcome::Deferred));
     }
 
     #[tokio::test]
@@ -2859,6 +3081,13 @@ mod tests {
         assert_eq!(deferred.outcome, RecipientOutcome::Deferred);
         assert!(record2.dsn_send_units.is_empty());
         assert_eq!(accepting2.messages().len(), 1);
+        // The transiently-failed domain's recipient is retried on a follow-up
+        // unit of their own — never dropped.
+        let plan = record2
+            .deferred_retry
+            .as_ref()
+            .expect("the unsettled domain's recipient must be scheduled for retry");
+        assert_eq!(plan.recipients, vec!["u3@c.example".to_string()]);
     }
 
     #[tokio::test]

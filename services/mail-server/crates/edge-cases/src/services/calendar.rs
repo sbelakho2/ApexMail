@@ -1063,4 +1063,429 @@ mod tests {
         assert!(html.contains("Test &lt;Event&gt;"));
         assert!(html.contains("org@test.com"));
     }
+
+    // ── adversarial: enums, invite creation, ICS round-trips ──────────
+
+    fn offline_service() -> CalendarService {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .expect("lazy pool never connects");
+        CalendarService::new(pool)
+    }
+
+    fn sample_event() -> CalendarEvent {
+        CalendarEvent {
+            uid: "uid-1@apexmail.ee".into(),
+            summary: "Meeting".into(),
+            description: Some("Agenda".into()),
+            location: Some("Room 1".into()),
+            start: Utc::now(),
+            end: Utc::now(),
+            all_day: false,
+            timezone: None,
+            organizer: Organizer {
+                email: "org@example.com".into(),
+                name: Some("Org".into()),
+            },
+            attendees: vec![],
+            method: CalendarMethod::Request,
+            status: CalendarStatus::Confirmed,
+            sequence: 0,
+            created: Utc::now(),
+            last_modified: Utc::now(),
+            url: None,
+            categories: None,
+            priority: None,
+            recurrence: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn calendar_method_and_status_parsing_is_allowlisted() {
+        for (raw, method, expected) in [
+            ("request", CalendarMethod::Request, "REQUEST"),
+            ("REPLY", CalendarMethod::Reply, "REPLY"),
+            ("cancel", CalendarMethod::Cancel, "CANCEL"),
+            ("refresh", CalendarMethod::Refresh, "REFRESH"),
+            ("counter", CalendarMethod::Counter, "COUNTER"),
+            (
+                "declinecounter",
+                CalendarMethod::DeclineCounter,
+                "DECLINECOUNTER",
+            ),
+            ("add", CalendarMethod::Add, "ADD"),
+            ("publish", CalendarMethod::Publish, "PUBLISH"),
+        ] {
+            assert_eq!(CalendarMethod::from_str(raw).unwrap(), method);
+            assert_eq!(method.as_str(), expected);
+            assert_eq!(
+                raw.to_uppercase().parse::<CalendarMethod>().unwrap(),
+                method
+            );
+        }
+        assert!(CalendarMethod::from_str("EVIL\nMETHOD").is_err());
+        assert!(CalendarMethod::from_str("").is_err());
+
+        assert_eq!(
+            CalendarStatus::from_str("tentative"),
+            CalendarStatus::Tentative
+        );
+        assert_eq!(
+            CalendarStatus::from_str("Cancelled"),
+            CalendarStatus::Cancelled
+        );
+        assert_eq!(
+            CalendarStatus::from_str("garbage"),
+            CalendarStatus::Confirmed
+        );
+        assert_eq!(CalendarStatus::Tentative.as_str(), "TENTATIVE");
+        assert_eq!(CalendarStatus::Cancelled.as_str(), "CANCELLED");
+        assert_eq!(CalendarStatus::Confirmed.as_str(), "CONFIRMED");
+    }
+
+    #[tokio::test]
+    async fn content_type_detection_is_case_insensitive() {
+        assert!(CalendarService::is_calendar_content_type(
+            "text/calendar; charset=utf-8"
+        ));
+        assert!(CalendarService::is_calendar_content_type("APPLICATION/ICS"));
+        assert!(!CalendarService::is_calendar_content_type("text/plain"));
+        assert!(!CalendarService::is_calendar_content_type(""));
+    }
+
+    #[tokio::test]
+    async fn create_invite_marks_all_day_and_escapes() {
+        let service = offline_service();
+        let invite = service
+            .create_invite(
+                "Standup; with, commas",
+                Utc::now(),
+                Utc::now(),
+                Organizer {
+                    email: "boss@example.com".into(),
+                    name: Some("Boss\nInjected".into()),
+                },
+                vec![Attendee {
+                    email: "dev@example.com".into(),
+                    name: Some("Dev, Jr.".into()),
+                    role: "OPT-PARTICIPANT".into(),
+                    part_stat: "ACCEPTED".into(),
+                    rsvp: false,
+                }],
+                Some("Notes".into()),
+                Some("HQ".into()),
+                CalendarMethod::Request,
+                true,
+            )
+            .expect("invite");
+        assert!(invite.event.uid.ends_with("@apexmail.ee"));
+        assert!(invite.ics_content.contains("DTSTART;VALUE=DATE:"));
+        assert!(invite.ics_content.contains("DTEND;VALUE=DATE:"));
+        assert!(
+            !invite.ics_content.contains("\nInjected"),
+            "CRLF must be neutralized"
+        );
+        assert!(invite
+            .ics_content
+            .contains("SUMMARY:Standup\\; with\\, commas"));
+        assert!(invite.ics_content.contains("RSVP=FALSE"));
+        assert!(invite.ics_content.contains("CN=Dev\\, Jr."));
+        assert!(invite.html_preview.contains("Standup; with, commas"));
+        assert!(invite.html_preview.contains("HQ"));
+        assert!(invite.html_preview.contains("Notes"));
+    }
+
+    #[tokio::test]
+    async fn generate_ics_optional_sections() {
+        let mut event = sample_event();
+        event.url = Some("https://example.com/e".into());
+        event.categories = Some(vec!["work".into(), "urgent".into()]);
+        event.priority = Some(1);
+        event.recurrence = Some(RecurrenceRule {
+            freq: "weekly".into(),
+            interval: Some(2),
+            count: None,
+            until: Some("20260101T000000Z".into()),
+            by_day: Some(vec!["mo".into(), "we".into()]),
+            by_month: Some(vec![1, 6]),
+            by_month_day: Some(vec![1, -1]),
+        });
+        let ics = generate_ics(&event);
+        assert!(ics.contains("URL:https://example.com/e"));
+        assert!(ics.contains("CATEGORIES:work,urgent"));
+        assert!(ics.contains("PRIORITY:1"));
+        // Long properties are folded at 75 chars — unfold before comparing.
+        let unfolded = ics.replace("\r\n ", "");
+        // FREQ is upper-cased; BYDAY values are passed through verbatim.
+        assert!(unfolded.contains(
+            "RRULE:FREQ=WEEKLY;INTERVAL=2;UNTIL=20260101T000000Z;BYDAY=mo,we;BYMONTH=1,6;BYMONTHDAY=1,-1"
+        ));
+
+        // A javascript: URL is never emitted.
+        event.url = Some("javascript:alert(1)".into());
+        assert!(!generate_ics(&event).contains("javascript"));
+        // Empty categories emit no line.
+        event.categories = Some(vec![]);
+        assert!(!generate_ics(&event).contains("CATEGORIES"));
+
+        // Organizer without a name and attendee without a name.
+        let mut event = sample_event();
+        event.organizer.name = None;
+        event.attendees = vec![Attendee {
+            email: "a@example.com".into(),
+            name: None,
+            role: "REQ-PARTICIPANT".into(),
+            part_stat: "NEEDS-ACTION".into(),
+            rsvp: true,
+        }];
+        let unfolded = generate_ics(&event).replace("\r\n ", "");
+        assert!(unfolded.contains("ORGANIZER:mailto:org@example.com"));
+        assert!(unfolded.contains(
+            "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:a@example.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn ics_round_trip_preserves_event_fields() {
+        let service = offline_service();
+        let mut event = sample_event();
+        event.all_day = true;
+        event.status = CalendarStatus::Tentative;
+        event.sequence = 7;
+        event.recurrence = Some(RecurrenceRule {
+            freq: "DAILY".into(),
+            interval: None,
+            count: Some(3),
+            until: None,
+            by_day: None,
+            by_month: None,
+            by_month_day: None,
+        });
+        event.attendees = vec![Attendee {
+            email: "guest@example.com".into(),
+            name: None,
+            role: "REQ-PARTICIPANT".into(),
+            part_stat: "NEEDS-ACTION".into(),
+            rsvp: true,
+        }];
+        event.categories = Some(vec!["ops".into(), "oncall".into()]);
+
+        let ics = generate_ics(&event);
+        let parsed = service.parse_ics(&ics).expect("round-trip parses");
+        assert_eq!(parsed.method, CalendarMethod::Request);
+        assert_eq!(parsed.product_id, "- //ApexMail//Calendar//EN");
+        assert_eq!(parsed.events.len(), 1);
+        let round = &parsed.events[0];
+        assert_eq!(round.uid, event.uid);
+        assert_eq!(round.summary, "Meeting");
+        assert_eq!(round.description.as_deref(), Some("Agenda"));
+        assert_eq!(round.location.as_deref(), Some("Room 1"));
+        assert_eq!(round.status, CalendarStatus::Tentative);
+        assert_eq!(round.sequence, 7);
+        assert_eq!(round.organizer.email, "org@example.com");
+        assert_eq!(round.attendees.len(), 1);
+        assert_eq!(round.attendees[0].email, "guest@example.com");
+        assert_eq!(
+            round.categories.as_deref(),
+            Some(&["ops".to_string(), "oncall".to_string()][..])
+        );
+        let recurrence = round.recurrence.as_ref().expect("rrule parsed");
+        assert_eq!(recurrence.freq, "DAILY");
+        assert_eq!(recurrence.count, Some(3));
+    }
+
+    #[tokio::test]
+    async fn parse_ics_rejects_unknown_method_and_skips_junk() {
+        let service = offline_service();
+        let ics = "BEGIN:VCALENDAR\r\nMETHOD:TELEPORT\r\nPRODID:x\r\nEND:VCALENDAR\r\n";
+        assert!(
+            service.parse_ics(ics).is_err(),
+            "unknown METHOD must be refused"
+        );
+
+        // No METHOD → defaults to PUBLISH; lines without ':' are skipped;
+        // unknown properties inside an event are ignored; a stray END:VEVENT
+        // without BEGIN is tolerated.
+        let ics = "BEGIN:VCALENDAR\r\nGARBAGE-LINE-WITHOUT-COLON\r\nEND:VEVENT\r\n\
+                   BEGIN:VEVENT\r\nUID:u@example.com\r\nX-CUSTOM:1\r\nEND:VEVENT\r\n\
+                   END:VCALENDAR\r\n";
+        let parsed = service.parse_ics(ics).unwrap();
+        assert_eq!(parsed.method, CalendarMethod::Publish);
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].uid, "u@example.com");
+
+        // Two VEVENT blocks share the calendar-level METHOD. (Build the
+        // blocks directly: nesting a full VCALENDAR inside another is not
+        // what an iTIP body looks like and the parser is not a nesting
+        // parser.)
+        let block = |summary: &str| {
+            format!(
+                "BEGIN:VEVENT\r\nUID:{summary}@apexmail.ee\r\nSUMMARY:{summary}\r\n\
+                 DTSTART:20260101T000000Z\r\nDTEND:20260101T010000Z\r\nEND:VEVENT\r\n"
+            )
+        };
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\n{}{}\r\nEND:VCALENDAR\r\n",
+            block("one"),
+            block("two")
+        );
+        let parsed = service.parse_ics(&ics).unwrap();
+        assert_eq!(parsed.events.len(), 2);
+        assert!(parsed
+            .events
+            .iter()
+            .all(|e| e.method == CalendarMethod::Reply));
+        assert_eq!(parsed.events[0].summary, "one");
+        assert_eq!(parsed.events[1].summary, "two");
+    }
+
+    #[tokio::test]
+    async fn parse_ics_datetime_formats_and_invalid_input() {
+        assert_eq!(
+            parse_ics_datetime("20250102T030405Z").unwrap().to_rfc3339(),
+            "2025-01-02T03:04:05+00:00"
+        );
+        assert_eq!(
+            parse_ics_datetime("20250102T030405").unwrap().to_rfc3339(),
+            "2025-01-02T03:04:05+00:00"
+        );
+        assert_eq!(
+            parse_ics_datetime("20250102").unwrap().to_rfc3339(),
+            "2025-01-02T00:00:00+00:00"
+        );
+        assert!(parse_ics_datetime("2025-01-02T03:04:05Z").is_none());
+        assert!(parse_ics_datetime("20251340T030405Z").is_none());
+        assert!(parse_ics_datetime("garbage").is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_rrule_handles_missing_freq_and_bad_numbers() {
+        assert!(parse_rrule("INTERVAL=2").is_none(), "FREQ is required");
+        let rule = parse_rrule(
+            "RRULE:FREQ=MONTHLY;INTERVAL=oops;BYMONTH=1,x,12;BYMONTHDAY=1,bad;BYDAY=mo, we;X-UNKNOWN=1",
+        )
+        .expect("freq present");
+        assert_eq!(rule.by_day, Some(vec!["MO".to_string(), "WE".to_string()]));
+        assert_eq!(rule.freq, "MONTHLY");
+        assert_eq!(rule.interval, None, "unparsable numbers are dropped");
+        assert_eq!(rule.by_month, Some(vec![1, 12]));
+        assert_eq!(rule.by_month_day, Some(vec![1]));
+        assert_eq!(rule.count, None);
+        assert_eq!(rule.until, None);
+    }
+
+    #[tokio::test]
+    async fn folding_splits_long_lines_on_char_boundaries() {
+        // Long multibyte line: every output line is ≤75 chars, continuation
+        // lines start with a space, and the content survives intact.
+        let long = "é".repeat(200);
+        let folded = fold_lines(&format!("X:{long}"));
+        let mut unfolded = String::new();
+        for line in folded.split("\r\n") {
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(' ') {
+                unfolded.push_str(rest);
+            } else {
+                unfolded.push_str(line);
+            }
+        }
+        assert_eq!(unfolded, format!("X:{long}"));
+        for line in folded.split("\r\n") {
+            assert!(line.chars().count() <= 75, "line too long: {line:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn html_preview_icons_and_fallbacks() {
+        let mut event = sample_event();
+        event.description = None;
+        event.location = None;
+        event.attendees = vec![
+            Attendee {
+                email: "yes@example.com".into(),
+                name: None,
+                role: "REQ-PARTICIPANT".into(),
+                part_stat: "ACCEPTED".into(),
+                rsvp: true,
+            },
+            Attendee {
+                email: "no@example.com".into(),
+                name: Some("N".into()),
+                role: "REQ-PARTICIPANT".into(),
+                part_stat: "DECLINED".into(),
+                rsvp: true,
+            },
+            Attendee {
+                email: "maybe@example.com".into(),
+                name: None,
+                role: "REQ-PARTICIPANT".into(),
+                part_stat: "TENTATIVE".into(),
+                rsvp: true,
+            },
+            Attendee {
+                email: "other@example.com".into(),
+                name: None,
+                role: "REQ-PARTICIPANT".into(),
+                part_stat: "NEEDS-ACTION".into(),
+                rsvp: true,
+            },
+        ];
+        let html = generate_html_preview(&event);
+        assert!(html.contains("&#10003;"), "accepted icon");
+        assert!(html.contains("&#10007;"), "declined icon");
+        assert!(html.contains(">?<"), "tentative icon");
+        assert!(html.contains("&#9675;"), "unknown icon");
+        assert!(
+            html.contains("yes@example.com"),
+            "email fallback for a nameless attendee"
+        );
+        assert!(!html.contains("<p><strong>Where:</strong>"));
+        assert!(!html.contains("<p></p>"), "no empty description paragraph");
+        assert!(html.contains("Org (org@example.com)"));
+    }
+
+    #[tokio::test]
+    async fn store_event_persists_to_the_canonical_schema() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "edge_calendar_store",
+            "edge_calendar_store",
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let Some(pool) = pool else { return };
+        let service = CalendarService::new(pool.clone());
+        let mut event = sample_event();
+        event.attendees = vec![Attendee {
+            email: "a@example.com".into(),
+            name: None,
+            role: "REQ-PARTICIPANT".into(),
+            part_stat: "NEEDS-ACTION".into(),
+            rsvp: true,
+        }];
+        service
+            .store_event("msg_cal_1", &event)
+            .await
+            .expect("store");
+
+        let (uid, summary, method, status, count): (String, String, String, String, i32) =
+            sqlx::query_as(
+                "SELECT uid, summary, method, status, attendee_count
+                 FROM edge_calendar_events WHERE message_id = $1",
+            )
+            .bind("msg_cal_1")
+            .fetch_one(&pool)
+            .await
+            .expect("row exists");
+        assert_eq!(uid, event.uid);
+        assert_eq!(summary, "Meeting");
+        assert_eq!(method, "REQUEST");
+        assert_eq!(status, "CONFIRMED");
+        assert_eq!(count, 1);
+    }
 }

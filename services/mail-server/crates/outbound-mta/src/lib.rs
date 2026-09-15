@@ -359,6 +359,7 @@ mod tests {
             actual_source_ip: Some("203.0.113.1".parse().expect("ip")),
             recipients: Vec::new(),
             dsn_send_units: Vec::new(),
+            deferred_retry: None,
         };
         assert_eq!(
             source_ip_reply_header(&record).as_deref(),

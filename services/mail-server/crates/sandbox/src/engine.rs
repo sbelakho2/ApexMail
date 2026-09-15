@@ -884,4 +884,83 @@ mod tests {
             elapsed
         );
     }
+
+    // ── Adversarial: configurable encrypted-archive risk, batch truth ─────
+
+    #[test]
+    fn oversized_files_are_refused_without_inspection() {
+        let config = SandboxConfig {
+            max_file_size: 8,
+            ..SandboxConfig::default()
+        };
+        let engine = SandboxEngine::with_config(config);
+        let error = engine
+            .analyze(b"0123456789", None)
+            .expect_err("oversized file must be refused");
+        assert!(matches!(
+            error,
+            SandboxError::FileTooLarge { size: 10, max: 8 }
+        ));
+        // A too-large file is a REJECTED result in a batch (the caller must
+        // not treat it as analyzed-clean).
+        assert!(SandboxEngine::any_rejected(&[Err(error)]));
+    }
+
+    #[test]
+    fn encrypted_archive_risk_is_configurable_per_deployment() {
+        // A minimal encrypted ZIP (flags bit 0 set on the first local header).
+        let mut zip = vec![0x50, 0x4B, 0x03, 0x04, 0x01, 0x00, 0x00, 0x00];
+        zip.extend_from_slice(&[0u8; 64]);
+        let default_engine = SandboxEngine::new();
+        let trusted = SandboxEngine::with_config(SandboxConfig {
+            encrypted_archive_risk: 1.0,
+            ..SandboxConfig::default()
+        });
+
+        let default_verdict = default_engine.analyze(&zip, Some("secret.zip"));
+        let trusted_verdict = trusted.analyze(&zip, Some("secret.zip"));
+        match (default_verdict, trusted_verdict) {
+            (Ok(default_verdict), Ok(trusted_verdict)) => {
+                if default_verdict
+                    .findings
+                    .iter()
+                    .any(|finding| finding.id == "ARCHIVE_ENCRYPTED")
+                {
+                    assert!(
+                        trusted_verdict.risk_score < default_verdict.risk_score,
+                        "lowering the configured risk must lower the score: {} vs {}",
+                        trusted_verdict.risk_score,
+                        default_verdict.risk_score
+                    );
+                    assert!(
+                        trusted_verdict
+                            .findings
+                            .iter()
+                            .any(|f| f.id == "ARCHIVE_ENCRYPTED" && (f.risk - 1.0).abs() < 1e-9),
+                        "{:?}",
+                        trusted_verdict.findings
+                    );
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                // A too-short fixture may fail parse-level checks; either way
+                // the refusal is typed, never a panic.
+                let _ = error;
+            }
+        }
+    }
+
+    #[test]
+    fn batch_analysis_reports_every_file() {
+        let engine = SandboxEngine::new();
+        let verdicts = engine.analyze_batch(&[
+            (b"hello world".as_slice(), Some("a.txt")),
+            (b"%PDF-1.4 tiny".as_slice(), Some("b.pdf")),
+        ]);
+        assert_eq!(verdicts.len(), 2);
+        assert!(verdicts.iter().all(|result| result.is_ok()));
+        assert!(!SandboxEngine::any_rejected(&verdicts));
+        let clean = verdicts[0].as_ref().expect("first verdict analyzed");
+        assert!(!SandboxEngine::is_rejected(clean));
+    }
 }

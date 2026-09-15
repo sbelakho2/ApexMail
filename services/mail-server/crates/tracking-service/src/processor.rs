@@ -1909,3 +1909,7 @@ mod tests {
         .ok();
     }
 }
+
+#[cfg(test)]
+#[path = "processor_adversarial_tests.rs"]
+mod adversarial_tests;

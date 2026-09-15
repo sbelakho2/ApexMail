@@ -625,4 +625,601 @@ mod tests {
         let v = serde_json::json!([{"big": "x".repeat(50)}]);
         assert!(v.to_string().len() > c.max_jsonb_bytes);
     }
+
+    // ── adversarial: DB-backed handlers on the canonical schema ───────
+
+    use crate::test_dns::StubDns;
+
+    async fn canonical_pool(test_name: &str) -> Option<sqlx::PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    async fn grader_state(
+        pool: sqlx::PgPool,
+        fake: &StubDns,
+        tune: impl FnOnce(&mut GraderConfig),
+    ) -> Arc<GraderState> {
+        let mut config = GraderConfig {
+            cache_ttl_seconds: 0,
+            rate_limit_max: 100,
+            tenant_dns_budget_max: 1_000,
+            network_timeout_seconds: 1,
+            ..GraderConfig::default()
+        };
+        tune(&mut config);
+        let mut engine = GraderEngine::new(config.clone(), None).expect("engine");
+        engine.set_dns_lookup_for_tests(Arc::new(fake.clone()));
+        let state = GraderState::new(Arc::new(engine), config, pool).expect("state");
+        Arc::new(state)
+    }
+
+    fn signal_dns() -> StubDns {
+        let dkim_key = "A".repeat(2800);
+        StubDns::new()
+            .mx("example.com", 5, "mx1.example.com")
+            .mx("example.com", 10, "mx2.example.com")
+            .a("example.com", "93.184.216.34")
+            .spf("example.com", "v=spf1 -all")
+            .dmarc("example.com", "v=DMARC1; p=reject; pct=100")
+            .dkim(
+                "default",
+                "example.com",
+                &format!("v=DKIM1; k=rsa; p={dkim_key}"),
+            )
+    }
+
+    fn submit_body() -> EmailSubmitRequest {
+        EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("alice@example.com".into()),
+            to: vec!["bob@example.net".into()],
+            subject: Some("Hello".into()),
+            body_text: Some("Just a normal message.".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec!["default".into()],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        }
+    }
+
+    fn auth(tenant: &str, scopes: &[&str], idem: Option<&str>) -> GraderAuthContext {
+        GraderAuthContext {
+            tenant_id: tenant.to_string(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            idempotency_key: idem.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_persists_scope_checks_and_idempotent_replay() {
+        let Some(pool) = canonical_pool("grader_submit").await else {
+            return;
+        };
+        let fake = signal_dns();
+        let state = grader_state(pool.clone(), &fake, |_| {}).await;
+
+        let (status, json) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], Some("idem-key-1")),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{:?}", json.0);
+        let id = json["id"].as_str().expect("id").to_string();
+        assert_eq!(json["domain"], "example.com");
+        assert!(
+            json["idempotency_replayed"].is_null(),
+            "first call is not a replay"
+        );
+        assert!(
+            json.get("breakdown").is_none(),
+            "breakdown never leaves the server"
+        );
+        assert!(
+            json.get("findings").is_none(),
+            "findings never leave the server"
+        );
+
+        // Persisted row carries tenant scoping, a body hash, and no raw body.
+        let (tenant, hash, from, encrypted): (String, Option<String>, Option<String>, bool) =
+            sqlx::query_as(
+                "SELECT tenant_id, body_hash, from_address, encrypted
+                 FROM grader_results WHERE id = $1::uuid",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tenant, "tenant-one");
+        assert_eq!(hash.unwrap().len(), 64);
+        assert_eq!(from.as_deref(), Some("alice@example.com"));
+        assert!(!encrypted);
+
+        // Same key → replay of the stored row, no second row.
+        let (status, replayed) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], Some("idem-key-1")),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replayed["id"], id, "same persisted row");
+        assert_eq!(replayed["idempotency_replayed"], true);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grader_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "replay must not insert");
+
+        // Missing scope.
+        let (status, json) =
+            submit_email(state.clone(), auth("tenant-one", &[], None), submit_body()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json["error"]["code"], "INSUFFICIENT_SCOPE");
+
+        // Wildcard scope works.
+        let (status, _) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["*"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Invalid tenant identifiers are refused before any work.
+        for bad in ["", "with space", &"x".repeat(65)] {
+            let (status, json) = submit_email(
+                state.clone(),
+                auth(bad, &["grader:write"], None),
+                submit_body(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "tenant {bad:?}");
+            assert_eq!(json["error"]["code"], "INVALID_TENANT");
+        }
+
+        // Invalid idempotency key.
+        let (status, json) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], Some("bad\tkey")),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "INVALID_IDEMPOTENCY_KEY");
+
+        // Disabled grader fails closed.
+        let disabled = grader_state(pool.clone(), &fake, |c| c.enabled = false).await;
+        let (status, json) = submit_email(
+            disabled,
+            auth("tenant-one", &["grader:write"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["code"], "GRADER_DISABLED");
+    }
+
+    #[tokio::test]
+    async fn results_are_tenant_isolated_on_read() {
+        let Some(pool) = canonical_pool("grader_isolation").await else {
+            return;
+        };
+        let fake = signal_dns();
+        let state = grader_state(pool.clone(), &fake, |_| {}).await;
+
+        let (status, json) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = uuid::Uuid::parse_str(json["id"].as_str().unwrap()).unwrap();
+
+        // The owner can read it (read scope).
+        let (status, json) = get_result(
+            state.clone(),
+            auth("tenant-one", &["grader:read"], None),
+            id,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["id"], id.to_string());
+
+        // A second tenant must never see it.
+        let (status, json) = get_result(
+            state.clone(),
+            auth("tenant-two", &["grader:read"], None),
+            id,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+        // List is tenant-scoped too.
+        let (status, json) = list_results(
+            state.clone(),
+            auth("tenant-two", &["grader:read"], None),
+            PaginationParams {
+                page: None,
+                per_page: None,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["results"].as_array().unwrap().len(), 0);
+
+        let (status, json) = list_results(
+            state.clone(),
+            auth("tenant-one", &["grader:read"], None),
+            PaginationParams {
+                page: Some(0),
+                per_page: Some(1_000),
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["page"], 1, "page 0 clamps to 1");
+        assert_eq!(json["per_page"], 100, "per_page clamps to 100");
+        assert_eq!(json["results"].as_array().unwrap().len(), 1);
+
+        // Missing scope on read.
+        let (status, _) = get_result(state.clone(), auth("tenant-one", &[], None), id).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Unknown id → 404.
+        let (status, _) = get_result(
+            state,
+            auth("tenant-one", &["grader:read"], None),
+            uuid::Uuid::new_v4(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn submit_enforces_size_caps_honestly() {
+        let Some(pool) = canonical_pool("grader_size_caps").await else {
+            return;
+        };
+        let fake = signal_dns();
+
+        // Body cap → 413 before any DNS work.
+        let state = grader_state(pool.clone(), &fake, |c| c.max_body_size = 8).await;
+        let mut body = submit_body();
+        body.body_text = Some("this is definitely too large".into());
+        let (status, json) =
+            submit_email(state, auth("tenant-one", &["grader:write"], None), body).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(json["error"]["code"], "BODY_TOO_LARGE");
+
+        // JSONB cap → 413 after analysis, before persistence.
+        let state = grader_state(pool.clone(), &fake, |c| c.max_jsonb_bytes = 10).await;
+        let (status, json) = submit_email(
+            state,
+            auth("tenant-one", &["grader:write"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(json["error"]["code"], "RESULT_TOO_LARGE");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grader_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a refused result is never persisted");
+    }
+
+    #[tokio::test]
+    async fn submit_encrypts_stored_from_and_subject_when_configured() {
+        use base64::Engine as _;
+        let Some(pool) = canonical_pool("grader_encryption").await else {
+            return;
+        };
+        let fake = signal_dns();
+        let key = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        let state = grader_state(pool.clone(), &fake, |c| {
+            c.encrypt_stored_content = true;
+            c.encryption_master_key_base64 = Some(key.clone());
+        })
+        .await;
+
+        let (status, _) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (from, subject, encrypted): (Option<String>, Option<String>, bool) =
+            sqlx::query_as("SELECT from_address, subject, encrypted FROM grader_results LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let from = from.expect("from stored");
+        assert!(from.starts_with("v1:"), "encrypted, not plaintext: {from}");
+        assert!(subject.unwrap().starts_with("v1:"));
+        assert!(encrypted);
+
+        let cipher = Cipher::from_base64_key(&key).unwrap();
+        assert_eq!(
+            String::from_utf8(cipher.decrypt(&from).unwrap()).unwrap(),
+            "alice@example.com"
+        );
+
+        // GraderState refuses an encryption config without/with a bad key.
+        let engine = Arc::new(GraderEngine::new(GraderConfig::default(), None).unwrap());
+        let mut bad = GraderConfig {
+            encrypt_stored_content: true,
+            encryption_master_key_base64: None,
+            ..GraderConfig::default()
+        };
+        assert!(GraderState::new(engine.clone(), bad.clone(), pool.clone()).is_err());
+        bad.encryption_master_key_base64 = Some("not-a-key".into());
+        assert!(GraderState::new(engine, bad, pool).is_err());
+    }
+
+    #[tokio::test]
+    async fn database_failures_are_reported_not_fabricated() {
+        let offline = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .unwrap();
+        let fake = signal_dns();
+        let state = grader_state(offline, &fake, |_| {}).await;
+
+        // Idempotency lookup against a dead DB → honest 500.
+        let (status, json) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], Some("k")),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json["error"]["code"], "DB_ERROR");
+
+        // get_result against a dead DB → honest 500 (not a 404).
+        let (status, json) = get_result(
+            state.clone(),
+            auth("tenant-one", &["grader:read"], None),
+            uuid::Uuid::new_v4(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json["error"]["code"], "DB_ERROR");
+
+        let (status, _) = list_results(
+            state,
+            auth("tenant-one", &["grader:read"], None),
+            PaginationParams {
+                page: None,
+                per_page: None,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // purge_expired reports 0 on error instead of panicking.
+        let dead = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .unwrap();
+        assert_eq!(purge_expired(&dead).await, 0);
+    }
+
+    #[tokio::test]
+    async fn purge_expired_removes_only_expired_rows() {
+        let Some(pool) = canonical_pool("grader_purge").await else {
+            return;
+        };
+        for (id, expires_offset_days) in [
+            ("11111111-1111-1111-1111-111111111111", -1i64),
+            ("22222222-2222-2222-2222-222222222222", 30),
+        ] {
+            sqlx::query(
+                "INSERT INTO grader_results
+                   (id, tenant_id, domain, score, grade, breakdown, findings,
+                    recommendations, encrypted, expires_at)
+                 VALUES ($1::uuid, 'tenant-one', 'example.com', 80, 'A',
+                         '{}'::jsonb, '[]'::jsonb, '{}', false,
+                         NOW() + make_interval(days => $2::int))",
+            )
+            .bind(id)
+            .bind(expires_offset_days)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(purge_expired(&pool).await, 1);
+        let remaining: Vec<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM grader_results ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining,
+            vec![uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn check_domain_route_enforces_enabled_rate_limit_and_domain_rules() {
+        let Some(pool) = canonical_pool("grader_check_route").await else {
+            return;
+        };
+        let fake = signal_dns();
+
+        // Disabled → 503.
+        let state = grader_state(pool.clone(), &fake, |c| c.enabled = false).await;
+        let (status, json) = check_domain(
+            state,
+            "203.0.113.7".parse().unwrap(),
+            DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["code"], "GRADER_DISABLED");
+
+        // Rate limit 0 → every request blocked.
+        let state = grader_state(pool.clone(), &fake, |c| c.rate_limit_max = 0).await;
+        let (status, json) = check_domain(
+            state,
+            "203.0.113.7".parse().unwrap(),
+            DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(json["error"]["code"], "RATE_LIMITED");
+
+        // Real check succeeds and is not persisted.
+        let state = grader_state(pool.clone(), &fake, |_| {}).await;
+        let (status, json) = check_domain(
+            state.clone(),
+            "203.0.113.7".parse().unwrap(),
+            DomainCheckRequest {
+                domain: "example.com".into(),
+                selectors: vec![],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{:?}", json.0);
+        assert_eq!(json["grade"], "A");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grader_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "domain-only checks are not persisted");
+
+        // Invalid domain → 400 INVALID_INPUT.
+        let (status, json) = check_domain(
+            state,
+            "203.0.113.7".parse().unwrap(),
+            DomainCheckRequest {
+                domain: "no-dot".into(),
+                selectors: vec![],
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "INVALID_INPUT");
+    }
+
+    #[tokio::test]
+    async fn tenant_dns_budget_exhaustion_is_a_honest_429() {
+        let Some(pool) = canonical_pool("grader_budget").await else {
+            return;
+        };
+        let fake = signal_dns();
+        // Budget of 1 unit < the 7 units a submit costs → refused before
+        // analysis, with a retry-later code.
+        let state = grader_state(pool.clone(), &fake, |c| c.tenant_dns_budget_max = 1).await;
+        let (status, json) = submit_email(
+            state.clone(),
+            auth("tenant-one", &["grader:write"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(json["error"]["code"], "TENANT_BUDGET");
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grader_results")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "nothing persisted when the budget refuses");
+
+        // A zero budget blocks every tenant.
+        let state = grader_state(pool.clone(), &fake, |c| c.tenant_dns_budget_max = 0).await;
+        let (status, _) = submit_email(
+            state,
+            auth("tenant-one", &["grader:write"], None),
+            submit_body(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn read_routes_fail_closed_when_disabled() {
+        let Some(pool) = canonical_pool("grader_disabled_reads").await else {
+            return;
+        };
+        let fake = signal_dns();
+        let state = grader_state(pool.clone(), &fake, |c| c.enabled = false).await;
+        let id = uuid::Uuid::new_v4();
+        let (status, json) = get_result(
+            state.clone(),
+            auth("tenant-one", &["grader:read"], None),
+            id,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["code"], "GRADER_DISABLED");
+
+        let (status, json) = list_results(
+            state.clone(),
+            auth("tenant-one", &["grader:read"], None),
+            PaginationParams {
+                page: None,
+                per_page: None,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["code"], "GRADER_DISABLED");
+
+        // Invalid tenant on the read paths (enabled grader, so validation is
+        // what refuses the request).
+        let live = grader_state(pool, &fake, |_| {}).await;
+        let (status, json) =
+            get_result(live.clone(), auth("bad tenant", &["grader:read"], None), id).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "INVALID_TENANT");
+        let (status, json) = list_results(
+            live,
+            auth("bad tenant", &["grader:read"], None),
+            PaginationParams {
+                page: None,
+                per_page: None,
+            },
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json["error"]["code"], "INVALID_TENANT");
+    }
+
+    #[test]
+    fn error_mapping_covers_every_variant() {
+        let (status, json) = map_grader_error(GraderError::DomainNotFound("gone.example".into()));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json["error"]["code"], "DOMAIN_NOT_FOUND");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("gone.example"));
+
+        let (status, json) = map_grader_error(GraderError::TenantBudgetExhausted);
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(json["error"]["code"], "TENANT_BUDGET");
+
+        let (status, json) = map_grader_error(GraderError::Internal("boom".into()));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json["error"]["code"], "INTERNAL");
+        // Internal detail is logged, never returned.
+        assert!(!json["error"]["message"].as_str().unwrap().contains("boom"));
+    }
 }

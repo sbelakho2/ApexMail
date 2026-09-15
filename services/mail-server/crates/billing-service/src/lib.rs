@@ -12,7 +12,6 @@ pub mod accounting_export;
 pub mod accounting_postings;
 pub mod config;
 pub mod credit_notes;
-pub mod hetzner_ip_provider;
 pub mod invoices;
 pub mod maintenance;
 /// Monitoring and alerting for metering drain operations.

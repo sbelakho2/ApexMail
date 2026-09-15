@@ -133,8 +133,11 @@ impl ChurnPredictionEngine {
             weight: BOUNCE_WEIGHT,
         });
 
-        // Inactivity signal — scoped to tenant
-        let last_engagement: Option<(chrono::DateTime<Utc>,)> = sqlx::query_as(
+        // Inactivity signal — scoped to tenant. `MAX(timestamp)` is NULL for
+        // a recipient with no engagement history: the tuple element itself
+        // must be Option, or a cold-start prediction (the most important
+        // churn case) fails to decode.
+        let last_engagement: Option<(Option<chrono::DateTime<Utc>>,)> = sqlx::query_as(
             "SELECT MAX(timestamp) FROM events WHERE tenant_id = $1 AND recipient = $2 AND event_type IN ('opened', 'clicked')",
         )
         .bind(tenant_id)
@@ -143,7 +146,8 @@ impl ChurnPredictionEngine {
         .await?;
 
         let days_inactive = last_engagement
-            .map(|(t,)| (Utc::now() - t).num_days())
+            .and_then(|(t,)| t)
+            .map(|t| (Utc::now() - t).num_days())
             .unwrap_or(365);
         let inactivity_score = (days_inactive as f64 / 90.0).min(1.0);
         signals.push(ChurnSignal {

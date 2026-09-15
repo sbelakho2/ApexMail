@@ -471,4 +471,94 @@ mod tests {
             assert_eq!(record.exchange, "mx.example.com");
         }
     }
+
+    // ── Adversarial: parser edge vocabulary ─────────────────────────────
+
+    #[test]
+    fn spf_all_qualifier_vocabulary() {
+        // Bare `all` is +all; each qualifier form maps to its sign.
+        assert_eq!(
+            SpfRecord::parse("v=spf1 all").and_then(|r| r.all_qualifier),
+            Some('+')
+        );
+        assert_eq!(
+            SpfRecord::parse("v=spf1 +all").and_then(|r| r.all_qualifier),
+            Some('+')
+        );
+        assert_eq!(
+            SpfRecord::parse("v=spf1 -all").and_then(|r| r.all_qualifier),
+            Some('-')
+        );
+        assert_eq!(
+            SpfRecord::parse("v=spf1 ~all").and_then(|r| r.all_qualifier),
+            Some('~')
+        );
+        assert_eq!(
+            SpfRecord::parse("v=spf1 ?all").and_then(|r| r.all_qualifier),
+            Some('?')
+        );
+        assert!(SpfRecord::parse("v=spf1 all").is_some_and(|r| !r.is_hard_fail()));
+        assert!(SpfRecord::parse("v=spf1 -all").is_some_and(|record| record.is_hard_fail()));
+        // `mx:all.example.com` is not the all mechanism.
+        let prefixed = SpfRecord::parse("v=spf1 mx:all.example.com ip4:1.2.3.4").unwrap();
+        assert!(prefixed.all_qualifier.is_none());
+        assert!(prefixed
+            .mechanisms
+            .contains(&"mx:all.example.com".to_string()));
+        // Qualifier detection is case-insensitive on the mechanism.
+        assert_eq!(
+            SpfRecord::parse("v=spf1 ~ALL").and_then(|r| r.all_qualifier),
+            Some('~')
+        );
+    }
+
+    #[test]
+    fn dkim_hash_algorithms_and_unknown_keys() {
+        let dkim = DkimRecord::parse(
+            "v=DKIM1; h=sha256:sha1; k=ed25519; s=email; t=y:s; x=ignored; p=AAAA",
+        )
+        .expect("parses");
+        assert_eq!(dkim.hash_algorithms, vec!["sha256", "sha1"]);
+        assert_eq!(dkim.key_type, "ed25519");
+        assert_eq!(dkim.service_type.as_deref(), Some("email"));
+        assert_eq!(dkim.flags, vec!["y", "s"]);
+        assert!(dkim.is_testing());
+        // Quoted values and internal spaces in the key are cleaned; a
+        // newline inside a value is preserved verbatim (and makes the key
+        // unusable for verification, which is the safe direction).
+        let quoted = DkimRecord::parse("v=\"DKIM1\"; p=AA BB CC").expect("quoted");
+        assert_eq!(quoted.public_key, "AABBCC");
+        // A record without a version still parses (version defaults to None).
+        let no_version = DkimRecord::parse("k=rsa; p=AAAA").expect("no version");
+        assert!(no_version.version.is_none());
+        // Value-less junk lines are ignored, not fatal.
+        assert!(DkimRecord::parse(";; ; p=AAAA").is_some());
+    }
+
+    #[test]
+    fn dmarc_unknown_versions_and_bad_pct() {
+        // A non-DMARC1 version is refused (only v=DMARC1 is a DMARC record).
+        assert!(DmarcPolicy::parse("v=DMARC2; p=reject").is_none());
+        // Non-numeric pct falls back to 100 (never a silent 0% policy).
+        let bad_pct = DmarcPolicy::parse("v=DMARC1; p=reject; pct=lots").expect("parses");
+        assert_eq!(bad_pct.pct, 100);
+        // rua/ruf lists split on commas; unknown keys are ignored.
+        let policy = DmarcPolicy::parse(
+            "v=DMARC1; p=quarantine; rua=mailto:a@x, mailto:b@y; ruf=mailto:f@x; unknown=1; aspf=s",
+        )
+        .expect("parses");
+        assert_eq!(policy.rua, vec!["mailto:a@x", "mailto:b@y"]);
+        assert_eq!(policy.ruf, vec!["mailto:f@x"]);
+        assert_eq!(policy.aspf, 's');
+        assert_eq!(policy.adkim, 'r');
+        // Subdomain policy falls back to the domain policy.
+        assert_eq!(policy.effective_subdomain_policy(), "quarantine");
+        // Whitespace and case normalisation.
+        let padded = DmarcPolicy::parse("  v=DMARC1 ;  p = REJECT ").expect("padded");
+        assert_eq!(padded.policy, "reject");
+        assert!(padded.is_reject());
+        // Empty adkim value keeps the default.
+        let empty_adkim = DmarcPolicy::parse("v=DMARC1; adkim=").expect("parses");
+        assert_eq!(empty_adkim.adkim, 'r');
+    }
 }

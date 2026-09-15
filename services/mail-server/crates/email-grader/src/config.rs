@@ -174,3 +174,194 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_or_fallback_keeps_sane_weights_and_replaces_broken_ones() {
+        let sane = ScoringWeights {
+            dns_health: 1.0,
+            authentication: 0.0,
+            spam_likelihood: 0.0,
+            content_quality: 0.0,
+            reputation: 0.0,
+        };
+        assert_eq!(sane.validate_or_fallback("t"), sane);
+
+        for broken in [
+            ScoringWeights {
+                dns_health: 0.0,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+            ScoringWeights {
+                dns_health: -1.0,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+            ScoringWeights {
+                dns_health: f64::INFINITY,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+            ScoringWeights {
+                dns_health: f64::NAN,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+        ] {
+            assert_eq!(
+                broken.validate_or_fallback("tenant-x"),
+                ScoringWeights::default(),
+                "broken weights must fall back"
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_weights_sum_to_one() {
+        let w = ScoringWeights {
+            dns_health: 1.0,
+            authentication: 1.0,
+            spam_likelihood: 1.0,
+            content_quality: 1.0,
+            reputation: 1.0,
+        }
+        .normalized();
+        let sum =
+            w.dns_health + w.authentication + w.spam_likelihood + w.content_quality + w.reputation;
+        assert!((sum - 1.0).abs() < 1e-9, "{sum}");
+
+        // Broken input → defaults (which already sum to 1.0).
+        let broken = ScoringWeights {
+            dns_health: 0.0,
+            authentication: 0.0,
+            spam_likelihood: 0.0,
+            content_quality: 0.0,
+            reputation: 0.0,
+        }
+        .normalized();
+        assert_eq!(broken, ScoringWeights::default());
+    }
+
+    /// Serializes env-mutating tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn from_env_reads_overrides_and_falls_back_on_garbage() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            "GRADER_ENABLED",
+            "GRADER_RATE_LIMIT",
+            "GRADER_CACHE_TTL",
+            "GRADER_DKIM_SELECTORS",
+            "GRADER_MAX_BODY_SIZE",
+            "GRADER_ENCRYPT_STORED",
+            "GRADER_ENCRYPTION_KEY_BASE64",
+            "GRADER_AUTH_HOSTNAME",
+            "GRADER_NETWORK_TIMEOUT",
+            "GRADER_DKIM_CONCURRENCY",
+            "GRADER_MTA_STS_MAX_BYTES",
+            "GRADER_IDEMPOTENCY_WINDOW",
+            "GRADER_RETENTION_DAYS",
+            "GRADER_MAX_JSONB_BYTES",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in keys {
+            std::env::remove_var(k);
+        }
+
+        let defaults = GraderConfig::from_env();
+        assert!(defaults.enabled);
+        assert_eq!(defaults.rate_limit_max, 10);
+        assert_eq!(defaults.cache_ttl_seconds, 300);
+        assert_eq!(
+            defaults.default_dkim_selectors,
+            vec!["default", "google", "dkim", "selector1"]
+        );
+        assert_eq!(defaults.auth_hostname, "grader.apexmail.ee");
+
+        std::env::set_var("GRADER_ENABLED", "false");
+        std::env::set_var("GRADER_RATE_LIMIT", "7");
+        std::env::set_var("GRADER_CACHE_TTL", "not-a-number");
+        std::env::set_var("GRADER_DKIM_SELECTORS", " s1 , s2 ,");
+        std::env::set_var("GRADER_MAX_BODY_SIZE", "1234");
+        std::env::set_var("GRADER_ENCRYPT_STORED", "true");
+        std::env::set_var("GRADER_ENCRYPTION_KEY_BASE64", "a2V5");
+        std::env::set_var("GRADER_AUTH_HOSTNAME", "grader.test");
+        std::env::set_var("GRADER_NETWORK_TIMEOUT", "2");
+        std::env::set_var("GRADER_DKIM_CONCURRENCY", "9");
+        std::env::set_var("GRADER_MTA_STS_MAX_BYTES", "4096");
+        std::env::set_var("GRADER_IDEMPOTENCY_WINDOW", "60");
+        std::env::set_var("GRADER_RETENTION_DAYS", "0");
+        std::env::set_var("GRADER_MAX_JSONB_BYTES", "1024");
+
+        let parsed = GraderConfig::from_env();
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.rate_limit_max, 7);
+        assert_eq!(parsed.cache_ttl_seconds, 300, "garbage keeps the default");
+        assert_eq!(parsed.default_dkim_selectors, vec!["s1", "s2", ""]);
+        assert_eq!(parsed.encryption_master_key_base64.as_deref(), Some("a2V5"));
+        assert!(parsed.encrypt_stored_content);
+        assert_eq!(parsed.auth_hostname, "grader.test");
+        assert_eq!(parsed.network_timeout_seconds, 2);
+        assert_eq!(parsed.dkim_lookup_concurrency, 9);
+        assert_eq!(parsed.mta_sts_policy_max_bytes, 4096);
+        assert_eq!(parsed.idempotency_window_seconds, 60);
+        assert_eq!(parsed.default_retention_days, 0);
+        assert_eq!(parsed.max_jsonb_bytes, 1024);
+
+        for (k, v) in saved {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn weights_for_tenant_override_normalizes_and_defaults() {
+        let mut config = GraderConfig::default();
+        config.tenant_weights.insert(
+            "tenant-a".into(),
+            ScoringWeights {
+                dns_health: 3.0,
+                authentication: 1.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+        );
+        let w = config.weights_for("tenant-a");
+        assert!((w.dns_health - 0.75).abs() < 1e-9);
+        assert!((w.authentication - 0.25).abs() < 1e-9);
+        assert_eq!(w.spam_likelihood, 0.0);
+
+        // Unknown tenant → defaults, normalized.
+        assert_eq!(config.weights_for("tenant-b"), ScoringWeights::default());
+
+        // A broken tenant override falls back to the uniform default (0.2 each).
+        config.tenant_weights.insert(
+            "tenant-b".into(),
+            ScoringWeights {
+                dns_health: 0.0,
+                authentication: 0.0,
+                spam_likelihood: 0.0,
+                content_quality: 0.0,
+                reputation: 0.0,
+            },
+        );
+        assert_eq!(config.weights_for("tenant-b"), ScoringWeights::default());
+    }
+}

@@ -5335,6 +5335,7 @@ mod tests {
     async fn make_processor_with_tracking(
         tracking: crate::common::TrackingConfig,
     ) -> EmailProcessor {
+        crate::common::ensure_aws_test_env();
         let db = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost/unused")
@@ -6495,6 +6496,7 @@ mod tests {
     /// gate; an unreachable Redis fails OPEN (best-effort).
     #[tokio::test]
     async fn check_send_admission_gates_on_config_rate_and_fails_open() {
+        crate::common::ensure_aws_test_env();
         let shared_route = DeliveryRoute::SesShared;
         // Unreachable Redis: the gate must fail open (warn + admit).
         let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
@@ -8567,6 +8569,7 @@ mod tests {
                 actual_source_ip: Some("198.51.100.7".parse().expect("test IP")),
                 recipients: vec![],
                 dsn_send_units: vec![],
+                deferred_retry: None,
             },
         });
         let transport = OutboundMtaTransport::new(stub);

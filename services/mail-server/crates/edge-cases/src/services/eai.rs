@@ -413,6 +413,19 @@ impl EAIService {
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
+/// Test-only seams for priming the DNS/EAI caches so tests exercise the full
+/// service logic without any network egress. Compiled only under `cfg(test)`.
+#[cfg(test)]
+impl EAIService {
+    pub(crate) fn prime_mx_cache(&self, domain: &str, has_mx: bool) {
+        self.mx_cache.insert(domain.to_string(), has_mx);
+    }
+
+    pub(crate) fn prime_eai_cache(&self, domain: &str, supported: bool) {
+        self.eai_cache.insert(domain.to_string(), supported);
+    }
+}
+
 /// Split a `"Display Name <addr@example.com>"` form into
 /// `(display name, address)`.
 ///
@@ -639,5 +652,279 @@ mod tests {
         assert_eq!(parsed.address.local_part, "alice");
         assert_eq!(parsed.address.domain, "example.com");
         assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
+    }
+
+    // ── adversarial: local-part and domain validation edges ───────────
+
+    async fn offline_service() -> EAIService {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .expect("lazy pool never connects");
+        let redis = deadpool_redis::Config::from_url("redis://localhost:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        EAIService::new(pool, redis)
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_invalid_local_parts() {
+        let service = offline_service().await;
+        for (email, expected) in [
+            ("@example.com", "Local part is empty"),
+            ("user@", "Domain is empty"),
+            ("user@@example.com", "Invalid character"),
+            (".leading@example.com", "dot"),
+            ("trailing.@example.com", "dot"),
+            ("dou..ble@example.com", "consecutive dots"),
+            ("has space@example.com", "Invalid character"),
+            // Needs a non-ASCII character too, otherwise the ASCII branch
+            // rejects it as an invalid character rather than a control char.
+            ("café\u{7}@example.com", "control"),
+        ] {
+            let error = service
+                .parse_email_address(email, None)
+                .await
+                .expect_err(&format!("{email:?} must be rejected"));
+            assert!(
+                error.to_string().contains(expected),
+                "{email:?}: expected {expected:?} in {:?}",
+                error.to_string()
+            );
+        }
+
+        // 64-char local part is fine, 65 is not.
+        let local64 = "a".repeat(64);
+        assert!(service
+            .parse_email_address(&format!("{local64}@example.com"), None)
+            .await
+            .is_ok());
+        let local65 = "a".repeat(65);
+        let error = service
+            .parse_email_address(&format!("{local65}@example.com"), None)
+            .await
+            .expect_err("65-char local part must be rejected");
+        assert!(error.to_string().contains("64"));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_invalid_domains() {
+        let service = offline_service().await;
+        for (email, expected) in [
+            ("user@localhost", "at least 2 labels"),
+            ("user@example..com", "empty label"),
+            ("user@example.123", "numeric"),
+            ("user@example.com.", "empty label"),
+            // idna rejects the replacement character outright.
+            ("user@\u{FFFD}.com", "Invalid internationalized domain"),
+        ] {
+            let error = service
+                .parse_email_address(email, None)
+                .await
+                .expect_err(&format!("{email:?} must be rejected"));
+            assert!(
+                error.to_string().contains(expected),
+                "{email:?}: expected {expected:?} in {:?}",
+                error.to_string()
+            );
+        }
+
+        // An ASCII domain over 255 characters is rejected before labels are
+        // even considered.
+        let long_domain = format!(
+            "{}.{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(63),
+            "e".repeat(5)
+        );
+        let error = service
+            .parse_email_address(&format!("user@{long_domain}"), None)
+            .await
+            .expect_err("over-255 domain must be rejected");
+        assert!(error.to_string().contains("255"), "{error}");
+
+        // A label that expands beyond 63 ASCII chars when punycoded.
+        let long_label = "é".repeat(60); // é -> xn--... expansion exceeds 63
+        let error = service
+            .parse_email_address(&format!("user@{long_label}.com"), None)
+            .await
+            .expect_err("oversize punycode label must be rejected");
+        assert!(
+            error.to_string().contains("63") || error.to_string().contains("Invalid"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_normalizes_internationalized_addresses() {
+        let service = offline_service().await;
+        let parsed = service
+            .parse_email_address("用户@例え.jp", Some("Ünïcode"))
+            .await
+            .expect("IDN address parses");
+        assert!(parsed.requires_smtputf8);
+        assert!(parsed.address.is_internationalized);
+        assert!(parsed.address.punycode_domain.is_some());
+        assert!(parsed.address.normalized.contains("xn--"));
+        assert_eq!(parsed.display_name.as_deref(), Some("Ünïcode"));
+
+        // Commands carry the punycode form when not in SMTPUTF8 mode.
+        let from = EAIService::build_mail_from_command(&parsed.address, false);
+        assert!(from.starts_with("MAIL FROM:<用户@xn--"));
+        let from_utf8 = EAIService::build_mail_from_command(&parsed.address, true);
+        assert!(from_utf8.ends_with(" SMTPUTF8"));
+
+        // NFC: an NFD input normalizes to the same address as the NFC form.
+        let nfc = service
+            .parse_email_address("café@example.com", None)
+            .await
+            .unwrap();
+        let nfd = service
+            .parse_email_address("cafe\u{301}@example.com", None)
+            .await
+            .unwrap();
+        assert_eq!(nfc.address.normalized, nfd.address.normalized);
+    }
+
+    #[tokio::test]
+    async fn validate_email_uses_cached_mx_and_reports_honestly() {
+        let service = offline_service().await;
+        // No MX and no A record for the domain → invalid, with a concrete error.
+        service.prime_mx_cache("no-mx.example", false);
+        let result = service.validate_email("user@no-mx.example").await.unwrap();
+        assert!(!result.is_valid);
+        assert!(result.errors.iter().any(|e| e.contains("No MX records")));
+
+        // MX present → valid.
+        service.prime_mx_cache("has-mx.example", true);
+        let result = service.validate_email("user@has-mx.example").await.unwrap();
+        assert!(result.is_valid, "{:?}", result.errors);
+        assert!(result.warnings.is_empty());
+
+        // Typo domains warn but stay valid.
+        service.prime_mx_cache("gmial.com", true);
+        let result = service.validate_email("user@gmial.com").await.unwrap();
+        assert!(result.is_valid);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("Did you mean gmail.com?")));
+
+        // Internationalized address with a domain that does not advertise
+        // SMTPUTF8 → warning, still valid.
+        service.prime_mx_cache("例え.jp", true);
+        service.prime_eai_cache("例え.jp", false);
+        let result = service.validate_email("用户@例え.jp").await.unwrap();
+        assert!(result.is_valid);
+        assert!(result.requires_smtputf8);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("may not support SMTPUTF8")));
+
+        // SMTPUTF8 support cached as true → no warning.
+        service.prime_eai_cache("münchen.de", true);
+        service.prime_mx_cache("münchen.de", true);
+        let result = service.validate_email("用户@münchen.de").await.unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+        // Malformed address → is_valid false, parse error surfaced.
+        let result = service.validate_email("not-an-email").await.unwrap();
+        assert!(!result.is_valid);
+        assert!(!result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_emails_is_batch_and_order_preserving() {
+        let service = offline_service().await;
+        service.prime_mx_cache("one.example", true);
+        service.prime_mx_cache("two.example", false);
+        let results = service
+            .validate_emails(&["user@one.example".into(), "user@two.example".into()])
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_valid);
+        assert!(!results[1].is_valid);
+        assert!(service.validate_emails(&[]).await.unwrap().is_empty());
+    }
+
+    // ── DB-backed: domain capability persistence and lookup order ─────
+
+    fn real_redis_pool() -> deadpool_redis::Pool {
+        let url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    #[tokio::test]
+    async fn domain_capability_persists_and_lookup_precedence_holds() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "edge_eai_capability",
+            "edge_eai_capability",
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let Some(pool) = pool else { return };
+        let redis = real_redis_pool();
+        let domain = format!("cap-{}.example", uuid::Uuid::new_v4().simple());
+        let redis_key = format!("eai:support:{domain}");
+
+        // Nothing anywhere → false, and the answer is cached.
+        let service = EAIService::new(pool.clone(), redis.clone());
+        assert!(!service.check_eai_support(&domain).await);
+
+        // Persist a capability row and re-check with a fresh cache: the DB
+        // path must serve it.
+        service
+            .update_domain_capability(&domain, true)
+            .await
+            .expect("insert capability");
+        let service = EAIService::new(pool.clone(), redis.clone());
+        assert!(service.check_eai_support(&domain).await);
+
+        // Upsert path: flipping the flag updates the same row.
+        service
+            .update_domain_capability(&domain, false)
+            .await
+            .expect("upsert capability");
+        let (rows, true_rows): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE supports_smtputf8)
+             FROM edge_domain_capabilities WHERE domain = $1",
+        )
+        .bind(&domain)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1, "upsert must not duplicate the domain");
+        assert_eq!(true_rows, 0, "the flag was flipped to false");
+        let service = EAIService::new(pool.clone(), redis.clone());
+        assert!(!service.check_eai_support(&domain).await);
+
+        // Redis wins over the DB when the key is present.
+        if let Ok(mut conn) = redis.get().await {
+            let _: Result<(), _> = redis::cmd("SET")
+                .arg(&redis_key)
+                .arg("1")
+                .query_async(&mut *conn)
+                .await;
+        }
+        let service = EAIService::new(pool.clone(), redis.clone());
+        assert!(service.check_eai_support(&domain).await);
+
+        // Clean up the Redis key so reruns stay deterministic.
+        if let Ok(mut conn) = redis.get().await {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&redis_key)
+                .query_async(&mut *conn)
+                .await;
+        }
     }
 }

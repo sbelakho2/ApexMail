@@ -694,4 +694,523 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
         });
     }
+
+    // ── adversarial: every handler through the real router ────────────
+
+    fn offline_state() -> Arc<AppState> {
+        let _guard = test_runtime().enter();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .unwrap();
+        let redis_pool = deadpool_redis::Config::from_url("redis://localhost:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let mut config = crate::config::EdgeCasesConfig::default();
+        config.clamav.enabled = false; // no ClamAV egress
+        Arc::new(AppState {
+            eai: EAIService::new(pool.clone(), redis_pool.clone()),
+            attachment: AttachmentService::new(
+                pool.clone(),
+                config.attachments.clone(),
+                config.clamav.clone(),
+            ),
+            calendar: CalendarService::new(pool.clone()),
+            delivery: DeliveryService::new(
+                pool.clone(),
+                redis_pool.clone(),
+                config.retry.clone(),
+                config.loop_detection.clone(),
+                &config.auto_responder.subject_patterns,
+            ),
+            api_key: "test-key".into(),
+            allow_anonymous: false,
+        })
+    }
+
+    async fn call(
+        state: Arc<AppState>,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = router(state);
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("x-api-key", "test-key")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    #[test]
+    fn eai_routes_validate_parse_and_normalize() {
+        test_runtime().block_on(async {
+            let state = offline_state();
+            state.eai.prime_mx_cache("example.com", true);
+            state.eai.prime_mx_cache("no-mx.example", false);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/eai/parse",
+                serde_json::json!({"email": "Alice <alice@example.com>"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["address"]["local_part"], "alice");
+
+            let (status, _) = call(
+                state.clone(),
+                "POST",
+                "/eai/parse",
+                serde_json::json!({"email": "\"><a@b>"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/eai/validate",
+                serde_json::json!({"emails": ["user@example.com", "user@no-mx.example"]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["results"][0]["is_valid"], true);
+            // The second domain has no MX (cached negative) → invalid, and the
+            // error names the missing MX records.
+            assert_eq!(json["results"][1]["is_valid"], false);
+            assert!(json["results"][1]["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("No MX records"));
+
+            let (status, json) = call(
+                state,
+                "POST",
+                "/eai/normalize",
+                serde_json::json!({"content": "héllo", "charset": "ISO-8859-1"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["normalized_charset"], "iso-8859-1");
+            assert_eq!(json["has_unicode"], true);
+        });
+    }
+
+    #[test]
+    fn attachment_routes_validate_size_and_stats() {
+        test_runtime().block_on(async {
+            let state = offline_state();
+            let exe_b64 = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"MZ\x90\x00\x03\x00",
+            );
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/attachments/validate",
+                serde_json::json!({"attachments": [{
+                    "filename": "invoice.pdf",
+                    "content_type": "application/pdf",
+                    "data": exe_b64,
+                }]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["is_valid"], false);
+            assert!(json["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("application/x-msdownload"));
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/attachments/size-check",
+                serde_json::json!({"size": 10}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["within_limit"], true);
+            let (_, json) = call(
+                state.clone(),
+                "POST",
+                "/attachments/size-check",
+                serde_json::json!({"size": 25 * 1024 * 1024 + 1}),
+            )
+            .await;
+            assert_eq!(json["within_limit"], false);
+
+            // Invalid base64 is treated as no content, and the declared size
+            // still governs.
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/attachments/validate",
+                serde_json::json!({"attachments": [{
+                    "filename": "x.bin", "size": 1, "data": "!!!not-base64!!!",
+                }]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["is_valid"], true);
+
+            let (status, json) = call(
+                state,
+                "POST",
+                "/attachments/stats",
+                serde_json::json!({"attachments": [
+                    {"filename": "a.png", "content_type": "image/png", "size": 3},
+                    {"filename": "b.pdf", "content_type": "application/pdf", "size": 5,
+                     "disposition": "inline"},
+                ]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["count"], 2);
+            assert_eq!(json["total_size"], 8);
+            assert_eq!(json["has_inline"], true);
+            assert_eq!(json["has_attachment"], true);
+        });
+    }
+
+    #[test]
+    fn calendar_routes_create_parse_and_reject_bad_methods() {
+        test_runtime().block_on(async {
+            let state = offline_state();
+            let invite = serde_json::json!({
+                "method": "request",
+                "summary": "Kickoff",
+                "start": "2026-01-05T09:00:00Z",
+                "end": "2026-01-05T10:00:00Z",
+                "organizer_email": "boss@example.com",
+                "attendees": [{"email": "dev@example.com"}],
+                "location": "HQ",
+                "all_day": true,
+            });
+
+            let (status, json) =
+                call(state.clone(), "POST", "/calendar/invite", invite.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            let ics = json["ics"].as_str().unwrap().to_string();
+            assert!(ics.contains("METHOD:REQUEST"));
+            assert!(ics.contains("DTSTART;VALUE=DATE:"));
+            assert!(json["html_preview"].as_str().unwrap().contains("Kickoff"));
+
+            // Unknown method is refused with operator-readable detail.
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/calendar/invite",
+                serde_json::json!({
+                    "method": "TELEPORT",
+                    "summary": "x",
+                    "start": "2026-01-05T09:00:00Z",
+                    "end": "2026-01-05T10:00:00Z",
+                    "organizer_email": "boss@example.com",
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(json, serde_json::Value::Null, "error body is plain text");
+
+            // Round-trip through /calendar/parse.
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/calendar/parse",
+                serde_json::json!({"ics": ics}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["method"], "Request");
+            assert_eq!(json["events"][0]["summary"], "Kickoff");
+
+            // Malformed calendar → 400.
+            let (status, _) = call(
+                state.clone(),
+                "POST",
+                "/calendar/parse",
+                serde_json::json!({"ics": "METHOD:BOGUS\r\n"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/calendar/generate-ics",
+                serde_json::json!({
+                    "method": "cancel",
+                    "summary": "Cancelled",
+                    "start": "2026-01-05T09:00:00Z",
+                    "end": "2026-01-05T10:00:00Z",
+                    "organizer_email": "boss@example.com",
+                    "attendees": [{
+                        "email": "dev@example.com",
+                        "name": "Dev",
+                        "role": "OPT-PARTICIPANT",
+                        "part_stat": "DECLINED",
+                        "rsvp": true
+                    }],
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let ics = json["ics"].as_str().unwrap();
+            assert!(ics.contains("METHOD:CANCEL"));
+            assert!(ics.contains("PARTSTAT=DECLINED"));
+
+            let (status, _) = call(
+                state,
+                "POST",
+                "/calendar/generate-ics",
+                serde_json::json!({
+                    "method": "bogus",
+                    "summary": "x",
+                    "start": "2026-01-05T09:00:00Z",
+                    "end": "2026-01-05T10:00:00Z",
+                    "organizer_email": "boss@example.com",
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        });
+    }
+
+    #[test]
+    fn delivery_routes_classify_and_schedule() {
+        test_runtime().block_on(async {
+            let state = offline_state();
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/delivery/parse-response",
+                serde_json::json!({"code": 421, "message": "rate limit exceeded, retry after 3 minutes"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["response_type"], "RateLimit");
+            assert_eq!(json["suggested_retry_delay"], 180);
+
+            // A dead database on the history route is an honest 500, never a
+            // fabricated empty history.
+            let app = router(state.clone());
+            let request = Request::builder()
+                .method("GET")
+                .uri("/delivery/history/msg_offline")
+                .header("x-api-key", "test-key")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/delivery/retry-schedule",
+                serde_json::json!({
+                    "response": {
+                        "code": 450, "message": "greylisted", "enhanced": null,
+                        "response_type": "Greylist", "is_greylist": true,
+                        "suggested_retry_delay": null
+                    },
+                    "current_attempt": 0
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["reason"], "greylist");
+            assert_eq!(json["delay_secs"], 300);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/delivery/retry-schedule",
+                serde_json::json!({
+                    "response": {
+                        "code": 550, "message": "user unknown", "enhanced": "5.1.1",
+                        "response_type": "PermanentFailure", "is_greylist": false,
+                        "suggested_retry_delay": null
+                    },
+                    "current_attempt": 0
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["retry"], false);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/delivery/detect-loop",
+                serde_json::json!({"received_headers": [
+                    "from a.example.com", "from a.example.com",
+                    "from a.example.com", "from a.example.com"
+                ]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["is_loop"], true);
+            assert_eq!(json["hop_count"], 4);
+
+            let (status, json) = call(
+                state.clone(),
+                "POST",
+                "/delivery/detect-autoresponder",
+                serde_json::json!({
+                    "headers": {"Auto-Submitted": "auto-replied", "X-Autorespond": "yes"},
+                    "subject": "Re: hello"
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(json["is_auto_responder"], true);
+            assert_eq!(json["type"], "ooo");
+
+            // MX from a primed cache (no DNS).
+            state.delivery.prime_mx_cache(
+                "primed.example",
+                vec![crate::services::delivery::MXRecord {
+                    exchange: "mx.primed.example".into(),
+                    priority: 5,
+                    ttl: None,
+                }],
+            );
+            let app = router(state.clone());
+            let request = Request::builder()
+                .method("GET")
+                .uri("/delivery/mx/primed.example")
+                .header("x-api-key", "test-key")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json[0]["exchange"], "mx.primed.example");
+        });
+    }
+
+    #[test]
+    fn health_variants_are_open() {
+        test_runtime().block_on(async {
+            let app = router(offline_state());
+            for uri in ["/health", "/health/ready", "/health/live"] {
+                let response = app
+                    .clone()
+                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            }
+        });
+    }
+
+    // ── DB-backed routes on the canonical schema ──────────────────────
+
+    fn db_state(pool: sqlx::PgPool) -> Arc<AppState> {
+        let _guard = test_runtime().enter();
+        let redis_url =
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let redis_pool = deadpool_redis::Config::from_url(redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let mut config = crate::config::EdgeCasesConfig::default();
+        config.clamav.enabled = false;
+        Arc::new(AppState {
+            eai: EAIService::new(pool.clone(), redis_pool.clone()),
+            attachment: AttachmentService::new(
+                pool.clone(),
+                config.attachments.clone(),
+                config.clamav.clone(),
+            ),
+            calendar: CalendarService::new(pool.clone()),
+            delivery: DeliveryService::new(
+                pool.clone(),
+                redis_pool,
+                config.retry.clone(),
+                config.loop_detection.clone(),
+                &config.auto_responder.subject_patterns,
+            ),
+            api_key: "test-key".into(),
+            allow_anonymous: true,
+        })
+    }
+
+    #[test]
+    fn delivery_history_and_greylist_routes_hit_the_database() {
+        test_runtime().block_on(async {
+            let pool = match migrator::test_support::fresh_canonical_pool(
+                "edge_routes_db",
+                "edge_routes_db",
+            )
+            .await
+            {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            };
+            let Some(pool) = pool else { return };
+            let state = db_state(pool.clone());
+            let message_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(
+                "INSERT INTO edge_delivery_attempts
+                   (id, message_id, attempt_number, mx_host, mx_priority, response_code,
+                    response_message, response_type, attempt_time, duration_ms)
+                 VALUES (gen_random_uuid(), $1, 1, 'mx.example', 10, 250, 'OK', 'success', NOW(), 5)",
+            )
+            .bind(&message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let app = router(state.clone());
+            let request = Request::builder()
+                .method("GET")
+                .uri(format!("/delivery/history/{message_id}"))
+                .header("x-api-key", "test-key")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json[0]["attempt"], 1);
+            assert_eq!(json[0]["response_code"], 250);
+
+            let domain = format!("grey-{}", uuid::Uuid::new_v4().simple());
+            let app = router(state);
+            let request = Request::builder()
+                .method("GET")
+                .uri(format!("/delivery/greylist-check/{domain}"))
+                .header("x-api-key", "test-key")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json["domain"], domain);
+            assert_eq!(json["known_greylister"], false);
+        });
+    }
 }

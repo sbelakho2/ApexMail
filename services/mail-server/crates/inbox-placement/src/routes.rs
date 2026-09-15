@@ -38,18 +38,33 @@ fn created(data: serde_json::Value) -> (StatusCode, Json<serde_json::Value>) {
 
 // ── Handlers ──────────────────────────────────────────────────
 
+/// Canonical tenant keys are VARCHAR(26) (`tenants.id`), lowercase
+/// alphanumeric plus `-`/`_`. Reject anything that could not be stored.
+fn validate_tenant_id(tenant_id: &str) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
+    if tenant_id.is_empty() || tenant_id.len() > 26 {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid tenant_id"));
+    }
+    if !tenant_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid tenant_id"));
+    }
+    Ok(tenant_id)
+}
+
 /// `POST /v1/inbox-placement/tests` — create a new placement test.
 pub async fn create_placement_test(
     state: Arc<PlacementState>,
     tenant_id: String,
     body: CreateTestRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let tenant_uuid = match Uuid::parse_str(&tenant_id) {
+    let tenant_id = match validate_tenant_id(&tenant_id) {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid tenant_id"),
+        Err(resp) => return resp,
     };
 
-    match state.engine.create_test(body, tenant_uuid).await {
+    match state.engine.create_test(body, tenant_id).await {
         Ok(test) => created(serde_json::json!(test)),
         // Validation refusals travel as sqlx::Error::Protocol carrying
         // operator guidance (no seed accounts, rate limit, unverified From
@@ -75,9 +90,9 @@ pub async fn list_placement_tests(
     per_page: Option<u32>,
     status: Option<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let tenant_uuid = match Uuid::parse_str(&tenant_id) {
+    let tenant_id = match validate_tenant_id(&tenant_id) {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid tenant_id"),
+        Err(resp) => return resp,
     };
 
     let page = page.unwrap_or(1).max(1);
@@ -90,13 +105,13 @@ pub async fn list_placement_tests(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM placement_tests WHERE tenant_id = $1 AND status = $2",
         )
-        .bind(tenant_uuid)
+        .bind(tenant_id)
         .bind(status_filter)
         .fetch_one(&state.db)
         .await
     } else {
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM placement_tests WHERE tenant_id = $1")
-            .bind(tenant_uuid)
+            .bind(tenant_id)
             .fetch_one(&state.db)
             .await
     };
@@ -119,7 +134,7 @@ pub async fn list_placement_tests(
                ORDER BY created_at DESC
                LIMIT $3 OFFSET $4"#,
         )
-        .bind(tenant_uuid)
+        .bind(tenant_id)
         .bind(status_filter)
         .bind(limit)
         .bind(offset)
@@ -135,7 +150,7 @@ pub async fn list_placement_tests(
                ORDER BY created_at DESC
                LIMIT $2 OFFSET $3"#,
         )
-        .bind(tenant_uuid)
+        .bind(tenant_id)
         .bind(limit)
         .bind(offset)
         .fetch_all(&state.db)
@@ -180,9 +195,9 @@ pub async fn get_placement_test(
     tenant_id: String,
     id: Uuid,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let tenant_uuid = match Uuid::parse_str(&tenant_id) {
+    let tenant_id = match validate_tenant_id(&tenant_id) {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid tenant_id"),
+        Err(resp) => return resp,
     };
 
     // Load the test itself.
@@ -194,7 +209,7 @@ pub async fn get_placement_test(
            WHERE id = $1 AND tenant_id = $2"#,
     )
     .bind(id)
-    .bind(tenant_uuid)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await
     {
@@ -207,7 +222,7 @@ pub async fn get_placement_test(
     };
 
     // Get results and score.
-    let results = match state.engine.get_test_results(id, tenant_uuid).await {
+    let results = match state.engine.get_test_results(id, tenant_id).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "inbox-placement: get results failed");
@@ -215,7 +230,7 @@ pub async fn get_placement_test(
         }
     };
 
-    let score = match state.engine.get_placement_score(id, tenant_uuid).await {
+    let score = match state.engine.get_placement_score(id, tenant_id).await {
         Ok(s) => Some(s),
         Err(e) => {
             tracing::warn!(error = %e, "inbox-placement: get score failed");
@@ -268,9 +283,9 @@ pub async fn get_placement_trends(
     days: Option<u32>,
     provider: Option<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let tenant_uuid = match Uuid::parse_str(&tenant_id) {
+    let tenant_id = match validate_tenant_id(&tenant_id) {
         Ok(id) => id,
-        Err(_) => return err(StatusCode::BAD_REQUEST, "invalid tenant_id"),
+        Err(resp) => return resp,
     };
 
     // Trend window: default 30 days, clamped to 1..=365 so an unclamped
@@ -280,7 +295,7 @@ pub async fn get_placement_trends(
     // Parse optional provider filter.
     let provider = provider.as_deref().map(ProviderName::from_str);
 
-    match state.engine.get_trends(tenant_uuid, days, provider).await {
+    match state.engine.get_trends(tenant_id, days, provider).await {
         Ok(trends) => ok(serde_json::json!({ "trends": trends })),
         Err(e) => {
             tracing::error!(error = %e, "inbox-placement: get trends failed");

@@ -78,7 +78,7 @@ pub enum ClaimOutcome {
     Claimed(Box<QueuedSubmission>),
     /// A prior attempt recorded a post-DATA 250; the stored record is
     /// returned and MUST NOT be delivered again.
-    AlreadyAccepted(AcceptanceRecord),
+    AlreadyAccepted(Box<AcceptanceRecord>),
     /// Another attempt holds a live lease.
     InFlight {
         attempt: u32,
@@ -330,7 +330,7 @@ fn classify_existing(
                         message: format!("acceptance_record is not an AcceptanceRecord: {error}"),
                     })
                 })?;
-            Ok(ClaimOutcome::AlreadyAccepted(record))
+            Ok(ClaimOutcome::AlreadyAccepted(Box::new(record)))
         }
         "failed" => Ok(ClaimOutcome::PermanentlyFailed {
             attempt,
@@ -504,6 +504,11 @@ impl RelayLedger for PgLedger {
             send_unit: send_unit.to_string(),
             message: format!("cannot serialize acceptance record: {error}"),
         })?;
+        // One transaction: the acceptance evidence and the follow-up unit for
+        // the deferred subset (see `AcceptanceRecord::deferred_retry`) commit
+        // together, so a crash can neither duplicate the accepted copies nor
+        // drop the deferred recipients.
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "UPDATE outbound_relay_ledger \
              SET state = 'accepted', acceptance_record = $2, actual_source_ip = $3::text::inet, \
@@ -517,8 +522,40 @@ impl RelayLedger for PgLedger {
         .bind(&record.remote_mx)
         .bind(record.tls_used)
         .bind(record.accepted_at)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        if let Some(plan) = &record.deferred_retry {
+            let recipients = serde_json::Value::Array(
+                plan.recipients
+                    .iter()
+                    .map(|recipient| serde_json::Value::String(recipient.clone()))
+                    .collect(),
+            );
+            // Copy the ORIGINAL envelope/message/tenant/queue id/source IP
+            // and the inherited attempt ladder from the just-accepted parent.
+            // The child carries only the deferred recipients and is due at
+            // the plan's backoff time. Deterministic send_unit + ON CONFLICT
+            // DO NOTHING make a replay of the acceptance a no-op.
+            sqlx::query(
+                "INSERT INTO outbound_relay_ledger \
+                 (send_unit, tenant_id, queue_id, state, envelope_from, recipients, message, \
+                  requested_source_ip, attempt, max_attempts, next_attempt_at, last_error, \
+                  updated_at) \
+                 SELECT $2, tenant_id, queue_id, 'pending', envelope_from, $3, message, \
+                        requested_source_ip, $4, max_attempts, $5, $6, NOW() \
+                   FROM outbound_relay_ledger WHERE send_unit = $1 \
+                 ON CONFLICT (send_unit) DO NOTHING",
+            )
+            .bind(send_unit)
+            .bind(&plan.send_unit)
+            .bind(&recipients)
+            .bind(i32::try_from(plan.attempt).unwrap_or(i32::MAX))
+            .bind(plan.next_attempt_at)
+            .bind(&plan.reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -755,6 +792,10 @@ pub mod test_support {
             record: &AcceptanceRecord,
         ) -> Result<(), LedgerError> {
             self.with_entries(|entries| {
+                // The follow-up unit for the deferred subset commits with the
+                // acceptance, mirroring PgLedger (built under the parent
+                // borrow, inserted once it ends).
+                let mut follow_up: Option<QueuedSubmission> = None;
                 if let Some(entry) = entries.get_mut(send_unit) {
                     if entry.state == "delivering" {
                         entry.state = "accepted".to_string();
@@ -765,7 +806,34 @@ pub mod test_support {
                         entry.acceptance = Some(record.clone());
                         entry.lease_until = None;
                         entry.last_error = None;
+                        if let Some(plan) = &record.deferred_retry {
+                            follow_up = Some(QueuedSubmission {
+                                send_unit: plan.send_unit.clone(),
+                                tenant_id: entry.tenant_id.clone(),
+                                queue_id: entry.queue_id,
+                                state: "pending".to_string(),
+                                envelope_from: entry.envelope_from.clone(),
+                                recipients: plan.recipients.clone(),
+                                message: entry.message.clone(),
+                                requested_source_ip: entry.requested_source_ip,
+                                actual_source_ip: None,
+                                remote_mx: None,
+                                tls_used: false,
+                                attempt: plan.attempt,
+                                max_attempts: entry.max_attempts,
+                                next_attempt_at: plan.next_attempt_at,
+                                lease_until: None,
+                                acceptance: None,
+                                last_error: Some(plan.reason.clone()),
+                                created_at: Utc::now(),
+                            });
+                        }
                     }
+                }
+                if let Some(follow_up) = follow_up {
+                    entries
+                        .entry(follow_up.send_unit.clone())
+                        .or_insert(follow_up);
                 }
             });
             Ok(())
@@ -877,49 +945,27 @@ mod tests {
     use crate::ledger::test_support::MemoryLedger;
     use crate::relay::{AcceptanceRecord, RecipientOutcome, RecipientResult};
 
-    /// The Postgres test URL: the crate-wide `TEST_DATABASE_URL` (the
-    /// canonical provisioned schema), with the historical crate-specific
-    /// variable as a fallback. `None` = the suite is unconfigured and
-    /// soft-skips; a CONFIGURED URL that cannot be used panics.
-    fn pg_ledger_test_url() -> Option<String> {
-        std::env::var("OUTBOUND_MTA_TEST_DATABASE_URL")
-            .ok()
-            .filter(|url| !url.trim().is_empty())
-            .or_else(|| {
-                std::env::var("TEST_DATABASE_URL")
-                    .ok()
-                    .filter(|url| !url.trim().is_empty())
-            })
-    }
-
+    /// A PRIVATE canonical database per test (the REAL migration chain via
+    /// the production migrator). The suite previously shared one table with
+    /// a process-local `PG_LEDGER_LOCK`, which only serialises threads:
+    /// `cargo nextest` runs every test as its own PROCESS, so a table-wide
+    /// sweep (`claim_due` / `reclaim_expired`) in one test raced another
+    /// test's rows and failed intermittently under parallel load.
     async fn pg_ledger_pool(test_name: &str) -> Option<PgPool> {
-        let url = pg_ledger_test_url()?;
-        let pool = PgPool::connect(&url).await.unwrap_or_else(|error| {
-            panic!(
-                "configured {test_name} database is unreachable ({error}); \
-                     TEST_DATABASE_URL is set, so this is an infrastructure failure"
-            )
-        });
-        let table: Option<String> =
-            sqlx::query_scalar("SELECT to_regclass('public.outbound_relay_ledger')::text")
-                .fetch_one(&pool)
-                .await
-                .expect("probe outbound_relay_ledger");
-        assert!(
-            table.is_some(),
-            "configured test database has no outbound_relay_ledger table \
-             (migration 212) — refusing to hand-write a schema subset"
-        );
-        let _ = sqlx::query("DELETE FROM outbound_relay_ledger WHERE send_unit LIKE $1")
-            .bind(format!("outbound-mta-test:{test_name}:%"))
-            .execute(&pool)
-            .await;
-        Some(pool)
+        match migrator::test_support::fresh_canonical_pool(
+            &format!("outbound-mta-ledger-{test_name}"),
+            &format!("obm_ledger_{test_name}"),
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
     }
 
-    /// The Postgres-backed tests share one table: serialize them so a
-    /// table-wide sweep (`claim_due` / `reclaim_expired`) in one test cannot
-    /// observe another test's rows.
+    /// Kept for `cargo test` (one process, many threads): serialises the
+    /// Postgres-backed tests so their table-wide sweeps cannot interleave.
+    /// Under nextest each test owns a private database instead.
     static PG_LEDGER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn seed_row(pool: &PgPool, send_unit: &str, state: &str) {
@@ -1046,6 +1092,7 @@ mod tests {
                 tls_used: true,
             }],
             dsn_send_units: Vec::new(),
+            deferred_retry: None,
         };
         ledger
             .record_accepted(&unit, &record)
@@ -1057,6 +1104,7 @@ mod tests {
             .expect("fourth claim")
         {
             ClaimOutcome::AlreadyAccepted(stored) => {
+                let stored = *stored;
                 assert_eq!(stored.send_unit, unit);
                 assert_eq!(stored.actual_source_ip, record.actual_source_ip);
                 assert!(stored.warmup_capacity_consumed());
@@ -1389,6 +1437,7 @@ mod tests {
             actual_source_ip: Some("2001:db8::1".parse().expect("v6")),
             recipients: Vec::new(),
             dsn_send_units: Vec::new(),
+            deferred_retry: None,
         };
         ledger
             .record_accepted(&unit, &record)
@@ -1443,6 +1492,117 @@ mod tests {
             .bind(format!("{unit}%"))
             .execute(&pool)
             .await;
+    }
+
+    /// A partial acceptance commits the deferred subset's follow-up unit in
+    /// the SAME transaction as the acceptance evidence, and a replayed
+    /// acceptance write (which no longer matches `delivering`) can neither
+    /// duplicate nor alter the child.
+    #[tokio::test]
+    async fn pg_partial_acceptance_commits_the_followup_unit_atomically() {
+        let _guard = PG_LEDGER_LOCK.lock().await;
+        let Some(pool) = pg_ledger_pool("partial-acceptance").await else {
+            return;
+        };
+        let ledger = PgLedger::new(pool);
+        let unit = format!("outbound-mta-test:partial:{}", Uuid::new_v4());
+        let claimed = ledger
+            .claim_submission(
+                NewSubmission {
+                    send_unit: unit.clone(),
+                    tenant_id: Some("tenant-pa".to_string()),
+                    queue_id: None,
+                    envelope_from: Some("sender@apexmail.ee".to_string()),
+                    recipients: vec!["a@example.com".to_string(), "b@example.com".to_string()],
+                    message: b"Subject: pa\r\n\r\nbody".to_vec(),
+                    requested_source_ip: None,
+                    max_attempts: 5,
+                },
+                Utc::now(),
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("claim");
+        assert!(matches!(claimed, ClaimOutcome::Claimed(_)));
+
+        let child_unit = format!("{unit}#deferred1");
+        // Far future: this suite shares one database, and other tests'
+        // due-sweeps use minute/hour horizons — a near-future child row would
+        // be claimed by THEIR claim_due (and vice versa). The relay-level
+        // tests prove the claim path; this test proves the atomic commit.
+        let next_attempt_at = Utc::now() + chrono::Duration::days(90);
+        let record = AcceptanceRecord {
+            send_unit: unit.clone(),
+            state: "accepted".to_string(),
+            accepted_at: Utc::now(),
+            attempt: 1,
+            remote_mx: Some("mx.example".to_string()),
+            tls_used: true,
+            requested_source_ip: None,
+            actual_source_ip: None,
+            recipients: vec![
+                RecipientResult {
+                    recipient: "a@example.com".to_string(),
+                    outcome: RecipientOutcome::Accepted,
+                    reply_code: Some(250),
+                    enhanced_status: None,
+                    diagnostic: None,
+                    mx: Some("mx.example".to_string()),
+                    tls_used: true,
+                },
+                RecipientResult {
+                    recipient: "b@example.com".to_string(),
+                    outcome: RecipientOutcome::Deferred,
+                    reply_code: Some(450),
+                    enhanced_status: Some("4.2.1".to_string()),
+                    diagnostic: Some("busy".to_string()),
+                    mx: Some("mx.example".to_string()),
+                    tls_used: true,
+                },
+            ],
+            dsn_send_units: Vec::new(),
+            deferred_retry: Some(crate::relay::DeferredRetryPlan {
+                send_unit: child_unit.clone(),
+                recipients: vec!["b@example.com".to_string()],
+                attempt: 1,
+                next_attempt_at,
+                reason: "smtp; 450 4.2.1 busy".to_string(),
+            }),
+        };
+        ledger
+            .record_accepted(&unit, &record)
+            .await
+            .expect("record accepted");
+
+        // The child exists, carries ONLY the deferred recipient, keeps the
+        // original envelope and message, is pending, and is not due yet.
+        let child = ledger
+            .get(&child_unit)
+            .await
+            .expect("get")
+            .expect("the follow-up row committed with the acceptance");
+        assert_eq!(child.state, "pending");
+        assert_eq!(child.recipients, vec!["b@example.com".to_string()]);
+        assert_eq!(child.envelope_from.as_deref(), Some("sender@apexmail.ee"));
+        assert_eq!(child.tenant_id.as_deref(), Some("tenant-pa"));
+        assert_eq!(child.attempt, 1);
+        assert_eq!(child.max_attempts, 5);
+        assert_eq!(child.message, b"Subject: pa\r\n\r\nbody".to_vec());
+        assert!(child.next_attempt_at > Utc::now());
+        assert_eq!(child.last_error.as_deref(), Some("smtp; 450 4.2.1 busy"));
+
+        // A replayed acceptance write cannot match `delivering`: the child is
+        // neither duplicated nor altered.
+        ledger
+            .record_accepted(&unit, &record)
+            .await
+            .expect("replay no-ops");
+        let child_after = ledger
+            .get(&child_unit)
+            .await
+            .expect("get")
+            .expect("child row");
+        assert_eq!(child_after.next_attempt_at, child.next_attempt_at);
     }
 
     /// The in-memory double must classify, fence and count exactly like the
@@ -1519,6 +1679,7 @@ mod tests {
             actual_source_ip: None,
             recipients: Vec::new(),
             dsn_send_units: Vec::new(),
+            deferred_retry: None,
         };
         ledger
             .record_accepted("mem-1", &record)

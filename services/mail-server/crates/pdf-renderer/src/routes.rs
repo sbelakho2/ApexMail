@@ -288,4 +288,113 @@ mod tests {
         assert_eq!(sanitize_filename_component("qbr-2026_v2"), "qbr-2026_v2");
         assert_eq!(sanitize_filename_component("///"), "document");
     }
+
+    // ── Adversarial: auth matrix, happy paths, filename sanitizing ──────
+
+    #[tokio::test]
+    async fn render_endpoints_stream_and_encode_real_pdfs() {
+        let app = pdf_router("super-secret".into());
+        let body = serde_json::json!({
+            "template": "invoice",
+            "data": { "invoice_number": "INV-1", "total": 12400 }
+        })
+        .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pdf/render")
+                    .header("x-api-key", "super-secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/pdf");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let disposition = response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(disposition.contains("filename=\"invoice-"), "{disposition}");
+        assert!(disposition.ends_with(".pdf\""), "{disposition}");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(bytes.starts_with(b"%PDF-"));
+
+        // Bearer auth works on the JSON endpoint.
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/pdf/render/json")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            "Bearer super-secret".parse().unwrap(),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let decoded = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            json["pdf_base64"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert!(decoded.starts_with(b"%PDF-"));
+        assert_eq!(json["size"].as_u64().unwrap() as usize, decoded.len());
+    }
+
+    #[tokio::test]
+    async fn unknown_template_is_404_and_empty_token_locks_render() {
+        let app = pdf_router("super-secret".into());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pdf/render/json")
+                    .header("x-api-key", "super-secret")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"template":"no-such-template","data":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // An unconfigured token rejects every protected route.
+        let locked = pdf_router(String::new());
+        let response = locked
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/pdf/render")
+                    .header("x-api-key", "anything")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"template":"invoice","data":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn filename_component_sanitizer_strips_metacharacters() {
+        assert_eq!(sanitize_filename_component("invoice"), "invoice");
+        assert_eq!(sanitize_filename_component("a-b_c9"), "a-b_c9");
+        assert_eq!(sanitize_filename_component("../../etc/passwd"), "etcpasswd");
+        assert_eq!(sanitize_filename_component("a\"b\r\nX"), "abX");
+        assert_eq!(sanitize_filename_component("..."), "document");
+        assert_eq!(sanitize_filename_component(""), "document");
+    }
 }

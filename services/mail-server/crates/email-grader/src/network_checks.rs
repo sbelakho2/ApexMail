@@ -8,7 +8,7 @@
 //! against the private/reserved blocklist, the connection is pinned to those
 //! validated IPs, redirects are disabled, and response bytes/time are capped.
 
-use apexmail_dns_resolver::lookup::DnsLookup;
+use crate::dns_provider::DnsProvider;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -42,7 +42,7 @@ pub struct TlsRptInfo {
 }
 
 /// Lookup BIMI for `<domain>` (we use the standard `default` selector).
-pub async fn lookup_bimi(dns: &DnsLookup, domain: &str) -> Option<BimiInfo> {
+pub async fn lookup_bimi(dns: &dyn DnsProvider, domain: &str) -> Option<BimiInfo> {
     let qname = format!("default._bimi.{domain}");
     let txts = dns.lookup_txt(&qname).await.ok()?;
     let raw = txts
@@ -66,7 +66,7 @@ pub async fn lookup_bimi(dns: &DnsLookup, domain: &str) -> Option<BimiInfo> {
 }
 
 /// Lookup TLS-RPT for `<domain>`.
-pub async fn lookup_tls_rpt(dns: &DnsLookup, domain: &str) -> Option<TlsRptInfo> {
+pub async fn lookup_tls_rpt(dns: &dyn DnsProvider, domain: &str) -> Option<TlsRptInfo> {
     let qname = format!("_smtp._tls.{domain}");
     let txts = dns.lookup_txt(&qname).await.ok()?;
     let raw = txts.into_iter().find(|t| {
@@ -99,7 +99,7 @@ pub async fn lookup_tls_rpt(dns: &DnsLookup, domain: &str) -> Option<TlsRptInfo>
 ///    so a DNS rebinding between check and connect cannot redirect the fetch;
 /// 4. disable redirects and keep the existing size/timeout caps.
 pub async fn lookup_mta_sts(
-    dns: &DnsLookup,
+    dns: &dyn DnsProvider,
     domain: &str,
     max_bytes: usize,
     timeout: Duration,
@@ -243,7 +243,7 @@ pub(crate) fn validate_mta_sts_domain(domain: &str) -> Result<(), &'static str> 
 
 /// Resolve the A + AAAA records for the MTA-STS policy host. Lookup errors
 /// are flattened to "no addresses" — the caller then refuses to fetch.
-async fn resolve_mta_sts_ips(dns: &DnsLookup, host: &str) -> Vec<IpAddr> {
+async fn resolve_mta_sts_ips(dns: &dyn DnsProvider, host: &str) -> Vec<IpAddr> {
     let (a, aaaa) = tokio::join!(dns.lookup_a(host), dns.lookup_aaaa(host));
     let parse = |records: Result<Vec<String>, _>| {
         records
@@ -538,6 +538,174 @@ mod tests {
                 "mailto:tls@example.com".to_string(),
                 "https://example.com/tls".to_string(),
             ]
+        );
+    }
+
+    // ── IPv6 edge-range coverage (no network) ─────────────────────────
+
+    #[test]
+    fn private_ipv6_covers_tunnel_and_embedded_forms() {
+        // Site-local (deprecated) fec0::/10.
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0xfec0, 0, 0, 0, 0, 0, 0, 1
+        ))));
+        // 6to4 with a PUBLIC embedded IPv4 is allowed.
+        assert!(!is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2002, 0x0808, 0x0808, 0, 0, 0, 0, 1
+        ))));
+        // 6to4 with a private embedded IPv4 (127.0.0.1) is rejected.
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2002, 0x7f00, 0x0001, 0, 0, 0, 0, 1
+        ))));
+        // Teredo 2001:0000::/32 with the embedded IPv4 XORed: 0xFFFFFFFE
+        // decodes (XOR 0xff) to 10.0.0.1 → rejected.
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0x2001, 0x0000, 0, 0, 0, 0, 0xf5ff, 0xfffe
+        ))));
+        // IPv4-compatible ::x/96 embedding 192.168.1.1 → rejected.
+        assert!(is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0, 0xc0a8, 0x0101
+        ))));
+        // Public IPv4-mapped address passes.
+        assert!(!is_private_ip(&IpAddr::V6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0xffff, 0x0808, 0x0808
+        ))));
+    }
+
+    #[test]
+    fn mta_sts_domain_validation_rejects_every_unsafe_shape() {
+        for bad in [
+            "",
+            "a".repeat(254).as_str(),
+            "1.2.3.4",
+            "255.255.255.255",
+            "::1",
+            "[::1]",
+            "dotless",
+            "a..b",
+            "example.123",
+            "exa mple.com",
+            "-lead.com",
+            "trail-.com",
+            "under_score.example.com",
+            "example.com\n.mta-sts",
+            "café.example.com",
+        ] {
+            assert!(validate_mta_sts_domain(bad).is_err(), "must reject {bad:?}");
+        }
+        for good in ["example.com", "mail.example.co.uk", "a-b.example.org"] {
+            assert!(validate_mta_sts_domain(good).is_ok(), "must accept {good}");
+        }
+    }
+
+    // ── DNS-backed lookups against a fake resolver ────────────────────
+
+    use crate::test_dns::StubDns;
+
+    #[tokio::test]
+    async fn bimi_lookup_parses_tags_and_ignores_other_txt() {
+        let dns = StubDns::new()
+            .txt(
+                "default._bimi.good.example",
+                &[
+                    "not-a-bimi-record",
+                    "v=BIMI1; L=https://good.example/l.svg; A=https://good.example/vmc.pem",
+                ],
+            )
+            .txt("default._bimi.bare.example", &["v=BIMI1"])
+            .empty_txt("default._bimi.missing.example");
+
+        let info = lookup_bimi(&dns, "good.example").await.expect("found");
+        assert_eq!(info.logo_url.as_deref(), Some("https://good.example/l.svg"));
+        assert_eq!(
+            info.vmc_url.as_deref(),
+            Some("https://good.example/vmc.pem")
+        );
+
+        let info = lookup_bimi(&dns, "bare.example").await.expect("found");
+        assert!(info.logo_url.is_none() && info.vmc_url.is_none());
+
+        assert!(lookup_bimi(&dns, "missing.example").await.is_none());
+        assert!(lookup_bimi(&dns, "nxdomain.example").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn tls_rpt_lookup_parses_rua_list() {
+        let dns = StubDns::new()
+            .txt(
+                "_smtp._tls.good.example",
+                &["v=TLSRPTv1; rua=mailto:tls@good.example, https://good.example/tls"],
+            )
+            .txt("_smtp._tls.other.example", &["v=spf1 -all"]);
+
+        let info = lookup_tls_rpt(&dns, "good.example").await.expect("found");
+        assert_eq!(
+            info.rua,
+            vec![
+                "mailto:tls@good.example".to_string(),
+                "https://good.example/tls".to_string()
+            ]
+        );
+        assert!(lookup_tls_rpt(&dns, "other.example").await.is_none());
+        assert!(lookup_tls_rpt(&dns, "nxdomain.example").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn mta_sts_lookup_refuses_unsafe_or_unresolvable_targets() {
+        let dns = StubDns::new()
+            .txt("_mta-sts.good.example", &["v=STSv1; id=20250101"])
+            .a("mta-sts.good.example", "93.184.216.34")
+            .txt("_mta-sts.noip.example", &["v=STSv1; id=20250101"])
+            // no A/AAAA for mta-sts.noip.example → resolution empty
+            .txt("_mta-sts.private.example", &["v=STSv1; id=20250101"])
+            .a("mta-sts.private.example", "10.0.0.5")
+            .txt("_mta-sts.v6private.example", &["v=STSv1; id=20250101"])
+            // AAAA-ONLY host (no A record) resolving to a unique-local
+            // IPv6 → refused before any HTTPS fetch, proving the AAAA half
+            // of the resolution join feeds the private-range gate.
+            .aaaa("mta-sts.v6private.example", "fd00::1")
+            .txt("_mta-sts.weakid.example", &["v=STSv1"])
+            // An IP-literal "domain" with a valid TXT: the syntactic guard
+            // must refuse it before any resolution.
+            .txt("_mta-sts.127.0.0.1", &["v=STSv1; id=20250101"]);
+
+        // No TXT at all → None before any validation.
+        assert!(
+            lookup_mta_sts(&dns, "nxdomain.example", 4096, Duration::from_millis(200))
+                .await
+                .is_none()
+        );
+        // TXT without an id= → None.
+        assert!(
+            lookup_mta_sts(&dns, "weakid.example", 4096, Duration::from_millis(200))
+                .await
+                .is_none()
+        );
+        // Resolution empty → refused.
+        assert!(
+            lookup_mta_sts(&dns, "noip.example", 4096, Duration::from_millis(200))
+                .await
+                .is_none()
+        );
+        // Private target → refused before any HTTPS fetch.
+        assert!(
+            lookup_mta_sts(&dns, "private.example", 4096, Duration::from_millis(200))
+                .await
+                .is_none()
+        );
+        // AAAA-only target on a private IPv6 → refused the same way (the
+        // A lookup's NXDOMAIN must not mask the unsafe AAAA record).
+        assert!(
+            lookup_mta_sts(&dns, "v6private.example", 4096, Duration::from_millis(200))
+                .await
+                .is_none()
+        );
+        // TXT present but the domain itself is an IP literal → refused by
+        // syntactic validation before resolution.
+        assert!(
+            lookup_mta_sts(&dns, "127.0.0.1", 4096, Duration::from_millis(200))
+                .await
+                .is_none()
         );
     }
 }

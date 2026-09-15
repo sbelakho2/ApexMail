@@ -937,4 +937,106 @@ mod tests {
             );
         }
     }
+
+    // ── Adversarial: hostile URL shapes and fail-closed SSRF guard ──────
+
+    #[test]
+    fn excessive_urls_are_counted_and_penalised() {
+        // The finding starts above 15 URLs in one message.
+        let body: String = (0..16)
+            .map(|i| format!("https://host{i}.example/a "))
+            .collect();
+        let score = analyze_urls(&body);
+        assert!(score.url_count >= 16, "{score:?}");
+        assert!(
+            score.findings.iter().any(|f| f.id == "EXCESSIVE_URLS"),
+            "{score:?}"
+        );
+    }
+
+    #[test]
+    fn hostile_url_shapes_are_flagged() {
+        // Very long URL (> 500 chars is the finding threshold).
+        let long = format!("https://example.com/{}", "a".repeat(600));
+        let score = analyze_urls(&long);
+        assert!(
+            score.findings.iter().any(|f| f.id == "VERY_LONG_URL"),
+            "{score:?}"
+        );
+
+        // Non-standard port.
+        let port = analyze_urls("Click https://example.com:8080/path now");
+        assert!(
+            port.findings.iter().any(|f| f.id == "URL_WITH_PORT"),
+            "{port:?}"
+        );
+
+        // javascript: URI.
+        let js = analyze_urls("click javascript:alert(1) now");
+        assert!(
+            js.findings.iter().any(|f| f.id == "JAVASCRIPT_URI"),
+            "{js:?}"
+        );
+
+        // IDN homograph (mixed Greek/Latin).
+        let homograph = analyze_urls("see https://αpple.com/verify");
+        assert!(
+            homograph.findings.iter().any(|f| f.id == "IDN_HOMOGRAPH"),
+            "{homograph:?}"
+        );
+
+        // Punycode form is flagged too.
+        let punycode = analyze_urls("see https://xn--pple-43d.com/verify");
+        assert!(!punycode.findings.is_empty(), "{punycode:?}");
+    }
+
+    #[test]
+    fn url_extraction_is_scheme_bounded_and_case_insensitive() {
+        // Only http(s):// is extracted (a bare host is not a URL); scheme
+        // case does not matter and the original casing is preserved.
+        let urls = extract_urls("Visit HTTP://Example.COM/a and HTTPS://Example.ORG/b now");
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert_eq!(urls[0], "HTTP://Example.COM/a");
+        assert!(urls[1].contains("Example.ORG"), "{urls:?}");
+        assert!(extract_urls("no urls here, just example.com").is_empty());
+        assert!(extract_urls("WWW.Example.COM/a").is_empty());
+        // Trailing punctuation is not swallowed into the URL.
+        let punctuated = extract_urls("see https://example.com/x, then stop");
+        assert_eq!(punctuated, vec!["https://example.com/x,"]);
+
+        // A wall of URLs never panics and extracts them all.
+        let wall: String = (0..200)
+            .map(|i| format!("http://h{i}.example/x "))
+            .collect();
+        assert_eq!(extract_urls(&wall).len(), 200);
+    }
+
+    #[cfg(feature = "phishing")]
+    #[tokio::test]
+    async fn ssrf_guard_blocks_private_literals_without_network() {
+        // IP literals are checked directly — no DNS, no HTTP.
+        for blocked in [
+            "http://127.0.0.1/admin",
+            "http://10.0.0.5/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://[fc00::1]/",
+            "http://0.0.0.0/",
+            "http://100.64.0.1/",
+            "http://240.0.0.1/",
+        ] {
+            assert!(
+                ip_literal_is_blocked(blocked).await,
+                "{blocked} must be blocked"
+            );
+        }
+        // A public IP literal passes the literal check (no request is made:
+        // the guard only parses).
+        assert!(!ip_literal_is_blocked("http://93.184.216.34/").await);
+    }
+
+    #[cfg(feature = "phishing")]
+    async fn ip_literal_is_blocked(url: &str) -> bool {
+        super::url_blocked_by_ssrf_guard(url).await.is_some()
+    }
 }

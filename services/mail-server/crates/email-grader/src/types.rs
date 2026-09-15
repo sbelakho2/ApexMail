@@ -202,3 +202,99 @@ impl From<GraderResponse> for GraderResultResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grade_letter_boundaries_and_display() {
+        for (score, letter) in [
+            (100u16, GradeLetter::APlus),
+            (90, GradeLetter::APlus),
+            (89, GradeLetter::A),
+            (80, GradeLetter::A),
+            (79, GradeLetter::B),
+            (70, GradeLetter::B),
+            (69, GradeLetter::C),
+            (60, GradeLetter::C),
+            (59, GradeLetter::D),
+            (40, GradeLetter::D),
+            (39, GradeLetter::F),
+            (0, GradeLetter::F),
+        ] {
+            assert_eq!(GradeLetter::from_score(score), letter, "score {score}");
+            assert_eq!(
+                letter.to_string(),
+                format!("{letter:?}").replace("Plus", "+")
+            );
+        }
+        assert_eq!(GradeLetter::APlus.to_string(), "A+");
+    }
+
+    #[test]
+    fn has_scope_honours_wildcard_and_exact_match_only() {
+        let ctx = |scopes: Vec<&str>| GraderAuthContext {
+            tenant_id: "t".into(),
+            scopes: scopes.into_iter().map(str::to_string).collect(),
+            idempotency_key: None,
+        };
+        assert!(ctx(vec!["grader:read"]).has_scope("grader:read"));
+        assert!(!ctx(vec!["grader:read"]).has_scope("grader:write"));
+        assert!(ctx(vec!["*"]).has_scope("grader:write"));
+        assert!(ctx(vec!["*"]).has_scope("anything"));
+        assert!(!ctx(vec![]).has_scope("grader:read"));
+        // No prefix/glob matching beyond the single wildcard.
+        assert!(!ctx(vec!["grader:*"]).has_scope("grader:read"));
+        assert!(!ctx(vec!["grader"]).has_scope("grader:read"));
+    }
+
+    #[test]
+    fn conversion_fills_missing_id_and_timestamp() {
+        let response = GraderResponse {
+            id: None,
+            domain: "example.com".into(),
+            score: 80,
+            grade: "A".into(),
+            breakdown: GradeBreakdown {
+                dns_health: ScoreBreakdown {
+                    score: 80,
+                    max: 100,
+                    details: None,
+                },
+                authentication: ScoreBreakdown {
+                    score: 80,
+                    max: 100,
+                    details: None,
+                },
+                spam_likelihood: ScoreBreakdown {
+                    score: 80,
+                    max: 100,
+                    details: None,
+                },
+                content_quality: None,
+                reputation: ScoreBreakdown {
+                    score: 80,
+                    max: 100,
+                    details: None,
+                },
+            },
+            findings: vec![],
+            recommendations: vec!["r".into()],
+            created_at: None,
+        };
+        let converted: GraderResultResponse = response.into();
+        assert_ne!(converted.id, uuid::Uuid::nil(), "a new id is minted");
+        assert!(!converted.idempotency_replayed);
+        assert_eq!(converted.domain, "example.com");
+        // The timestamp is filled in (Utc::now), not left as the Unix epoch.
+        assert!(converted.created_at.timestamp() > 1_600_000_000);
+
+        // The serialized external shape omits nothing sensitive and hides the
+        // replay flag when false.
+        let json = serde_json::to_value(&converted).unwrap();
+        assert!(json.get("breakdown").is_none());
+        assert!(json.get("findings").is_none());
+        assert!(json.get("idempotency_replayed").is_none());
+    }
+}

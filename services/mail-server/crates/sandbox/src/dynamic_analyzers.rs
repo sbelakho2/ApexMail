@@ -1090,4 +1090,118 @@ mod tests {
             ClamdVerdict::Invalid
         );
     }
+
+    // ── Adversarial: strict clamd parsing, socket refusal, rule loading ──
+
+    #[test]
+    fn clamd_response_parser_is_strict_and_fail_closed() {
+        assert_eq!(parse_clamd_response("stream: OK\n"), ClamdVerdict::Clean);
+        assert_eq!(parse_clamd_response("OK"), ClamdVerdict::Clean);
+        assert_eq!(
+            parse_clamd_response("stream: Eicar-Test-Signature FOUND\n"),
+            ClamdVerdict::Detected("Eicar-Test-Signature".into())
+        );
+        // Multi-line sessions: any FOUND wins.
+        assert_eq!(
+            parse_clamd_response("stream: OK\nstream: Win.Test.EICAR_HDB-1 FOUND\n"),
+            ClamdVerdict::Detected("Win.Test.EICAR_HDB-1".into())
+        );
+        // Bare IDSESSION-style FOUND lines are understood.
+        assert_eq!(
+            parse_clamd_response("Eicar-Test-Signature FOUND"),
+            ClamdVerdict::Detected("Eicar-Test-Signature".into())
+        );
+        // Everything ambiguous is Invalid (treated as scanner failure), never
+        // as clean: empty, garbage, ERROR, nameless FOUND lines.
+        for response in ["", "   ", "ERROR: scan failed", " FOUND", "?", "stream: "] {
+            assert_eq!(
+                parse_clamd_response(response),
+                ClamdVerdict::Invalid,
+                "response {response:?}"
+            );
+        }
+        // A FOUND line without a well-formed stream prefix still counts as a
+        // detection (the safe direction) — it is never reported clean.
+        assert!(matches!(
+            parse_clamd_response("stream: FOUND"),
+            ClamdVerdict::Detected(_)
+        ));
+    }
+
+    #[test]
+    fn clamav_socket_path_validation_refuses_non_sockets() {
+        // A regular file is not a Unix socket.
+        let path =
+            std::env::temp_dir().join(format!("apex-sandbox-not-a-socket-{}", std::process::id()));
+        std::fs::write(&path, b"not a socket").expect("temp file");
+        let analyzer = ClamAvSocketAnalyzer::new(path.to_string_lossy().to_string());
+        let finding = analyzer
+            .analyze(b"data", None)
+            .expect("fail-closed finding");
+        assert_eq!(finding.id, "CLAMAV_SOCKET_INVALID");
+        // Fail-closed: an unavailable scanner must REJECT, never allow.
+        assert_eq!(finding.decision, DynamicDecision::Reject);
+        let _ = std::fs::remove_file(&path);
+
+        // A relative path is refused outright.
+        let relative = ClamAvSocketAnalyzer::new("relative/clamd.ctl".to_string());
+        assert_eq!(
+            relative.analyze(b"data", None).map(|f| f.decision),
+            Some(DynamicDecision::Reject)
+        );
+
+        // A missing absolute path is refused.
+        let missing = ClamAvSocketAnalyzer::new("/nonexistent/clamd-apex.ctl".to_string());
+        assert_eq!(
+            missing.analyze(b"data", None).map(|f| f.decision),
+            Some(DynamicDecision::Reject)
+        );
+
+        // Oversized data is flagged before any socket work.
+        let small = ClamAvSocketAnalyzer::with_max_size("/nonexistent/clamd-apex.ctl".into(), 2);
+        let finding = small.analyze(b"too big", None).expect("size finding");
+        assert_eq!(finding.id, "CLAMAV_SIZE_EXCEEDED");
+        assert_eq!(finding.decision, DynamicDecision::Flag);
+    }
+
+    #[test]
+    fn rule_loading_is_fail_safe() {
+        // A missing rule file returns None (no rules), not a panic.
+        assert!(load_external_rules("/nonexistent/rules.yar").is_none());
+        // An empty rule set builds an analyzer matching nothing.
+        let analyzer = YaraSignatureAnalyzer::with_rules(Vec::new());
+        assert!(analyzer.is_some());
+        let analyzer = analyzer.expect("empty analyzer");
+        assert_eq!(analyzer.rule_count(), 0);
+        assert!(analyzer.analyze(b"hello", None).is_none());
+
+        // Malformed JSON is None, valid JSON creates rules.
+        let path = std::env::temp_dir().join(format!("apex-rules-{}.json", std::process::id()));
+        std::fs::write(&path, b"{ not json").expect("write");
+        assert!(load_external_rules(&path.to_string_lossy()).is_none());
+        // Patterns are hex-encoded strings ("68656c6c6f" = "hello").
+        std::fs::write(
+            &path,
+            serde_json::json!([
+                {
+                    "id": "TEST_RULE",
+                    "name": "test",
+                    "description": "test",
+                    "patterns": ["68656c6c6f"],
+                    "risk": 9.0,
+                    "severity": "High"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write");
+        let rules = load_external_rules(&path.to_string_lossy()).expect("valid rules");
+        assert_eq!(rules.len(), 1);
+        let analyzer = YaraSignatureAnalyzer::with_rules(rules).expect("analyzer");
+        assert_eq!(analyzer.rule_count(), 1);
+        let _ = std::fs::remove_file(&path);
+
+        // The default analyzer exists and is reusable.
+        assert!(default_dynamic_analyzer().rule_count() >= 1);
+    }
 }

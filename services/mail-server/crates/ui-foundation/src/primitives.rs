@@ -4222,4 +4222,184 @@ mod tests {
         assert!(c.command_palette_sections.contains(&"Navigation"));
         assert!(c.command_palette_sections.contains(&"Actions"));
     }
+
+    // ── Adversarial: tri-state controls, contracts, deterministic ids ───
+
+    #[test]
+    fn checkbox_covers_checked_unchecked_and_indeterminate() {
+        for (checked, indeterminate, state) in [
+            (false, false, "unchecked"),
+            (true, false, "checked"),
+            (false, true, "indeterminate"),
+        ] {
+            let html = Checkbox {
+                checked,
+                variant: "default",
+                size: "default",
+                indeterminate,
+                disabled: false,
+                aria_label: Some("Select row"),
+            }
+            .render_html();
+            assert!(
+                html.contains(&format!("data-state=\"{state}\"")),
+                "{state}: {html}"
+            );
+            let truthy = checked || indeterminate;
+            assert_eq!(
+                html.contains("aria-checked=\"true\""),
+                truthy,
+                "{state} aria-checked"
+            );
+            assert_eq!(
+                html.contains("<svg"),
+                truthy,
+                "{state} must render an indicator only when on"
+            );
+            assert!(html.contains("aria-label=\"Select row\""));
+        }
+
+        let disabled = Checkbox {
+            checked: false,
+            variant: "default",
+            size: "default",
+            indeterminate: false,
+            disabled: true,
+            aria_label: None,
+        }
+        .render_html();
+        assert!(disabled.contains(" disabled aria-disabled=\"true\""));
+        assert!(!disabled.contains("aria-label"));
+    }
+
+    #[test]
+    fn switch_slider_and_progress_states_are_distinct() {
+        let on = Switch {
+            checked: true,
+            variant: "default",
+            size: "default",
+            disabled: false,
+        }
+        .render_html();
+        let off = Switch {
+            checked: false,
+            variant: "default",
+            size: "default",
+            disabled: false,
+        }
+        .render_html();
+        assert!(on.contains("role=\"switch\" aria-checked=\"true\""));
+        assert!(off.contains("role=\"switch\" aria-checked=\"false\""));
+        assert_ne!(on, off);
+
+        let slider_with = Slider {
+            value: 40,
+            variant: "default",
+            size: "default",
+            show_tooltip: true,
+        }
+        .render_html();
+        assert!(slider_with.contains(">40</span>"), "tooltip value");
+        assert!(slider_with.contains("width:40%"));
+        let slider_without = Slider {
+            value: 40,
+            variant: "default",
+            size: "default",
+            show_tooltip: false,
+        }
+        .render_html();
+        assert!(!slider_without.contains(">40</span>"));
+
+        let progress = Progress {
+            value: 30,
+            variant: "default",
+            size: "default",
+            animated: true,
+            show_value: true,
+        }
+        .render_html();
+        assert!(progress.contains("translateX(-70%)"), "100-30");
+        assert!(progress.contains(">30%</span>"));
+        assert!(progress.contains("animate-progress"));
+        // Full and empty extremes never underflow.
+        for value in [0u8, 100u8] {
+            let html = Progress {
+                value,
+                variant: "default",
+                size: "default",
+                animated: false,
+                show_value: false,
+            }
+            .render_html();
+            assert!(html.contains(&format!("translateX(-{}%)", 100 - value)));
+        }
+    }
+
+    #[test]
+    fn dialog_ids_are_deterministic_and_title_derived() {
+        let first = Dialog {
+            title: "Delete campaign?",
+            description: Some("Permanent"),
+            body: "<p>x</p>",
+            size: "default",
+            variant: "default",
+            hide_close_button: false,
+        }
+        .render_html();
+        let second = Dialog {
+            title: "Delete campaign?",
+            description: None,
+            body: "",
+            size: "default",
+            variant: "default",
+            hide_close_button: true,
+        }
+        .render_html();
+        assert!(first.contains("aria-labelledby=\"apex-dialog-delete-campaign\""));
+        assert!(second.contains("aria-labelledby=\"apex-dialog-delete-campaign\""));
+        assert!(!second.contains("data-dialog-close"));
+        // A title with no alphanumerics still yields the stable base id.
+        let punctuation = Dialog {
+            title: "???",
+            description: None,
+            body: "",
+            size: "default",
+            variant: "default",
+            hide_close_button: false,
+        }
+        .render_html();
+        assert!(punctuation.contains("aria-labelledby=\"apex-dialog\""));
+
+        // AlertDialog initial focus depends on the dialog type.
+        let confirm = AlertDialog {
+            title: "Remove?",
+            message: "confirm",
+            confirm_label: "Remove",
+            cancel_label: Some("Cancel"),
+            variant: "destructive",
+            dialog_type: "confirm",
+        }
+        .render_html();
+        assert!(confirm.contains("data-initial-focus=\"[data-alert-dialog-cancel]\""));
+    }
+
+    #[test]
+    fn tooltip_contract_matches_the_radix_numbers() {
+        let contract = Tooltip::positioning_contract();
+        assert_eq!(contract, TooltipPositioningContract::spec());
+        assert_eq!(contract.default_delay_ms, 700);
+        assert_eq!(contract.skip_delay_ms, 300);
+        assert_eq!(contract.side_offset, 4);
+        assert_eq!(contract.collision_padding, 8);
+        assert!(contract.supports_arrow);
+        assert!(contract.supports_collision_boundary);
+        let html = Tooltip {
+            content: "Save",
+            variant: "default",
+            side: "top",
+            delay_duration: 700,
+        }
+        .render_html();
+        assert!(html.contains("role=\"tooltip\" data-side=\"top\" data-delay=\"700\""));
+    }
 }

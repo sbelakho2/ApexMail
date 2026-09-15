@@ -1315,3 +1315,908 @@ async fn adapters_post_idempotently_and_feed_derivation() {
     assert!(balances.contains(&(ROLE_EXPENSE_DEFAULT.to_string(), 4500, 0)));
     assert!(balances.contains(&(ROLE_AP.to_string(), 0, 4500)));
 }
+
+// ---------------------------------------------------------------------------
+// 9. Adversarial: refusal paths write nothing, replay divergence refused,
+//    period boundaries are exact, derivation arithmetic is integer-exact.
+// ---------------------------------------------------------------------------
+
+/// A rejected posting must leave the ledger byte-identical: no entry, no
+/// line, no draft — and a divergent replay of an accepted key must be
+/// refused rather than silently attach different lines.
+#[tokio::test]
+async fn rejected_and_divergent_postings_change_nothing() {
+    let Some(pool) = provision("acct_refusals").await else {
+        return;
+    };
+    let tag = run_tag().to_string();
+    let seed = seed(&pool, &format!("refusals-{tag}"), false).await;
+    let debit = account(&pool, seed.entity, ROLE_AR).await;
+    let credit = account(&pool, seed.entity, ROLE_REVENUE).await;
+
+    let entries_before = count(
+        &pool,
+        &format!(
+            "SELECT COUNT(*)::bigint FROM journal_entries WHERE legal_entity_id = '{}'",
+            seed.entity
+        ),
+    )
+    .await;
+    let lines_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id \
+         WHERE e.legal_entity_id = $1",
+    )
+    .bind(seed.entity)
+    .fetch_one(&pool)
+    .await
+    .expect("scoped line count");
+
+    // Unbalanced: refused before any write.
+    let unbalanced = request(
+        &seed,
+        &format!("adv-unbalanced-{tag}"),
+        EntryType::Standard,
+        vec![
+            JournalLine::debit(debit, 100, "EUR"),
+            JournalLine::credit(credit, 99, "EUR"),
+        ],
+        None,
+    );
+    assert!(matches!(
+        posting::post_journal_entry(&pool, &unbalanced).await,
+        Err(AccountingError::Unbalanced { .. })
+    ));
+
+    // Zero lines: refused.
+    let empty = request(
+        &seed,
+        &format!("adv-empty-{tag}"),
+        EntryType::Standard,
+        vec![],
+        None,
+    );
+    assert!(matches!(
+        posting::post_journal_entry(&pool, &empty).await,
+        Err(AccountingError::NoLines)
+    ));
+
+    // A reversal that does not name the entry it reverses: refused.
+    let dangling = request(
+        &seed,
+        &format!("adv-dangling-reversal-{tag}"),
+        EntryType::Reversal,
+        simple_lines(debit, credit, 500),
+        None,
+    );
+    assert!(matches!(
+        posting::post_journal_entry(&pool, &dangling).await,
+        Err(AccountingError::Invalid(message)) if message.contains("must reference")
+    ));
+
+    let entries_after = count(
+        &pool,
+        &format!(
+            "SELECT COUNT(*)::bigint FROM journal_entries WHERE legal_entity_id = '{}'",
+            seed.entity
+        ),
+    )
+    .await;
+    assert_eq!(
+        entries_after, entries_before,
+        "refused postings must not insert entries"
+    );
+    let lines_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_lines l JOIN journal_entries e ON e.id = l.entry_id \
+         WHERE e.legal_entity_id = $1",
+    )
+    .bind(seed.entity)
+    .fetch_one(&pool)
+    .await
+    .expect("scoped line count");
+    assert_eq!(
+        lines_after, lines_before,
+        "refused postings must not insert lines"
+    );
+
+    // Accepted manual entry: replay is idempotent…
+    let accepted = request(
+        &seed,
+        &format!("adv-accepted-{tag}"),
+        EntryType::Standard,
+        simple_lines(debit, credit, 1000),
+        None,
+    );
+    let first = posting::post_journal_entry(&pool, &accepted)
+        .await
+        .expect("accepted posting");
+    assert_eq!(first.status, PostStatus::Posted);
+    let replay = posting::post_journal_entry(&pool, &accepted)
+        .await
+        .expect("replay");
+    assert_eq!(replay.status, PostStatus::AlreadyPosted);
+    assert_eq!(replay.entry_id, first.entry_id);
+
+    // …but a divergent payload under the same key is a conflict, not a
+    // second posting of different lines.
+    let mut divergent = accepted.clone();
+    divergent.lines = simple_lines(debit, credit, 9999);
+    assert!(matches!(
+        posting::post_journal_entry(&pool, &divergent).await,
+        Err(AccountingError::IdempotencyKeyConflict(key)) if key == format!("adv-accepted-{tag}")
+    ));
+
+    // A pre-existing DRAFT with the same key must not be silently posted
+    // through the adapter path (that would attach the adapter's lines to a
+    // hand-written draft).
+    let draft_key = format!("adv-draft-{}", run_tag());
+    let (draft_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO journal_entries (legal_entity_id, fiscal_period_id, entry_date, entry_type, \
+            memo, source_hash, idempotency_key) \
+         VALUES ($1, $2, DATE '2026-06-15', 'standard', 'manual draft', $3, $4) RETURNING id",
+    )
+    .bind(seed.entity)
+    .bind(seed.period)
+    .bind("0".repeat(64))
+    .bind(&draft_key)
+    .fetch_one(&pool)
+    .await
+    .expect("draft insert");
+    let mut draft_replay = request(
+        &seed,
+        &draft_key,
+        EntryType::Standard,
+        simple_lines(debit, credit, 700),
+        None,
+    );
+    draft_replay.entry_date = date(2026, 6, 15);
+    assert!(matches!(
+        posting::post_journal_entry(&pool, &draft_replay).await,
+        Err(AccountingError::IdempotencyKeyConflict(key)) if key == draft_key
+    ));
+    let still_draft: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT posted_at FROM journal_entries WHERE id = $1")
+            .bind(draft_id)
+            .fetch_one(&pool)
+            .await
+            .expect("draft row");
+    assert!(still_draft.is_none(), "the draft must stay a draft");
+
+    // Reversing a draft is refused (delete it instead), reversing a missing
+    // entry is a typed error.
+    let reverse_draft = posting::reverse_entry(
+        &pool,
+        &ReversalRequest {
+            entry_id: draft_id,
+            entry_date: date(2026, 6, 16),
+            memo: String::new(),
+            posted_by: "test".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(reverse_draft, Err(AccountingError::Invalid(_))));
+    let reverse_missing = posting::reverse_entry(
+        &pool,
+        &ReversalRequest {
+            entry_id: Uuid::new_v4(),
+            entry_date: date(2026, 6, 16),
+            memo: String::new(),
+            posted_by: "test".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        reverse_missing,
+        Err(AccountingError::Invalid(message)) if message.contains("not found")
+    ));
+    sqlx::query("DELETE FROM journal_entries WHERE id = $1")
+        .bind(draft_id)
+        .execute(&pool)
+        .await
+        .expect("draft delete is allowed");
+
+    // Reversal with an empty memo gets the canonical "Reversal of …" memo
+    // and is itself replay-safe even when the caller changes the note.
+    let posted = posting::post_journal_entry(
+        &pool,
+        &request(
+            &seed,
+            &format!("adv-reversal-target-{tag}"),
+            EntryType::Standard,
+            simple_lines(debit, credit, 4321),
+            None,
+        ),
+    )
+    .await
+    .expect("target posting");
+    let target = posted.entry_id.expect("entry id");
+    let reversal = posting::reverse_entry(
+        &pool,
+        &ReversalRequest {
+            entry_id: target,
+            entry_date: date(2026, 6, 20),
+            memo: "   ".to_string(),
+            posted_by: "test".to_string(),
+        },
+    )
+    .await
+    .expect("reversal");
+    assert_eq!(reversal.status, PostStatus::Posted);
+    let (target_no,): (i64,) = sqlx::query_as("SELECT entry_no FROM journal_entries WHERE id = $1")
+        .bind(target)
+        .fetch_one(&pool)
+        .await
+        .expect("target row");
+    let (memo,): (String,) = sqlx::query_as("SELECT memo FROM journal_entries WHERE id = $1")
+        .bind(reversal.entry_id.expect("reversal id"))
+        .fetch_one(&pool)
+        .await
+        .expect("reversal row");
+    assert_eq!(memo, format!("Reversal of journal entry #{target_no}"));
+    let mut retry = ReversalRequest {
+        entry_id: target,
+        entry_date: date(2026, 6, 21),
+        memo: "a different note".to_string(),
+        posted_by: "test".to_string(),
+    };
+    retry.memo = "a different note".to_string();
+    let replay = posting::reverse_entry(&pool, &retry)
+        .await
+        .expect("reversal replay");
+    assert_eq!(replay.status, PostStatus::AlreadyPosted);
+    assert_eq!(replay.entry_id, reversal.entry_id);
+}
+
+/// Period boundaries: a posting lands in the period covering its date and
+/// nowhere else; a leap day is covered exactly once; a closed period refuses
+/// new postings; the close/lock state machine runs exactly once.
+#[tokio::test]
+async fn period_boundaries_are_exact_and_close_lock_transitions_once() {
+    let Some(pool) = provision("acct_periods").await else {
+        return;
+    };
+    let seed = seed(&pool, &format!("periods-{}", run_tag()), false).await;
+    let debit = account(&pool, seed.entity, ROLE_AR).await;
+    let credit = account(&pool, seed.entity, ROLE_REVENUE).await;
+
+    // Adjacent, NON-overlapping periods in years the seed year-period does
+    // not cover: January 2027 and leap February 2028 (29 days exactly once).
+    let mut conn = pool.acquire().await.expect("conn");
+    let jan = periods::ensure_period(
+        &mut conn,
+        seed.entity,
+        "month",
+        "2027-01",
+        date(2027, 1, 1),
+        date(2027, 1, 31),
+    )
+    .await
+    .expect("january");
+    let leap_feb = periods::ensure_period(
+        &mut conn,
+        seed.entity,
+        "month",
+        "2028-02",
+        date(2028, 2, 1),
+        date(2028, 2, 29),
+    )
+    .await
+    .expect("leap february");
+
+    // ensure_period is exactly-once: a duplicate returns the same id.
+    let jan_again = periods::ensure_period(
+        &mut conn,
+        seed.entity,
+        "month",
+        "2027-01-retry",
+        date(2027, 1, 1),
+        date(2027, 1, 31),
+    )
+    .await
+    .expect("duplicate");
+    assert_eq!(jan, jan_again, "duplicate ranges resolve to one period");
+
+    assert!(matches!(
+        periods::ensure_period(
+            &mut conn,
+            seed.entity,
+            "fortnight",
+            "bogus",
+            date(2027, 1, 1),
+            date(2027, 1, 14)
+        )
+        .await,
+        Err(AccountingError::Invalid(_))
+    ));
+    assert!(matches!(
+        periods::ensure_period(
+            &mut conn,
+            seed.entity,
+            "month",
+            "reversed",
+            date(2027, 3, 1),
+            date(2027, 2, 1)
+        )
+        .await,
+        Err(AccountingError::Invalid(_))
+    ));
+
+    // Exact boundaries: first and last day resolve to their own period; a
+    // date outside every period is a typed NoOpenPeriod.
+    assert_eq!(
+        periods::find_open_period_for_date(&mut conn, seed.entity, date(2027, 1, 1))
+            .await
+            .expect("jan first day"),
+        jan
+    );
+    assert_eq!(
+        periods::find_open_period_for_date(&mut conn, seed.entity, date(2027, 1, 31))
+            .await
+            .expect("jan last day"),
+        jan
+    );
+    assert_eq!(
+        periods::find_open_period_for_date(&mut conn, seed.entity, date(2028, 2, 29))
+            .await
+            .expect("leap day"),
+        leap_feb
+    );
+    assert!(matches!(
+        periods::find_open_period_for_date(&mut conn, seed.entity, date(2028, 3, 1)).await,
+        Err(AccountingError::NoOpenPeriod { .. })
+    ));
+
+    // Post exactly on both January edges and on the leap day; each lands in
+    // its own period exactly once.
+    for (period, day, amount) in [
+        (jan, date(2027, 1, 1), 101i64),
+        (jan, date(2027, 1, 31), 131),
+        (leap_feb, date(2028, 2, 29), 229),
+    ] {
+        let mut req = request(
+            &seed,
+            &format!("boundary-{day}-{}", run_tag()),
+            EntryType::Standard,
+            simple_lines(debit, credit, amount),
+            None,
+        );
+        req.fiscal_period_id = period;
+        req.entry_date = day;
+        let outcome = posting::post_journal_entry(&pool, &req)
+            .await
+            .unwrap_or_else(|error| panic!("boundary posting {day}: {error}"));
+        assert_eq!(outcome.status, PostStatus::Posted);
+    }
+    let jan_entries: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE fiscal_period_id = $1 AND posted_at IS NOT NULL",
+    )
+    .bind(jan)
+    .fetch_one(&pool)
+    .await
+    .expect("jan count");
+    assert_eq!(jan_entries, 2, "each January posting lands once");
+    let leap_entries: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE fiscal_period_id = $1 AND posted_at IS NOT NULL",
+    )
+    .bind(leap_feb)
+    .fetch_one(&pool)
+    .await
+    .expect("leap count");
+    assert_eq!(leap_entries, 1, "the leap day is covered exactly once");
+
+    // A draft in a period blocks its close until it is resolved.
+    let (draft_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO journal_entries (legal_entity_id, fiscal_period_id, entry_date, entry_type, \
+            memo, source_hash, idempotency_key) \
+         VALUES ($1, $2, DATE '2028-02-10', 'standard', 'draft', $3, $4) RETURNING id",
+    )
+    .bind(seed.entity)
+    .bind(leap_feb)
+    .bind("0".repeat(64))
+    .bind(format!("period-draft-{}", run_tag()))
+    .fetch_one(&pool)
+    .await
+    .expect("draft");
+    let blocked = periods::close_period(&pool, leap_feb, "tester").await;
+    assert!(
+        matches!(blocked, Err(AccountingError::Invalid(ref message)) if message.contains("draft")),
+        "a period with a draft cannot close: {blocked:?}"
+    );
+    sqlx::query("DELETE FROM journal_entries WHERE id = $1")
+        .bind(draft_id)
+        .execute(&pool)
+        .await
+        .expect("draft delete");
+
+    // Closing February is refused while it still holds posted entries? No:
+    // posted entries are exactly what a close is FOR — it must succeed and
+    // report the balanced totals.
+    let closed = periods::close_period(&pool, leap_feb, "tester")
+        .await
+        .expect("close");
+    assert_eq!(closed.status, "closed");
+    assert_eq!(closed.posted_entries, 1);
+    assert_eq!(closed.debit_cents, 229);
+    assert_eq!(closed.credit_cents, 229);
+    assert_eq!(
+        periods::period_status(&mut conn, leap_feb)
+            .await
+            .expect("status"),
+        "closed"
+    );
+    let close_again = periods::close_period(&pool, leap_feb, "tester").await;
+    assert!(matches!(
+        close_again,
+        Err(AccountingError::PeriodNotOpen { .. })
+    ));
+
+    // Posting into a closed period is refused by the period guard and the
+    // ledger does not move: re-opening is impossible.
+    let closed_entries_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE fiscal_period_id = $1",
+    )
+    .bind(leap_feb)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    let mut into_closed = request(
+        &seed,
+        &format!("closed-period-{}", run_tag()),
+        EntryType::Standard,
+        simple_lines(debit, credit, 50),
+        None,
+    );
+    into_closed.fiscal_period_id = leap_feb;
+    into_closed.entry_date = date(2028, 2, 10);
+    let refused = posting::post_journal_entry(&pool, &into_closed).await;
+    match &refused {
+        Err(error) => assert!(
+            error.to_string().contains("not open")
+                || accounting_core::error::is_trigger_refusal(error),
+            "closed-period posting must be refused by the period guard: {error}"
+        ),
+        Ok(outcome) => panic!("posting into a closed period succeeded: {outcome:?}"),
+    }
+    let closed_entries_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE fiscal_period_id = $1",
+    )
+    .bind(leap_feb)
+    .fetch_one(&pool)
+    .await
+    .expect("count");
+    assert_eq!(closed_entries_before, closed_entries_after);
+
+    // Locking an OPEN period is refused; locking the closed one succeeds and
+    // is terminal.
+    let lock_open = periods::lock_period(&pool, jan, "tester").await;
+    assert!(matches!(
+        lock_open,
+        Err(AccountingError::PeriodNotOpen { .. })
+    ));
+    let locked = periods::lock_period(&pool, leap_feb, "tester")
+        .await
+        .expect("lock");
+    assert_eq!(locked.status, "locked");
+    let lock_again = periods::lock_period(&pool, leap_feb, "tester").await;
+    assert!(matches!(
+        lock_again,
+        Err(AccountingError::PeriodNotOpen { .. })
+    ));
+    // A locked period also refuses new postings.
+    assert!(posting::post_journal_entry(&pool, &into_closed)
+        .await
+        .is_err());
+
+    // Close/lock on a missing period: typed error, never a panic.
+    assert!(matches!(
+        periods::close_period(&pool, Uuid::new_v4(), "tester").await,
+        Err(AccountingError::Invalid(_))
+    ));
+    assert!(matches!(
+        periods::lock_period(&pool, Uuid::new_v4(), "tester").await,
+        Err(AccountingError::Invalid(_))
+    ));
+    assert!(matches!(
+        periods::period_status(&mut conn, Uuid::new_v4()).await,
+        Err(AccountingError::Invalid(_))
+    ));
+}
+
+/// Derivation arithmetic is integer-exact: VAT totals in cents with no
+/// float rounding, period result = revenue − expenses.
+#[tokio::test]
+async fn derivation_is_integer_exact_with_no_rounding_drift() {
+    let Some(pool) = provision("acct_derive").await else {
+        return;
+    };
+    let seed = seed(&pool, &format!("derive-{}", run_tag()), false).await;
+    let ar = account(&pool, seed.entity, ROLE_AR).await;
+    let revenue = account(&pool, seed.entity, ROLE_REVENUE).await;
+    let vat_out = account(&pool, seed.entity, ROLE_VAT_OUTPUT).await;
+    let vat_in = account(&pool, seed.entity, ROLE_VAT_INPUT).await;
+    let expense = account(&pool, seed.entity, ROLE_EXPENSE_DEFAULT).await;
+    let ap = account(&pool, seed.entity, ROLE_AP).await;
+
+    let mut conn = pool.acquire().await.expect("conn");
+    let before = derive::vat_totals_for_period(&mut *conn, seed.entity, seed.period)
+        .await
+        .expect("baseline vat");
+
+    // A sale with odd cents (100 007 = 1000.07 EUR) to catch float rounding:
+    // vat = net * rate / 10 000 in integer cents, no drift.
+    let net: i64 = 100_007;
+    let vat: i64 = (net as i128 * 2400 / 10_000) as i64;
+    let total = net + vat;
+    let sale = PostJournalRequest {
+        legal_entity_id: seed.entity,
+        fiscal_period_id: seed.period,
+        entry_date: date(2026, 6, 15),
+        entry_type: EntryType::Standard,
+        memo: "integer-exact sale".to_string(),
+        posted_by: "test".to_string(),
+        idempotency_key: format!("derive-sale-{}", run_tag()),
+        source: None,
+        reversal_of_entry_id: None,
+        lines: vec![
+            JournalLine::debit(ar, total, "EUR"),
+            JournalLine::credit(revenue, net, "EUR"),
+            JournalLine::credit(vat_out, vat, "EUR").with_vat(
+                net,
+                vat,
+                Some(2400),
+                Some("OUTPUT".to_string()),
+            ),
+        ],
+    };
+    posting::post_journal_entry(&pool, &sale)
+        .await
+        .expect("sale posting");
+
+    // A reverse-charged purchase: input VAT on an expense.
+    let purchase = PostJournalRequest {
+        legal_entity_id: seed.entity,
+        fiscal_period_id: seed.period,
+        entry_date: date(2026, 6, 16),
+        entry_type: EntryType::Standard,
+        memo: "integer-exact purchase".to_string(),
+        posted_by: "test".to_string(),
+        idempotency_key: format!("derive-purchase-{}", run_tag()),
+        source: None,
+        reversal_of_entry_id: None,
+        lines: vec![
+            JournalLine::debit(expense, 50_00, "EUR"),
+            JournalLine::debit(vat_in, 12_00, "EUR").with_vat(
+                50_00,
+                12_00,
+                Some(2400),
+                Some("INPUT".to_string()),
+            ),
+            JournalLine::credit(ap, 62_00, "EUR"),
+        ],
+    };
+    posting::post_journal_entry(&pool, &purchase)
+        .await
+        .expect("purchase posting");
+
+    let rows = derive::vat_entries_for_period(&mut *conn, seed.entity, seed.period)
+        .await
+        .expect("vat entries");
+    let output_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.vat_role.as_deref() == Some(ROLE_VAT_OUTPUT))
+        .collect();
+    assert!(!output_rows.is_empty());
+    assert_eq!(output_rows[0].net_cents, Some(net));
+    assert_eq!(output_rows[0].vat_cents, Some(vat));
+    assert_eq!(output_rows[0].vat_rate_bp, Some(2400));
+    assert_eq!(output_rows[0].vat_code.as_deref(), Some("OUTPUT"));
+
+    let totals = derive::vat_totals_for_period(&mut *conn, seed.entity, seed.period)
+        .await
+        .expect("vat totals");
+    assert_eq!(totals.output_base_cents, before.output_base_cents + net);
+    assert_eq!(totals.output_vat_cents, before.output_vat_cents + vat);
+    assert_eq!(totals.input_base_cents, before.input_base_cents + 50_00);
+    assert_eq!(totals.input_vat_cents, before.input_vat_cents + 12_00);
+    assert_eq!(
+        totals.payable_cents(),
+        (before.output_vat_cents + vat) - (before.input_vat_cents + 12_00),
+        "payable is output − input in integer cents"
+    );
+
+    // Period movement + result: revenue and expense movement in cents.
+    let movement = derive::period_movement(&mut *conn, seed.entity, seed.period)
+        .await
+        .expect("movement");
+    assert!(movement
+        .iter()
+        .any(|row| row.account_type == "revenue" && row.credit_cents >= net));
+    let (revenue_cents, expenses_cents, result) =
+        derive::period_result(&mut *conn, seed.entity, seed.period)
+            .await
+            .expect("result");
+    assert!(revenue_cents >= net);
+    assert!(expenses_cents >= 50_00);
+    assert_eq!(result, revenue_cents.saturating_sub(expenses_cents));
+
+    // Posted-entry read contract reflects the entries.
+    let posted = derive::posted_entries(&mut *conn, seed.entity, seed.period)
+        .await
+        .expect("posted entries");
+    assert!(posted.iter().any(|row| row.memo == "integer-exact sale"));
+    let by_source = derive::entries_for_source(&mut *conn, "does-not-exist", "nowhere", "none")
+        .await
+        .expect("entries for unknown source");
+    assert!(by_source.is_empty());
+
+    // Trial balance: balanced totals per account-role pair.
+    let trial = derive::trial_balance(&mut *conn, seed.entity, seed.period)
+        .await
+        .expect("trial balance");
+    let sum_debit: i128 = trial.iter().map(|row| row.debit_cents as i128).sum();
+    let sum_credit: i128 = trial.iter().map(|row| row.credit_cents as i128).sum();
+    assert_eq!(sum_debit, sum_credit, "trial balance must balance");
+}
+
+/// Adapter refusals: missing/draft/zero sources and the wallet/manual
+/// settlement branches. Every refusal is a typed error or an explicit skip,
+/// never a fabricated entry.
+#[tokio::test]
+async fn adapter_refusals_are_typed_and_settlement_sources_are_honest() {
+    let Some(pool) = provision("acct_adapter_refusals").await else {
+        return;
+    };
+    let seed = seed(&pool, &format!("adapter-refusals-{}", run_tag()), true).await;
+    ensure_tenant(&pool).await;
+
+    // Missing source rows.
+    assert!(matches!(
+        adapters::post_invoice_issued(&pool, Uuid::new_v4()).await,
+        Err(AccountingError::SourceRowMissing {
+            table: "invoices",
+            ..
+        })
+    ));
+    assert!(matches!(
+        adapters::post_payment_allocation(&pool, "no-such-operation").await,
+        Err(AccountingError::SourceRowMissing {
+            table: "invoice_payment_allocations",
+            ..
+        })
+    ));
+    assert!(matches!(
+        adapters::post_credit_note(&pool, Uuid::new_v4()).await,
+        Err(AccountingError::SourceRowMissing {
+            table: "credit_notes",
+            ..
+        })
+    ));
+    assert!(matches!(
+        adapters::post_payroll_record(
+            &pool,
+            seed.entity,
+            Uuid::new_v4(),
+            PayrollAmounts {
+                income_tax_cents: 0,
+                social_tax_cents: 0,
+                unemployment_employee_cents: 0,
+                unemployment_employer_cents: 0,
+                pension_cents: 0,
+                net_cents: 0,
+            },
+        )
+        .await,
+        Err(AccountingError::SourceRowMissing {
+            table: "payroll_records",
+            ..
+        })
+    ));
+    assert!(matches!(
+        adapters::post_bank_statement_line(&pool, Uuid::new_v4()).await,
+        Err(AccountingError::SourceRowMissing {
+            table: "bank_statement_lines",
+            ..
+        })
+    ));
+
+    // Draft invoices are refused (finalization is the trigger); a zero-total
+    // invoice is an explicit skip.
+    let tag = run_tag().to_string();
+    let draft_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, status, currency, amount, subtotal, vat_total, total, \
+            vat_rate, issued_at, due_at, invoice_number, line_items) \
+         VALUES ($1, $2, 'draft', 'EUR', 100, 100, 0, 100, 0, NOW(), NOW(), $3, '[]')",
+    )
+    .bind(draft_id)
+    .bind(TENANT)
+    .bind(format!("INV-{tag}-draft"))
+    .execute(&pool)
+    .await
+    .expect("draft invoice");
+    assert!(matches!(
+        adapters::post_invoice_issued(&pool, draft_id).await,
+        Err(AccountingError::Invalid(message)) if message.contains("draft")
+    ));
+
+    let zero_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO invoices (id, tenant_id, status, currency, amount, subtotal, vat_total, total, \
+            vat_rate, issued_at, due_at, invoice_number, line_items) \
+         VALUES ($1, $2, 'pending', 'EUR', 0, 0, 0, 0, 0, NOW(), NOW(), $3, '[]')",
+    )
+    .bind(zero_id)
+    .bind(TENANT)
+    .bind(format!("INV-{tag}-zero"))
+    .execute(&pool)
+    .await
+    .expect("zero invoice");
+    let skipped = adapters::post_invoice_issued(&pool, zero_id)
+        .await
+        .expect("zero invoice skip");
+    assert_eq!(skipped.status, PostStatus::Skipped);
+
+    // Wallet settlement: the clearing account is the wallet liability, and
+    // the source document type is `wallet_settlement`.
+    // A DRAFT invoice row is enough: the settlement adapter does not require
+    // a posted receivable, and leaving it unposted keeps this test from
+    // shifting the shared adapters suite's VAT deltas.
+    let wallet_invoice = Uuid::new_v4();
+    insert_invoice(&pool, wallet_invoice, false, &format!("INV-{tag}-wallet")).await;
+    let wallet_op = format!("wallet:{tag}");
+    sqlx::query(
+        "INSERT INTO invoice_payment_allocations (tenant_id, invoice_id, operation_id, source, amount_cents, currency) \
+         VALUES ($1, $2, $3, 'wallet', 12400, 'EUR')",
+    )
+    .bind(TENANT)
+    .bind(wallet_invoice)
+    .bind(&wallet_op)
+    .execute(&pool)
+    .await
+    .expect("wallet allocation");
+    let wallet_outcome = adapters::post_payment_allocation(&pool, &wallet_op)
+        .await
+        .expect("wallet settlement");
+    assert_eq!(wallet_outcome.status, PostStatus::Posted);
+    let wallet_entry = wallet_outcome.entry_id.expect("entry");
+    let wallet_debit_role: String = sqlx::query_scalar(
+        "SELECT a.account_role FROM journal_lines l JOIN chart_of_accounts a ON a.id = l.account_id \
+         WHERE l.entry_id = $1 AND l.debit_cents > 0 LIMIT 1",
+    )
+    .bind(wallet_entry)
+    .fetch_one(&pool)
+    .await
+    .expect("wallet debit role");
+    assert_eq!(wallet_debit_role, ROLE_WALLET_LIABILITY);
+    let wallet_source_type: String = sqlx::query_scalar(
+        "SELECT source_type FROM accounting_source_documents \
+         WHERE source_table = 'invoice_payment_allocations' AND source_id = $1",
+    )
+    .bind(&wallet_op)
+    .fetch_one(&pool)
+    .await
+    .expect("source type");
+    assert_eq!(wallet_source_type, "wallet_settlement");
+
+    // Manual settlement: falls back to the bank account role.
+    let manual_invoice = Uuid::new_v4();
+    insert_invoice(&pool, manual_invoice, false, &format!("INV-{tag}-manual")).await;
+    let manual_op = format!("manual:{tag}");
+    sqlx::query(
+        "INSERT INTO invoice_payment_allocations (tenant_id, invoice_id, operation_id, source, amount_cents, currency) \
+         VALUES ($1, $2, $3, 'manual', 12400, 'EUR')",
+    )
+    .bind(TENANT)
+    .bind(manual_invoice)
+    .bind(&manual_op)
+    .execute(&pool)
+    .await
+    .expect("manual allocation");
+    let manual_outcome = adapters::post_payment_allocation(&pool, &manual_op)
+        .await
+        .expect("manual settlement");
+    assert_eq!(manual_outcome.status, PostStatus::Posted);
+    let manual_role: String = sqlx::query_scalar(
+        "SELECT a.account_role FROM journal_lines l JOIN chart_of_accounts a ON a.id = l.account_id \
+         WHERE l.entry_id = $1 AND l.debit_cents > 0 LIMIT 1",
+    )
+    .bind(manual_outcome.entry_id.expect("entry"))
+    .fetch_one(&pool)
+    .await
+    .expect("manual debit role");
+    assert_eq!(manual_role, ROLE_BANK);
+
+    // A credit-note-sourced allocation is skipped here (the credit-note
+    // adapter owns it) rather than double counted.
+    let cn_op = format!("cn-sourced:{tag}");
+    sqlx::query(
+        "INSERT INTO invoice_payment_allocations (tenant_id, invoice_id, operation_id, source, amount_cents, currency) \
+         VALUES ($1, $2, $3, 'credit_note', 100, 'EUR')",
+    )
+    .bind(TENANT)
+    .bind(manual_invoice)
+    .bind(&cn_op)
+    .execute(&pool)
+    .await
+    .expect("credit-note allocation");
+    let cn_skipped = adapters::post_payment_allocation(&pool, &cn_op)
+        .await
+        .expect("credit-note sourced allocation");
+    assert_eq!(cn_skipped.status, PostStatus::Skipped);
+
+    // Payroll guard: a record whose gross is not net + withheld taxes is
+    // refused (the amounts must be computed first), and the ledger does not
+    // move.
+    let record_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_records (employee_name, personal_code, gross_salary_cents, \
+            funded_pension_rate, pay_period) \
+         VALUES ('Guard Test', $1, 100000, 0.02, TIMESTAMPTZ '2026-06-30 12:00:00+00') \
+         RETURNING id",
+    )
+    .bind(format!("GUARD-{tag}"))
+    .fetch_one(&pool)
+    .await
+    .expect("payroll record");
+    let payroll_key = format!("payroll:{record_id}");
+    let entries_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE idempotency_key = $1",
+    )
+    .bind(&payroll_key)
+    .fetch_one(&pool)
+    .await
+    .expect("payroll entry count");
+    let mismatch = adapters::post_payroll_record(
+        &pool,
+        seed.entity,
+        record_id,
+        PayrollAmounts {
+            income_tax_cents: 1,
+            social_tax_cents: 1,
+            unemployment_employee_cents: 1,
+            unemployment_employer_cents: 1,
+            pension_cents: 1,
+            net_cents: 1,
+        },
+    )
+    .await;
+    assert!(
+        matches!(mismatch, Err(AccountingError::Invalid(ref message)) if message.contains("gross")),
+        "miscomputed payroll must be refused: {mismatch:?}"
+    );
+    let entries_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM journal_entries WHERE idempotency_key = $1",
+    )
+    .bind(&payroll_key)
+    .fetch_one(&pool)
+    .await
+    .expect("payroll entry count");
+    assert_eq!(
+        entries_after, entries_before,
+        "a refused payroll record must not post"
+    );
+
+    // Zero-amount bank line: refused.
+    let bank_ledger = account(&pool, seed.entity, ROLE_BANK).await;
+    let bank_account_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO bank_accounts (legal_entity_id, name, iban, currency, account_id) \
+         VALUES ($1, 'Zero', $2, 'EUR', $3) RETURNING id",
+    )
+    .bind(seed.entity)
+    .bind(format!("EE00ZERO{tag}000000"))
+    .bind(bank_ledger)
+    .fetch_one(&pool)
+    .await
+    .expect("bank account");
+    let zero_line: Uuid = sqlx::query_scalar(
+        "INSERT INTO bank_statement_lines (bank_account_id, external_id, statement_date, amount_cents, currency, reference) \
+         VALUES ($1, $2, DATE '2026-06-21', 0, 'EUR', 'ZERO') RETURNING id",
+    )
+    .bind(bank_account_id)
+    .bind(format!("zero-{tag}"))
+    .fetch_one(&pool)
+    .await
+    .expect("zero line");
+    assert!(matches!(
+        adapters::post_bank_statement_line(&pool, zero_line).await,
+        Err(AccountingError::Invalid(message)) if message.contains("zero")
+    ));
+}

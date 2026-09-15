@@ -166,4 +166,61 @@ mod tests {
         assert_eq!(parsed.cache_ttl_secs, 300);
         assert_eq!(parsed.max_ttl_ceiling_secs, DNS_MAX_TTL_CEILING_SECS);
     }
+
+    // ── Adversarial: validation floors ──────────────────────────────────
+
+    #[test]
+    fn validate_rejects_every_zero_or_tiny_limit() {
+        let base = DnsConfig::default();
+        assert!(base.validate().is_ok());
+
+        let cases: Vec<(&str, DnsConfig)> = vec![
+            (
+                "cache_ttl_secs",
+                DnsConfig {
+                    cache_ttl_secs: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "max_cache_entries",
+                DnsConfig {
+                    max_cache_entries: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "negative_ttl_secs",
+                DnsConfig {
+                    negative_ttl_secs: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "query_timeout_ms",
+                DnsConfig {
+                    query_timeout_ms: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "max_ttl_ceiling_secs",
+                DnsConfig {
+                    max_ttl_ceiling_secs: 59,
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (field, config) in cases {
+            let error = config.validate().unwrap_err();
+            assert!(error.contains(field), "{field}: {error}");
+        }
+        // Boundaries: 60s ceiling is accepted.
+        assert!(DnsConfig {
+            max_ttl_ceiling_secs: 60,
+            ..base
+        }
+        .validate()
+        .is_ok());
+    }
 }

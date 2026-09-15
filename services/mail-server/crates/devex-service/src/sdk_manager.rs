@@ -169,4 +169,69 @@ mod tests {
             .validate_sdk_version(SdkLanguage::Go, "2023-06")
             .unwrap());
     }
+
+    // ── Adversarial: registry completeness and version validation ───────
+
+    #[test]
+    fn registry_covers_every_language_with_sane_metadata() {
+        let manager = SdkManager::new();
+        let languages = [
+            SdkLanguage::Go,
+            SdkLanguage::Java,
+            SdkLanguage::Php,
+            SdkLanguage::Python,
+            SdkLanguage::Ruby,
+        ];
+        assert_eq!(manager.list_sdks().len(), languages.len());
+        for language in languages {
+            let info = manager.get_sdk_info(language).expect("sdk info");
+            assert!(!info.package_name.is_empty());
+            assert!(!info.latest_version.is_empty());
+            assert!(
+                info.repository_url
+                    .starts_with("https://github.com/apexmail/"),
+                "{} repository is not the official org",
+                info.package_name
+            );
+            let install = manager.get_install_command(language).expect("install");
+            assert!(!install.trim().is_empty());
+        }
+        // Default is the same registry.
+        assert_eq!(SdkManager::default().list_sdks().len(), languages.len());
+    }
+
+    #[test]
+    fn sdk_version_validation_rejects_unknown_versions() {
+        let manager = SdkManager::new();
+        // The shipped API version is accepted.
+        assert!(manager
+            .validate_sdk_version(SdkLanguage::Python, "2024-01")
+            .is_ok());
+        // An older (still parseable) requested version is compatible.
+        assert!(manager
+            .validate_sdk_version(SdkLanguage::Python, "2023-06")
+            .is_ok());
+        // A malformed requested version is a typed validation error.
+        let error = manager
+            .validate_sdk_version(SdkLanguage::Python, "garbage")
+            .expect_err("malformed version");
+        assert!(error.to_string().contains("garbage"), "{error}");
+
+        // A broken registry entry (invalid api_version) is refused too.
+        let broken = SdkManager {
+            sdks: vec![SdkInfo {
+                language: SdkLanguage::Python,
+                package_name: "apexmail".into(),
+                latest_version: "1.0.0".into(),
+                api_version: "not-a-version".into(),
+                repository_url: "https://github.com/apexmail/apexmail-python".into(),
+                install_command: "pip install apexmail".into(),
+                min_runtime_version: "3.9".into(),
+            }],
+        };
+        let error = broken
+            .validate_sdk_version(SdkLanguage::Python, "2024-01")
+            .expect_err("invalid registry entry");
+        assert!(error.to_string().contains("not-a-version"), "{error}");
+    }
 }

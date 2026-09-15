@@ -287,7 +287,202 @@ pub fn load() -> Result<Config> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_redis_url;
+    use super::{build_redis_url, load, parse_trusted_proxies, var_or_bool};
+
+    /// Serializes env-mutating tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Set env vars, run `f`, restore the previous values afterwards.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_string(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(value) => std::env::set_var(k, value),
+                None => std::env::remove_var(k),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, v) in saved {
+            match v {
+                Some(value) => std::env::set_var(&k, value),
+                None => std::env::remove_var(&k),
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    #[test]
+    fn trusted_proxy_parsing_accepts_cidr_bare_and_drops_garbage() {
+        let parsed = parse_trusted_proxies("10.0.0.0/8, 203.0.113.7 , ,not-an-ip,2001:db8::/32");
+        assert_eq!(parsed.len(), 3, "{parsed:?}");
+        assert!(parsed[0].contains("10.0.0.1".parse::<std::net::IpAddr>().unwrap()));
+        // A bare IPv4 becomes a /32.
+        assert!(parsed[1].contains("203.0.113.7".parse::<std::net::IpAddr>().unwrap()));
+        assert!(parse_trusted_proxies("").is_empty());
+    }
+
+    #[test]
+    fn bool_env_parsing_matches_documented_values() {
+        with_env(&[("TRACKING_TEST_BOOL", Some("true"))], || {
+            assert!(var_or_bool("TRACKING_TEST_BOOL", false))
+        });
+        for value in ["1", "yes"] {
+            with_env(&[("TRACKING_TEST_BOOL", Some(value))], || {
+                assert!(var_or_bool("TRACKING_TEST_BOOL", false), "{value}")
+            });
+        }
+        for value in ["false", "0", "no"] {
+            with_env(&[("TRACKING_TEST_BOOL", Some(value))], || {
+                assert!(!var_or_bool("TRACKING_TEST_BOOL", true), "{value}")
+            });
+        }
+        with_env(&[("TRACKING_TEST_BOOL", Some("banana"))], || {
+            assert!(
+                var_or_bool("TRACKING_TEST_BOOL", true),
+                "garbage keeps default"
+            );
+            assert!(!var_or_bool("TRACKING_TEST_BOOL", false));
+        });
+        with_env(&[("TRACKING_TEST_BOOL", None)], || {
+            assert!(var_or_bool("TRACKING_TEST_BOOL", true));
+        });
+    }
+
+    /// NOTE: `load()` runs `dotenvy::dotenv()`, and the workspace root
+    /// `.env` provides both TRACKING_SECRET_KEY and JWT_PUBLIC_KEY_PEM. The
+    /// "variable entirely absent" branches are therefore not reachable from
+    /// a repo checkout; the empty/too-short values exercise the same
+    /// validation ladder deterministically.
+    #[test]
+    fn load_rejects_empty_or_short_secret_key() {
+        let err = with_env(
+            &[
+                ("TRACKING_SECRET_KEY", Some("")),
+                ("JWT_PUBLIC_KEY_PEM", Some("pem")),
+            ],
+            load,
+        )
+        .expect_err("empty secret");
+        assert!(err.to_string().contains("at least 32 characters"), "{err}");
+
+        let err = with_env(
+            &[
+                ("TRACKING_SECRET_KEY", Some("short")),
+                ("JWT_PUBLIC_KEY_PEM", Some("pem")),
+            ],
+            load,
+        )
+        .expect_err("short secret");
+        assert!(err.to_string().contains("at least 32 characters"), "{err}");
+
+        // A 32+-char secret with the JWT key present loads.
+        let config = with_env(
+            &[
+                (
+                    "TRACKING_SECRET_KEY",
+                    Some("01234567890123456789012345678901"),
+                ),
+                ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+            ],
+            load,
+        )
+        .expect("valid minimal config");
+        assert_eq!(
+            config.secret_key.as_str(),
+            "01234567890123456789012345678901"
+        );
+    }
+
+    #[test]
+    fn load_parses_overrides_and_rejects_unsafe_values() {
+        let secret = "01234567890123456789012345678901";
+        let base: Vec<(&str, Option<&str>)> = vec![
+            ("TRACKING_SECRET_KEY", Some(secret)),
+            ("JWT_PUBLIC_KEY_PEM", Some("-----BEGIN PUBLIC KEY-----")),
+            ("TRACKING_HOST", Some("127.0.0.1")),
+            ("TRACKING_PORT", Some("4100")),
+            ("METRICS_PORT", Some("9100")),
+            ("DATABASE_URL", Some("postgresql://u:p@db:5432/apex")),
+            ("REDIS_HOST", Some("cache")),
+            ("REDIS_PORT", Some("6380")),
+            ("REDIS_DB", Some("3")),
+            ("REDIS_PASSWORD", Some("p@ss word")),
+            ("REDIS_POOL_SIZE", Some("7")),
+            ("DB_MAX_CONNECTIONS", Some("9")),
+            ("CLICKHOUSE_URL", Some("http://ch:8123")),
+            ("CLICKHOUSE_DATABASE", Some("apex")),
+            ("CLICKHOUSE_USER", Some("u")),
+            ("CLICKHOUSE_PASSWORD", Some("p")),
+            ("CLICKHOUSE_INSERT_TIMEOUT_SECONDS", Some("5")),
+            ("TRUSTED_PROXIES", Some("10.0.0.0/8, 192.0.2.9")),
+            ("TRACKING_PUBLIC_HOST", Some("https://t.example")),
+            ("TRACKING_PIXEL_PATH", Some("/px")),
+            ("TRACKING_CLICK_PATH", Some("/cl")),
+            ("TRACKING_UNSUBSCRIBE_PATH", Some("/un")),
+            ("TRACKING_PREFERENCES_PATH", Some("/pr")),
+            ("TRACKING_FALLBACK_URL", Some("https://fallback.example")),
+            (
+                "TRACKING_UNSUBSCRIBE_CONFIRMATION_URL",
+                Some("https://done.example"),
+            ),
+            ("TRACKING_REDIRECT_STATUS", Some("307")),
+            ("TRACKING_MAX_REDIRECT_URL_LEN", Some("1234")),
+            ("RATE_LIMIT_ENABLED", Some("no")),
+            ("RATE_LIMIT_MAX_PER_MINUTE", Some("55")),
+            ("METRICS_ENABLED", Some("0")),
+        ];
+        let config = with_env(&base, load).expect("valid config");
+        assert_eq!(config.server.addr.to_string(), "127.0.0.1:4100");
+        assert_eq!(config.database.url, "postgresql://u:p@db:5432/apex");
+        assert_eq!(config.database.max_connections, 9);
+        assert_eq!(config.redis.url, "redis://:p%40ss%20word@cache:6380/3");
+        assert_eq!(config.redis.pool_size, 7);
+        assert_eq!(config.clickhouse.database, "apex");
+        assert_eq!(config.tracking.base_url, "https://t.example");
+        assert_eq!(config.tracking.pixel_path, "/px");
+        assert_eq!(config.tracking.redirect_status, 307);
+        assert_eq!(config.tracking.max_redirect_url_len, 1234);
+        assert_eq!(config.tracking.trusted_proxies.len(), 2);
+        assert!(!config.rate_limit.enabled);
+        assert_eq!(config.rate_limit.max_per_minute, 55);
+        assert!(!config.metrics.enabled);
+        assert_eq!(config.metrics.port, 9100);
+
+        // Every validation rule refuses instead of accepting a broken value.
+        let broken: Vec<(&str, Option<&str>, &str)> = vec![
+            ("DB_MAX_CONNECTIONS", Some("0"), "DB_MAX_CONNECTIONS"),
+            ("DB_MAX_CONNECTIONS", Some("10001"), "DB_MAX_CONNECTIONS"),
+            ("REDIS_POOL_SIZE", Some("0"), "REDIS_POOL_SIZE"),
+            ("REDIS_POOL_SIZE", Some("1001"), "REDIS_POOL_SIZE"),
+            (
+                "RATE_LIMIT_MAX_PER_MINUTE",
+                Some("0"),
+                "RATE_LIMIT_MAX_PER_MINUTE",
+            ),
+            (
+                "TRACKING_REDIRECT_STATUS",
+                Some("200"),
+                "TRACKING_REDIRECT_STATUS",
+            ),
+            ("TRACKING_PORT", Some("9100"), "must differ"),
+        ];
+        for (key, value, needle) in broken {
+            let mut vars = base.clone();
+            vars.push((key, value));
+            if key == "TRACKING_PORT" {
+                vars.push(("METRICS_PORT", Some("9100")));
+            }
+            let err = with_env(&vars, load).expect_err(key);
+            assert!(err.to_string().contains(needle), "{key}={value:?}: {err}");
+        }
+    }
 
     #[test]
     fn redis_password_is_percent_encoded() {

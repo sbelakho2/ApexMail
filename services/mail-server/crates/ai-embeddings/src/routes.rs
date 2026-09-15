@@ -379,4 +379,191 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body["error"].as_str().is_some());
     }
+
+    // ── Adversarial: auth ordering + vector/search handler contracts ────
+
+    fn auth_request(method: &str, uri: &str, token: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = token {
+            builder = builder.header("x-api-key", token);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_is_public_but_everything_else_requires_the_token() {
+        use tower::ServiceExt;
+        let app = router(test_state());
+        let response = app
+            .clone()
+            .oneshot(auth_request("GET", "/health", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // No token → 401; wrong token → 401; bearer token → 200.
+        for token in [None, Some("wrong")] {
+            let response = app
+                .clone()
+                .oneshot(auth_request("GET", "/stats", token))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+        let mut request = auth_request("GET", "/stats", None);
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-key".parse().unwrap(),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // An empty configured token locks everything but /health.
+        let template = test_state();
+        let empty_token_state = Arc::new(AppState {
+            embedding_service: EmbeddingService::new(template.config.inference.clone())
+                .expect("service"),
+            vector_store: VectorStore::new(384, 1000, 900, vec![]),
+            config: template.config.clone(),
+            service_token: String::new(),
+        });
+        let locked = router(empty_token_state);
+        let response = locked
+            .clone()
+            .oneshot(auth_request("GET", "/health", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = locked
+            .oneshot(auth_request("GET", "/stats", Some("anything")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn add_and_search_handlers_enforce_dimension_and_top_k() {
+        use tower::ServiceExt;
+        let state = test_state();
+        let app = router(state.clone());
+
+        // The state's store dimension (384) shapes the valid payloads.
+        let mut unit = vec![0.0f32; 384];
+        unit[0] = 1.0;
+
+        // Dimension mismatch is a 400 from the store validation.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vectors")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "text": "short",
+                            "vector": [1.0, 0.0],
+                            "tenant_id": "tenant-a"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // A valid vector is created (201) with the tenant scope attached.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vectors")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "text": "valid",
+                            "vector": unit.clone(),
+                            "tenant_id": "tenant-a",
+                            "metadata": {"source": "test"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(state.vector_store.len(), 1);
+
+        // top_k=0 and top_k=101 are refused before searching.
+        for top_k in [0usize, 101] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/search")
+                        .header("x-api-key", "test-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "vector": unit.clone(),
+                                "tenant_id": "tenant-a",
+                                "top_k": top_k
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "top_k={top_k}");
+        }
+
+        // A valid search returns the tenant's row; a foreign tenant sees none.
+        let search = |tenant: &'static str| {
+            let app = app.clone();
+            let unit = unit.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/search")
+                        .header("x-api-key", "test-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "vector": unit,
+                                "tenant_id": tenant,
+                                "top_k": 5,
+                                "min_score": 0.9
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let response = search("tenant-a").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["results"][0]["text"], "valid");
+
+        let response = search("tenant-b").await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"], 0, "cross-tenant search must be empty");
+    }
 }

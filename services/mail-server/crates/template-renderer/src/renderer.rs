@@ -1205,4 +1205,179 @@ mod tests {
 
         pool.close().await;
     }
+
+    // ── Adversarial (DB-backed): save/render roundtrip, tenant scope, cache ──
+
+    /// Each test provisions its OWN canonical database (a private name per
+    /// test + process id): a pool is bound to the runtime that created it,
+    /// and `#[tokio::test]` runtimes are per-test, so a shared pool across
+    /// tests would be used from a dead runtime.
+    async fn pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(
+            "template_renderer_renderer",
+            &format!("tr_{test_name}_{}", std::process::id()),
+        )
+        .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn make_renderer(pool: PgPool) -> TemplateRenderer {
+        let mut config = test_config();
+        config.db.url = String::new();
+        TemplateRenderer::new(pool, config)
+    }
+
+    async fn seed_tenant(pool: &PgPool, tenant_id: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, settings) VALUES ($1, 'TR Test OÜ', '{}') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("tenant");
+    }
+
+    #[tokio::test]
+    async fn stored_render_roundtrips_is_tenant_scoped_and_cached() {
+        let Some(pool) = pool("roundtrip").await else {
+            return;
+        };
+        let renderer = make_renderer(pool.clone());
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        let other_tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant).await;
+        seed_tenant(&pool, &other_tenant).await;
+
+        let saved = renderer
+            .save_template(
+                &tenant,
+                "Welcome",
+                "Hi {{ name }}",
+                "<h1>{{ title }}</h1><p>{{ body }}</p>",
+                Some("Plain {{ title }}"),
+            )
+            .await
+            .expect("save");
+        assert_eq!(saved.version, 1);
+        assert_eq!(saved.tenant_id, tenant);
+        assert_eq!(saved.id.len(), 26);
+
+        let options = RenderOptions {
+            props: serde_json::json!({"title": "Hello", "body": "World", "name": "Alice"}),
+            generate_plaintext: true,
+            minify: false,
+            subject: None,
+            missing_field_fallback: None,
+        };
+
+        let first = renderer
+            .render_template(&tenant, &saved.id, None, &options)
+            .await
+            .expect("render");
+        assert_eq!(first.html, "<h1>Hello</h1><p>World</p>");
+        assert!(!first.metadata.cached);
+        // The stored subject supplies the subject when the caller omits it.
+        assert_eq!(first.subject.as_deref(), Some("Hi Alice"));
+        // The explicit text_body wins over HTML-generated plaintext and is
+        // merge-field resolved; metadata describes the FINAL body.
+        assert_eq!(first.plaintext.as_deref(), Some("Plain Hello"));
+        assert_eq!(
+            first.metadata.plaintext_size_bytes,
+            first.plaintext.as_ref().map(|p| p.len())
+        );
+        assert_eq!(first.metadata.html_size_bytes, first.html.len());
+
+        // A replay is a cache hit (same canonical row).
+        let second = renderer
+            .render_template(&tenant, &saved.id, None, &options)
+            .await
+            .expect("render replay");
+        assert!(second.metadata.cached, "second render must be cached");
+        assert_eq!(second.html, first.html);
+
+        // The pinned historical version renders the same v1 snapshot.
+        let pinned = renderer
+            .render_template(&tenant, &saved.id, Some(1), &options)
+            .await
+            .expect("pinned render");
+        assert_eq!(pinned.html, first.html);
+
+        // A different caller option set must NOT reuse the cached result.
+        let different = RenderOptions {
+            generate_plaintext: false,
+            subject: Some("Override".to_string()),
+            ..options.clone()
+        };
+        let overridden = renderer
+            .render_template(&tenant, &saved.id, None, &different)
+            .await
+            .expect("override render");
+        assert!(!overridden.metadata.cached);
+        assert_eq!(overridden.subject.as_deref(), Some("Override"));
+        assert!(overridden.plaintext.is_none());
+
+        // Cross-tenant access is indistinguishable from missing.
+        for (tid, label) in [
+            (other_tenant.as_str(), "other tenant"),
+            ("missing", "unknown id"),
+        ] {
+            let error = renderer
+                .render_template(tid, &saved.id, None, &options)
+                .await
+                .expect_err(label);
+            assert!(matches!(error, TemplateError::NotFound { .. }), "{error}");
+        }
+        // Unknown pinned version is also NotFound.
+        let error = renderer
+            .render_template(&tenant, &saved.id, Some(99), &options)
+            .await
+            .expect_err("unknown version");
+        assert!(matches!(error, TemplateError::NotFound { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn invalid_templates_are_refused_before_any_write() {
+        let Some(pool) = pool("invalid").await else {
+            return;
+        };
+        let renderer = make_renderer(pool.clone());
+        let tenant = apexmail_lib::id::generate_id("", 26);
+        seed_tenant(&pool, &tenant).await;
+
+        let count_for_tenant = |pool: PgPool, tenant: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*)::bigint FROM templates WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("count")
+        };
+        let before = count_for_tenant(pool.clone(), tenant.clone()).await;
+        let error = renderer
+            .save_template(
+                &tenant,
+                "Broken",
+                "subject",
+                "<script>alert(1)</script>",
+                None,
+            )
+            .await
+            .expect_err("hostile template must be refused");
+        assert!(
+            matches!(error, TemplateError::InvalidSyntax { .. }),
+            "{error}"
+        );
+        let after = count_for_tenant(pool.clone(), tenant.clone()).await;
+        assert_eq!(before, after, "a refused save must write nothing");
+
+        // Validation is exposed without rendering.
+        assert!(renderer.validate("<p>{{ name }}</p>").valid);
+        assert!(!renderer.validate("<p>{{ name</p>").valid);
+        assert!(renderer.starter_template().contains('<'));
+    }
 }

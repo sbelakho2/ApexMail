@@ -869,4 +869,101 @@ evicted_keys:invalid
         let _ = monitor.process_info_response(&info2, now);
         // No assertion on the result — just ensuring no panic or crash.
     }
+
+    // ── Adversarial: INFO parsing edges, collector mirroring, degradation ──
+
+    #[test]
+    fn info_parse_handles_zero_maxmemory_and_missing_keys() {
+        let parsed = InfoMemoryResponse::parse(
+            "# Memory\nused_memory:1048576\nmaxmemory:0\nmaxmemory_policy:noeviction\n",
+        );
+        assert_eq!(parsed.used_memory, 1_048_576);
+        assert_eq!(parsed.maxmemory, 0);
+        // No maxmemory ⇒ utilization is 0.0 (never a division blow-up).
+        assert_eq!(parsed.utilization_ratio(), 0.0);
+
+        let full =
+            InfoMemoryResponse::parse("used_memory:5242880\nmaxmemory:10485760\nevicted_keys:42\n");
+        assert_eq!(full.evicted_keys, 42);
+        assert!((full.utilization_ratio() - 0.5).abs() < 1e-9);
+
+        // Garbage lines are ignored; the parser never panics.
+        let empty = InfoMemoryResponse::parse("not info at all\nused_memory:abc\n");
+        assert_eq!(empty.used_memory, 0);
+        assert_eq!(empty.maxmemory, 0);
+    }
+
+    #[tokio::test]
+    async fn collector_mirrors_gauges_and_eviction_rate() {
+        let collector = Arc::new(MetricsCollector::new(vec![0.1]));
+        let monitor = RedisKeyMonitor::with_collector(Some(5.0), collector.clone());
+        let start = Instant::now();
+
+        let first = monitor.process_info_response(
+            &InfoMemoryResponse::parse(
+                "used_memory:1000\nmaxmemory:2000\nmaxmemory_policy:allkeys-lru\n",
+            ),
+            start,
+        );
+        assert!(!first, "first poll has no previous eviction baseline");
+        let summary = collector.get_summary();
+        let names: Vec<&str> = summary.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"redis_used_memory_bytes"));
+        assert!(names.contains(&"redis_maxmemory_bytes"));
+        assert!(names.contains(&"redis_memory_utilization_ratio"));
+
+        // A second poll 60s later with 600 cumulative evictions = 600/min.
+        let second = monitor.process_info_response(
+            &InfoMemoryResponse::parse("used_memory:1500\nmaxmemory:2000\nevicted_keys:600\n"),
+            start + std::time::Duration::from_secs(60),
+        );
+        assert!(second, "600 evictions/minute must cross a 5/min threshold");
+        assert!(monitor.is_high_eviction_warning_active());
+        assert_eq!(monitor.eviction_rate_threshold(), 5.0);
+
+        // The warning clears when the rate drops back below the threshold.
+        let third = monitor.process_info_response(
+            &InfoMemoryResponse::parse("used_memory:1500\nmaxmemory:2000\nevicted_keys:600\n"),
+            start + std::time::Duration::from_secs(120),
+        );
+        assert!(!third);
+        assert!(!monitor.is_high_eviction_warning_active());
+
+        // reset_state returns the monitor to its pristine state.
+        monitor.reset_state();
+        assert!(!monitor.is_high_eviction_warning_active());
+    }
+
+    #[tokio::test]
+    async fn check_evictions_degrades_to_none_on_unreachable_backend() {
+        // `Some(false)` thresholds: the assertion below proves the honest
+        // unknown — an unreachable backend yields None, never a boolean.
+        // A configured-but-unreachable Redis must degrade to None (honest
+        // "unknown"), never panic or fabricate a boolean.
+        let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let monitor = RedisKeyMonitor::new(Some(1.0));
+        assert_eq!(monitor.check_evictions(&pool).await, None);
+    }
+
+    #[tokio::test]
+    async fn check_evictions_reads_real_redis_when_configured() {
+        let Ok(url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping check_evictions_reads_real_redis: TEST_REDIS_URL unset");
+            return;
+        };
+        if url.trim().is_empty() {
+            eprintln!("skipping check_evictions_reads_real_redis: TEST_REDIS_URL blank");
+            return;
+        }
+        let cfg = deadpool_redis::Config::from_url(&url);
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let monitor = RedisKeyMonitor::new(Some(1.0));
+        // Real Redis: Some(false) with a low threshold on a healthy server.
+        assert_eq!(monitor.check_evictions(&pool).await, Some(false));
+    }
 }

@@ -369,6 +369,7 @@ mod tests {
             actual_source_ip: actual.map(|ip| ip.parse().expect("test IP")),
             recipients: vec![],
             dsn_send_units: vec![],
+            deferred_retry: None,
         }
     }
 

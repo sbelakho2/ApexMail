@@ -1113,4 +1113,187 @@ mod tests {
         assert_eq!(truncate_chars(cjk, 2), "你好");
         assert_eq!(truncate_chars("é€", 1), "é");
     }
+
+    // ── Adversarial: state builders, empty token, defaults, traces ─────
+
+    #[tokio::test]
+    async fn state_builders_attach_dependencies() {
+        let state = test_state()
+            .with_db_pool(sqlx::PgPool::connect_lazy("postgres://x/y").expect("lazy pool"));
+        assert!(state.db_pool.is_some());
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
+        let pool = std::sync::Arc::new(
+            redis_cfg
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("pool"),
+        );
+        let state = state.with_redis_pool(pool);
+        assert!(state.redis_pool.is_some());
+    }
+
+    #[tokio::test]
+    async fn empty_service_token_locks_every_protected_route() {
+        let mut state = test_state();
+        state.service_token = String::new();
+        let app = router(state);
+        for uri in [
+            "/health/details",
+            "/metrics/summary",
+            "/traces",
+            "/alerts",
+            "/slos",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+        // /health and /metrics stay public.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn alertmanager_alert_without_status_defaults_to_firing() {
+        let state = test_state();
+        let app = router(state.clone());
+        let payload = json!({
+            "alerts": [ { "labels": { "alertname": "DefaultStatus" }, "annotations": {} } ]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/alerts")
+                    .header("x-api-key", "test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let active = state.alerts.list_active_alerts();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].rule_name, "DefaultStatus");
+        assert_eq!(active[0].status, crate::types::AlertStatus::Firing);
+    }
+
+    #[tokio::test]
+    async fn traces_endpoint_lists_recent_with_clamped_limit() {
+        let state = test_state();
+        state.traces.record_span(crate::types::TraceSpan {
+            trace_id: "t1".into(),
+            span_id: "s1".into(),
+            parent_span_id: None,
+            operation_name: "GET /x".into(),
+            service_name: "api".into(),
+            kind: crate::types::SpanKind::Server,
+            status: crate::types::SpanStatus::Ok,
+            status_message: None,
+            start_time: Utc::now(),
+            end_time: Some(Utc::now()),
+            duration_ms: Some(3),
+            attributes: HashMap::new(),
+            events: Vec::new(),
+        });
+        let app = router(state);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/traces?limit=1")
+                    .header("x-api-key", "test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+
+        // limit=0 clamps to 1, not 0 (a limit of zero would return nothing
+        // while claiming success).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/traces?limit=0")
+                    .header("x-api-key", "test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn alert_severity_and_status_vocabulary_maps_closed() {
+        assert_eq!(
+            parse_alert_severity(Some("info")),
+            crate::types::AlertSeverity::Info
+        );
+        assert_eq!(
+            parse_alert_severity(Some("emergency")),
+            crate::types::AlertSeverity::Emergency
+        );
+        assert_eq!(
+            parse_alert_severity(Some("weird")),
+            crate::types::AlertSeverity::Warning
+        );
+        assert_eq!(
+            parse_alert_severity(None),
+            crate::types::AlertSeverity::Warning
+        );
+        assert_eq!(
+            parse_alert_status("resolved"),
+            crate::types::AlertStatus::Resolved
+        );
+        assert_eq!(
+            parse_alert_status("pending"),
+            crate::types::AlertStatus::Pending
+        );
+        assert_eq!(
+            parse_alert_status("acknowledged"),
+            crate::types::AlertStatus::Acknowledged
+        );
+        assert_eq!(
+            parse_alert_status("silenced"),
+            crate::types::AlertStatus::Silenced
+        );
+        assert_eq!(
+            parse_alert_status("garbage"),
+            crate::types::AlertStatus::Firing
+        );
+    }
 }
