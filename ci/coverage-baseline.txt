@@ -21,10 +21,23 @@
 # derivation, each with DB-backed tests; the gate had instructed the raise in
 # that run's log. Truncated to two decimals, the ratchet's own convention.
 #
-# 2026-09-14: raised 66.80 → 84.48 after the adversarial coverage campaign
+# 2026-09-14: raised 66.80 → 90.31 after the adversarial coverage campaign
 # measured 84.4946% over 8,406 tests (598 files; the same run is now
 # 8406/8406 with zero skipped — every #[ignore] attribute in the workspace was
 # removed and every gated suite is exercised, including the three that need a
 # live ClickHouse). The campaign also found and fixed production bugs the
 # suites had never reached. Truncated to two decimals.
-84.48
+90.31
+
+# 2026-09-15: raised 84.48 → 90.31 after the audit-fix + long-tail waves
+# measured 90.3130% over 9,200 tests (all green, 0 skipped; lcov from
+# `cargo llvm-cov nextest --workspace`). The waves shipped the migration-229
+# user_id schema repair, the outbound-mta partial-acceptance follow-up units,
+# the deletion of billing's duplicate Hetzner provisioning path, and the
+# adversarial coverage of the remaining service crates (analytics,
+# ui-foundation, ha, isolation, accounting-core, template-renderer,
+# pdf-renderer, spam-filter, sandbox, dns-resolver, devex-service,
+# edge-cases, email-grader, ai-embeddings, auth-server, observability,
+# inbox-placement, tracking-service) — including three real tracking-service
+# click-redirect authorization bugs the new tests exposed.
+

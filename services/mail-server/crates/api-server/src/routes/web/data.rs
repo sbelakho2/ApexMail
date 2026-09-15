@@ -3497,7 +3497,13 @@ async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
             // price_cents is INTEGER on the canonical schema; the row shape
             // decodes i64, so cast in SQL (a bare INT4 fails ColumnDecode and
             // made the whole catalog read as "data unavailable").
-            "SELECT name, display_name, COALESCE(price_cents, 0)::bigint FROM plans ORDER BY price_cents ASC LIMIT 50",
+            // newest-first tiebreak: parallel test runs seed their own
+            // catalog rows into the shared database, and without the
+            // created_at tiebreak the first 50 by price alone can fill with
+            // rows accumulated from PREVIOUS runs, crowding out the row the
+            // current run just seeded.
+            "SELECT name, display_name, COALESCE(price_cents, 0)::bigint FROM plans \
+             ORDER BY price_cents ASC, created_at DESC, id LIMIT 50",
         )
         .fetch_all(&state.db)
         .await
@@ -5771,8 +5777,9 @@ pub(crate) mod coverage_support {
     pub(crate) async fn seed_global(pool: &PgPool, tag: &str) -> String {
         sqlx::query(
             // price_cents = -1 sorts this row first in the catalog's
-            // `ORDER BY price_cents ASC LIMIT 50`, so accumulated test plans
-            // can never crowd it out.
+            // `ORDER BY price_cents ASC, created_at DESC, id LIMIT 50`, so
+            // neither accumulated nor concurrently-seeded test plans can
+            // crowd it out.
             "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, created_at, updated_at)
              VALUES ($1, $2, $3, -1, 1000, true, 1, NOW(), NOW())",
         )
