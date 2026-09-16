@@ -1437,7 +1437,16 @@ mod db_tests {
         };
         let now = Utc::now();
         let period = period_key(now.date_naive().year(), now.date_naive().month()).expect("period");
-        let today = now.date_naive();
+        // The derivation judges evidence in force by the TALLINN issue date
+        // (`AT TIME ZONE 'Europe/Tallinn'`): computing "today" in UTC let the
+        // not-yet-in-force case slip inside the window during Tallinn's
+        // evening. Ask the DATABASE for that date — the exact contract the
+        // SQL applies, with no Rust-side timezone arithmetic to drift.
+        let today: chrono::NaiveDate =
+            sqlx::query_scalar("SELECT (NOW() AT TIME ZONE 'Europe/Tallinn')::date")
+                .fetch_one(&pool)
+                .await
+                .expect("tallinn date");
 
         // (evidence INSERT, taxable amount) — only the first is in force.
         let evidence_sql = "INSERT INTO vat_validation_evidence \

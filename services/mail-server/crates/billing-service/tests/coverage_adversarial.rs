@@ -36,6 +36,21 @@ use uuid::Uuid;
 // Provisioning harness
 // ---------------------------------------------------------------------------
 
+/// Install a process-wide TRACE subscriber once. Tracing macros evaluate
+/// their field expressions only when the callsite is enabled; without a
+/// subscriber every dynamic `x = %expr` field line in the measured crate
+/// sources would be an uncoverable region. Output goes to the sink.
+fn ensure_trace_sink() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INSTALLED.set(()).is_ok() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+}
+
 const MAX_DB_NAME_LEN: usize = 63;
 
 fn test_database_url() -> Option<String> {
@@ -102,6 +117,7 @@ impl Harness {
 }
 
 async fn provision(test_name: &str) -> Option<Harness> {
+    ensure_trace_sink();
     let url = test_database_url()?;
     let (server_part, db_part) = url
         .rsplit_once('/')

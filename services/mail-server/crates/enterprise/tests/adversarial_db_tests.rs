@@ -51,7 +51,23 @@ struct Harness {
     token_b: String,
 }
 
+/// Install a process-wide TRACE subscriber once: tracing macros evaluate
+/// their field expressions only at ENABLED callsites, so without a subscriber
+/// every dynamic `x = %expr` field line in the measured crate sources is an
+/// uncoverable region. The formatted output goes to the sink.
+fn ensure_trace_sink() {
+    static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if INSTALLED.set(()).is_ok() {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::io::sink)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+}
+
 async fn harness() -> Option<&'static Harness> {
+    ensure_trace_sink();
     SHARED
         .get_or_init(|| async { build_harness().await })
         .await

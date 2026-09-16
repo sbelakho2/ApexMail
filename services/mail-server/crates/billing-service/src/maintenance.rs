@@ -3997,21 +3997,56 @@ mod coverage_adversarial {
     }
 
     impl Env {
+        /// Schema-level fault injection in this test's PRIVATE database
+        /// clone: rename a table so queries against it fail (42P01).
+        async fn break_table(&self, table: &str) {
+            sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_broken"))
+                .execute(&self.pool)
+                .await
+                .expect("break table");
+        }
+
+        async fn restore_table(&self, table: &str) {
+            let _ = sqlx::query(&format!("ALTER TABLE {table}_broken RENAME TO {table}"))
+                .execute(&self.pool)
+                .await;
+        }
+
         async fn finish(self) {
             self.pool.close().await;
-            if let Ok(admin) = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(&self.admin_url)
-                .await
-            {
-                let _ = sqlx::query(&format!(
-                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-                    self.db_name
-                ))
-                .execute(&admin)
-                .await;
-                admin.close().await;
+            // Bounded retry: under parallel load the admin connect can time
+            // out once; failing the TEST over teardown contention reports a
+            // regression where there is none (the namespaced leftover DB is
+            // dropped by the next run of the same test).
+            let mut admin = None;
+            for attempt in 0..3 {
+                match PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(Duration::from_secs(10))
+                    .connect(&self.admin_url)
+                    .await
+                {
+                    Ok(pool) => {
+                        admin = Some(pool);
+                        break;
+                    }
+                    Err(error) if attempt == 2 => {
+                        eprintln!(
+                            "teardown of {} gave up after 3 attempts: {error}",
+                            self.db_name
+                        );
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+                }
             }
+            let Some(admin) = admin else { return };
+            let _ = sqlx::query(&format!(
+                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                self.db_name
+            ))
+            .execute(&admin)
+            .await;
+            admin.close().await;
         }
     }
 
@@ -4074,13 +4109,33 @@ mod coverage_adversarial {
         .execute(&admin)
         .await
         .expect("drop test db");
-        sqlx::query(&format!(
-            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
-            db_name, template
-        ))
-        .execute(&admin)
-        .await
-        .expect("clone test db");
+        {
+            // Serialize template clones process-wide and retry the transient
+            // 55006 (a concurrent cloner's internal session on the template).
+            let _clone_guard = crate::test_support::CLONE_LOCK.lock().await;
+            let mut last_error = None;
+            for _ in 0..5 {
+                match sqlx::query(&format!(
+                    r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+                    db_name, template
+                ))
+                .execute(&admin)
+                .await
+                {
+                    Ok(_) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+            }
+            if let Some(error) = last_error {
+                panic!("clone test db: {error}");
+            }
+        }
         admin.close().await;
 
         let database_url = format!("{server_part}/{db_name}");
@@ -4114,19 +4169,31 @@ mod coverage_adversarial {
         })
     }
 
+    /// Cross-process serialization for tests that touch the SHARED Redis
+    /// pending-metering keyspace: a drain consumes every `meter:pending:*`
+    /// key it can see — including another test process's — so two drains
+    /// racing make each other's counts wrong. A session-level advisory lock
+    /// on the admin database; released when the pool drops.
+    async fn metering_keys_guard(admin_url: &str) -> Option<sqlx::PgPool> {
+        crate::test_support::redis_keys_guard(admin_url, "metering").await
+    }
+
     macro_rules! env_test {
         ($name:ident, |$e:ident| $body:block) => {
             #[tokio::test]
             async fn $name() {
-                let Some(owned) = provision(stringify!($name)).await else {
-                    return;
-                };
-                let $e = &owned;
-                $body
-                owned.finish().await;
+                if let Some(owned) = provision(stringify!($name)).await {
+                    let $e = &owned;
+                    $body
+                    owned.finish().await;
+                }
             }
         };
     }
+
+    use crate::types::MeterEventType;
+    use crate::usage::record_usage;
+    use billing_common::cost_throttle::cost_throttle_key;
 
     // ---------------- seeding / redis helpers ----------------
 
@@ -4250,6 +4317,7 @@ mod coverage_adversarial {
         metering_drain_recovers_valid_and_discards_malformed,
         |env| {
             let _drain_guard = METER_DRAIN_LOCK.lock().await;
+            let _metering_guard = metering_keys_guard(&env.admin_url).await;
             let tenant = "mtcov_drain";
             seed_tenant(env, tenant, "free", "active").await;
             redis_del(env, "meter:pending:raw-1").await;
@@ -5598,6 +5666,7 @@ mod coverage_adversarial {
 
     env_test!(metering_drain_replay_never_double_counts, |env| {
         let _drain_guard = METER_DRAIN_LOCK.lock().await;
+        let _metering_guard = metering_keys_guard(&env.admin_url).await;
         let tenant = "mtcov_drain_replay";
         seed_tenant(env, tenant, "free", "active").await;
         let raw_id = "mtcov-replay-raw-1";
@@ -6462,5 +6531,1039 @@ mod coverage_adversarial {
             .await
             .expect("margin");
         assert_eq!(status, CostMarginStatus::Healthy);
+    });
+
+    // ===================================================================
+    // Deep adversarial additions: the scheduler's startup sweeps and tick
+    // loops (virtual clock), month-end closing, trial reconciliation,
+    // dunning grace expiry, wallet conservation, restriction-aware recovery
+    // and the cost-margin throttle — each pinned to exactly-once semantics.
+    // ===================================================================
+
+    async fn seed_tenant_plan(env: &Env, tenant: &str, plan: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE SET plan = EXCLUDED.plan, status = EXCLUDED.status",
+        )
+        .bind(tenant)
+        .bind(format!("Maint {tenant}"))
+        .bind(plan)
+        .bind(status)
+        .execute(&env.pool)
+        .await
+        .expect("seed tenant");
+    }
+
+    async fn seed_dunning(env: &Env, tenant: &str, status: &str, grace: Option<DateTime<Utc>>) {
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count, grace_period_ends_at)
+             VALUES ($2, $1, $3, 2, $4)
+             ON CONFLICT (tenant_id) DO UPDATE SET status = EXCLUDED.status,
+                 grace_period_ends_at = EXCLUDED.grace_period_ends_at",
+        )
+        .bind(tenant)
+        // dunning_records.id is VARCHAR(26): the tenant-prefixed id
+        // overflowed it (22001). ON CONFLICT (tenant_id) keys the row, so a
+        // short unique id is enough.
+        .bind(format!("dun{}", &uuid::Uuid::new_v4().simple().to_string()[..22]))
+        .bind(status)
+        .bind(grace)
+        .execute(&env.pool)
+        .await
+        .expect("seed dunning");
+    }
+
+    // ---------------- scheduler: startup + virtual-clock ticks ----------------
+
+    #[tokio::test]
+    async fn periodic_jobs_run_their_startup_sweeps_and_log_results() {
+        let Some(env) = provision("periodic_startup").await else {
+            return;
+        };
+        let _metering_guard = metering_keys_guard(&env.admin_url).await;
+        crate::test_support::ensure_trace_subscriber();
+
+        // Seed data so the startup arms of archive / reclaim / grace produce
+        // RESULT logs, not just empty sweeps.
+        seed_tenant_plan(&env, "mtcov_start", "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency,
+                                   subtotal, vat_total, total, pdf_url, issued_at, paid_at,
+                                   due_at, period_start, period_end)
+             VALUES (gen_random_uuid(), 'mtcov_start', 'MTCOV-1', 'paid', 1000, 'eur', 1000, 0, 1000,
+                     'https://pdf.example/mtcov', NOW() - INTERVAL '120 days',
+                     NOW() - INTERVAL '120 days', NOW() - INTERVAL '90 days',
+                     NOW() - INTERVAL '120 days', NOW() - INTERVAL '90 days')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("archivable invoice");
+        sqlx::query(
+            "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, updated_at)
+             VALUES (gen_random_uuid(), 'evt_mtcov_stale', 'invoice.paid', 'pending',
+                     NOW() - INTERVAL '20 minutes')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("stale webhook");
+
+        start_periodic_jobs(env.state.clone());
+        // The startup sweeps run immediately; interval ticks are >= 30s away
+        // and never fire within this bounded, real-time window.
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+
+        let archived: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_archives")
+            .fetch_one(&env.pool)
+            .await
+            .expect("archives");
+        assert_eq!(
+            archived, 1,
+            "startup archival archived the old paid invoice"
+        );
+        let reclaimed: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_mtcov_stale'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("reclaimed");
+        assert_eq!(
+            reclaimed, "received",
+            "startup reclaim reset the stale claim"
+        );
+        env.finish().await;
+    }
+
+    #[tokio::test]
+    async fn periodic_jobs_startup_error_arms_are_logged_not_fatal() {
+        let Some(env) = provision("periodic_startup_faults").await else {
+            return;
+        };
+        crate::test_support::ensure_trace_subscriber();
+        // Break the tables the startup sweeps read: every Err arm must be an
+        // error! log, never a panic or an aborted task.
+        env.break_table("invoices").await;
+        env.break_table("stripe_webhook_events").await;
+        env.break_table("dedicated_ips").await;
+        start_periodic_jobs(env.state.clone());
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        env.restore_table("invoices").await;
+        env.restore_table("stripe_webhook_events").await;
+        env.restore_table("dedicated_ips").await;
+        env.finish().await;
+    }
+
+    #[tokio::test]
+    async fn periodic_jobs_tick_every_loop_under_a_virtual_clock() {
+        let Some(env) = provision("periodic_ticks").await else {
+            return;
+        };
+        let _metering_guard = metering_keys_guard(&env.admin_url).await;
+        crate::test_support::ensure_trace_subscriber();
+        seed_tenant_plan(&env, "mtcov_tick", "growth", "active").await;
+        // All real I/O (provisioning) happened on the running clock; now
+        // freeze time and let the scheduler's timers fast-forward through a
+        // virtual day so EVERY loop ticks at least once.
+        tokio::time::pause();
+        start_periodic_jobs(env.state.clone());
+        let virtual_day = tokio::time::sleep(std::time::Duration::from_secs(26 * 3600));
+        // Bound the virtual fast-forward with REAL time: auto-advance makes
+        // this finish in milliseconds; a hang fails loudly instead.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(60), virtual_day).await;
+        env.finish().await;
+    }
+
+    // ---------------- month-end closing ----------------
+
+    env_test!(month_end_closing_is_exactly_once_per_period, |env| {
+        seed_tenant_plan(env, "mtcov_close", "growth", "active").await;
+        // One paid invoice in the CURRENT month: the closing targets the
+        // PREVIOUS month, so the first run records an EMPTY closing marker.
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end)
+             VALUES (gen_random_uuid(), 'mtcov_close', 'MTCOV-2', 'paid', 10000, 'eur',
+                     8000, 2000, 10000, NOW(), NOW() + INTERVAL '30 days', NOW(), NOW())",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("current-month invoice");
+
+        let ran = perform_month_end_closing(&env.state)
+            .await
+            .expect("closing");
+        assert!(ran, "an empty period still records its closing marker");
+        // total_invoices is INTEGER (INT4) on the canonical schema — sqlx
+        // does not coerce it to i64.
+        let (total, status): (i32, String) = sqlx::query_as(
+            "SELECT total_invoices, status FROM month_end_closings ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("closing row");
+        assert_eq!(total, 0);
+        assert_eq!(status, "completed");
+        // Idempotent: the second run in the same period is a no-op.
+        let ran = perform_month_end_closing(&env.state)
+            .await
+            .expect("closing");
+        assert!(!ran, "a closed period never closes twice");
+        let closings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM month_end_closings")
+            .fetch_one(&env.pool)
+            .await
+            .expect("count");
+        assert_eq!(closings, 1, "exactly one closing row per period");
+
+        // A paid invoice in the PREVIOUS month is closed with exact totals.
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, invoice_number, status, amount, currency,
+                                   subtotal, vat_total, total, issued_at, due_at,
+                                   period_start, period_end)
+             VALUES (gen_random_uuid(), 'mtcov_close', 'MTCOV-3', 'paid', 12400, 'eur',
+                     10000, 2400, 12400, NOW() - INTERVAL '1 month', NOW(), NOW(), NOW())",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("last-month invoice");
+        // Drop the marker so the closing re-runs for the populated period.
+        sqlx::query("DELETE FROM month_end_closings")
+            .execute(&env.pool)
+            .await
+            .expect("reset");
+        let ran = perform_month_end_closing(&env.state)
+            .await
+            .expect("closing");
+        assert!(ran);
+        // The canonical invoices columns are subtotal/vat_total/total (the
+        // *_cents names live on month_end_closings).
+        let (closed_at_set, revenue, vat): (bool, i64, i64) = sqlx::query_as(
+            "SELECT closed_at IS NOT NULL, total, vat_total
+             FROM invoices WHERE invoice_number = 'MTCOV-3'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("invoice");
+        assert!(closed_at_set, "the paid invoice is closed");
+        assert_eq!(revenue, 12400);
+        assert_eq!(vat, 2400);
+        let audit: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_audit_log WHERE action = 'month_end_closing'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit");
+        assert_eq!(audit, 1, "the closing writes a system audit entry");
+    });
+
+    env_test!(month_end_closing_fault_arms_fail_honestly, |env| {
+        seed_tenant_plan(env, "mtcov_closefault", "growth", "active").await;
+        env.break_table("month_end_closings").await;
+        let error = perform_month_end_closing(&env.state)
+            .await
+            .expect_err("broken closing table");
+        assert!(
+            error.contains("Failed to check existing month-end closing"),
+            "honest failure: {error}"
+        );
+        env.restore_table("month_end_closings").await;
+    });
+
+    // ---------------- trial reconciliation ----------------
+
+    env_test!(trial_sweep_downgrades_only_stale_trials, |env| {
+        seed_tenant_plan(env, "mtcov_trial_stale", "growth", "active").await;
+        seed_tenant_plan(env, "mtcov_trial_fresh", "growth", "active").await;
+        // Real timestamps: the bound value reaches $3::timestamptz as a
+        // parameter, so SQL text like "NOW() - INTERVAL ..." is rejected
+        // (22007) instead of being evaluated.
+        for (tenant, sub, trial_end) in [
+            (
+                "mtcov_trial_stale",
+                "sub_mtcov_stale",
+                chrono::Utc::now() - chrono::Duration::days(3),
+            ),
+            (
+                "mtcov_trial_fresh",
+                "sub_mtcov_fresh",
+                chrono::Utc::now() + chrono::Duration::days(10),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO stripe_subscriptions
+                     (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, trial_end, stripe_customer_id)
+                 VALUES ($1, $2, 'growth', 'trialing', NOW() - INTERVAL '20 days',
+                         NOW() - INTERVAL '2 days', $3::timestamptz, 'cus_mtcov')",
+            )
+            .bind(tenant)
+            .bind(sub)
+            .bind(trial_end)
+            .execute(&env.pool)
+            .await
+            .expect("trial row");
+        }
+
+        let swept = sweep_expired_trials(&env.state).await.expect("sweep");
+        assert_eq!(swept, 1, "only the stale trial is downgraded");
+        let (stale_status, stale_plan): (String, String) = sqlx::query_as(
+            "SELECT (SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_mtcov_stale'),
+                    (SELECT plan FROM tenants WHERE id = 'mtcov_trial_stale')",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("stale");
+        assert_eq!(stale_status, "canceled");
+        assert_eq!(stale_plan, "free", "entitlement drops with the stale trial");
+        let fresh_plan: String =
+            sqlx::query_scalar("SELECT plan FROM tenants WHERE id = 'mtcov_trial_fresh'")
+                .fetch_one(&env.pool)
+                .await
+                .expect("fresh");
+        assert_eq!(fresh_plan, "growth", "a live trial is never raced");
+        let audit: i64 = sqlx::query_scalar(
+            // These sweeps audit through the canonical compliance audit_logs chain
+            // (append_audit_log), not the billing-local log.
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.trial_expired_sweep'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit");
+        assert_eq!(audit, 1, "the downgrade is audited");
+        // Idempotent: a second sweep finds nothing.
+        let swept = sweep_expired_trials(&env.state).await.expect("sweep");
+        assert_eq!(swept, 0);
+    });
+
+    env_test!(empty_trial_sweep_commits_cleanly, |env| {
+        let swept = sweep_expired_trials(&env.state).await.expect("sweep");
+        assert_eq!(swept, 0, "an empty sweep is a committed no-op");
+    });
+
+    // ---------------- dunning grace expiry ----------------
+
+    env_test!(grace_expiry_purges_queues_and_notifies_once, |env| {
+        for tenant in ["mtcov_grace_a", "mtcov_grace_b"] {
+            seed_tenant_plan(env, tenant, "growth", "suspended").await;
+            seed_dunning(
+                env,
+                tenant,
+                "hard_suspended",
+                Some(Utc::now() - chrono::Duration::days(2)),
+            )
+            .await;
+            sqlx::query(
+                "INSERT INTO messages (id, tenant_id, from_email, to_emails, status, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, 'billing@apexmail.test', '[\"tenant@example.test\"]'::jsonb, 'dunning_queued', NOW(), NOW())",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("queued message");
+        }
+
+        // Batch size 1 forces the loop through TWO full iterations.
+        let result = process_grace_period_expirations(&env.state, 1)
+            .await
+            .expect("grace sweep");
+        assert_eq!(result.processed_count, 2);
+        assert_eq!(
+            result.purged_messages_count, 2,
+            "queued messages are purged"
+        );
+        let notifications: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE type = 'messages_purged'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("notifications");
+        assert_eq!(notifications, 2, "each tenant is notified exactly once");
+        let messages_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE status = 'dunning_queued'")
+                .fetch_one(&env.pool)
+                .await
+                .expect("messages");
+        assert_eq!(messages_left, 0);
+        let grace_left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dunning_records WHERE grace_period_ends_at IS NOT NULL",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("grace");
+        assert_eq!(grace_left, 0, "the expired grace window is cleared");
+
+        // Idempotent: nothing matches a second sweep.
+        let result = process_grace_period_expirations(&env.state, 100)
+            .await
+            .expect("grace sweep");
+        assert_eq!(result.processed_count, 0);
+    });
+
+    // ---------------- wallet conservation ----------------
+
+    async fn seed_wallet(env: &Env, tenant: &str, balance: i64, reserved: i64) -> uuid::Uuid {
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        let id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO wallets (tenant_id, balance, reserved) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(tenant)
+        .bind(balance)
+        .bind(reserved)
+        .fetch_one(&env.pool)
+        .await
+        .expect("wallet");
+        sqlx::query(
+            "INSERT INTO wallet_transactions (wallet_id, tenant_id, type, amount, balance_after, description)
+             VALUES ($1, $2, 'credit', $3, $4, 'seed credit')",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(balance)
+        .bind(balance)
+        .execute(&env.pool)
+        .await
+        .expect("credit row");
+        id
+    }
+
+    env_test!(
+        expired_reservations_release_exactly_the_reserved_amount,
+        |env| {
+            let tenant = "mtcov_wallet";
+            let wallet = seed_wallet(env, tenant, 5000, 1200).await;
+            sqlx::query(
+                // The canonical wallet_reservations shape: UUID id, the
+                // owning wallet row (NOT NULL FK target), positive amount.
+                "INSERT INTO wallet_reservations (id, wallet_id, tenant_id, amount, status, expires_at)
+             VALUES ($1, $2, $3, 700, 'active', NOW() - INTERVAL '1 hour')",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(wallet)
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("reservation");
+
+            let released = process_expired_wallet_reservations(&env.state)
+                .await
+                .expect("release");
+            assert_eq!(released, 1);
+            let (balance, reserved): (i64, i64) =
+                sqlx::query_as("SELECT balance, reserved FROM wallets WHERE tenant_id = $1")
+                    .bind(tenant)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("wallet");
+            assert_eq!(balance, 5000, "the balance itself never moves on release");
+            assert_eq!(reserved, 500, "exactly the reservation amount is released");
+
+            // Idempotent.
+            let released = process_expired_wallet_reservations(&env.state)
+                .await
+                .expect("release");
+            assert_eq!(released, 0);
+            let released_again: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM wallet_reservations WHERE released_at IS NOT NULL",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("count");
+            assert_eq!(released_again, 1);
+        }
+    );
+
+    env_test!(stale_credits_expire_once_under_the_fifo_cap, |env| {
+        let tenant = "mtcov_expiry";
+        // A 13-month-old credit of 3000, a fresh credit of 2000: only the
+        // stale, unconsumed part may expire.
+        let wallet = seed_wallet(env, tenant, 5000, 0).await;
+        sqlx::query(
+            "INSERT INTO wallet_transactions (wallet_id, tenant_id, type, amount, balance_after, description, created_at)
+             VALUES ($1, $2, 'credit', 3000, 3000, 'old credit', NOW() - INTERVAL '13 months')",
+        )
+        .bind(wallet)
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("old credit");
+
+        let expired = expire_stale_wallet_credits(&env.state)
+            .await
+            .expect("expiry");
+        assert_eq!(expired, 1);
+        let (balance, expiry_rows): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT balance FROM wallets WHERE tenant_id = $1),
+                    (SELECT COUNT(*) FROM wallet_transactions
+                     WHERE tenant_id = $1 AND reference = 'wallet_credit_expiry')",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("wallet");
+        assert_eq!(balance, 2000, "only the stale credit expired");
+        assert_eq!(expiry_rows, 1, "the expiry is a single ledger debit");
+        let audit: i64 = sqlx::query_scalar(
+            // These sweeps audit through the canonical compliance audit_logs chain
+            // (append_audit_log), not the billing-local log.
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.wallet_credit_expired'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit");
+        assert_eq!(audit, 1);
+
+        // Self-limiting: the expiry debit counts as consumption.
+        let expired = expire_stale_wallet_credits(&env.state)
+            .await
+            .expect("expiry");
+        assert_eq!(expired, 0, "the sweep never expires the same credit twice");
+    });
+
+    #[test]
+    fn release_reserved_clamp_never_wraps() {
+        assert_eq!(release_reserved_cents_clamp(1000, 400), 600);
+        assert_eq!(release_reserved_cents_clamp(1000, 1000), 0);
+        assert_eq!(
+            release_reserved_cents_clamp(100, 9_000_000_000),
+            0,
+            "no wrap on huge totals"
+        );
+    }
+
+    // ---------------- restriction-aware recovery ----------------
+
+    env_test!(payment_recovery_scopes_to_the_settled_invoice, |env| {
+        let tenant = "mtcov_recover";
+        seed_tenant_plan(env, tenant, "growth", "suspended").await;
+        seed_dunning(env, tenant, "hard_suspended", None).await;
+        sqlx::query(
+            "INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type)
+             VALUES ($1, 'billing', 'dunning hard suspension', 'system')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("billing hold");
+        // The latest failure belongs to a DIFFERENT invoice.
+        sqlx::query(
+            "INSERT INTO dunning_events (id, tenant_id, event_type, invoice_id, created_at)
+             VALUES (gen_random_uuid(), $1, 'payment_failed', 'in_other', NOW())",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("failure event");
+
+        mark_payment_recovered(&env.state, tenant, Some("in_settled"))
+            .await
+            .expect("scoped recovery");
+        let (status, hold_cleared): (String, bool) = sqlx::query_as(
+            "SELECT (SELECT status FROM dunning_records WHERE tenant_id = $1),
+                    (SELECT cleared_at IS NOT NULL FROM tenant_restrictions
+                     WHERE tenant_id = $1 AND kind = 'billing')",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("state");
+        assert_eq!(
+            status, "hard_suspended",
+            "Fix F4: a different failing invoice keeps dunning"
+        );
+        assert!(!hold_cleared, "the billing hold survives a scoped refusal");
+        let recovered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM dunning_events WHERE tenant_id = $1 AND event_type = 'payment_recovered'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("events");
+        assert_eq!(
+            recovered, 1,
+            "the settled invoice's recovery is still logged"
+        );
+
+        // Recovering the invoice that ACTUALLY failed resets everything.
+        mark_payment_recovered(&env.state, tenant, Some("in_other"))
+            .await
+            .expect("full recovery");
+        let (status, tenant_status): (String, String) = sqlx::query_as(
+            "SELECT (SELECT status FROM dunning_records WHERE tenant_id = $1),
+                    (SELECT status FROM tenants WHERE id = $1)",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("state");
+        assert_eq!(status, "healthy");
+        assert_eq!(tenant_status, "active", "the billing suspension is lifted");
+    });
+
+    env_test!(payment_recovery_never_touches_non_billing_holds, |env| {
+        let tenant = "mtcov_recover_admin";
+        seed_tenant_plan(env, tenant, "growth", "suspended").await;
+        seed_dunning(env, tenant, "soft_suspended", None).await;
+        for kind in ["billing", "administrative"] {
+            sqlx::query(
+                "INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type)
+                     VALUES ($1, $2, 'hold', 'system')",
+            )
+            .bind(tenant)
+            .bind(kind)
+            .execute(&env.pool)
+            .await
+            .expect("hold");
+        }
+
+        admin_reset_dunning_restriction_aware(
+            &env.pool,
+            &env.redis,
+            tenant,
+            "admin-cov",
+            "manual reset",
+        )
+        .await
+        .expect("admin reset");
+        let cleared: Vec<(String,)> = sqlx::query_as(
+                "SELECT kind FROM tenant_restrictions WHERE tenant_id = $1 AND cleared_at IS NULL ORDER BY kind",
+            )
+            .bind(tenant)
+            .fetch_all(&env.pool)
+            .await
+            .expect("holds");
+        let kinds: Vec<String> = cleared.into_iter().map(|row| row.0).collect();
+        assert_eq!(
+            kinds,
+            vec!["administrative".to_string()],
+            "only the billing hold clears"
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+        assert_eq!(status, "healthy");
+    });
+
+    // ---------------- abuse lifecycle ----------------
+
+    #[test]
+    fn abuse_transitions_are_gated() {
+        assert!(abuse_transition_allowed("open", "investigating"));
+        assert!(abuse_transition_allowed("investigating", "confirmed"));
+        assert!(abuse_transition_allowed("investigating", "dismissed"));
+        assert!(abuse_transition_allowed("confirmed", "resolved"));
+        // dismissed/resolved are TERMINAL for the review cycle (the matrix's
+        // documented contract): a dismissed report is not abuse, so
+        // "resolving" it later would double-count a resolution.
+        assert!(!abuse_transition_allowed("dismissed", "resolved"));
+        assert!(
+            !abuse_transition_allowed("open", "confirmed"),
+            "no trial-by-default"
+        );
+        assert!(
+            !abuse_transition_allowed("resolved", "open"),
+            "terminal stays terminal"
+        );
+        assert!(
+            !abuse_transition_allowed("confirmed", "dismissed"),
+            "confirmed abuse is resolved, not dismissed"
+        );
+    }
+
+    env_test!(abuse_report_blocks_recovery_until_resolved, |env| {
+        let tenant = "mtcov_abuse";
+        seed_tenant_plan(env, tenant, "growth", "suspended").await;
+        seed_dunning(env, tenant, "hard_suspended", None).await;
+        sqlx::query(
+            "INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type)
+             VALUES ($1, 'billing', 'dunning hard suspension', 'system')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("billing hold");
+
+        let blocked = tenant_has_open_abuse_hold(&env.state, tenant)
+            .await
+            .expect("hold check");
+        assert!(!blocked, "no report yet: no abuse hold");
+
+        let report_id = record_abuse_report(
+            &env.state,
+            tenant,
+            "spam",
+            Some("cov-admin"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("record report");
+        let blocked = tenant_has_open_abuse_hold(&env.state, tenant)
+            .await
+            .expect("hold check");
+        assert!(blocked, "an open report holds the tenant");
+
+        // While the abuse report is open, payment recovery clears billing but
+        // must NOT reactivate the tenant.
+        mark_payment_recovered(&env.state, tenant, None)
+            .await
+            .expect("recovery");
+        let tenant_status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(
+            tenant_status, "suspended",
+            "an open abuse report blocks reactivation"
+        );
+
+        // Dismissing the report releases the hold; resolving it does too.
+        review_abuse_report(&env.pool, report_id, "dismissed", "cov-admin", "handled")
+            .await
+            .expect("dismiss");
+        let blocked = tenant_has_open_abuse_hold(&env.state, tenant)
+            .await
+            .expect("hold check");
+        assert!(!blocked, "a dismissed report no longer holds");
+    });
+
+    env_test!(restrictions_impose_and_clear_independently, |env| {
+        let tenant = "mtcov_restrict";
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        impose_tenant_restriction(
+            &env.pool,
+            tenant,
+            "verification",
+            "cov reason",
+            "system",
+            None,
+        )
+        .await
+        .expect("impose");
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_restrictions
+                 WHERE tenant_id = $1 AND kind = 'verification' AND cleared_at IS NULL",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("count");
+        assert_eq!(active, 1);
+        let cleared =
+            clear_tenant_restriction(&env.pool, tenant, "verification", "cov-admin", "done")
+                .await
+                .expect("clear");
+        assert!(cleared, "the restriction existed and was cleared");
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_restrictions
+                 WHERE tenant_id = $1 AND kind = 'verification' AND cleared_at IS NULL",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("count");
+        assert_eq!(active, 0, "the restriction is cleared, not deleted");
+    });
+
+    // ---------------- cost margin + throttling ----------------
+
+    async fn seed_cost_row(env: &Env, tenant: &str, revenue: i64, cost: i64) {
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        sqlx::query(
+            "INSERT INTO tenant_costs
+                 (tenant_id, recorded_at, storage_cost, bandwidth_cost, compute_cost,
+                  dedicated_ip_cost, total_cost, revenue)
+             VALUES ($1, NOW(), 0, 0, 0, 0, $2, $3)",
+        )
+        .bind(tenant)
+        .bind(cost)
+        .bind(revenue)
+        .execute(&env.pool)
+        .await
+        .expect("cost row");
+    }
+
+    env_test!(cost_margin_throttles_critical_and_recovers, |env| {
+        let healthy = "mtcov_cost_healthy";
+        let critical = "mtcov_cost_critical";
+        let warning = "mtcov_cost_warning";
+        seed_cost_row(env, healthy, 10_000, 1_000).await; // 90% margin
+        seed_cost_row(env, warning, 10_000, 8_500).await; // 15% margin
+        seed_cost_row(env, critical, 1_000, 2_000).await; // -100% margin
+
+        let result = process_cost_margin_checks(&env.state)
+            .await
+            .expect("checks");
+        // The canonical chain seeds the platform `system` tenant (migration
+        // 072): the sweep checks every ACTIVE tenant, so 4 are checked while
+        // only the three above carry cost rows.
+        assert_eq!(result.checked, 4);
+        assert_eq!(result.warnings, 1);
+        assert_eq!(result.critical, 1);
+
+        // The critical tenant is throttled; the others are not.
+        let mut conn = env.redis.get().await.expect("redis");
+        let throttled: bool = redis::cmd("EXISTS")
+            .arg(cost_throttle_key(critical))
+            .query_async(&mut conn)
+            .await
+            .expect("exists");
+        assert!(throttled, "a critical margin activates the cost throttle");
+        let healthy_throttled: bool = redis::cmd("EXISTS")
+            .arg(cost_throttle_key(healthy))
+            .query_async(&mut conn)
+            .await
+            .expect("exists");
+        assert!(!healthy_throttled, "a healthy margin never throttles");
+        // The status cache key is `cost:status:{tenant}` (see
+        // cache_cost_margin_status).
+        let cached: Option<String> = redis::cmd("GET")
+            .arg(format!("cost:status:{healthy}"))
+            .query_async(&mut conn)
+            .await
+            .expect("cache");
+        assert!(cached.is_some(), "the evaluated status is cached");
+
+        // Recovery: a fresh month with no costs clears the throttle.
+        sqlx::query("DELETE FROM tenant_costs WHERE tenant_id = $1")
+            .bind(critical)
+            .execute(&env.pool)
+            .await
+            .expect("clear costs");
+        sqlx::query("DELETE FROM cost_alerts WHERE tenant_id = $1")
+            .bind(critical)
+            .execute(&env.pool)
+            .await
+            .expect("clear alerts");
+        let status = check_tenant_cost_margin(&env.state, critical)
+            .await
+            .expect("check");
+        assert_eq!(status, CostMarginStatus::Healthy);
+        let throttled: bool = redis::cmd("EXISTS")
+            .arg(cost_throttle_key(critical))
+            .query_async(&mut conn)
+            .await
+            .expect("exists");
+        assert!(!throttled, "recovery releases the throttle");
+    });
+
+    env_test!(cost_alerts_deduplicate_while_open, |env| {
+        let tenant = "mtcov_cost_dedupe";
+        seed_cost_row(env, tenant, 1_000, 5_000).await; // deeply negative margin
+        process_cost_margin_checks(&env.state)
+            .await
+            .expect("checks");
+        process_cost_margin_checks(&env.state)
+            .await
+            .expect("checks");
+        let alerts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cost_alerts WHERE tenant_id = $1 AND alert_type = 'negative_margin'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("alerts");
+        assert_eq!(alerts, 1, "an open alert is never duplicated");
+    });
+
+    // ---------------- KMD backfill ----------------
+
+    #[test]
+    fn kmd_backfill_covers_missed_periods_within_the_cap() {
+        // Nothing generated: only the target period.
+        assert_eq!(kmd_backfill_periods(&[], (2026, 8), 24), vec![(2026, 8)]);
+        // Gap: every missing month after the latest generated period.
+        assert_eq!(
+            kmd_backfill_periods(&[(2026, 5)], (2026, 8), 24),
+            vec![(2026, 6), (2026, 7), (2026, 8)]
+        );
+        // Already at/after the target: nothing to do.
+        assert_eq!(
+            kmd_backfill_periods(&[(2026, 8)], (2026, 8), 24),
+            Vec::<(i32, u32)>::new()
+        );
+        assert_eq!(
+            kmd_backfill_periods(&[(2026, 9)], (2026, 8), 24),
+            Vec::<(i32, u32)>::new()
+        );
+        // The cap protects a fresh deployment from years of empty returns.
+        assert_eq!(kmd_backfill_periods(&[(2020, 1)], (2026, 8), 24).len(), 24);
+        // Year rollover walks correctly.
+        assert_eq!(
+            kmd_backfill_periods(&[(2025, 12)], (2026, 2), 24),
+            vec![(2026, 1), (2026, 2)]
+        );
+    }
+
+    env_test!(usage_alert_sweep_cooldown_fires_once, |env| {
+        let tenant = "mtcov_alert";
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        // Plan with a 10-email limit; usage at 100% of it.
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit)
+             VALUES ('plan_mtcov_alert', 'mtcov_alert_plan', 'x', 0, 10, 10)
+             ON CONFLICT (name) DO UPDATE SET email_limit = EXCLUDED.email_limit",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("plan");
+        sqlx::query("UPDATE tenants SET plan = 'mtcov_alert_plan' WHERE id = $1")
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("plan");
+        sqlx::query(
+            "INSERT INTO usage_alert_configs
+                 (tenant_id, metric_type, threshold_percent, notification_channel, enabled)
+             VALUES ($1, 'emails', 80, 'email', true)",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("alert config");
+        for _ in 0..10 {
+            record_usage(
+                &env.pool,
+                &env.redis,
+                tenant,
+                MeterEventType::EmailsSent,
+                1,
+                None,
+                None,
+            )
+            .await
+            .expect("usage");
+        }
+
+        // The cooldown key lives in the SHARED test Redis and survives a
+        // failed prior run (its TTL outlives the test): clear it so the
+        // first sweep is judged on this run's data alone. The cooldown's
+        // once-per-window behaviour is asserted by the SECOND sweep below.
+        {
+            let mut conn = env.redis.get().await.expect("redis");
+            let _: () = redis::cmd("DEL")
+                .arg("alert:cooldown:mtcov_alert:emails:80")
+                .query_async(&mut conn)
+                .await
+                .expect("clear stale cooldown");
+        }
+        let client = Client::new();
+        let first = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("sweep");
+        assert_eq!(first.tenants_checked, 1);
+        assert_eq!(first.alerts_triggered, 1, "the threshold fires");
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'usage_alert'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("queue");
+        assert_eq!(queued, 1);
+
+        // The cooldown suppresses a second alert within the hour.
+        let second = process_usage_alerts(&env.state, &client)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            second.alerts_triggered, 0,
+            "the cooldown fires at most once per period"
+        );
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM notification_queue WHERE tenant_id = $1 AND type = 'usage_alert'",
+        )
+        .bind(tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("queue");
+        assert_eq!(queued, 1, "no duplicate notification");
+    });
+
+    env_test!(metering_drain_recovers_pending_events_exactly_once, |env| {
+        let _metering_guard = metering_keys_guard(&env.admin_url).await;
+        let tenant = "mtcov_drain";
+        seed_tenant_plan(env, tenant, "growth", "active").await;
+        let raw_id = "evt_mtcov_drain_0001";
+        let event_id = normalize_metering_event_id(raw_id);
+        // The pending-event wire format is camelCase (PendingMeterEvent's
+        // rename_all): snake_case fields deserialize as missing and the
+        // event is discarded as malformed.
+        let payload = serde_json::json!({
+            "id": raw_id,
+            "tenantId": tenant,
+            "eventType": "email_sent",
+            "quantity": 3,
+            "timestamp": Utc::now().to_rfc3339(),
+            "metadata": {},
+        });
+        let mut conn = env.redis.get().await.expect("redis");
+        let _: () = redis::cmd("SET")
+            .arg(format!("meter:pending:{raw_id}"))
+            .arg(payload.to_string())
+            .query_async(&mut conn)
+            .await
+            .expect("pending event");
+        // A corrupt sibling is discarded, not recovered.
+        let _: () = redis::cmd("SET")
+            .arg("meter:pending:evt_mtcov_corrupt")
+            .arg("not json")
+            .query_async(&mut conn)
+            .await
+            .expect("corrupt pending");
+        drop(conn);
+
+        let result = drain_pending_metering_events(&env.state, 100)
+            .await
+            .expect("drain");
+        assert_eq!(result.processed_count, 1);
+        assert_eq!(result.discarded_count, 1);
+        let stored: i64 = sqlx::query_scalar("SELECT quantity FROM metering_events WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("event");
+        assert_eq!(stored, 3);
+        // Recovered events are audited into the CANONICAL compliance
+        // audit_logs table (insert_audit_log), not a billing-local log.
+        let audit: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'billing.metering_event_recovered'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("audit");
+        assert_eq!(audit, 1, "the recovery is audited");
+        let keys_left: i64 = redis::cmd("KEYS")
+            .arg("meter:pending:evt_mtcov_*")
+            .query_async::<Vec<String>>(&mut env.redis.get().await.expect("redis"))
+            .await
+            .map(|keys| keys.len() as i64)
+            .expect("keys");
+        assert_eq!(keys_left, 0, "both pending keys are cleaned up");
+
+        // Replay: the DB conflict makes the counter guard a no-op — the event
+        // is never double-counted.
+        let mut conn = env.redis.get().await.expect("redis");
+        let _: () = redis::cmd("SET")
+            .arg(format!("meter:pending:{raw_id}"))
+            .arg(payload.to_string())
+            .query_async(&mut conn)
+            .await
+            .expect("re-queue");
+        drop(conn);
+        let result = drain_pending_metering_events(&env.state, 100)
+            .await
+            .expect("drain");
+        assert_eq!(
+            result.processed_count, 0,
+            "a recovered event never re-inserts"
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM metering_events WHERE id = $1")
+            .bind(event_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("count");
+        assert_eq!(rows, 1);
     });
 }

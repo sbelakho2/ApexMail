@@ -176,13 +176,7 @@ async fn record_deadletter(
     body: Option<&[u8]>,
     signature: Option<&str>,
 ) {
-    let prepared = match prepare_deadletter(entry, body, signature, Utc::now()) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            error!(error = %error, "failed to serialize stripe dead letter");
-            return;
-        }
-    };
+    let prepared = prepare_deadletter(entry, body, signature, Utc::now());
 
     if let Err(error) = write_prepared_deadletter_to_redis(state, &prepared).await {
         error!(error = %error, "failed to write stripe dead letter");
@@ -206,12 +200,14 @@ fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> String {
     truncated
 }
 
+/// Prepare a deadletter entry for storage. Serialization of this
+/// all-string/Option struct is infallible, so no error arm is invented.
 fn prepare_deadletter(
     entry: DeadletterEntry,
     body: Option<&[u8]>,
     signature: Option<&str>,
     now: DateTime<Utc>,
-) -> Result<PreparedDeadletter, serde_json::Error> {
+) -> PreparedDeadletter {
     let now_ms = now.timestamp_millis();
     let occurred_at = entry
         .occurred_at
@@ -251,13 +247,13 @@ fn prepare_deadletter(
         ..entry
     };
 
-    Ok(PreparedDeadletter {
+    PreparedDeadletter {
         event_key,
-        payload: serde_json::to_string(&store_entry)?,
+        payload: serde_json::to_string(&store_entry).expect("deadletter entry serializes"),
         now_ms,
         cleanup_before_ms: now_ms - DEADLETTER_RETENTION_MS,
         retry_at_ms,
-    })
+    }
 }
 
 async fn write_prepared_deadletter_to_redis(
@@ -308,27 +304,27 @@ async fn write_prepared_deadletter_to_redis(
 }
 
 async fn remove_prepared_deadletter_from_redis(state: &AppState, event_key: &str) {
-    let Ok(mut conn) = state.redis.get().await else {
-        return;
-    };
-
-    if let Err(error) = redis::pipe()
-        .atomic()
-        .cmd("DEL")
-        .arg(event_key)
-        .ignore()
-        .cmd("ZREM")
-        .arg(DEADLETTER_INDEX_KEY)
-        .arg(event_key)
-        .ignore()
-        .cmd("ZREM")
-        .arg(DEADLETTER_RETRY_INDEX_KEY)
-        .arg(event_key)
-        .ignore()
-        .query_async::<()>(&mut conn)
-        .await
-    {
-        error!(error = %error, event_key, "failed to compensate stripe dead letter after DB commit failure");
+    if let Ok(mut conn) = state.redis.get().await {
+        // Best-effort compensation: a Redis failure here is only logged (the
+        // deadletter entry is retry-indexed and expires on its own TTL).
+        if let Err(error) = redis::pipe()
+            .atomic()
+            .cmd("DEL")
+            .arg(event_key)
+            .ignore()
+            .cmd("ZREM")
+            .arg(DEADLETTER_INDEX_KEY)
+            .arg(event_key)
+            .ignore()
+            .cmd("ZREM")
+            .arg(DEADLETTER_RETRY_INDEX_KEY)
+            .arg(event_key)
+            .ignore()
+            .query_async::<()>(&mut conn)
+            .await
+        {
+            error!(error = %error, event_key, "failed to compensate stripe dead letter after DB commit failure");
+        }
     }
 }
 
@@ -442,8 +438,7 @@ async fn record_failed_webhook_deadletter_atomic(
         Some(payload),
         Some(signature),
         Utc::now(),
-    )
-    .map_err(|error| format!("Failed to serialize Stripe deadletter entry: {error}"))?;
+    );
 
     let mut tx =
         state.db.begin().await.map_err(|error| {
@@ -1346,7 +1341,12 @@ async fn snapshot_billing_period(
         return Ok(());
     }
 
-    let effective: Option<(String, Option<i64>, String)> = sqlx::query_as(
+    // `p.name` is NULL when the tenant's effective plan name is not present
+    // in `plans` (legacy/renamed plan, or an override removed out-of-band).
+    // Decoding it as a bare `String` turned that legitimate state into a
+    // decode ERROR, failing the whole entitlement webhook (dead-lettering a
+    // valid subscription update) instead of degrading to the fallback below.
+    let effective: Option<(Option<String>, Option<i64>, String)> = sqlx::query_as(
         r#"
         SELECT p.name, p.email_limit,
                COALESCE(t.settings->>'billingCurrency', 'EUR')
@@ -1372,11 +1372,11 @@ async fn snapshot_billing_period(
     .map_err(|error| format!("Failed to snapshot billing period plan: {error}"))?;
 
     let (plan_name, email_allowance, currency) = match effective {
-        Some((name, limit, currency)) => {
+        Some((Some(name), limit, currency)) => {
             let currency = normalize_period_currency(&currency);
             (Some(name), limit, currency)
         }
-        None => (
+        _ => (
             subscription_plan.map(str::to_string),
             None,
             crate::overage::default_period_currency(),
@@ -4618,8 +4618,7 @@ mod tests {
             Some(br#"{"id":"evt_retry"}"#),
             Some("t=123,v1=abc"),
             now,
-        )
-        .expect("prepare deadletter");
+        );
 
         assert!(prepared.event_key.contains("evt_retry"));
         assert_eq!(
@@ -4655,8 +4654,7 @@ mod tests {
             Some(oversized_bytes),
             Some("t=123,v1=abc"),
             Utc::now(),
-        )
-        .expect("prepare deadletter");
+        );
 
         assert_eq!(
             prepared.retry_at_ms, None,
@@ -4665,11 +4663,7 @@ mod tests {
 
         let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("payload json");
         let stored_body = entry.body.as_deref().expect("body stored");
-        assert!(
-            stored_body.len() <= DEADLETTER_MAX_BODY_BYTES + "...(truncated)".len(),
-            "stored body must be capped at ~4 KiB, got {}",
-            stored_body.len()
-        );
+        assert!(stored_body.len() <= DEADLETTER_MAX_BODY_BYTES + "...(truncated)".len());
         assert!(stored_body.ends_with("...(truncated)"));
     }
 
@@ -5111,12 +5105,7 @@ mod tests {
         let header = "t=1711234567,v1=abcdef1234567890abcdef1234567890abcdef12,v1=deadbeef";
         let result = parse_signature_header(header);
 
-        assert!(
-            result.is_ok(),
-            "valid signature header should parse: {:?}",
-            result.err()
-        );
-        let (timestamp, signatures) = result.unwrap();
+        let (timestamp, signatures) = result.expect("valid signature header should parse");
         assert_eq!(timestamp, 1_711_234_567);
         assert_eq!(signatures.len(), 2);
         assert_eq!(signatures[0], "abcdef1234567890abcdef1234567890abcdef12");
@@ -5154,18 +5143,16 @@ mod tests {
 
         // The routing itself is synchronous; we verify the event type mapping
         // by checking it would match the catch-all arm.
-        match event.event_type.as_str() {
+        assert!(!matches!(
+            event.event_type.as_str(),
             "checkout.session.completed"
-            | "customer.subscription.created"
-            | "customer.subscription.updated"
-            | "customer.subscription.deleted"
-            | "invoice.paid"
-            | "invoice.payment_failed"
-            | "customer.subscription.trial_will_end" => {
-                panic!("unknown event type should not match a known branch");
-            }
-            _ => {} // catch-all — expected
-        }
+                | "customer.subscription.created"
+                | "customer.subscription.updated"
+                | "customer.subscription.deleted"
+                | "invoice.paid"
+                | "invoice.payment_failed"
+                | "customer.subscription.trial_will_end"
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -5256,21 +5243,35 @@ mod coverage_adversarial {
     }
 
     impl Env {
+        /// Schema-level fault injection in this test's PRIVATE database
+        /// clone: rename a table so queries against it fail (42P01).
+        async fn break_table(&self, table: &str) {
+            sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_broken"))
+                .execute(&self.pool)
+                .await
+                .expect("break table");
+        }
+
+        async fn restore_table(&self, table: &str) {
+            let _ = sqlx::query(&format!("ALTER TABLE {table}_broken RENAME TO {table}"))
+                .execute(&self.pool)
+                .await;
+        }
+
         async fn finish(self) {
             self.pool.close().await;
-            if let Ok(admin) = PgPoolOptions::new()
+            let admin = PgPoolOptions::new()
                 .max_connections(1)
                 .connect(&self.admin_url)
                 .await
-            {
-                let _ = sqlx::query(&format!(
-                    r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-                    self.db_name
-                ))
-                .execute(&admin)
-                .await;
-                admin.close().await;
-            }
+                .expect("admin connect for teardown");
+            let _ = sqlx::query(&format!(
+                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+                self.db_name
+            ))
+            .execute(&admin)
+            .await;
+            admin.close().await;
         }
     }
 
@@ -5333,13 +5334,33 @@ mod coverage_adversarial {
         .execute(&admin)
         .await
         .expect("drop test db");
-        sqlx::query(&format!(
-            r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
-            db_name, template
-        ))
-        .execute(&admin)
-        .await
-        .expect("clone test db");
+        {
+            // Serialize template clones process-wide and retry the transient
+            // 55006 (a concurrent cloner's internal session on the template).
+            let _clone_guard = crate::test_support::CLONE_LOCK.lock().await;
+            let mut last_error = None;
+            for _ in 0..5 {
+                match sqlx::query(&format!(
+                    r#"CREATE DATABASE "{}" TEMPLATE "{}""#,
+                    db_name, template
+                ))
+                .execute(&admin)
+                .await
+                {
+                    Ok(_) => {
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+            }
+            if let Some(error) = last_error {
+                panic!("clone test db: {error}");
+            }
+        }
         admin.close().await;
 
         let database_url = format!("{server_part}/{db_name}");
@@ -5378,12 +5399,11 @@ mod coverage_adversarial {
         ($name:ident, |$e:ident| $body:block) => {
             #[tokio::test]
             async fn $name() {
-                let Some(owned) = provision(stringify!($name)).await else {
-                    return;
-                };
-                let $e = &owned;
-                $body
-                owned.finish().await;
+                if let Some(owned) = provision(stringify!($name)).await {
+                    let $e = &owned;
+                    $body
+                    owned.finish().await;
+                }
             }
         };
     }
@@ -5438,6 +5458,10 @@ mod coverage_adversarial {
         serde_json::from_value(value).expect("invoice event")
     }
 
+    fn decode_invoice(value: &serde_json::Value) -> InvoiceEvent {
+        serde_json::from_value(value.clone()).expect("invoice event")
+    }
+
     fn subscription_event(value: serde_json::Value) -> SubscriptionEvent {
         serde_json::from_value(value).expect("subscription event")
     }
@@ -5471,6 +5495,7 @@ mod coverage_adversarial {
 
     env_test!(replay_deadletter_reverifies_hmac_and_is_idempotent, |env| {
         let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
         let tenant = "swcov_replay";
         seed_tenant(env, tenant, "growth", "active").await;
         let payload = payment_failed_payload("evt_sw_replay", "in_sw_replay", tenant);
@@ -5561,6 +5586,7 @@ mod coverage_adversarial {
 
     env_test!(deadletter_retry_backs_off_then_exhausts, |env| {
         let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
         let tenant = "swcov_backoff";
         seed_tenant(env, tenant, "growth", "active").await;
         let payload = payment_failed_payload("evt_sw_backoff", "in_sw_backoff", tenant);
@@ -6594,13 +6620,9 @@ mod coverage_adversarial {
             Some(b"{\"id\":\"evt_1\"}"),
             Some("t=1,v1=aa"),
             now,
-        )
-        .expect("prepare");
-        assert!(small.retry_at_ms.is_some(), "a full body is retryable");
-        assert!(
-            small.event_key.contains("evt_with_spaces"),
-            "ids are sanitized"
         );
+        assert!(small.retry_at_ms.is_some(), "a full body is retryable");
+        assert!(small.event_key.contains("evt_with_spaces"));
 
         let oversized = "x".repeat(DEADLETTER_MAX_BODY_BYTES + 100);
         let big = prepare_deadletter(
@@ -6612,8 +6634,7 @@ mod coverage_adversarial {
             Some(oversized.as_bytes()),
             Some("t=1,v1=aa"),
             now,
-        )
-        .expect("prepare");
+        );
         assert!(
             big.retry_at_ms.is_none(),
             "a truncated body can never be replayed"
@@ -6625,4 +6646,2154 @@ mod coverage_adversarial {
             "truncation is marked"
         );
     }
+
+    // ===================================================================
+    // Deep adversarial additions: signature verification (real HMAC),
+    // every event arm, replay exactly-once, cross-tenant binding refusal,
+    // dead-letter fault injection, and the tax/settlement edges.
+    // ===================================================================
+
+    use crate::test_support::{
+        ensure_trace_subscriber, seed_plan as shared_seed_plan, seed_tenant as shared_seed_tenant,
+        sign_stripe, state_with_broken_db, state_with_dead_redis, state_with_empty_stripe_secret,
+        TestEnv,
+    };
+    use tower::ServiceExt;
+
+    async fn shared_env(tag: &str) -> TestEnv {
+        ensure_trace_subscriber();
+        crate::test_support::provision(tag)
+            .await
+            .expect("TEST_DATABASE_URL provisioning")
+    }
+
+    fn stripe_request(
+        body: &[u8],
+        signature: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut builder = axum::http::Request::builder()
+            .method("POST")
+            .uri("/webhooks/stripe");
+        if let Some(signature) = signature {
+            builder = builder.header("stripe-signature", signature);
+        }
+        builder.body(axum::body::Body::from(body.to_vec())).unwrap()
+    }
+
+    async fn post_webhook(
+        state: &Arc<AppState>,
+        body: &[u8],
+        signature: Option<&str>,
+    ) -> axum::response::Response {
+        router()
+            .with_state(state.clone())
+            .oneshot(stripe_request(body, signature))
+            .await
+            .expect("oneshot")
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn signed_event(event_id: &str, event_type: &str, object: serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "id": event_id,
+            "type": event_type,
+            "data": { "object": object }
+        }))
+        .expect("event json")
+    }
+
+    /// Clear every deadletter key/index: the Redis server is shared across
+    /// runs, so stale entries (35-day TTL) would otherwise pollute counts.
+    /// Callers must hold DEADLETTER_LOCK.
+    async fn clear_all_deadletters(env: &Env) {
+        let mut conn = redis_conn(env).await;
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg("stripe:deadletter:*")
+            .query_async(&mut conn)
+            .await
+            .expect("keys");
+        if !keys.is_empty() {
+            let _: () = redis::cmd("DEL")
+                .arg(&keys)
+                .query_async(&mut conn)
+                .await
+                .expect("del");
+        }
+    }
+
+    async fn deadletter_entries(env: &Env, pattern: &str) -> Vec<String> {
+        let mut conn = redis_conn(env).await;
+        deadletter_entries_on(&mut conn, pattern).await
+    }
+
+    async fn deadletter_entries_on(
+        conn: &mut deadpool_redis::Connection,
+        pattern: &str,
+    ) -> Vec<String> {
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(pattern)
+            .query_async(&mut *conn)
+            .await
+            .expect("keys");
+        let mut out = Vec::new();
+        for key in keys {
+            let value: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(conn)
+                .await
+                .expect("get");
+            if let Some(value) = value {
+                out.push(value);
+            }
+        }
+        out
+    }
+
+    async fn pool_conn(pool: &deadpool_redis::Pool) -> deadpool_redis::Connection {
+        pool.get().await.expect("redis connection")
+    }
+
+    /// AppState over `env`'s DB with a private throwaway redis — full
+    /// isolation for tests that poison the shared deadletter indexes.
+    fn state_with_isolated_redis(
+        env: &Env,
+        isolated: &crate::test_support::IsolatedRedis,
+    ) -> Arc<AppState> {
+        let mut config = env.state.config.clone();
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        AppState::new(env.pool.clone(), isolated.pool.clone(), config)
+    }
+
+    async fn event_rows(pool: &sqlx::PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM stripe_webhook_events")
+            .fetch_one(pool)
+            .await
+            .expect("event rows")
+    }
+
+    // ---------------- signature verification (real HMAC) ----------------
+
+    env_test!(route_missing_signature_is_400_and_deadletters, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let body = br#"{"id":"evt_nosig","type":"invoice.paid"}"#;
+        let response = post_webhook(&env.state, body, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["error"], "Missing stripe-signature header");
+        let entries = deadletter_entries(env, "stripe:deadletter:event:unknown*").await;
+        assert_eq!(entries.len(), 1, "missing signature is deadlettered");
+        let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
+        assert_eq!(entry.reason, "missing_signature");
+        assert_eq!(event_rows(&env.pool).await, 0, "nothing claimed");
+    });
+
+    env_test!(route_empty_signature_header_is_400, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let response = post_webhook(&env.state, br#"{"id":"evt_emptysig"}"#, Some("  ")).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    env_test!(route_malformed_json_refused_with_no_write, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let timestamp = Utc::now().timestamp();
+        let signature = sign_stripe("whsec_coverage", b"not json", timestamp);
+        let response = post_webhook(&env.state, b"not json", Some(&signature)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json = response_json(response).await;
+        assert_eq!(json["error"], "Invalid JSON payload");
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "malformed JSON writes nothing"
+        );
+        let entries = deadletter_entries(env, "stripe:deadletter:event:unknown*").await;
+        assert_eq!(entries.len(), 1);
+        let entry: DeadletterEntry = serde_json::from_str(&entries[0]).expect("entry");
+        assert_eq!(entry.reason, "invalid_json_payload");
+    });
+
+    env_test!(route_missing_and_blank_event_ids_refused, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let timestamp = Utc::now().timestamp();
+        for body in [
+            br#"{"no_id": true}"#.to_vec(),
+            br#"{"id": null}"#.to_vec(),
+            br#"{"id": "   "}"#.to_vec(),
+        ] {
+            let signature = sign_stripe("whsec_coverage", &body, timestamp);
+            let response = post_webhook(&env.state, &body, Some(&signature)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let json = response_json(response).await;
+            assert_eq!(json["error"], "Missing event ID");
+        }
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    env_test!(route_tampered_signature_and_secret_refused, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let body = signed_event(
+            "evt_tamper",
+            "invoice.paid",
+            serde_json::json!({"id":"in_t","amount_due":1}),
+        );
+        let timestamp = Utc::now().timestamp();
+        let wrong_secret = sign_stripe("whsec_NOT_the_secret", &body, timestamp);
+        let response = post_webhook(&env.state, &body, Some(&wrong_secret)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "forged signature writes nothing"
+        );
+
+        let right_secret = sign_stripe("whsec_coverage", &body, timestamp);
+        let mut segments = right_secret.split(',');
+        let ts = segments.next().unwrap();
+        let v1 = segments.next().unwrap();
+        let flipped: String = format!(
+            "{},{}",
+            ts,
+            v1.chars()
+                .map(|c| if c == '0' { '1' } else { '0' })
+                .collect::<String>()
+        );
+        let response = post_webhook(&env.state, &body, Some(&flipped)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            event_rows(&env.pool).await,
+            0,
+            "bit-flipped signature writes nothing"
+        );
+    });
+
+    env_test!(route_timestamp_tolerance_window_enforced, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let body = signed_event(
+            "evt_stale",
+            "invoice.paid",
+            serde_json::json!({"id":"in_s","amount_due":1}),
+        );
+        for delta in [301_i64, -301] {
+            let signature = sign_stripe("whsec_coverage", &body, Utc::now().timestamp() + delta);
+            let response = post_webhook(&env.state, &body, Some(&signature)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "outside tolerance refused"
+            );
+            assert_eq!(event_rows(&env.pool).await, 0);
+        }
+        // Inside the window the signature verifies and the event is CLAIMED
+        // (it may then fail on its own business content — never on the MAC).
+        let signature = sign_stripe("whsec_coverage", &body, Utc::now().timestamp() - 299);
+        let _response = post_webhook(&env.state, &body, Some(&signature)).await;
+        assert_eq!(
+            event_rows(&env.pool).await,
+            1,
+            "verified signature claims the event"
+        );
+    });
+
+    env_test!(route_malformed_signature_headers_refused, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        clear_all_deadletters(env).await;
+        let body = br#"{"id":"evt_badsig","type":"invoice.paid"}"#;
+        for header in [
+            "t=abc,v1=deadbeef",
+            "t=123",
+            "v1=deadbeef",
+            "t=123,v1=",
+            "garbage",
+            "t=123,v0=legacy",
+        ] {
+            let response = post_webhook(&env.state, body, Some(header)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "header {header} refused"
+            );
+        }
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    #[test]
+    fn parse_signature_header_skips_valueless_and_unknown_segments() {
+        // A segment with no '=' is skipped, unknown keys are ignored, and a
+        // second t= overwrites the first.
+        let (timestamp, signatures) = parse_signature_header("junk,t=5,t=7,v1=ab,v0=x,=").unwrap();
+        assert_eq!(timestamp, 7);
+        assert_eq!(signatures, vec!["ab"]);
+        assert!(parse_signature_header("t=notanumber,v1=ab").is_err());
+    }
+
+    env_test!(
+        verify_signature_empty_secret_refused_before_any_write,
+        |env| {
+            let body = signed_event(
+                "evt_nosecret",
+                "invoice.paid",
+                serde_json::json!({"id":"in_n","amount_due":1}),
+            );
+            let timestamp = Utc::now().timestamp();
+            let signature = sign_stripe("whsec_coverage", &body, timestamp);
+            let broken = state_with_empty_stripe_secret(&env.pool, &env.redis, &env.state.config);
+            let error = verify_and_parse_event(&broken, &body, &signature)
+                .expect_err("empty secret refused");
+            assert_eq!(error, "Stripe webhook secret is not configured");
+
+            let error = replay_deadletter(
+                &broken,
+                &DeadletterEntry {
+                    reason: "processing_failed".into(),
+                    event_id: Some("evt_nosecret".into()),
+                    body: Some(String::from_utf8(body.clone()).unwrap()),
+                    signature: Some(signature.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("replay refuses an unconfigured secret");
+            assert_eq!(error, "Stripe webhook secret is not configured");
+            assert_eq!(event_rows(&env.pool).await, 0);
+        }
+    );
+
+    // ---------------- replay / concurrency semantics ----------------
+
+    env_test!(route_replay_is_exactly_once_no_double_entitlement, |env| {
+        shared_seed_tenant(&env.pool, "swadv_replay", "free").await;
+        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
+        let object = serde_json::json!({
+            "id": "sub_swadv_replay",
+            "customer": "cus_swadv",
+            "status": "active",
+            "metadata": { "tenant_id": "swadv_replay" },
+            "current_period_start": Utc::now().timestamp(),
+            "current_period_end": Utc::now().timestamp() + 2_592_000,
+            "cancel_at_period_end": false,
+            "canceled_at": null,
+            "trial_end": null,
+            "items": { "data": [ { "price": { "id": "price_swadv_growth", "recurring": { "interval": "month" } } } ] }
+        });
+        let body = signed_event("evt_swadv_replay", "customer.subscription.created", object);
+        let timestamp = Utc::now().timestamp();
+        let signature = sign_stripe("whsec_coverage", &body, timestamp);
+
+        let first = post_webhook(&env.state, &body, Some(&signature)).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = post_webhook(&env.state, &body, Some(&signature)).await;
+        assert_eq!(
+            second.status(),
+            StatusCode::OK,
+            "Stripe expects 2xx on replay"
+        );
+
+        let (plan, subs): (String, i64) = sqlx::query_as(
+            "SELECT (SELECT plan FROM tenants WHERE id = 'swadv_replay'),
+                    (SELECT COUNT(*) FROM stripe_subscriptions WHERE tenant_id = 'swadv_replay')",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("state");
+        assert_eq!(plan, "swadv_growth");
+        assert_eq!(subs, 1, "replay never duplicates the subscription");
+        let periods: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_periods WHERE tenant_id = 'swadv_replay'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("periods");
+        assert_eq!(periods, 1, "replay never duplicates the billing period");
+    });
+
+    env_test!(
+        route_event_pending_elsewhere_returns_503_and_no_deadletter,
+        |env| {
+            let _guard = DEADLETTER_LOCK.lock().await;
+            let _dl_guard =
+                crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+            clear_all_deadletters(env).await;
+            shared_seed_tenant(&env.pool, "swadv_pending", "free").await;
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status)
+             VALUES (gen_random_uuid(), 'evt_swadv_pending', 'invoice.paid', 'pending')",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("pending row");
+            let body = signed_event(
+                "evt_swadv_pending",
+                "invoice.paid",
+                serde_json::json!({"id": "in_p", "amount_due": 1}),
+            );
+            let timestamp = Utc::now().timestamp();
+            let signature = sign_stripe("whsec_coverage", &body, timestamp);
+            let response = post_webhook(&env.state, &body, Some(&signature)).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let entries = deadletter_entries(env, "stripe:deadletter:event:*").await;
+            assert_eq!(entries.len(), 0, "a pending event is never deadlettered");
+            let status: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_swadv_pending'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("status");
+            assert_eq!(status, "pending", "the other worker's claim is untouched");
+        }
+    );
+
+    // ---------------- unknown types + per-arm decode failures ----------------
+
+    env_test!(route_unknown_event_type_acknowledged_and_processed, |env| {
+        let body = signed_event(
+            "evt_swadv_unknown",
+            "customer.created",
+            serde_json::json!({"id": "cus_x"}),
+        );
+        let timestamp = Utc::now().timestamp();
+        let signature = sign_stripe("whsec_coverage", &body, timestamp);
+        let response = post_webhook(&env.state, &body, Some(&signature)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["received"], true);
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_swadv_unknown'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("status");
+        assert_eq!(
+            status, "processed",
+            "unknown types are claimed and acknowledged"
+        );
+    });
+
+    env_test!(handle_stripe_event_decode_failures_fail_closed, |env| {
+        // Every handled event type with a malformed object must be an error
+        // (deadlettered by the caller), never a silent drop.
+        let cases = [
+            (
+                "checkout.session.completed",
+                serde_json::json!({"no_id": 1}),
+            ),
+            (
+                "customer.subscription.created",
+                serde_json::json!({"id": "sub_x"}),
+            ),
+            (
+                "customer.subscription.updated",
+                serde_json::json!({"id": 42}),
+            ),
+            (
+                "customer.subscription.deleted",
+                serde_json::json!({"items": "nope"}),
+            ),
+            ("invoice.paid", serde_json::json!({"id": "in_x"})),
+            (
+                "invoice.payment_failed",
+                serde_json::json!({"amount_due": "many"}),
+            ),
+            (
+                "customer.subscription.trial_will_end",
+                serde_json::json!({"id": "sub_y"}),
+            ),
+        ];
+        for (event_type, object) in cases {
+            let event: StripeEventPayload = serde_json::from_value(serde_json::json!({
+                "id": "evt_decode",
+                "type": event_type,
+                "data": { "object": object }
+            }))
+            .expect("envelope");
+            let error = handle_stripe_event(&env.state, &event)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("decode failure must be an error"));
+            assert!(
+                error.contains("Failed to decode"),
+                "decode failure must be an error"
+            );
+        }
+        assert_eq!(event_rows(&env.pool).await, 0);
+    });
+
+    env_test!(handle_checkout_completed_without_metadata_is_noop, |env| {
+        let event: StripeEventPayload = serde_json::from_value(serde_json::json!({
+            "id": "evt_checkout_orphan",
+            "type": "checkout.session.completed",
+            "data": { "object": { "id": "cs_orphan" } }
+        }))
+        .expect("envelope");
+        handle_stripe_event(&env.state, &event)
+            .await
+            .expect("unattributable checkout is acknowledged");
+        let subs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+            .fetch_one(&env.pool)
+            .await
+            .expect("subs");
+        assert_eq!(subs, 0);
+    });
+
+    // ---------------- subscription binding / lifecycle guards ----------------
+
+    async fn sub_event(
+        tenant: Option<&str>,
+        status: &str,
+        price_id: &str,
+        interval: Option<&str>,
+        period_start: i64,
+    ) -> SubscriptionEvent {
+        let price = match interval {
+            Some(interval) => {
+                serde_json::json!({ "id": price_id, "recurring": { "interval": interval } })
+            }
+            None => serde_json::json!({ "id": price_id }),
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": "sub_swadv",
+            "customer": "cus_swadv",
+            "status": status,
+            "metadata": tenant.map(|t| serde_json::json!({ "tenant_id": t })),
+            "current_period_start": period_start,
+            "current_period_end": period_start + 2_592_000,
+            "cancel_at_period_end": false,
+            "canceled_at": null,
+            "trial_end": null,
+            "items": { "data": [ { "price": price } ] }
+        }))
+        .expect("subscription event")
+    }
+
+    env_test!(subscription_price_shape_failures_fail_closed, |env| {
+        shared_seed_tenant(&env.pool, "swadv_shape", "free").await;
+        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
+        let now = Utc::now().timestamp();
+
+        // items[0].price == null
+        let no_price: SubscriptionEvent = serde_json::from_value(serde_json::json!({
+            "id": "sub_swadv", "customer": "cus", "status": "active",
+            "metadata": { "tenant_id": "swadv_shape" },
+            "current_period_start": now, "current_period_end": now + 100,
+            "cancel_at_period_end": false, "canceled_at": null, "trial_end": null,
+            "items": { "data": [ { "price": null } ] }
+        }))
+        .expect("event");
+        let error = handle_subscription_change(&env.state, no_price)
+            .await
+            .expect_err("missing price refused");
+        assert!(error.contains("no line-item price"));
+
+        // price present but id missing
+        let event = sub_event(
+            Some("swadv_shape"),
+            "active",
+            "price_swadv_growth",
+            None,
+            now,
+        )
+        .await;
+        let priceless = SubscriptionEvent {
+            items: SubscriptionItems {
+                data: vec![SubscriptionItem {
+                    price: Some(SubscriptionPrice {
+                        id: None,
+                        recurring: None,
+                    }),
+                }],
+            },
+            ..event
+        };
+        let error = handle_subscription_change(&env.state, priceless)
+            .await
+            .expect_err("missing price id refused");
+        assert!(error.contains("no valid line-item price"));
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stripe_subscriptions")
+            .fetch_one(&env.pool)
+            .await
+            .expect("rows");
+        assert_eq!(rows, 0, "refused shapes write nothing");
+    });
+
+    env_test!(subscription_cross_tenant_rebind_refused, |env| {
+        shared_seed_tenant(&env.pool, "swadv_owner", "free").await;
+        shared_seed_tenant(&env.pool, "swadv_attacker", "free").await;
+        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ('swadv_owner', 'sub_swadv', 'swadv_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_owner')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("owner row");
+
+        // The same Stripe subscription id, attributed to a DIFFERENT tenant.
+        let event = sub_event(
+            Some("swadv_attacker"),
+            "active",
+            "price_swadv_growth",
+            Some("month"),
+            now,
+        )
+        .await;
+        let error = handle_subscription_change(&env.state, event)
+            .await
+            .expect_err("cross-tenant rebind refused");
+        assert!(error.contains("already bound to a different tenant"));
+        let owner: String = sqlx::query_scalar(
+            "SELECT tenant_id FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("owner");
+        assert_eq!(owner, "swadv_owner");
+    });
+
+    env_test!(subscription_illegal_transition_refused, |env| {
+        shared_seed_tenant(&env.pool, "swadv_trans", "free").await;
+        shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ('swadv_trans', 'sub_swadv', 'swadv_growth', 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_t')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("active row");
+
+        // active -> incomplete is not an admitted transition.
+        let event = sub_event(
+            Some("swadv_trans"),
+            "incomplete",
+            "price_swadv_growth",
+            Some("month"),
+            now,
+        )
+        .await;
+        let error = handle_subscription_change(&env.state, event)
+            .await
+            .expect_err("illegal transition refused");
+        assert!(error.contains("Invalid subscription status transition"));
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("status");
+        assert_eq!(status, "active", "the refused event changes nothing");
+
+        // Legal deactivation still applies.
+        let event = sub_event(
+            Some("swadv_trans"),
+            "canceled",
+            "price_swadv_growth",
+            Some("month"),
+            now,
+        )
+        .await;
+        handle_subscription_change(&env.state, event)
+            .await
+            .expect("legal transition applies");
+    });
+
+    env_test!(
+        subscription_stale_cycle_and_stale_replacement_ignored,
+        |env| {
+            shared_seed_tenant(&env.pool, "swadv_stale", "free").await;
+            shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
+            let now = Utc::now().timestamp();
+            // The stored row already applied a NEWER cycle watermark.
+            sqlx::query(
+                "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id, event_watermark)
+             VALUES ('swadv_stale', 'sub_swadv', 'swadv_growth', 'active',
+                     to_timestamp($1), to_timestamp($2), 'cus_s', to_timestamp($1))",
+            )
+            .bind(now)
+            .bind(now + 2_592_000)
+            .execute(&env.pool)
+            .await
+            .expect("row");
+
+            // An OLDER event for the same subscription must not rewind the cycle.
+            let event = sub_event(
+                Some("swadv_stale"),
+                "past_due",
+                "price_swadv_growth",
+                Some("month"),
+                now - 100_000,
+            )
+            .await;
+            handle_subscription_change(&env.state, event)
+                .await
+                .expect("stale events are acknowledged");
+            let (status, watermark): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, event_watermark FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("row");
+            assert_eq!(status, "active", "stale event cannot rewind state");
+            assert_eq!(
+                watermark.expect("watermark").timestamp(),
+                now,
+                "watermark never rewinds"
+            );
+
+            // A stale event for an OLD subscription cannot outrank a newer
+            // active replacement on the same tenant: the old row is demoted
+            // (no watermark) and the replacement is ACTIVE with a newer one.
+            sqlx::query(
+                "UPDATE stripe_subscriptions SET status = 'canceled', event_watermark = NULL
+                 WHERE stripe_subscription_id = 'sub_swadv'",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("demote the old row");
+            sqlx::query(
+                "INSERT INTO stripe_subscriptions
+                     (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, stripe_customer_id, event_watermark)
+                 VALUES ('swadv_stale', 'sub_swadv_old', 'swadv_growth', 'active',
+                         to_timestamp($1), to_timestamp($2), 'cus_s', to_timestamp($1))",
+            )
+            .bind(now)
+            .bind(now + 2_592_000)
+            .execute(&env.pool)
+            .await
+            .expect("replacement row");
+            let mut revival = sub_event(
+                Some("swadv_stale"),
+                "active",
+                "price_swadv_growth",
+                Some("month"),
+                now - 100_000,
+            )
+            .await;
+            revival.id = "sub_swadv".to_string();
+            handle_subscription_change(&env.state, revival)
+                .await
+                .expect("stale replacement events are acknowledged");
+            let newer_status: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv_old'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("newer");
+            assert_eq!(newer_status, "active", "the newer replacement survives");
+        }
+    );
+
+    env_test!(
+        subscription_renewal_snapshots_closing_and_superseded_cycles,
+        |env| {
+            shared_seed_tenant(&env.pool, "swadv_renew", "free").await;
+            shared_seed_plan(&env.pool, "swadv_growth", "price_swadv_growth").await;
+            let now = Utc::now().timestamp();
+
+            // A closing cycle on the renewed subscription (trialing: only one
+            // ACTIVE row per tenant is possible) plus an ACTIVE superseded one.
+            for (sub_id, status) in [("sub_swadv", "trialing"), ("sub_swadv_other", "active")] {
+                sqlx::query(
+                    "INSERT INTO stripe_subscriptions
+                     (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                      billing_cycle_end, stripe_customer_id, event_watermark)
+                 VALUES ('swadv_renew', $3, 'swadv_growth', $4,
+                         to_timestamp($1), to_timestamp($2), 'cus_r', to_timestamp($1))",
+                )
+                .bind(
+                    now - 2_592_000
+                        - if sub_id == "sub_swadv_other" {
+                            86_400
+                        } else {
+                            0
+                        },
+                )
+                .bind(
+                    now - if sub_id == "sub_swadv_other" {
+                        86_400
+                    } else {
+                        0
+                    },
+                )
+                .bind(sub_id)
+                .bind(status)
+                .execute(&env.pool)
+                .await
+                .expect("row");
+            }
+
+            // A renewal (trialing -> active, a legal transition) with a NEW
+            // cycle start snapshots both the closing cycle and the
+            // superseded sibling before overwriting.
+            let event = sub_event(
+                Some("swadv_renew"),
+                "active",
+                "price_swadv_growth",
+                Some("month"),
+                now,
+            )
+            .await;
+            handle_subscription_change(&env.state, event)
+                .await
+                .expect("renewal applies");
+            let periods: Vec<(String,)> = sqlx::query_as(
+                "SELECT stripe_subscription_id FROM billing_periods
+             WHERE tenant_id = 'swadv_renew' ORDER BY stripe_subscription_id, period_start",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .expect("periods");
+            assert!(
+                periods.len() >= 3,
+                "closing + superseded + incoming cycles snapshotted"
+            );
+            let superseded_status: String = sqlx::query_scalar(
+            "SELECT status FROM stripe_subscriptions WHERE stripe_subscription_id = 'sub_swadv_other'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("superseded");
+            assert_eq!(
+                superseded_status, "canceled",
+                "renewal deactivates superseded rows"
+            );
+            // Replay of the same renewal is idempotent (same cycle start).
+            let event = sub_event(
+                Some("swadv_renew"),
+                "active",
+                "price_swadv_growth",
+                Some("month"),
+                now,
+            )
+            .await;
+            handle_subscription_change(&env.state, event)
+                .await
+                .expect("replay applies");
+        }
+    );
+
+    #[test]
+    fn subscription_status_deserializes_every_arm_and_maps_entitlement() {
+        for (raw, expect) in [
+            ("active", "active"),
+            ("past_due", "past_due"),
+            ("unpaid", "unpaid"),
+            ("canceled", "canceled"),
+            ("incomplete", "incomplete"),
+            ("incomplete_expired", "incomplete_expired"),
+            ("trialing", "trialing"),
+            ("paused", "paused"),
+        ] {
+            let status: SubscriptionStatus =
+                serde_json::from_value(serde_json::json!(raw)).expect("status");
+            assert_eq!(status.as_str(), expect);
+        }
+        assert!(SubscriptionStatus::Active.can_transition_from("paused"));
+        assert!(SubscriptionStatus::Canceled.can_transition_from("paused"));
+        assert!(!SubscriptionStatus::Trialing.can_transition_from("paused"));
+        assert!(SubscriptionStatus::Active.can_transition_from("incomplete"));
+        assert!(SubscriptionStatus::IncompleteExpired.can_transition_from("incomplete"));
+        assert!(!SubscriptionStatus::Paused.can_transition_from("incomplete"));
+        assert!(SubscriptionStatus::Unpaid.can_transition_from("past_due"));
+        assert!(SubscriptionStatus::Active.can_transition_from("unpaid"));
+        assert!(SubscriptionStatus::Canceled.can_transition_from("unpaid"));
+        assert!(!SubscriptionStatus::Incomplete.can_transition_from("unpaid"));
+        assert!(!SubscriptionStatus::Active.can_transition_from("unknown_status"));
+        // ExpandableId object form.
+        let expanded: ExpandableId =
+            serde_json::from_value(serde_json::json!({"id": "cus_obj"})).expect("expandable");
+        assert_eq!(expanded.id(), "cus_obj");
+        let plain: ExpandableId =
+            serde_json::from_value(serde_json::json!("cus_plain")).expect("expandable");
+        assert_eq!(plain.id(), "cus_plain");
+    }
+
+    // ---------------- dead-letter fault injection ----------------
+
+    env_test!(
+        deadletter_write_failure_on_dead_redis_is_logged_not_fatal,
+        |env| {
+            let dead = state_with_dead_redis(&env.pool);
+            // A missing signature must still answer 400 even when Redis is down.
+            let response = post_webhook(&dead, br#"{"id":"evt_deadredis"}"#, None).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(event_rows(&env.pool).await, 0);
+        }
+    );
+
+    env_test!(deadletter_index_wrongtype_fails_the_write_arm, |env| {
+        let _guard = DEADLETTER_LOCK.lock().await;
+        let _dl_guard = crate::test_support::redis_keys_guard(&env.admin_url, "deadletter").await;
+        let mut conn = redis_conn(env).await;
+        let _: () = redis::cmd("SET")
+            .arg(DEADLETTER_INDEX_KEY)
+            .arg("not-a-zset")
+            .query_async(&mut conn)
+            .await
+            .expect("poison index");
+        drop(conn);
+
+        let response = post_webhook(&env.state, br#"{"id":"evt_wrongtype"}"#, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let mut conn = redis_conn(env).await;
+        let _: () = redis::cmd("DEL")
+            .arg(DEADLETTER_INDEX_KEY)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup index");
+    });
+
+    env_test!(
+        record_failed_deadletter_without_row_reports_not_found,
+        |env| {
+            let error = record_failed_webhook_deadletter_atomic(
+                &env.state,
+                "evt_never_claimed",
+                "boom",
+                br#"{"id":"evt_never_claimed"}"#,
+                "t=1,v1=ab",
+            )
+            .await
+            .expect_err("missing claim row");
+            assert!(error.contains("was not found"), "honest failure: {error}");
+        }
+    );
+
+    env_test!(
+        record_failed_deadletter_begin_failure_is_a_hard_error,
+        |env| {
+            let broken = state_with_broken_db();
+            let error = record_failed_webhook_deadletter_atomic(
+                &broken,
+                "evt_beginfail",
+                "boom",
+                br#"{"id":"evt_beginfail"}"#,
+                "t=1,v1=ab",
+            )
+            .await
+            .expect_err("broken db begin");
+            assert!(error.contains("Failed to begin"), "honest failure: {error}");
+            assert_eq!(event_rows(&env.pool).await, 0, "nothing was claimed");
+        }
+    );
+
+    env_test!(
+        record_failed_deadletter_redis_failure_rolls_back_the_status_flip,
+        |env| {
+            let isolated = crate::test_support::spawn_isolated_redis();
+            let state = state_with_isolated_redis(env, &isolated);
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status)
+                 VALUES (gen_random_uuid(), 'evt_rollback', 'invoice.paid', 'pending')",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("claim row");
+
+            let mut conn = pool_conn(&isolated.pool).await;
+            let _: () = redis::cmd("SET")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("not-a-zset")
+                .query_async(&mut conn)
+                .await
+                .expect("poison retry index");
+            drop(conn);
+
+            let error = record_failed_webhook_deadletter_atomic(
+                &state,
+                "evt_rollback",
+                "boom",
+                br#"{"id":"evt_rollback"}"#,
+                "t=1,v1=ab",
+            )
+            .await
+            .expect_err("redis failure surfaces");
+            assert!(
+                error.contains("failed to write stripe dead letter"),
+                "honest failure: {error}"
+            );
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_rollback'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+            assert_eq!(status, "pending", "the failed-status flip rolled back");
+        }
+    );
+
+    env_test!(
+        record_failed_deadletter_commit_failure_compensates_redis,
+        |env| {
+            let isolated = crate::test_support::spawn_isolated_redis();
+            let state = state_with_isolated_redis(env, &isolated);
+            sqlx::query(
+                "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status)
+                 VALUES (gen_random_uuid(), 'evt_commitfail', 'invoice.paid', 'pending')",
+            )
+            .execute(&env.pool)
+            .await
+            .expect("claim row");
+            // Deferred constraint: the UPDATE succeeds inside the tx and the
+            // COMMIT itself fails — the exact commit-failure fault to inject.
+            // (Postgres CHECK constraints cannot defer; a FK to a guard table
+            // can, and 'failed' is absent from the guard.)
+            for statement in [
+                "CREATE TABLE cov_status_guard (status text PRIMARY KEY)",
+                "INSERT INTO cov_status_guard VALUES ('pending'), ('received')",
+                "ALTER TABLE stripe_webhook_events ADD CONSTRAINT cov_status_fk FOREIGN KEY (status)                  REFERENCES cov_status_guard(status) DEFERRABLE INITIALLY DEFERRED",
+            ] {
+                sqlx::query(statement)
+                    .execute(&env.pool)
+                    .await
+                    .expect("deferred constraint setup");
+            }
+
+            let error = record_failed_webhook_deadletter_atomic(
+                &state,
+                "evt_commitfail",
+                "boom",
+                br#"{"id":"evt_commitfail"}"#,
+                "t=1,v1=ab",
+            )
+            .await
+            .expect_err("commit failure surfaces");
+            assert!(
+                error.contains("Failed to commit"),
+                "honest failure: {error}"
+            );
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM stripe_webhook_events WHERE stripe_event_id = 'evt_commitfail'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+            assert_eq!(
+                status, "pending",
+                "commit failure leaves the claim untouched"
+            );
+            // The already-written deadletter entry is compensated away.
+            let mut conn = pool_conn(&isolated.pool).await;
+            let entries =
+                deadletter_entries_on(&mut conn, "stripe:deadletter:event:evt_commitfail*").await;
+            assert_eq!(
+                entries.len(),
+                0,
+                "redis entry compensated after commit failure"
+            );
+        }
+    );
+
+    env_test!(compensation_failure_is_logged_never_fatal, |env| {
+        // Direct fault injection: the compensation pipeline must tolerate a
+        // Redis failure (it only logs) — a commit failure must never panic
+        // or mask its own error because the compensating DEL/ZREM failed.
+        let isolated = crate::test_support::spawn_isolated_redis();
+        let state = state_with_isolated_redis(env, &isolated);
+        let mut conn = pool_conn(&isolated.pool).await;
+        let the_key = "stripe:deadletter:event:evt_comp_direct";
+        let _: () = redis::cmd("SETEX")
+            .arg(the_key)
+            .arg(60)
+            .arg("{}")
+            .query_async(&mut conn)
+            .await
+            .expect("stored entry");
+        // Poison the shared index as a STRING: DEL succeeds, ZREM fails.
+        let _: () = redis::cmd("SET")
+            .arg(DEADLETTER_INDEX_KEY)
+            .arg("not-a-zset")
+            .query_async(&mut conn)
+            .await
+            .expect("poison index");
+        drop(conn);
+
+        remove_prepared_deadletter_from_redis(&state, the_key).await;
+
+        let mut conn = pool_conn(&isolated.pool).await;
+        let gone: Option<String> = redis::cmd("GET")
+            .arg(the_key)
+            .query_async(&mut conn)
+            .await
+            .expect("entry state");
+        assert_eq!(gone, None, "the DEL in the compensation still ran");
+    });
+
+    env_test!(
+        prepare_deadletter_without_body_stores_nothing_replayable,
+        |env| {
+            let _ = env;
+            let prepared = prepare_deadletter(
+                DeadletterEntry {
+                    reason: "missing_signature".into(),
+                    ..Default::default()
+                },
+                None,
+                None,
+                Utc::now(),
+            );
+            assert_eq!(prepared.retry_at_ms, None);
+            let entry: DeadletterEntry = serde_json::from_str(&prepared.payload).expect("entry");
+            assert!(entry.body.is_none());
+            assert!(entry.signature.is_none());
+        }
+    );
+
+    // ---------------- retry worker arms ----------------
+
+    env_test!(
+        retry_worker_handles_evicted_corrupt_and_foreign_entries,
+        |env| {
+            let isolated = crate::test_support::spawn_isolated_redis();
+            let state = state_with_isolated_redis(env, &isolated);
+            let mut conn = pool_conn(&isolated.pool).await;
+            let _ = &state;
+            let _: () = redis::cmd("ZREMRANGEBYSCORE")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg("-inf")
+                .arg("+inf")
+                .query_async(&mut conn)
+                .await
+                .expect("clear");
+
+            // 1) evicted entry: index member without a stored body.
+            let _: () = redis::cmd("ZADD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg(1)
+                .arg("stripe:deadletter:event:evicted")
+                .query_async(&mut conn)
+                .await
+                .expect("schedule evicted");
+            // 2) corrupt entry: stored body is not JSON.
+            let _: () = redis::cmd("SET")
+                .arg("stripe:deadletter:event:corrupt")
+                .arg("this is not json")
+                .query_async(&mut conn)
+                .await
+                .expect("store corrupt");
+            let _: () = redis::cmd("ZADD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg(1)
+                .arg("stripe:deadletter:event:corrupt")
+                .query_async(&mut conn)
+                .await
+                .expect("schedule corrupt");
+            // 3) foreign entry: not a processing_failed reason.
+            let foreign = DeadletterEntry {
+                reason: "missing_signature".into(),
+                ..Default::default()
+            };
+            let _: () = redis::cmd("SET")
+                .arg("stripe:deadletter:event:foreign")
+                .arg(serde_json::to_string(&foreign).unwrap())
+                .query_async(&mut conn)
+                .await
+                .expect("store foreign");
+            let _: () = redis::cmd("ZADD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .arg(1)
+                .arg("stripe:deadletter:event:foreign")
+                .query_async(&mut conn)
+                .await
+                .expect("schedule foreign");
+            drop(conn);
+
+            retry_deadlettered_webhooks(&state)
+                .await
+                .expect("retry pass");
+            let mut conn = pool_conn(&isolated.pool).await;
+            let remaining: i64 = redis::cmd("ZCARD")
+                .arg(DEADLETTER_RETRY_INDEX_KEY)
+                .query_async(&mut conn)
+                .await
+                .expect("card");
+            assert_eq!(remaining, 0, "all three arms drop their index members");
+            let _: () = redis::cmd("DEL")
+                .arg("stripe:deadletter:event:corrupt")
+                .arg("stripe:deadletter:event:foreign")
+                .query_async(&mut conn)
+                .await
+                .expect("cleanup");
+        }
+    );
+
+    env_test!(retry_worker_empty_index_is_a_clean_noop, |env| {
+        let isolated = crate::test_support::spawn_isolated_redis();
+        let state = state_with_isolated_redis(env, &isolated);
+        retry_deadlettered_webhooks(&state)
+            .await
+            .expect("empty batch returns immediately");
+    });
+
+    env_test!(retry_worker_success_removes_entry_from_index, |env| {
+        let isolated = crate::test_support::spawn_isolated_redis();
+        let state = state_with_isolated_redis(env, &isolated);
+        shared_seed_tenant(&env.pool, "swadv_retry_ok", "growth").await;
+        let payload = payment_failed_payload("evt_retry_ok", "in_retry_ok", "swadv_retry_ok");
+        let body = serde_json::to_string(&payload).unwrap();
+        let timestamp = Utc::now().timestamp();
+        let signature = sign_stripe("whsec_coverage", body.as_bytes(), timestamp);
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some("evt_retry_ok".into()),
+            body: Some(body),
+            signature: Some(signature),
+            ..Default::default()
+        };
+        let the_key = "stripe:deadletter:event:evt_retry_ok";
+        let mut conn = pool_conn(&isolated.pool).await;
+        let _: () = redis::cmd("ZREMRANGEBYSCORE")
+            .arg(DEADLETTER_RETRY_INDEX_KEY)
+            .arg("-inf")
+            .arg("+inf")
+            .query_async(&mut conn)
+            .await
+            .expect("clear");
+        let _: () = redis::cmd("SET")
+            .arg(the_key)
+            .arg(serde_json::to_string(&entry).unwrap())
+            .query_async(&mut conn)
+            .await
+            .expect("store");
+        let _: () = redis::cmd("ZADD")
+            .arg(DEADLETTER_RETRY_INDEX_KEY)
+            .arg(1)
+            .arg(the_key)
+            .query_async(&mut conn)
+            .await
+            .expect("schedule");
+        drop(conn);
+
+        retry_deadlettered_webhooks(&state).await.expect("retry");
+        let mut conn = pool_conn(&isolated.pool).await;
+        let score: Option<i64> = redis::cmd("ZSCORE")
+            .arg(DEADLETTER_RETRY_INDEX_KEY)
+            .arg(the_key)
+            .query_async(&mut conn)
+            .await
+            .expect("score");
+        assert_eq!(score, None, "success leaves the retry index");
+        let kept: Option<String> = redis::cmd("GET")
+            .arg(the_key)
+            .query_async(&mut conn)
+            .await
+            .expect("kept");
+        assert!(kept.is_some(), "the deadletter body stays for audit");
+        let count: i32 = sqlx::query_scalar(
+            "SELECT failed_payment_count FROM dunning_records WHERE tenant_id = 'swadv_retry_ok'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("dunning");
+        assert_eq!(count, 1, "the retried failure applied exactly once");
+        let _: () = redis::cmd("DEL")
+            .arg(the_key)
+            .query_async(&mut conn)
+            .await
+            .expect("cleanup");
+    });
+
+    env_test!(process_retries_pass_drains_due_entries_once, |env| {
+        let isolated = crate::test_support::spawn_isolated_redis();
+        let state = state_with_isolated_redis(env, &isolated);
+        process_deadletter_retries(&state)
+            .await
+            .expect("nothing due is a clean pass");
+    });
+
+    #[tokio::test]
+    async fn spawned_retry_worker_performs_one_immediate_pass() {
+        {
+            let env = shared_env("worker_spawn").await;
+            spawn_deadletter_retry_worker(env.state.clone());
+            // The first interval tick fires immediately: one full retry pass
+            // runs before the runtime is torn down.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            env.finish().await;
+        }
+    }
+
+    // ---------------- invoice settlement edges ----------------
+
+    env_test!(
+        invoice_paid_without_any_tenant_reference_deadletters,
+        |env| {
+            let orphan: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_orphan_paid", "amount_due": 100
+            }))
+            .expect("event");
+            let error = handle_invoice_paid(&env.state, orphan)
+                .await
+                .expect_err("unresolvable invoice.paid");
+            assert!(error.contains("could not be resolved to a tenant"));
+
+            // A subscription reference that matches nothing is equally refused.
+            let unknown_sub: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_orphan_sub", "amount_due": 100, "subscription": "sub_ghost"
+            }))
+            .expect("event");
+            let error = handle_invoice_paid(&env.state, unknown_sub)
+                .await
+                .expect_err("unknown subscription");
+            assert!(error.contains("could not be resolved to a tenant"));
+        }
+    );
+
+    env_test!(invoice_paid_settles_allocates_and_recovers_dunning, |env| {
+        let tenant = "swadv_settle";
+        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        let invoice_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+                                   amount, currency, subtotal, vat_total, total,
+                                   due_at, period_start, period_end)
+             VALUES ($1, $2, 'in_swadv_settle', 'SWADV-1', 'pending', 12400, 'eur', 10000, 2400,
+                     12400, NOW(), NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("local invoice");
+        // Tenant already in dunning: settlement must recover it.
+        sqlx::query(
+            "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
+             VALUES ('swadv_settle_dunning_0001', $1, 'soft_suspended', 3)",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("dunning");
+
+        let settlement_body = serde_json::json!({
+            "id": "in_swadv_settle",
+            "amount_due": 12400,
+            "amount_paid": 12400,
+            "currency": "eur",
+            "subtotal": 10000,
+            "tax": 2400,
+            "total": 12400,
+            "subscription_details": { "metadata": { "tenant_id": tenant } },
+            "automatic_tax": { "enabled": true, "status": "complete" }
+        });
+        handle_invoice_paid(&env.state, decode_invoice(&settlement_body))
+            .await
+            .expect("settlement");
+        let (status, paid_at_is_set): (String, bool) =
+            sqlx::query_as("SELECT status, paid_at IS NOT NULL FROM invoices WHERE id = $1")
+                .bind(invoice_id)
+                .fetch_one(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(status, "paid");
+        assert!(paid_at_is_set);
+        let allocation: i64 = sqlx::query_scalar(
+            "SELECT amount_cents FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("allocation");
+        assert_eq!(
+            allocation, 12400,
+            "the verified payment is allocated exactly once"
+        );
+        let dunning: Option<String> =
+            sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                .bind(tenant)
+                .fetch_one(&env.pool)
+                .await
+                .expect("dunning");
+        assert_eq!(
+            dunning.as_deref(),
+            Some("healthy"),
+            "settlement recovers dunning"
+        );
+
+        // Replay: idempotent, no second allocation.
+        handle_invoice_paid(&env.state, decode_invoice(&settlement_body))
+            .await
+            .expect("replay");
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE invoice_id = $1",
+        )
+        .bind(invoice_id)
+        .fetch_one(&env.pool)
+        .await
+        .expect("count");
+        assert_eq!(allocations, 1, "replay never double-allocates");
+    });
+
+    env_test!(invoice_paid_currency_mismatch_refused, |env| {
+        let tenant = "swadv_currency";
+        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        let invoice_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+                                   amount, currency, subtotal, vat_total, total,
+                                   due_at, period_start, period_end)
+             VALUES ($1, $2, 'in_ccy', 'SWADV-2', 'pending', 1000, 'eur', 1000, 0, 1000,
+                     NOW(), NOW(), NOW() + INTERVAL '30 days')",
+        )
+        .bind(invoice_id)
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("local invoice");
+
+        let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
+            "id": "in_ccy",
+            "amount_due": 1000,
+            "amount_paid": 1000,
+            "currency": "usd",
+            "subtotal": 1000,
+            "total": 1000,
+            "subscription_details": { "metadata": { "tenant_id": tenant } },
+            "automatic_tax": { "enabled": true, "status": "complete" }
+        }))
+        .expect("event");
+        let error = handle_invoice_paid(&env.state, event)
+            .await
+            .expect_err("currency mismatch refused");
+        assert!(error.contains("denominated in"), "honest failure: {error}");
+        let status: String = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+            .bind(invoice_id)
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "pending", "the refused settlement writes nothing");
+    });
+
+    env_test!(invoice_paid_zero_value_settles_without_allocation, |env| {
+        let tenant = "swadv_zero";
+        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
+            "id": "in_swadv_zero",
+            "amount_due": 0,
+            "amount_paid": 0,
+            "currency": "eur",
+            "subtotal": 0,
+            "total": 0,
+            "subscription_details": { "metadata": { "tenant_id": tenant } },
+            "automatic_tax": { "enabled": true, "status": "complete" }
+        }))
+        .expect("event");
+        handle_invoice_paid(&env.state, event)
+            .await
+            .expect("zero-value invoices settle");
+        let invoice: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM invoices WHERE stripe_invoice_id = 'in_swadv_zero'")
+                .fetch_optional(&env.pool)
+                .await
+                .expect("invoice");
+        assert_eq!(
+            invoice.expect("imported").0,
+            "paid",
+            "Fix A imports the paid row"
+        );
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invoice_payment_allocations WHERE operation_id = 'stripe:in_swadv_zero'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("allocations");
+        assert_eq!(
+            allocations, 0,
+            "no positive allocation is invented for zero value"
+        );
+    });
+
+    env_test!(
+        invoice_paid_import_refused_for_foreign_tenant_leaves_dunning,
+        |env| {
+            let owner = "swadv_import_owner";
+            let other = "swadv_import_other";
+            shared_seed_tenant(&env.pool, owner, "growth").await;
+            shared_seed_tenant(&env.pool, other, "growth").await;
+            sqlx::query(
+                "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+                                   amount, currency, subtotal, vat_total, total,
+                                   due_at, period_start, period_end)
+             VALUES (gen_random_uuid(), $1, 'in_import', 'SWADV-3', 'pending',
+                     1000, 'eur', 1000, 0, 1000, NOW(), NOW(), NOW() + INTERVAL '30 days')",
+            )
+            .bind(owner)
+            .execute(&env.pool)
+            .await
+            .expect("owner invoice");
+            sqlx::query(
+                "INSERT INTO dunning_records (id, tenant_id, status, failed_payment_count)
+             VALUES ('swadv_import_dunning_01', $1, 'soft_suspended', 2)",
+            )
+            .bind(other)
+            .execute(&env.pool)
+            .await
+            .expect("other dunning");
+
+            let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_import",
+                "amount_due": 1000,
+                "amount_paid": 1000,
+                "currency": "eur",
+                "subtotal": 1000,
+                "total": 1000,
+                "subscription_details": { "metadata": { "tenant_id": other } },
+                "automatic_tax": { "enabled": true, "status": "complete" }
+            }))
+            .expect("event");
+            handle_invoice_paid(&env.state, event)
+                .await
+                .expect("guard-rejected upsert is not an error");
+            let dunning: Option<String> =
+                sqlx::query_scalar("SELECT status FROM dunning_records WHERE tenant_id = $1")
+                    .bind(other)
+                    .fetch_one(&env.pool)
+                    .await
+                    .expect("dunning");
+            assert_eq!(
+                dunning.as_deref(),
+                Some("soft_suspended"),
+                "Fix F4: no blanket recovery"
+            );
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM invoices WHERE stripe_invoice_id = 'in_import'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("status");
+            assert_eq!(status, "pending", "the foreign tenant cannot settle it");
+        }
+    );
+
+    env_test!(
+        invoice_paid_tax_gate_with_recomputation_from_address,
+        |env| {
+            let tenant = "swadv_recompute";
+            shared_seed_tenant(&env.pool, tenant, "growth").await;
+            // A country outside the EU with no VAT number: recomputed VAT is 0.
+            sqlx::query(
+                "INSERT INTO billing_addresses (tenant_id, country, city)
+             VALUES ($1, 'US', 'Testville')",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+
+            let matching: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_recompute_ok",
+                "amount_due": 4900,
+                "amount_paid": 4900,
+                "currency": "eur",
+                "subtotal": 4900,
+                "total": 4900,
+                "subscription_details": { "metadata": { "tenant_id": tenant } }
+            }))
+            .expect("event");
+            handle_invoice_paid(&env.state, matching)
+                .await
+                .expect("recomputed 0% VAT matches");
+            let (validation, source): (String, String) = sqlx::query_as(
+                "SELECT validation_status,
+                    raw_payload->'apexmail'->>'source'
+             FROM stripe_tax_snapshots WHERE stripe_invoice_id = 'in_recompute_ok'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("snapshot");
+            assert_eq!(validation, "fallback_unavailable");
+            assert_eq!(source, "recomputed");
+
+            // An EU country without evidence recomputes the statutory rate; a
+            // mismatching charged total blocks.
+            sqlx::query("UPDATE billing_addresses SET country = 'EE' WHERE tenant_id = $1")
+                .bind(tenant)
+                .execute(&env.pool)
+                .await
+                .expect("address");
+            let mismatch: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_recompute_bad",
+                "amount_due": 4900,
+                "amount_paid": 4900,
+                "currency": "eur",
+                "subtotal": 4900,
+                "total": 4900,
+                "subscription_details": { "metadata": { "tenant_id": tenant } }
+            }))
+            .expect("event");
+            let error = handle_invoice_paid(&env.state, mismatch)
+                .await
+                .expect_err("missing statutory VAT blocks");
+            assert!(error.contains("blocked"), "honest failure: {error}");
+            let incidents: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM finance_incidents WHERE kind = 'tax_total_mismatch'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .expect("incidents");
+            assert_eq!(incidents, 1, "a critical finance incident is raised");
+        }
+    );
+
+    env_test!(
+        invoice_paid_null_country_address_degrades_to_zero_vat,
+        |env| {
+            let tenant = "swadv_nullcountry";
+            shared_seed_tenant(&env.pool, tenant, "growth").await;
+            sqlx::query(
+                "INSERT INTO billing_addresses (tenant_id, country, city)
+             VALUES ($1, NULL, 'Testville')",
+            )
+            .bind(tenant)
+            .execute(&env.pool)
+            .await
+            .expect("address");
+            let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_nullcountry",
+                "amount_due": 1000,
+                "amount_paid": 1000,
+                "currency": "eur",
+                "subtotal": 1000,
+                "total": 1000,
+                "subscription_details": { "metadata": { "tenant_id": tenant } }
+            }))
+            .expect("event");
+            handle_invoice_paid(&env.state, event)
+                .await
+                .expect("null country recomputes 0% VAT and matches");
+            let validation: String = sqlx::query_scalar(
+            "SELECT validation_status FROM stripe_tax_snapshots WHERE stripe_invoice_id = 'in_nullcountry'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("snapshot");
+            assert_eq!(validation, "fallback_unavailable");
+        }
+    );
+
+    env_test!(persist_tax_snapshot_replay_returns_the_first_write, |env| {
+        let tenant = "swadv_snapreplay";
+        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
+            "id": "in_snapreplay",
+            "amount_due": 1000,
+            "currency": "eur",
+            "subtotal": 1000,
+            "total": 1000
+        }))
+        .expect("event");
+        let expected = ExpectedTax {
+            subtotal_cents: 1000,
+            vat_cents: 0,
+            total_cents: 1000,
+            source: "recomputed",
+            country: Some("US".into()),
+            vat_rate: 0.0,
+            evidence_id: None,
+        };
+        let first = persist_tax_snapshot(
+            &env.pool,
+            &event,
+            tenant,
+            None,
+            "eur",
+            (1000, 0, 1000),
+            &expected,
+            "apexmail_local",
+            "fallback_unavailable",
+            0,
+            "not_provided",
+            &serde_json::json!([]),
+        )
+        .await
+        .expect("first write");
+        let second = persist_tax_snapshot(
+            &env.pool,
+            &event,
+            tenant,
+            None,
+            "eur",
+            (1000, 0, 1000),
+            &expected,
+            "apexmail_local",
+            "fallback_unavailable",
+            0,
+            "not_provided",
+            &serde_json::json!([]),
+        )
+        .await
+        .expect("replay");
+        assert_eq!(first, second, "the immutable first write wins");
+    });
+
+    // ---------------- dunning config + notification edges ----------------
+
+    env_test!(dunning_config_degrades_to_defaults_on_faults, |env| {
+        let tenant = "swadv_duncfg";
+        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        // Per-tenant configured schedule is honored.
+        sqlx::query(
+            "INSERT INTO dunning_config
+                 (tenant_id, retry_schedule_days, soft_suspend_after_days, hard_suspend_after_days, grace_period_days)
+             VALUES ($1, ARRAY[2,4], 5, 9, 3)",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("config row");
+        let config = get_dunning_config_for_tenant(&env.state, tenant).await;
+        assert_eq!(config.retry_schedule_days, vec![2, 4]);
+
+        // Table missing: defaults, loudly.
+        env.break_table("dunning_config").await;
+        let config = get_dunning_config_for_tenant(&env.state, tenant).await;
+        assert_eq!(
+            config.soft_suspend_after_days, 7,
+            "defaults survive a missing table"
+        );
+        env.restore_table("dunning_config").await;
+
+        // Table exists again (the OnceLock now trusts it): the tenant row wins.
+        let config = get_dunning_config_for_tenant(&env.state, tenant).await;
+        assert_eq!(config.retry_schedule_days, vec![2, 4]);
+        env.break_table("dunning_config").await;
+        let config = get_dunning_config_for_tenant(&env.state, tenant).await;
+        assert_eq!(
+            config.hard_suspend_after_days, 21,
+            "defaults survive a failing query"
+        );
+        env.restore_table("dunning_config").await;
+    });
+
+    env_test!(
+        dunning_notification_type_mapping_and_enqueue_failure,
+        |env| {
+            let tenant = "swadv_notif";
+            shared_seed_tenant(&env.pool, tenant, "growth").await;
+            for (status, _kind) in [
+                ("warning", "payment_reminder"),
+                ("soft_suspended", "account_soft_suspended"),
+                ("hard_suspended", "account_hard_suspended"),
+            ] {
+                send_dunning_notification(&env.state, tenant, status, serde_json::json!({})).await;
+            }
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT type FROM notification_queue WHERE tenant_id = $1 ORDER BY type",
+            )
+            .bind(tenant)
+            .fetch_all(&env.pool)
+            .await
+            .expect("queue");
+            let types: Vec<String> = rows.into_iter().map(|r| r.0).collect();
+            assert_eq!(
+                types,
+                vec![
+                    "account_hard_suspended".to_string(),
+                    "account_soft_suspended".to_string(),
+                    "payment_reminder".to_string()
+                ]
+            );
+
+            // Enqueue failure is logged, never fatal.
+            env.break_table("notification_queue").await;
+            send_dunning_notification(&env.state, tenant, "warning", serde_json::json!({})).await;
+            env.restore_table("notification_queue").await;
+        }
+    );
+
+    env_test!(
+        payment_failed_caches_status_and_survives_cache_faults,
+        |env| {
+            let tenant = "swadv_cache";
+            shared_seed_tenant(&env.pool, tenant, "growth").await;
+            let dead = state_with_dead_redis(&env.pool);
+            let event: InvoiceEvent = serde_json::from_value(serde_json::json!({
+                "id": "in_cache",
+                "amount_due": 10,
+                "subscription_details": { "metadata": { "tenant_id": tenant } }
+            }))
+            .expect("event");
+            handle_payment_failed(&dead, event)
+                .await
+                .expect("payment failure processing survives a dead cache");
+            let count: i32 = sqlx::query_scalar(
+                "SELECT failed_payment_count FROM dunning_records WHERE tenant_id = $1",
+            )
+            .bind(tenant)
+            .fetch_one(&env.pool)
+            .await
+            .expect("dunning");
+            assert_eq!(count, 1);
+        }
+    );
+
+    env_test!(reclaim_reports_reclaimed_events_loudly, |env| {
+        sqlx::query(
+            "INSERT INTO stripe_webhook_events (id, stripe_event_id, event_type, status, updated_at)
+             VALUES (gen_random_uuid(), 'evt_swadv_reclaim', 'invoice.paid', 'pending',
+                     NOW() - INTERVAL '20 minutes')",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("stale row");
+        let reclaimed = reclaim_stale_pending_webhooks(&env.state)
+            .await
+            .expect("reclaim");
+        assert_eq!(reclaimed, vec!["evt_swadv_reclaim".to_string()]);
+    });
+
+    // ---------------- dedicated-IP auto-provisioning (local servers) ----------------
+
+    /// A local axum server on an ephemeral port answering /v1/dedicated-ips.
+    async fn local_api_server(
+        status: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/v1/dedicated-ips",
+            axum::routing::post(move || async move { (status, "{}") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("local server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn state_with_api_base(env: &Env, api_base: String) -> Arc<AppState> {
+        let mut config = env.state.config.clone();
+        config.api_base_url = api_base;
+        AppState::new(env.pool.clone(), env.redis.clone(), config)
+    }
+
+    async fn seed_dedicated_ip_plan(env: &Env, name: &str, included: i32) {
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, api_call_limit, features)
+             VALUES ($1, $2, $2, 0, 1000, 1000, jsonb_build_object('dedicated_ip_count', $3))
+             ON CONFLICT (name) DO UPDATE SET features = EXCLUDED.features",
+        )
+        .bind(format!("plan_{name}"))
+        .bind(name)
+        .bind(included)
+        .execute(&env.pool)
+        .await
+        .expect("plan with dedicated ips");
+    }
+
+    async fn seed_active_subscription(env: &Env, tenant: &str, plan: &str, sub_id: &str) {
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                 (tenant_id, stripe_subscription_id, plan, status, billing_cycle_start,
+                  billing_cycle_end, stripe_customer_id)
+             VALUES ($1, $2, $3, 'active', NOW(), NOW() + INTERVAL '30 days', 'cus_ip')",
+        )
+        .bind(tenant)
+        .bind(sub_id)
+        .bind(plan)
+        .execute(&env.pool)
+        .await
+        .expect("active subscription");
+    }
+
+    env_test!(auto_provision_covers_every_allocation_outcome, |env| {
+        // 1) plan without dedicated IPs -> immediate no-op.
+        let none = "swadv_ip_none";
+        shared_seed_tenant(&env.pool, none, "growth").await;
+        auto_provision_dedicated_ips_background(&env.state, none)
+            .await
+            .expect("no allowance is a no-op");
+
+        // 2) tenant already at its allowance -> no-op.
+        let full = "swadv_ip_full";
+        seed_dedicated_ip_plan(env, "swadv_ip_plan", 1).await;
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan', 'active')",
+        )
+        .bind(full)
+        .execute(&env.pool)
+        .await
+        .expect("tenant");
+        seed_active_subscription(env, full, "swadv_ip_plan", "sub_swadv_ip_full").await;
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status)
+             VALUES ('ip-swadv-full-0000000000000001', $1, '198.51.100.10', 'active')",
+        )
+        .bind(full)
+        .execute(&env.pool)
+        .await
+        .expect("ip");
+        auto_provision_dedicated_ips_background(&env.state, full)
+            .await
+            .expect("sufficient IPs is a no-op");
+
+        // 3) success: a local 200 server records a completed request.
+        let ok_tenant = "swadv_ip_ok";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan', 'active')",
+        )
+        .bind(ok_tenant)
+        .execute(&env.pool)
+        .await
+        .expect("tenant");
+        seed_active_subscription(env, ok_tenant, "swadv_ip_plan", "sub_swadv_ip_ok").await;
+        let (base, server) = local_api_server(StatusCode::OK).await;
+        auto_provision_dedicated_ips_background(&state_with_api_base(env, base), ok_tenant)
+            .await
+            .expect("success path");
+        let (status, ok): (String, i32) = sqlx::query_as(
+            "SELECT status, success_count FROM dedicated_ip_provisioning_requests WHERE tenant_id = $1",
+        )
+        .bind(ok_tenant)
+        .fetch_one(&env.pool)
+        .await
+        .expect("request");
+        assert_eq!(status, "completed");
+        assert_eq!(ok, 1);
+        server.abort();
+
+        // 4) partial: one IP already allocated, the next attempt fails (409).
+        let partial = "swadv_ip_partial";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan', 'active')",
+        )
+        .bind(partial)
+        .execute(&env.pool)
+        .await
+        .expect("tenant");
+        seed_active_subscription(env, partial, "swadv_ip_plan", "sub_swadv_ip_partial").await;
+        let (base_fail, server_fail) = local_api_server(StatusCode::CONFLICT).await;
+        auto_provision_dedicated_ips_background(&state_with_api_base(env, base_fail), partial)
+            .await
+            .expect("failure recorded");
+        server_fail.abort();
+        let (status, failures): (String, i32) = sqlx::query_as(
+            "SELECT status, failure_count FROM dedicated_ip_provisioning_requests WHERE tenant_id = $1",
+        )
+        .bind(partial)
+        .fetch_one(&env.pool)
+        .await
+        .expect("request");
+        assert_eq!(status, "failed");
+        assert_eq!(failures, 1, "the non-2xx response is a recorded failure");
+
+        // 5) transport error: closed local port.
+        let errored = "swadv_ip_err";
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan', 'active')",
+        )
+        .bind(errored)
+        .execute(&env.pool)
+        .await
+        .expect("tenant");
+        seed_active_subscription(env, errored, "swadv_ip_plan", "sub_swadv_ip_err").await;
+        auto_provision_dedicated_ips_background(
+            &state_with_api_base(env, "http://127.0.0.1:1".to_string()),
+            errored,
+        )
+        .await
+        .expect("transport errors are recorded, not fatal");
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM dedicated_ip_provisioning_requests WHERE tenant_id = $1",
+        )
+        .bind(errored)
+        .fetch_one(&env.pool)
+        .await
+        .expect("request");
+        assert_eq!(status, "failed");
+    });
+
+    env_test!(
+        auto_provision_request_recording_faults_are_surfaced,
+        |env| {
+            let tenant = "swadv_ip_fault";
+            seed_dedicated_ip_plan(env, "swadv_ip_plan2", 1).await;
+            sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status) VALUES ($1, $1, 'swadv_ip_plan2', 'active')",
+        )
+        .bind(tenant)
+        .execute(&env.pool)
+        .await
+        .expect("tenant");
+            seed_active_subscription(env, tenant, "swadv_ip_plan2", "sub_swadv_ip_fault").await;
+            // The request table is gone: recording the intent fails honestly.
+            env.break_table("dedicated_ip_provisioning_requests").await;
+            let error = auto_provision_dedicated_ips_background(&env.state, tenant)
+                .await
+                .expect_err("broken request table");
+            assert!(
+                error.contains("Failed to record dedicated IP provisioning request"),
+                "honest failure: {error}"
+            );
+            env.restore_table("dedicated_ip_provisioning_requests")
+                .await;
+
+            // The allowance query itself failing is surfaced too.
+            env.break_table("stripe_subscriptions").await;
+            let error = auto_provision_dedicated_ips_background(&env.state, tenant)
+                .await
+                .expect_err("broken allowance query");
+            assert!(error.contains("Failed to load dedicated IP allowance"));
+            env.restore_table("stripe_subscriptions").await;
+
+            env.break_table("dedicated_ips").await;
+            let error = auto_provision_dedicated_ips_background(&env.state, tenant)
+                .await
+                .expect_err("broken count query");
+            assert!(error.contains("Failed to load active dedicated IP count"));
+            env.restore_table("dedicated_ips").await;
+        }
+    );
+
+    // ---------------- snapshot helpers ----------------
+
+    #[test]
+    fn normalize_period_currency_rejects_malformed_codes() {
+        assert_eq!(normalize_period_currency("eur"), "EUR");
+        assert_eq!(normalize_period_currency("  usd "), "USD");
+        assert_eq!(normalize_period_currency("EURO"), "EUR");
+        assert_eq!(normalize_period_currency("e1"), "EUR");
+        assert_eq!(normalize_period_currency(""), "EUR");
+    }
+
+    #[test]
+    fn derive_invoice_totals_none_total_arm_uses_the_total() {
+        let (subtotal, vat, total) = derive_invoice_totals(None, None, Some(7_777), 7_777);
+        assert_eq!((subtotal, vat, total), (7_777, 0, 7_777));
+    }
+
+    env_test!(snapshot_period_edges_are_honest, |env| {
+        let tenant = "swadv_snapedge";
+        shared_seed_tenant(&env.pool, tenant, "growth").await;
+        let mut tx = env.pool.begin().await.expect("tx");
+        // Inverted period: no snapshot, no error.
+        snapshot_billing_period(
+            &mut tx,
+            tenant,
+            "sub_snap",
+            "active",
+            Some("growth"),
+            Utc::now(),
+            Utc::now() - Duration::from_secs(60),
+        )
+        .await
+        .expect("inverted periods are skipped");
+        // Unknown tenant: degrades to the subscription plan + default currency.
+        snapshot_billing_period(
+            &mut tx,
+            "swadv_missing_tenant",
+            "sub_snap",
+            "canceled",
+            Some("growth"),
+            Utc::now(),
+            Utc::now() + Duration::from_secs(60),
+        )
+        .await
+        .expect("unknown tenant degrades");
+        tx.commit().await.expect("commit");
+        let snapshot: serde_json::Value = sqlx::query_scalar(
+            "SELECT pricing_snapshot FROM billing_periods WHERE tenant_id = 'swadv_missing_tenant'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .expect("snapshot");
+        assert_eq!(snapshot["currency"], "EUR");
+    });
+
+    // ---------------- replay refusals ----------------
+
+    env_test!(replay_deadletter_missing_signature_refused, |env| {
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some("evt_nosig_replay".into()),
+            body: Some(r#"{"id":"evt_nosig_replay","type":"invoice.paid"}"#.into()),
+            ..Default::default()
+        };
+        let error = replay_deadletter(&env.state, &entry)
+            .await
+            .expect_err("missing signature");
+        assert!(error.contains("No signature stored"));
+    });
+
+    env_test!(replay_deadletter_malformed_body_refused, |env| {
+        let timestamp = Utc::now().timestamp();
+        let body = r#"{"id":"evt_badbody","type":"invoice.paid"#;
+        let signature = sign_stripe("whsec_coverage", body.as_bytes(), timestamp);
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some("evt_badbody".into()),
+            body: Some(body.to_string()),
+            signature: Some(signature),
+            ..Default::default()
+        };
+        let error = replay_deadletter(&env.state, &entry)
+            .await
+            .expect_err("malformed stored body");
+        assert!(
+            error.contains("Failed to parse stored webhook body"),
+            "honest failure: {error}"
+        );
+        assert_eq!(event_rows(&env.pool).await, 0, "nothing claimed");
+    });
+
+    env_test!(replay_deadletter_pending_event_is_refused, |env| {
+        shared_seed_tenant(&env.pool, "swadv_pendreplay", "growth").await;
+        let payload = payment_failed_payload("evt_pendreplay", "in_pendreplay", "swadv_pendreplay");
+        let body = serde_json::to_string(&payload).unwrap();
+        let timestamp = Utc::now().timestamp();
+        let signature = sign_stripe("whsec_coverage", body.as_bytes(), timestamp);
+        let entry = DeadletterEntry {
+            reason: "processing_failed".into(),
+            event_id: Some("evt_pendreplay".into()),
+            body: Some(body),
+            signature: Some(signature),
+            ..Default::default()
+        };
+        replay_deadletter(&env.state, &entry)
+            .await
+            .expect("first replay claims");
+        // Simulate a concurrent worker holding the claim.
+        sqlx::query(
+            "UPDATE stripe_webhook_events SET status = 'pending', processed_at = NULL
+             WHERE stripe_event_id = 'evt_pendreplay'",
+        )
+        .execute(&env.pool)
+        .await
+        .expect("re-pend");
+        let error = replay_deadletter(&env.state, &entry)
+            .await
+            .expect_err("pending event");
+        assert!(
+            error.contains("pending on another worker"),
+            "honest failure: {error}"
+        );
+    });
 }

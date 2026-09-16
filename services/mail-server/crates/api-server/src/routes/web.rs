@@ -13219,12 +13219,29 @@ mod coverage_auth_admin_tests {
         )
         .await;
         assert!(flash_text(&response, &app.config).contains("catalog"));
+        // seed_global pins its plan at price_cents = -1 to sort first, but
+        // the shared `_api` database accumulates -1 plans across runs and
+        // `tenant_plan_names` bounds the catalog with `LIMIT 50` and no
+        // tie-break — 63+ tied rows make the pick arbitrary. A dedicated
+        // plan priced strictly below everything accumulated is
+        // deterministic no matter how many rows prior runs left behind.
+        let catalog_plan = format!("catalog-plan-{tag}");
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, price_cents, email_limit, is_active, sort_order, created_at, updated_at)
+             VALUES ($1, $2, $3, -1000000, 1000, true, 1, NOW(), NOW())",
+        )
+        .bind(apexmail_lib::id::generate_id("", 26))
+        .bind(&catalog_plan)
+        .bind(format!("Catalog Plan {tag}"))
+        .execute(&app.db)
+        .await
+        .expect("seed deterministic catalog plan");
         let (headers, form) = signed_form(
             &app.config,
             &[
                 ("name", tenant_name.as_str()),
                 ("domain", &format!("{tag}.example.test")),
-                ("plan", &format!("plan-{tag}")),
+                ("plan", catalog_plan.as_str()),
             ],
         );
         let response = form_admin_tenant_create(

@@ -1603,6 +1603,10 @@ mod tests {
     /// never rebuilt per verification/deletion request.
     #[tokio::test]
     async fn ses_client_is_shared_across_calls_per_region() {
+        // This builds a real AWS SDK client: route it through the
+        // deterministic TLS-root test environment (the macOS keychain read
+        // under load intermittently yields zero parseable roots).
+        crate::test_db::ensure_aws_test_env();
         let first = shared_ses_client("eu-north-1").await;
         let second = shared_ses_client("eu-north-1").await;
         assert!(

@@ -230,9 +230,11 @@ pub fn all_passed(checks: &[CheckVerdict]) -> bool {
 
 /// True when every check (required or not) is a `Pass` — the strongest claim
 /// this module can make. A `not_performed` check (e.g. an unsupported
-/// signature algorithm) makes this false.
+/// signature algorithm) makes this false, and so does an EMPTY check list:
+/// "every check passed" is vacuously true over zero checks and must not back
+/// the strongest claim this module can make.
 pub fn strictly_passed(checks: &[CheckVerdict]) -> bool {
-    checks.iter().all(|check| check.outcome.is_pass())
+    !checks.is_empty() && checks.iter().all(|check| check.outcome.is_pass())
 }
 
 /// True when any check failed, required or not.
@@ -589,17 +591,16 @@ pub mod der {
                 if value < 0x80 {
                     return Err(DerError::NonMinimalLength);
                 }
-                let value = usize::try_from(value).map_err(|_| DerError::ElementTooLarge {
-                    length: usize::MAX,
-                    max: budget.limits.max_element_bytes,
-                })?;
-                if value > budget.limits.max_element_bytes {
+                // The bound is checked in u64 space (total for every input)
+                // before the conversion, so the cast below is lossless on
+                // every target whose usize is at least 32 bits.
+                if value > budget.limits.max_element_bytes as u64 {
                     return Err(DerError::ElementTooLarge {
-                        length: value,
+                        length: value as usize,
                         max: budget.limits.max_element_bytes,
                     });
                 }
-                (value, 2 + n)
+                (value as usize, 2 + n)
             };
 
             let content_start = start + header;
@@ -1022,6 +1023,22 @@ pub mod der {
     }
 }
 
+/// Build a verification `AlgorithmIdentifier` from OID arcs.
+///
+/// `x509_parser::verify::verify_signature` reads only the algorithm OID (the
+/// NULL parameters of the RSA encodings are never inspected), so the
+/// identifier is constructed directly instead of round-tripping through DER.
+/// `Oid::from` fails only for structurally impossible arcs; the reason string
+/// is surfaced as `Unsupported` by both verification modules.
+fn verification_algorithm_from_arcs(
+    arcs: &[u64],
+) -> Result<x509_parser::prelude::AlgorithmIdentifier<'static>, String> {
+    let oid = x509_parser::der_parser::asn1_rs::Oid::from(arcs).map_err(|error| {
+        format!("could not encode the signature algorithm OID {arcs:?}: {error:?}")
+    })?;
+    Ok(x509_parser::prelude::AlgorithmIdentifier::new(oid, None))
+}
+
 // ---------------------------------------------------------------------------
 // RFC 3161 timestamps
 // ---------------------------------------------------------------------------
@@ -1081,12 +1098,13 @@ pub mod timestamp {
     /// OID of RSASSA-PSS.
     pub const OID_RSASSA_PSS: &str = "1.2.840.113549.1.1.10";
 
-    /// Map a CMS digest algorithm onto the combined PKCS#1 v1.5 signature OID.
-    fn rsa_pkcs1_oid_for_digest(digest_oid: &str) -> Option<&'static str> {
+    /// Map a CMS digest algorithm onto the combined PKCS#1 v1.5 signature
+    /// algorithm ARCs.
+    fn rsa_pkcs1_arcs_for_digest(digest_oid: &str) -> Option<&'static [u64]> {
         match digest_oid {
-            OID_SHA256 => Some("1.2.840.113549.1.1.11"),
-            OID_SHA384 => Some("1.2.840.113549.1.1.12"),
-            OID_SHA512 => Some("1.2.840.113549.1.1.13"),
+            OID_SHA256 => Some(&[1, 2, 840, 113549, 1, 1, 11]),
+            OID_SHA384 => Some(&[1, 2, 840, 113549, 1, 1, 12]),
+            OID_SHA512 => Some(&[1, 2, 840, 113549, 1, 1, 13]),
             _ => None,
         }
     }
@@ -1207,14 +1225,14 @@ pub mod timestamp {
                     )));
                 }
             }
-            match parsed.host_str() {
-                Some(host) if !host.is_empty() => {}
-                _ => {
-                    return Err(TimeStampError::InvalidConfig(
-                        "TSA URL has no host".to_string(),
-                    ));
-                }
-            }
+            // The url crate refuses special schemes (http/https) without a
+            // non-empty host at parse time, so a successfully parsed URL of
+            // those schemes always carries one. Keep the invariant asserted
+            // so a future url-crate regression cannot slip through silently.
+            debug_assert!(
+                parsed.host_str().is_some_and(|host| !host.is_empty()),
+                "url crate invariant broken: special scheme parsed without a host"
+            );
             Ok(Self {
                 url: trimmed.to_string(),
                 auth_header: None,
@@ -1858,10 +1876,9 @@ pub mod timestamp {
         })
     }
 
+    /// Parse the `seconds` INTEGER of an `Accuracy` SEQUENCE the caller has
+    /// already tag-checked ([`der::TAG_SEQUENCE`]).
     fn parse_accuracy_seconds(tlv: &Tlv<'_>, budget: &mut Budget) -> Result<Option<u64>, DerError> {
-        if tlv.tag != der::TAG_SEQUENCE {
-            return Ok(None);
-        }
         budget.descend(|budget| {
             let mut reader = tlv.reader();
             if reader.peek_tag() == Some(der::TAG_INTEGER) {
@@ -2318,8 +2335,11 @@ pub mod timestamp {
                 "the signer certificate did not parse, so the ESS certificate hash cannot be bound"
                     .to_string(),
             )),
-            Some(attribute) => match certificate_der {
-                Some(der) => match parse_ess_cert_hash(attribute) {
+            // `certificate` is Some only when derived from `certificate_der`,
+            // so a parseable certificate implies the DER bytes are present.
+            Some(attribute) => {
+                let der = certificate_der.expect("certificate implies certificate_der");
+                match parse_ess_cert_hash(attribute) {
                     Ok((hash_algorithm_oid, expected_hash)) => {
                         match digest_for_oid(&hash_algorithm_oid, der) {
                             Some(actual) if actual == expected_hash => checks.push(CheckVerdict::pass(
@@ -2350,13 +2370,8 @@ pub mod timestamp {
                         true,
                         reason,
                     )),
-                },
-                None => checks.push(CheckVerdict::not_performed(
-                    "ess_signing_certificate_hash_matches_certificate",
-                    true,
-                    "no certificate to compare against".to_string(),
-                )),
-            },
+                }
+            }
             None => checks.push(CheckVerdict::not_performed(
                 "ess_signing_certificate_hash_matches_certificate",
                 true,
@@ -2526,21 +2541,20 @@ pub mod timestamp {
         }
         // CMS carries the digest separately: a very common SignerInfo uses
         // `rsaEncryption` as signatureAlgorithm, with the digest named by
-        // digestAlgorithm. Map that pair onto the combined PKCS#1 OID the
-        // verification backend understands. RSASSA-PSS is a distinct scheme
-        // and is reported as unsupported rather than guessed at.
-        let mapped_der: Option<Vec<u8>> = if algorithm.algorithm.to_string() == OID_RSA_ENCRYPTION {
-            match rsa_pkcs1_oid_for_digest(&signer.digest_algorithm) {
-                Some(oid) => Some(der::algorithm_identifier(oid).map_err(|error| {
-                    SignatureFailure::Unsupported(format!(
-                        "could not encode the RSA signature algorithm: {error}"
-                    ))
-                })?),
+        // digestAlgorithm. Map that pair onto the combined PKCS#1 identifier
+        // the verification backend understands. RSASSA-PSS is a distinct
+        // scheme and is reported as unsupported rather than guessed at.
+        let mapped_algorithm = if algorithm.algorithm.to_string() == OID_RSA_ENCRYPTION {
+            match rsa_pkcs1_arcs_for_digest(&signer.digest_algorithm) {
+                Some(arcs) => Some(
+                    super::verification_algorithm_from_arcs(arcs)
+                        .map_err(SignatureFailure::Unsupported)?,
+                ),
                 None => {
                     return Err(SignatureFailure::Unsupported(format!(
-                            "signatureAlgorithm is rsaEncryption but digestAlgorithm {} has no supported PKCS#1 v1.5 mapping",
-                            signer.digest_algorithm
-                        )));
+                        "signatureAlgorithm is rsaEncryption but digestAlgorithm {} has no supported PKCS#1 v1.5 mapping",
+                        signer.digest_algorithm
+                    )));
                 }
             }
         } else if algorithm.algorithm.to_string() == OID_RSASSA_PSS {
@@ -2550,23 +2564,6 @@ pub mod timestamp {
                 ));
         } else {
             None
-        };
-        let mapped_algorithm = match &mapped_der {
-            Some(bytes) => {
-                let (remaining, mapped) =
-                    AlgorithmIdentifier::from_der(bytes).map_err(|error| {
-                        SignatureFailure::Unsupported(format!(
-                            "could not parse the mapped RSA signature algorithm: {error}"
-                        ))
-                    })?;
-                if !remaining.is_empty() {
-                    return Err(SignatureFailure::Unsupported(
-                        "mapped RSA signature algorithm has trailing bytes".to_string(),
-                    ));
-                }
-                Some(mapped)
-            }
-            None => None,
         };
         let algorithm = mapped_algorithm.as_ref().unwrap_or(&algorithm);
         let signature = x509_parser::der_parser::asn1_rs::BitString::new(0, &signer.signature);
@@ -2663,15 +2660,22 @@ pub mod timestamp {
 
     impl TimeStampClient {
         /// Build a client for the given configuration.
+        ///
+        /// Only `timeout`/`connect_timeout` are configured on the HTTP
+        /// builder; constructing such a client cannot fail unless the TLS
+        /// backend itself is unusable (in which case every client in the
+        /// process is, and there is no degraded mode worth continuing in).
         pub fn new(config: TsaConfig) -> Result<Self, TimeStampError> {
             let timeout = std::time::Duration::from_secs(config.timeout_secs.max(1));
             let http = reqwest::Client::builder()
                 .timeout(timeout)
                 .connect_timeout(timeout)
                 .build()
-                .map_err(|error| {
-                    TimeStampError::Transport(format!("HTTP client build failed: {error}"))
-                })?;
+                .expect(
+                    "reqwest client construction failed: only timeout/connect_timeout are set, \
+                     so this means the TLS backend is unusable — refusing to run with a \
+                     degraded HTTP stack",
+                );
             Ok(Self { config, http })
         }
 
@@ -2707,7 +2711,20 @@ pub mod timestamp {
             algorithm: HashAlgorithm,
             now: DateTime<Utc>,
         ) -> Result<TimeStampEvidence, TimeStampError> {
-            let nonce = random_nonce();
+            self.timestamp_at_with_nonce(document, algorithm, now, random_nonce())
+                .await
+        }
+
+        /// [`TimeStampClient::timestamp_at`] with an explicit nonce, for
+        /// deterministic replay audits: a stored token can be re-requested
+        /// and re-verified against the exact exchange that produced it.
+        pub async fn timestamp_at_with_nonce(
+            &self,
+            document: &[u8],
+            algorithm: HashAlgorithm,
+            now: DateTime<Utc>,
+            nonce: u64,
+        ) -> Result<TimeStampEvidence, TimeStampError> {
             let request_der = build_request(document, algorithm, nonce, true)?;
             let response_der = self.post(&request_der).await?;
             let request = self
@@ -2811,6 +2828,1056 @@ pub mod timestamp {
         let client = TimeStampClient::new(config.clone())?;
         client.timestamp(document, algorithm).await
     }
+
+    /// Adversarial unit tests for the module-private parsing and
+    /// verification arms. Synthetic CMS tokens are assembled with the DER
+    /// writer so every refusal path is reachable without a live TSA.
+    #[cfg(test)]
+    mod timestamp_tests {
+        use super::super::der;
+        use super::super::CheckOutcome;
+        use super::*;
+
+        // The same certificate the OpenSSL fixture carries (DER, hex) — the
+        // unit tests cannot reach the integration fixtures.
+        const CERT_HEX: &str = "3082038930820271a00302010202045a504558300d06092a864886f70d01010b0500305a310b3009060355040613024545311e301c060355040a0c15417065784d61696c20546573742046697874757265312b302906035504030c22417065784d61696c20546573742054534120284e4f542050524f44554354494f4e29301e170d3236303931323231313933375a170d3336303930393231313933375a305a310b3009060355040613024545311e301c060355040a0c15417065784d61696c20546573742046697874757265312b302906035504030c22417065784d61696c20546573742054534120284e4f542050524f44554354494f4e2930820122300d06092a864886f70d01010105000382010f003082010a0282010100b30a8b1ae3ecf5fb229dc9beb60b613cc02d86b4b9bc8f84d595984399dd8a1afa71521c6d91b63775378ba7bf2ed6d9d543faa71f777dc3c2632c5b4c8ea7d8a7cd26f7462694d721f5aefdbe4ef31878b78bccb9aa1acd89bd73252218420ef3b6fcd27ee010864862edacb2dcfe35901c71060284771986f2033c40309e716ca7ad9c7efb5c494b6dfd7a012bb0210b283cccca9e3059cb1a48d03a2bb604ebfce7bd1bd24e30efb99949b3966b09597e46e87483b1afb0b289a73c7bf7df4d489698ff37e223f83b046af65f51454ccdbe9f3442c4705cd5c397d9f2369fb513db37a20955e62384892c2bea6388d17583426fdc9284efb1c604d011df150203010001a3573055300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030160603551d250101ff040c300a06082b06010505070308301d0603551d0e04160414717afd522d0495d89e78f45d59795d981a0d482a300d06092a864886f70d01010b0500038201010028e4f826146b6240f3f1d13ec21284e1dbe4494cf405cebb211aca3e90c864bd314ba83591120d7dba2cf3b497022b04630a1e1e58d8fddea0e36b47bbc91ae357cc9d5fe44e50fba8e476a9850f8017070ef10628e7fa12d41bdb03411e275055c04834419c909f1a4ee683c0e3ce96ecb5334f04398b6488bbead7c74771ec913e6d927e54261ebb67dc036762683a573b2596436e0f6370f81e0e87070a556ba33e5157388a8a5853840c834a4d53a2d0d40816c99a4b1ca06b8ba847537481be1632fce7d5ff1ea419d8bd47e9ab779beaabb5de7068a2f869befb2f43c0f34f4ef92c385630cc655f0b5e8de49c4bd43a8585a5af92dd7e4b3730fb785f";
+
+        const DOCUMENT: &[u8] = b"unit-test statutory document bytes";
+
+        fn cert_der() -> Vec<u8> {
+            hex::decode(CERT_HEX).expect("certificate hex")
+        }
+
+        fn now() -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339("2026-09-12T21:19:44Z")
+                .expect("clock")
+                .with_timezone(&Utc)
+        }
+
+        fn request<'a>(document: &'a [u8]) -> TimestampVerificationRequest<'a> {
+            TimestampVerificationRequest {
+                document,
+                nonce: 7,
+                algorithm: HashAlgorithm::Sha256,
+                tolerance_secs: 300,
+                now: now(),
+                tsa_url: Some("https://tsa.unit.test/"),
+            }
+        }
+
+        fn sha256_algorithm() -> Vec<u8> {
+            der::algorithm_identifier(OID_SHA256).expect("sha256 algorithm")
+        }
+
+        /// Build a `TSTInfo` DER with configurable genTime bytes, accuracy,
+        /// ordering flag and nonce.
+        fn tst_info(gen_time: &[u8], accuracy: bool, ordering: bool, nonce: bool) -> Vec<u8> {
+            let imprint = der::sequence(&[
+                sha256_algorithm(),
+                der::octet_string(&HashAlgorithm::Sha256.digest(DOCUMENT)),
+            ]);
+            let mut parts = vec![
+                der::unsigned_integer(1),
+                der::oid("1.3.6.1.4.1.57264.1.1").expect("policy"),
+                imprint,
+                der::unsigned_integer_bytes(&[0x02]),
+                der::tlv(der::TAG_GENERALIZED_TIME, gen_time),
+            ];
+            if accuracy {
+                parts.push(der::sequence(&[der::unsigned_integer(1)]));
+            }
+            if ordering {
+                parts.push(der::boolean(true));
+            }
+            if nonce {
+                parts.push(der::unsigned_integer(7));
+            }
+            der::sequence(&parts)
+        }
+
+        struct SignerSpec {
+            sid: Vec<u8>,
+            digest_algorithm: Vec<u8>,
+            signed_attributes: Vec<Vec<u8>>,
+            signature_algorithm: Vec<u8>,
+            signature: Vec<u8>,
+        }
+
+        fn attribute(oid: &str, value: Vec<u8>) -> Vec<u8> {
+            der::sequence(&[der::oid(oid).expect("attr oid"), der::set(&[value])])
+        }
+
+        fn default_signer() -> SignerSpec {
+            SignerSpec {
+                sid: der::sequence(&[
+                    der::sequence(&[der::tlv(0x31, &der::sequence(&[]))]), // Name (garbage shape)
+                    der::unsigned_integer_bytes(&[0x02]),
+                ]),
+                digest_algorithm: sha256_algorithm(),
+                signed_attributes: vec![
+                    attribute(
+                        OID_CONTENT_TYPE_ATTR,
+                        der::oid(OID_TST_INFO).expect("contentType"),
+                    ),
+                    attribute(
+                        OID_MESSAGE_DIGEST_ATTR,
+                        der::octet_string(&Sha256::digest(tst_info(
+                            b"20260912211944Z",
+                            false,
+                            false,
+                            true,
+                        ))),
+                    ),
+                    attribute(
+                        OID_SIGNING_CERT_V2_ATTR,
+                        ess_signing_certificate(None, Sha256::digest(cert_der()).to_vec()),
+                    ),
+                ],
+                signature_algorithm: der::algorithm_identifier("1.2.840.113549.1.1.11")
+                    .expect("sha256WithRSA"),
+                signature: der::octet_string(&[0xAA; 32]),
+            }
+        }
+
+        /// `SigningCertificateV2` attribute value; `hash_algorithm` None uses
+        /// the SHA-256 default (no algorithm element).
+        fn ess_signing_certificate(hash_algorithm: Option<Vec<u8>>, cert_hash: Vec<u8>) -> Vec<u8> {
+            let mut cert_id = Vec::new();
+            if let Some(algorithm) = hash_algorithm {
+                cert_id.extend_from_slice(&algorithm);
+            }
+            cert_id.extend_from_slice(&der::octet_string(&cert_hash));
+            der::sequence(&[der::sequence(&[der::sequence(&[cert_id])])])
+        }
+
+        fn signer_info(spec: &SignerSpec) -> Vec<u8> {
+            let mut parts = vec![
+                der::unsigned_integer(1),
+                spec.sid.clone(),
+                spec.digest_algorithm.clone(),
+            ];
+            if !spec.signed_attributes.is_empty() {
+                let mut content = Vec::new();
+                for attr in &spec.signed_attributes {
+                    content.extend_from_slice(attr);
+                }
+                parts.push(der::tlv(der::TAG_CTX_0, &content));
+            }
+            parts.push(spec.signature_algorithm.clone());
+            parts.push(spec.signature.clone());
+            der::sequence(&parts)
+        }
+
+        /// Assemble a full `TimeStampResp` (status granted) around the given
+        /// TSTInfo and signer specs.
+        fn response(tst: &[u8], signers: &[SignerSpec], certs: bool, crls: bool) -> Vec<u8> {
+            let encap = der::sequence(&[
+                der::oid(OID_TST_INFO).expect("tstInfo oid"),
+                der::tlv(der::TAG_CTX_0, &der::octet_string(tst)),
+            ]);
+            let mut parts = vec![
+                der::unsigned_integer(1),
+                der::set(&[sha256_algorithm()]),
+                encap,
+            ];
+            if certs {
+                parts.push(der::tlv(der::TAG_CTX_0, &cert_der()));
+            }
+            if crls {
+                parts.push(der::tlv(der::TAG_CTX_1, &[]));
+            }
+            parts.push(der::set(
+                &signers.iter().map(signer_info).collect::<Vec<_>>(),
+            ));
+            let signed_data = der::sequence(&parts);
+            let token = der::sequence(&[
+                der::oid(OID_SIGNED_DATA).expect("signedData oid"),
+                der::tlv(der::TAG_CTX_0, &signed_data),
+            ]);
+            der::sequence(&[der::sequence(&[der::unsigned_integer(0)]), token])
+        }
+
+        fn verify(bytes: &[u8]) -> Result<TimeStampEvidence, TimeStampError> {
+            verify_response(bytes, &request(DOCUMENT))
+        }
+
+        fn outcome<'a>(evidence: &'a TimeStampEvidence, check: &str) -> &'a CheckOutcome {
+            &evidence
+                .checks
+                .iter()
+                .find(|verdict| verdict.check == check)
+                .unwrap_or_else(|| panic!("missing check {check}"))
+                .outcome
+        }
+
+        #[test]
+        fn zz_debug_synthetic_response_parses() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let signer = default_signer();
+            let bytes = response(&tst, &[signer], true, false);
+            let (status, token) = parse_response(&bytes).expect("parse_response");
+            assert_eq!(status.status, 0);
+            let token = token.expect("token present");
+            let parsed = parse_token(token).expect("parse_token");
+            assert_eq!(parsed.tst.nonce, Some(7));
+            assert_eq!(parsed.certificates.len(), 1);
+            assert_eq!(parsed.signer_infos.len(), 1);
+        }
+
+        // ── status classification and rendering ──────────────────────────
+
+        #[test]
+        fn rejection_status_names_and_renders_every_status() {
+            // Status 0 (granted) with no token is MalformedResponse by
+            // contract (verify_response rejects non-granted statuses FIRST);
+            // the loop covers every rejection/waiting status.
+            for (status, expected) in [
+                (1u64, "grantedWithMods"),
+                (2, "rejection"),
+                (3, "waiting"),
+                (4, "revocationWarning"),
+                (5, "revocationNotification"),
+                (6, "unknown"),
+                (99, "unknown"),
+            ] {
+                let body = der::sequence(&[der::sequence(&[der::unsigned_integer(status)])]);
+                let error = verify(&body).expect_err("non-granted must be rejected");
+                match error {
+                    TimeStampError::Rejected {
+                        status: observed,
+                        status_name,
+                        ..
+                    } => {
+                        assert_eq!(observed, status);
+                        assert_eq!(status_name, expected);
+                    }
+                    other => panic!("expected Rejected, got {other:?}"),
+                }
+            }
+
+            // A rejection with status strings AND fail info renders both into
+            // the message; one with neither renders bare.
+            let with_strings = der::sequence(&[der::sequence(&[
+                der::unsigned_integer(2),
+                der::sequence(&[der::tlv(der::TAG_UTF8_STRING, b"busy")]),
+                der::tlv(der::TAG_BIT_STRING, &[0x00, 0b0010_0000]),
+            ])]);
+            let message = verify(&with_strings).expect_err("rejection").to_string();
+            assert!(message.contains("busy"), "{message}");
+            assert!(message.contains("badRequest"), "{message}");
+            let bare = der::sequence(&[der::sequence(&[der::unsigned_integer(2)])]);
+            let message = verify(&bare).expect_err("rejection").to_string();
+            assert!(
+                message.contains("status 2 (rejection)") && !message.contains('\u{2014}'),
+                "{message}"
+            );
+        }
+
+        #[test]
+        fn granted_response_without_a_token_is_malformed() {
+            let body = der::sequence(&[der::sequence(&[der::unsigned_integer(0)])]);
+            let error = verify(&body).expect_err("granted status must carry a token");
+            match error {
+                TimeStampError::MalformedResponse(message) => {
+                    assert!(message.contains("no timeStampToken"), "{message}")
+                }
+                other => panic!("expected MalformedResponse, got {other:?}"),
+            }
+        }
+
+        // ── TSTInfo optional fields ──────────────────────────────────────
+
+        #[test]
+        fn tst_info_ordering_accuracy_and_nonce_all_parse() {
+            let tst = tst_info(b"20260912211944Z", true, true, true);
+            let signer = SignerSpec {
+                signed_attributes: vec![
+                    attribute(
+                        OID_CONTENT_TYPE_ATTR,
+                        der::oid(OID_TST_INFO).expect("contentType"),
+                    ),
+                    attribute(
+                        OID_MESSAGE_DIGEST_ATTR,
+                        der::octet_string(&Sha256::digest(&tst)),
+                    ),
+                ],
+                ..default_signer()
+            };
+            let evidence =
+                verify(&response(&tst, &[signer], true, false)).expect("optional fields parse");
+            assert!(evidence.ordering, "ordering BOOLEAN observed");
+            assert_eq!(evidence.accuracy_seconds, Some(1));
+            // The nonce field was present and matched the request.
+            assert_eq!(
+                outcome(&evidence, "nonce_matches_request"),
+                &CheckOutcome::Pass
+            );
+        }
+
+        #[test]
+        fn unparsable_gen_time_fails_only_the_time_checks() {
+            let tst = tst_info(b"99999999999999Z", false, false, true);
+            let signer = default_signer();
+            let evidence = verify(&response(&tst, &[signer], true, false))
+                .expect("token parses; genTime failure is a named check");
+            assert!(outcome(&evidence, "gen_time_parses").is_fail());
+            assert!(outcome(&evidence, "gen_time_within_tolerance").is_not_performed());
+            assert_eq!(evidence.gen_time_rfc3339, None);
+            assert_eq!(evidence.gen_time_unix, None);
+            assert_eq!(evidence.gen_time_raw, "99999999999999Z");
+            assert_eq!(
+                outcome(&evidence, "imprint_matches_document"),
+                &CheckOutcome::Pass
+            );
+        }
+
+        // ── certificate and signer structure ────────────────────────────
+
+        #[test]
+        fn token_without_certificates_fails_the_certificate_check() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let signer = default_signer();
+            let evidence = verify(&response(&tst, &[signer], false, false))
+                .expect("token without a certificate set parses");
+            let failed = outcome(&evidence, "signer_certificate_parses");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("carries no certificates"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+            assert!(evidence.signer_certificate.is_none());
+            assert!(outcome(&evidence, "token_signature_valid").is_not_performed());
+            assert!(outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate"
+            )
+            .is_not_performed());
+        }
+
+        #[test]
+        fn token_with_crls_parses_and_a_missing_signer_fails_closed() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            // CRL set present, empty SignerInfo set.
+            let evidence = verify(&response(&tst, &[], true, true))
+                .expect("token without SignerInfos still produces evidence");
+            assert!(outcome(&evidence, "signed_attrs_content_type").is_fail());
+            assert!(
+                outcome(&evidence, "signed_attrs_message_digest_matches_econtent")
+                    .is_not_performed()
+            );
+            assert!(outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate"
+            )
+            .is_not_performed());
+            assert!(outcome(&evidence, "signer_id_matches_certificate").is_not_performed());
+            assert!(outcome(&evidence, "token_signature_valid").is_not_performed());
+            assert!(!evidence.all_passed());
+        }
+
+        // ── signed attributes ────────────────────────────────────────────
+
+        #[test]
+        fn content_type_attribute_is_checked_for_value_and_identity() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            // Wrong OID: signed contentType names something else.
+            let mut signer = default_signer();
+            signer.signed_attributes[0] = attribute(
+                OID_CONTENT_TYPE_ATTR,
+                der::oid("1.2.840.113549.1.9.16.1.99").expect("other oid"),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false))
+                .expect("parses; wrong contentType is a named check");
+            let failed = outcome(&evidence, "signed_attrs_content_type");
+            match failed {
+                CheckOutcome::Fail { detail } => assert!(detail.contains("expected"), "{detail}"),
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Wrong value type: an INTEGER where an OID must be.
+            let mut signer = default_signer();
+            signer.signed_attributes[0] =
+                attribute(OID_CONTENT_TYPE_ATTR, der::unsigned_integer(1));
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(&evidence, "signed_attrs_content_type");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("unexpected value type"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Undecodable OID bytes.
+            let mut signer = default_signer();
+            signer.signed_attributes[0] = attribute(
+                OID_CONTENT_TYPE_ATTR,
+                der::tlv(der::TAG_OID, &[0x2A, 0x88]), // trailing continuation
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            assert!(outcome(&evidence, "signed_attrs_content_type").is_fail());
+
+            // Missing entirely.
+            let mut signer = default_signer();
+            signer.signed_attributes.remove(0);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(&evidence, "signed_attrs_content_type");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no contentType"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn message_digest_attribute_type_and_presence_are_checked() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let mut signer = default_signer();
+            signer.signed_attributes[1] =
+                attribute(OID_MESSAGE_DIGEST_ATTR, der::unsigned_integer(1));
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(&evidence, "signed_attrs_message_digest_matches_econtent");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("unexpected value type"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            let mut signer = default_signer();
+            signer.signed_attributes.remove(1);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            assert!(
+                outcome(&evidence, "signed_attrs_message_digest_matches_econtent")
+                    .is_not_performed()
+            );
+        }
+
+        #[test]
+        fn message_digest_mismatch_names_the_two_digests() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let mut signer = default_signer();
+            signer.signed_attributes[1] = attribute(
+                OID_MESSAGE_DIGEST_ATTR,
+                der::octet_string(&Sha256::digest(b"other content")),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(&evidence, "signed_attrs_message_digest_matches_econtent");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("does not equal"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        // ── ESS signing certificate ──────────────────────────────────────
+
+        #[test]
+        fn ess_hash_algorithm_element_is_honoured_when_present() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            // SHA-512 algorithm element with the matching digest: passes.
+            let mut signer = default_signer();
+            signer.signed_attributes[2] = attribute(
+                OID_SIGNING_CERT_V2_ATTR,
+                ess_signing_certificate(
+                    Some(sha512_algorithm_identifier()),
+                    Sha512::digest(cert_der()).to_vec(),
+                ),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            assert_eq!(
+                outcome(
+                    &evidence,
+                    "ess_signing_certificate_hash_matches_certificate"
+                ),
+                &CheckOutcome::Pass,
+                "{:?}",
+                evidence.failing_checks()
+            );
+
+            // Same algorithm, wrong hash: fails naming both values.
+            let mut signer = default_signer();
+            signer.signed_attributes[2] = attribute(
+                OID_SIGNING_CERT_V2_ATTR,
+                ess_signing_certificate(
+                    Some(sha512_algorithm_identifier()),
+                    Sha512::digest(b"other").to_vec(),
+                ),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate",
+            );
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("does not equal"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // SHA-384 is an accepted digest for ESS hashing.
+            let mut signer = default_signer();
+            signer.signed_attributes[2] = attribute(
+                OID_SIGNING_CERT_V2_ATTR,
+                ess_signing_certificate(
+                    Some(der::algorithm_identifier(OID_SHA384).expect("sha384")),
+                    sha384_of(&cert_der()),
+                ),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            assert_eq!(
+                outcome(
+                    &evidence,
+                    "ess_signing_certificate_hash_matches_certificate"
+                ),
+                &CheckOutcome::Pass
+            );
+        }
+
+        fn sha512_algorithm_identifier() -> Vec<u8> {
+            der::algorithm_identifier(OID_SHA512).expect("sha512 algorithm")
+        }
+
+        fn sha384_of(data: &[u8]) -> Vec<u8> {
+            use sha2::Digest;
+            sha2::Sha384::digest(data).to_vec()
+        }
+
+        #[test]
+        fn ess_unsupported_hash_and_malformed_values_are_reported() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            // SHA-1 hash algorithm: recognised name, refused for hashing.
+            let mut signer = default_signer();
+            signer.signed_attributes[2] = attribute(
+                OID_SIGNING_CERT_V2_ATTR,
+                ess_signing_certificate(
+                    Some(der::algorithm_identifier("1.3.14.3.2.26").expect("sha1")),
+                    vec![0x00; 20],
+                ),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate",
+            );
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("not supported for hashing"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+
+            // Malformed ESS value (no certs sequence inside).
+            let mut signer = default_signer();
+            signer.signed_attributes[2] = attribute(
+                OID_SIGNING_CERT_V2_ATTR,
+                der::sequence(&[der::unsigned_integer(1)]),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate",
+            );
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no certs sequence"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // certHash element is not an OCTET STRING (algorithm absent).
+            let mut signer = default_signer();
+            signer.signed_attributes[2] = attribute(
+                OID_SIGNING_CERT_V2_ATTR,
+                der::sequence(&[der::sequence(&[der::sequence(&[der::unsigned_integer(1)])])]),
+            );
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate",
+            );
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("not an OCTET STRING"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // No ESS attribute at all.
+            let mut signer = default_signer();
+            signer.signed_attributes.truncate(2);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            assert!(outcome(
+                &evidence,
+                "ess_signing_certificate_hash_matches_certificate"
+            )
+            .is_not_performed());
+        }
+
+        // ── signer identifier ────────────────────────────────────────────
+
+        #[test]
+        fn subject_key_identifier_and_unknown_signer_ids_are_not_performed() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let mut signer = default_signer();
+            signer.sid = der::tlv(der::TAG_CTX_0, &[0x04, 0x01, 0x02]);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(&evidence, "signer_id_matches_certificate");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("subjectKeyIdentifier"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+
+            let mut signer = default_signer();
+            signer.sid = der::unsigned_integer(1);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(&evidence, "signer_id_matches_certificate");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("unrecognised"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn signer_id_mismatch_and_unparsable_issuer_are_reported() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            // IssuerAndSerial with a serial that does NOT match the cert.
+            let mut signer = default_signer();
+            signer.sid = der::sequence(&[
+                der::sequence(&[]), // empty Name: parses, no remaining
+                der::unsigned_integer_bytes(&[0x99]),
+            ]);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let failed = outcome(&evidence, "signer_id_matches_certificate");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("serial match: false"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Issuer Name that does not re-parse: comparison not performed.
+            let mut signer = default_signer();
+            // An OCTET STRING where the issuer Name belongs: x509's Name
+            // parser refuses it outright (a SEQUENCE-shaped sid still parses
+            // as an RDN sequence and merely compares unequal).
+            signer.sid = der::sequence(&[
+                der::octet_string(b"not a name"),
+                der::unsigned_integer_bytes(&cert_serial()),
+            ]);
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(&evidence, "signer_id_matches_certificate");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("could not be re-parsed"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+        }
+
+        fn cert_serial() -> Vec<u8> {
+            x509_parser::prelude::X509Certificate::from_der(&cert_der())
+                .expect("cert")
+                .1
+                .raw_serial()
+                .to_vec()
+        }
+
+        // ── signature algorithm classification ───────────────────────────
+
+        #[test]
+        fn pss_and_unmappable_rsa_digests_are_reported_unsupported() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let mut signer = default_signer();
+            signer.signature_algorithm =
+                der::algorithm_identifier(OID_RSASSA_PSS).expect("PSS algorithm");
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(&evidence, "token_signature_valid");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("RSASSA-PSS"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+
+            // rsaEncryption with a SHA-1 digest has no PKCS#1 mapping here.
+            let mut signer = default_signer();
+            signer.signature_algorithm =
+                der::algorithm_identifier(OID_RSA_ENCRYPTION).expect("rsaEncryption");
+            signer.digest_algorithm = der::algorithm_identifier("1.3.14.3.2.26").expect("sha1");
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(&evidence, "token_signature_valid");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(
+                        reason.contains("no supported PKCS#1 v1.5 mapping"),
+                        "{reason}"
+                    )
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn algorithm_identifier_with_inner_trailing_bytes_is_refused() {
+            // SEQUENCE { OID sha256WithRSA, NULL, NULL } — the third element
+            // is left unconsumed by AlgorithmIdentifier::from_der.
+            let raw = der::sequence(&[
+                der::oid("1.2.840.113549.1.1.11").expect("oid"),
+                der::null(),
+                der::null(),
+            ]);
+            let (remaining, _algorithm) = x509_parser::prelude::AlgorithmIdentifier::from_der(&raw)
+                .expect("parses the first two elements");
+            if remaining.is_empty() {
+                // x509-parser consumes trailing elements; the guard in
+                // verify_token_signature then has nothing to fire on and the
+                // check is dead — this test pins that knowledge.
+                return;
+            }
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let mut signer = default_signer();
+            signer.signature_algorithm = raw;
+            let evidence = verify(&response(&tst, &[signer], true, false)).expect("parses");
+            let skipped = outcome(&evidence, "token_signature_valid");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("trailing bytes"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn verification_algorithm_builder_rejects_impossible_arcs() {
+            let error = super::super::verification_algorithm_from_arcs(&[7, 1])
+                .expect_err("first arc >= 7");
+            assert!(error.contains("could not encode"), "{error}");
+            let error = super::super::verification_algorithm_from_arcs(&[1, 40])
+                .expect_err("second arc >= 40 under 1.x");
+            assert!(error.contains("could not encode"), "{error}");
+            let ok = super::super::verification_algorithm_from_arcs(&[1, 2, 840, 113549, 1, 1, 11])
+                .expect("sha256WithRSA arcs are valid");
+            assert_eq!(
+                ok.algorithm.to_string(),
+                "1.2.840.113549.1.1.11",
+                "the constructed identifier names the mapped algorithm"
+            );
+        }
+
+        // ── request / status parsing edges ───────────────────────────────
+
+        #[test]
+        fn parse_request_refuses_hostile_imprints_and_trailing_elements() {
+            // Imprint OCTET STRING replaced by a BOOLEAN.
+            let hostile = der::sequence(&[
+                der::unsigned_integer(1),
+                der::sequence(&[sha256_algorithm(), der::boolean(true)]),
+                der::unsigned_integer(7),
+            ]);
+            assert!(parse_request(&hostile).is_err());
+
+            // Trailing element inside the MessageImprint sequence.
+            let hostile = der::sequence(&[
+                der::unsigned_integer(1),
+                der::sequence(&[
+                    sha256_algorithm(),
+                    der::octet_string(&[0u8; 32]),
+                    der::null(),
+                ]),
+                der::unsigned_integer(7),
+            ]);
+            assert!(parse_request(&hostile).is_err());
+
+            // Same shape inside a TSTInfo imprint.
+            let hostile = der::sequence(&[
+                der::oid("1.3.6.1.4.1.57264.1.1").expect("policy"),
+                der::sequence(&[
+                    sha256_algorithm(),
+                    der::octet_string(&[0u8; 32]),
+                    der::null(),
+                ]),
+                der::unsigned_integer_bytes(&[0x02]),
+                der::tlv(der::TAG_GENERALIZED_TIME, b"20260912211944Z"),
+            ]);
+            let wrapped = der::tlv(der::TAG_CTX_0, &der::octet_string(&hostile));
+            let encap = der::sequence(&[der::oid(OID_TST_INFO).expect("tstInfo"), wrapped]);
+            let signed_data = der::sequence(&[
+                der::unsigned_integer(1),
+                der::set(&[sha256_algorithm()]),
+                encap,
+                der::tlv(der::TAG_CTX_0, &cert_der()),
+                der::set(&[signer_info(&default_signer())]),
+            ]);
+            let token = der::sequence(&[
+                der::oid(OID_SIGNED_DATA).expect("signedData"),
+                der::tlv(der::TAG_CTX_0, &signed_data),
+            ]);
+            let body = der::sequence(&[der::sequence(&[der::unsigned_integer(0)]), token]);
+            assert!(
+                matches!(verify(&body), Err(TimeStampError::MalformedDer(_))),
+                "trailing imprint element must be a DER refusal"
+            );
+        }
+
+        #[test]
+        fn status_strings_skip_non_utf8_elements_and_foreign_content_type_is_refused() {
+            // statusString carrying a non-UTF8String element is skipped
+            // without failing the response.
+            let with_printable = der::sequence(&[der::sequence(&[
+                der::unsigned_integer(2),
+                der::sequence(&[
+                    der::tlv(der::TAG_UTF8_STRING, b"hello"),
+                    der::tlv(0x13, b"printable"), // PrintableString element
+                ]),
+                der::tlv(der::TAG_BIT_STRING, &[0x00, 0x80]),
+            ])]);
+            let error = verify(&with_printable).expect_err("rejection");
+            match error {
+                TimeStampError::Rejected {
+                    status_string,
+                    fail_info,
+                    ..
+                } => {
+                    assert_eq!(status_string, vec!["hello".to_string()]);
+                    assert_eq!(fail_info, vec!["badAlg".to_string()]);
+                }
+                other => panic!("expected Rejected, got {other:?}"),
+            }
+
+            // A token whose ContentInfo names something other than
+            // signedData is refused as malformed.
+            let wrong_content = der::sequence(&[
+                der::oid("1.2.840.113549.1.7.1").expect("data oid"),
+                der::tlv(der::TAG_CTX_0, &der::octet_string(&[])),
+            ]);
+            let body = der::sequence(&[der::sequence(&[der::unsigned_integer(0)]), wrong_content]);
+            let error = verify(&body).expect_err("foreign contentType");
+            match error {
+                TimeStampError::MalformedResponse(message) => {
+                    assert!(message.contains("expected signedData"), "{message}")
+                }
+                other => panic!("expected MalformedResponse, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn hash_algorithm_names_and_digests_are_complete() {
+            assert_eq!(HashAlgorithm::Sha256.name(), "sha256");
+            assert_eq!(HashAlgorithm::Sha512.name(), "sha512");
+            assert_eq!(HashAlgorithm::Sha256.oid(), OID_SHA256);
+            assert_eq!(HashAlgorithm::Sha512.oid(), OID_SHA512);
+            assert_eq!(
+                hash_algorithm_from_oid(OID_SHA384),
+                None,
+                "SHA-384 is token-internal only and not requestable"
+            );
+            assert_eq!(hash_algorithm_from_oid("1.1.1.1"), None);
+            assert_eq!(HashAlgorithm::Sha512.digest(DOCUMENT).len(), 64);
+        }
+
+        #[test]
+        fn evidence_fields_expose_what_was_parsed() {
+            let tst = tst_info(b"20260912211944Z", false, false, true);
+            let evidence =
+                verify(&response(&tst, &[default_signer()], true, false)).expect("parses");
+            assert_eq!(evidence.tst_info_version, 1);
+            assert_eq!(evidence.serial_number_hex, "02");
+            assert_eq!(evidence.policy_oid, "1.3.6.1.4.1.57264.1.1");
+            let certificate = evidence.signer_certificate.as_ref().expect("cert");
+            assert!(certificate.not_before.contains("2026"));
+            // The signature value is synthetic: it must NOT verify.
+            let failed = outcome(&evidence, "token_signature_valid");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("did not verify"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        // ── configuration builders ───────────────────────────────────────
+
+        #[test]
+        fn config_builders_override_every_field_and_describe_themselves() {
+            let config = TsaConfig::new("https://tsa.example.test/rfc3161")
+                .expect("valid")
+                .with_tolerance_secs(60)
+                .with_timeout_secs(9)
+                .with_max_response_bytes(4096)
+                .with_auth_header("Authorization", "Bearer secret");
+            assert_eq!(config.tolerance_secs, 60);
+            assert_eq!(config.timeout_secs, 9);
+            assert_eq!(config.max_response_bytes, 4096);
+            let auth = config.auth_header.as_ref().expect("auth");
+            assert_eq!(auth.name, "Authorization");
+            assert_eq!(auth.value, "Bearer secret");
+            let described = config.describe();
+            assert!(described.contains("tolerance 60s"), "{described}");
+            assert!(described.contains("auth configured"), "{described}");
+            assert!(!described.contains("secret"), "{described}");
+            // The verification request inherits tolerance and URL.
+            let request = config.verification_request(DOCUMENT, 5, HashAlgorithm::Sha256, now());
+            assert_eq!(request.tolerance_secs, 60);
+            assert_eq!(request.tsa_url, Some("https://tsa.example.test/rfc3161"));
+        }
+
+        // ── environment matrix (serialized: env is process-global) ───────
+
+        /// Serializes env-mutating tests in this module.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        fn with_env<T>(
+            vars: &[(&str, Option<&str>)],
+            run: impl FnOnce() -> Result<Option<T>, TimeStampError>,
+        ) -> Result<Option<T>, TimeStampError> {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+            let saved: Vec<(String, Option<String>)> = vars
+                .iter()
+                .map(|(name, _)| ((*name).to_string(), std::env::var(name).ok()))
+                .collect();
+            for (name, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            let result = run();
+            for (name, value) in &saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            result
+        }
+
+        #[test]
+        fn from_env_reads_every_variable_and_its_failure_modes() {
+            // Unset URL: unconfigured.
+            let config =
+                with_env(&[(ENV_TSA_URL, None)], TsaConfig::from_env).expect("unconfigured");
+            assert!(config.is_none());
+
+            // Well-formed everything.
+            let config = with_env(
+                &[
+                    (ENV_TSA_URL, Some("https://tsa.example.test/rfc3161")),
+                    (ENV_TSA_AUTH_HEADER, Some("Authorization: Bearer x")),
+                    (ENV_TSA_TOLERANCE_SECS, Some("90")),
+                    (ENV_TSA_TIMEOUT_SECS, Some("8")),
+                    (ENV_TSA_MAX_RESPONSE_BYTES, Some("2048")),
+                ],
+                TsaConfig::from_env,
+            )
+            .expect("valid environment")
+            .expect("configured");
+            assert_eq!(config.tolerance_secs, 90);
+            assert_eq!(config.timeout_secs, 8);
+            assert_eq!(config.max_response_bytes, 2048);
+            let auth = config.auth_header.expect("auth");
+            assert_eq!(auth.name, "Authorization");
+            assert_eq!(auth.value, "Bearer x");
+
+            // Auth header without a colon.
+            let error = with_env(
+                &[
+                    (ENV_TSA_URL, Some("https://tsa.example.test/")),
+                    (ENV_TSA_AUTH_HEADER, Some("no-colon-here")),
+                ],
+                TsaConfig::from_env,
+            )
+            .expect_err("malformed auth header");
+            match error {
+                TimeStampError::InvalidConfig(message) => {
+                    assert!(message.contains("'Name: Value'"), "{message}")
+                }
+                other => panic!("expected InvalidConfig, got {other:?}"),
+            }
+
+            // Empty name or value side.
+            let error = with_env(
+                &[
+                    (ENV_TSA_URL, Some("https://tsa.example.test/")),
+                    (ENV_TSA_AUTH_HEADER, Some("   : value")),
+                ],
+                TsaConfig::from_env,
+            )
+            .expect_err("empty auth name");
+            assert!(matches!(error, TimeStampError::InvalidConfig(_)));
+
+            // Non-positive tolerance / timeout / size.
+            for (name, value) in [
+                (ENV_TSA_TOLERANCE_SECS, "0"),
+                (ENV_TSA_TOLERANCE_SECS, "-5"),
+                (ENV_TSA_TIMEOUT_SECS, "0"),
+                (ENV_TSA_MAX_RESPONSE_BYTES, "0"),
+            ] {
+                let error = with_env(
+                    &[
+                        (ENV_TSA_URL, Some("https://tsa.example.test/")),
+                        (name, Some(value)),
+                    ],
+                    TsaConfig::from_env,
+                )
+                .expect_err("bad numeric override");
+                match error {
+                    TimeStampError::InvalidConfig(message) => {
+                        assert!(message.contains(name), "{name}={value}: {message}")
+                    }
+                    other => panic!("{name}={value}: expected InvalidConfig, got {other:?}"),
+                }
+            }
+
+            // Unparseable numbers fall back to the defaults (no error).
+            let config = with_env(
+                &[
+                    (ENV_TSA_URL, Some("https://tsa.example.test/")),
+                    (ENV_TSA_TOLERANCE_SECS, Some("soon")),
+                ],
+                TsaConfig::from_env,
+            )
+            .expect("garbage numbers are ignored")
+            .expect("configured");
+            assert_eq!(config.tolerance_secs, DEFAULT_TOLERANCE_SECS);
+        }
+
+        #[test]
+        fn client_from_env_builds_or_reports_unconfigured() {
+            let client = with_env(
+                &[
+                    (ENV_TSA_URL, Some("https://tsa.example.test/rfc3161")),
+                    (ENV_TSA_TIMEOUT_SECS, Some("5")),
+                ],
+                TimeStampClient::from_env,
+            )
+            .expect("valid env")
+            .expect("client");
+            assert_eq!(client.config().url, "https://tsa.example.test/rfc3161");
+            assert_eq!(client.config().timeout_secs, 5);
+
+            let none = with_env(&[(ENV_TSA_URL, None)], TimeStampClient::from_env)
+                .expect("unconfigured is not an error");
+            assert!(none.is_none());
+
+            let outcome = with_env(
+                &[(ENV_TSA_URL, Some("ftp://tsa.example.test/"))],
+                TimeStampClient::from_env,
+            );
+            match outcome {
+                Err(TimeStampError::InvalidConfig(_)) => {}
+                Err(other) => panic!("expected InvalidConfig, got {other:?}"),
+                Ok(_) => panic!("ftp scheme must not build a client"),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2820,7 +3887,6 @@ pub mod timestamp {
 /// ASiC-E / BDOC (ETSI EN 319 162) container verification over unpacked
 /// members. See the module docs for proven / not-proven properties.
 pub mod container {
-    use super::der;
     use super::{
         all_passed, has_failures, strictly_passed, CertificateSummary, CheckVerdict,
         EVIDENCE_SCHEMA_VERSION,
@@ -3500,15 +4566,12 @@ pub mod container {
             .map(|node| node.text.trim().to_string())
             .unwrap_or_default();
         let signature_value_bytes = decode_base64_text(&signature_value);
+        // `decode_base64_text` never returns an empty Ok (an empty value is
+        // an Err), so a decoded SignatureValue always carries bytes.
         match &signature_value_bytes {
-            Ok(bytes) if !bytes.is_empty() => {
+            Ok(_) => {
                 checks.push(CheckVerdict::pass("signature_value_decodes", true));
             }
-            Ok(_) => checks.push(CheckVerdict::fail(
-                "signature_value_decodes",
-                true,
-                "SignatureValue is empty".to_string(),
-            )),
             Err(error) => checks.push(CheckVerdict::fail(
                 "signature_value_decodes",
                 true,
@@ -3548,15 +4611,20 @@ pub mod container {
                 true,
                 "SignatureValue did not decode".to_string(),
             )),
-            (_, None, _) => checks.push(CheckVerdict::not_performed(
-                "signature_value_over_raw_signed_info",
-                true,
-                "no parseable signing certificate, so no public key is available".to_string(),
-            )),
+            // A structurally-missing SignatureMethod is judged BEFORE the
+            // certificate gate: the malformation of the signature element is
+            // the more informative verdict, and masking it behind
+            // NotPerformed would let a malformed signature read as "merely
+            // unverifiable".
             (_, _, None) => checks.push(CheckVerdict::fail(
                 "signature_value_over_raw_signed_info",
                 true,
                 "SignedInfo has no SignatureMethod".to_string(),
+            )),
+            (_, None, _) => checks.push(CheckVerdict::not_performed(
+                "signature_value_over_raw_signed_info",
+                true,
+                "no parseable signing certificate, so no public key is available".to_string(),
             )),
         }
 
@@ -3619,16 +4687,15 @@ pub mod container {
         Invalid(String),
     }
 
-    fn xmldsig_algorithm_oid(uri: &str) -> Option<(&'static str, bool)> {
-        // (OID, parameters-present)
+    fn xmldsig_algorithm_arcs(uri: &str) -> Option<&'static [u64]> {
         match uri {
-            URI_RSA_SHA256 => Some(("1.2.840.113549.1.1.11", true)),
-            URI_RSA_SHA384 => Some(("1.2.840.113549.1.1.12", true)),
-            URI_RSA_SHA512 => Some(("1.2.840.113549.1.1.13", true)),
-            URI_RSA_SHA1 => Some(("1.2.840.113549.1.1.5", true)),
-            URI_ECDSA_SHA256 => Some(("1.2.840.10045.4.3.2", false)),
-            URI_ECDSA_SHA384 => Some(("1.2.840.10045.4.3.3", false)),
-            URI_ED25519 => Some(("1.3.101.112", false)),
+            URI_RSA_SHA256 => Some(&[1, 2, 840, 113549, 1, 1, 11]),
+            URI_RSA_SHA384 => Some(&[1, 2, 840, 113549, 1, 1, 12]),
+            URI_RSA_SHA512 => Some(&[1, 2, 840, 113549, 1, 1, 13]),
+            URI_RSA_SHA1 => Some(&[1, 2, 840, 113549, 1, 1, 5]),
+            URI_ECDSA_SHA256 => Some(&[1, 2, 840, 10045, 4, 3, 2]),
+            URI_ECDSA_SHA384 => Some(&[1, 2, 840, 10045, 4, 3, 3]),
+            URI_ED25519 => Some(&[1, 3, 101, 112]),
             _ => None,
         }
     }
@@ -3639,25 +4706,13 @@ pub mod container {
         signature_value: &[u8],
         certificate: &x509_parser::prelude::X509Certificate<'_>,
     ) -> Result<(), SignatureFailure> {
-        use x509_parser::prelude::{AlgorithmIdentifier, FromDer};
-        let (oid, with_parameters) = xmldsig_algorithm_oid(method_uri).ok_or_else(|| {
+        let arcs = xmldsig_algorithm_arcs(method_uri).ok_or_else(|| {
             SignatureFailure::Unsupported(format!("signature method {method_uri} is not supported"))
         })?;
-        let algorithm_der = if with_parameters {
-            der::algorithm_identifier(oid)
-        } else {
-            der::algorithm_identifier_without_parameters(oid)
-        }
-        .map_err(|error| {
-            SignatureFailure::Invalid(format!("could not encode algorithm: {error}"))
-        })?;
-        let (remaining, algorithm) = AlgorithmIdentifier::from_der(&algorithm_der)
-            .map_err(|error| SignatureFailure::Invalid(format!("algorithm identifier: {error}")))?;
-        if !remaining.is_empty() {
-            return Err(SignatureFailure::Invalid(
-                "algorithm identifier has trailing bytes".to_string(),
-            ));
-        }
+        // verify_signature reads only the algorithm OID, so the identifier is
+        // built directly from the ARCs (see verification_algorithm_from_arcs).
+        let algorithm =
+            super::verification_algorithm_from_arcs(arcs).map_err(SignatureFailure::Unsupported)?;
         let signature = x509_parser::der_parser::asn1_rs::BitString::new(0, signature_value);
         match x509_parser::verify::verify_signature(
             certificate.public_key(),
@@ -3668,7 +4723,7 @@ pub mod container {
             Ok(()) => Ok(()),
             Err(x509_parser::prelude::X509Error::SignatureUnsupportedAlgorithm) => {
                 Err(SignatureFailure::Unsupported(format!(
-                    "signature method {method_uri} maps to {oid}, which the available verification backend does not support"
+                    "signature method {method_uri} maps to an algorithm the available verification backend does not support"
                 )))
             }
             Err(error) => Err(SignatureFailure::Invalid(format!(
@@ -3971,5 +5026,1024 @@ pub mod container {
             attributes.push((key, value));
         }
         Ok(attributes)
+    }
+
+    /// Adversarial unit tests for the module-private container arms. The
+    /// valid-container round trip lives in tests/signing_tests.rs; here every
+    /// refusal and degradation path is driven directly.
+    #[cfg(test)]
+    mod container_tests {
+        use super::super::CheckOutcome;
+        use super::*;
+
+        const DOC: &[u8] = b"container unit document";
+
+        fn members(signatures_xml: &str) -> Vec<ContainerMember> {
+            vec![
+                ContainerMember::new("mimetype", ASIC_E_MIMETYPE.as_bytes().to_vec()),
+                ContainerMember::new(
+                    "META-INF/signatures.xml",
+                    signatures_xml.as_bytes().to_vec(),
+                ),
+                ContainerMember::new("document.txt", DOC.to_vec()),
+            ]
+        }
+
+        fn container_check<'a>(evidence: &'a AsicEvidence, id: &str) -> &'a CheckOutcome {
+            &evidence
+                .container_checks
+                .iter()
+                .find(|check| check.check == id)
+                .unwrap_or_else(|| panic!("missing container check {id}"))
+                .outcome
+        }
+
+        fn signature_check<'a>(evidence: &'a AsicEvidence, id: &str) -> &'a CheckOutcome {
+            &evidence.signatures[0]
+                .checks
+                .iter()
+                .find(|check| check.check == id)
+                .unwrap_or_else(|| panic!("missing signature check {id}"))
+                .outcome
+        }
+
+        fn doc_digest_b64() -> String {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(Sha256::digest(DOC))
+        }
+
+        /// A minimal, valid-shaped signature XML over document.txt.
+        fn signature_xml(reference_uri: &str, digest_b64: &str) -> String {
+            format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="sig-1">
+  <ds:SignedInfo Id="si-1">
+    <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+    <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+    <ds:Reference URI="{reference_uri}">
+      <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+      <ds:DigestValue>{digest_b64}</ds:DigestValue>
+    </ds:Reference>
+  </ds:SignedInfo>
+  <ds:SignatureValue>AAAA</ds:SignatureValue>
+</ds:Signature>"#
+            )
+        }
+
+        #[test]
+        fn duplicate_mimetype_members_fail_the_presence_check() {
+            let mut extra = members(&signature_xml("document.txt", &doc_digest_b64()));
+            extra.push(ContainerMember::new(
+                "mimetype",
+                ASIC_E_MIMETYPE.as_bytes().to_vec(),
+            ));
+            let evidence = verify_asic_e(&extra);
+            let failed = container_check(&evidence, "mimetype_member_present");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("2 'mimetype' members"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn too_many_signature_files_fail_the_presence_check() {
+            let mut many = vec![
+                ContainerMember::new("mimetype", ASIC_E_MIMETYPE.as_bytes().to_vec()),
+                ContainerMember::new("document.txt", DOC.to_vec()),
+            ];
+            for index in 0..=MAX_SIGNATURE_FILES {
+                many.push(ContainerMember::new(
+                    format!("META-INF/signatures{index}.xml"),
+                    signature_xml("document.txt", &doc_digest_b64()).into_bytes(),
+                ));
+            }
+            let evidence = verify_asic_e(&many);
+            let failed = container_check(&evidence, "signature_file_present");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("more than the supported"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn oversized_and_non_utf8_signature_files_fail_their_own_checks() {
+            let mut oversized = members("");
+            oversized[1] = ContainerMember::new(
+                "META-INF/signatures.xml",
+                vec![b'x'; MAX_SIGNATURES_XML_BYTES + 1],
+            );
+            let evidence = verify_asic_e(&oversized);
+            let failed = container_check(
+                &evidence,
+                "signatures_xml_size_within_limit[META-INF/signatures.xml]",
+            );
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("exceeds the"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            let mut binary = members("");
+            binary[1] = ContainerMember::new("META-INF/signatures.xml", vec![0xFF, 0xFE, 0x00]);
+            let evidence = verify_asic_e(&binary);
+            let failed =
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("not UTF-8"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn signature_file_naming_accepts_numbered_and_rejects_other_suffixes() {
+            // signatures1.xml is a signature file; the covered member must be
+            // counted; a different suffix is not.
+            let xml = signature_xml("document.txt", &doc_digest_b64());
+            let mut container = vec![
+                ContainerMember::new("mimetype", ASIC_E_MIMETYPE.as_bytes().to_vec()),
+                ContainerMember::new("META-INF/signatures1.xml", xml.clone().into_bytes()),
+                ContainerMember::new("META-INF/signatures.json", xml.into_bytes()),
+                ContainerMember::new("document.txt", DOC.to_vec()),
+            ];
+            let evidence = verify_asic_e(&container);
+            assert!(container_check(&evidence, "signature_file_present").is_pass());
+            assert_eq!(evidence.signatures.len(), 1, "only signatures1.xml counts");
+            assert!(evidence.signatures[0]
+                .references
+                .iter()
+                .any(|reference| reference.uri == "document.txt"));
+            container.retain(|member| member.path != "META-INF/signatures1.xml");
+            let evidence = verify_asic_e(&container);
+            assert!(container_check(&evidence, "signature_file_present").is_fail());
+        }
+
+        #[test]
+        fn more_than_thirty_two_signatures_hit_the_count_limit() {
+            let mut one_signature = String::new();
+            for index in 0..(MAX_SIGNATURES + 1) {
+                one_signature.push_str(&format!(
+                    r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="x"/><ds:SignatureMethod Algorithm="x"/><ds:Reference URI="document.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature>"#,
+                    doc_digest_b64()
+                ));
+                let _ = index;
+            }
+            let evidence = verify_asic_e(&members(&one_signature));
+            assert_eq!(evidence.signatures.len(), MAX_SIGNATURES);
+            let failed = container_check(&evidence, "signature_count_within_limit");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(
+                        detail.contains(&format!("more than {MAX_SIGNATURES} signatures")),
+                        "{detail}"
+                    )
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn missing_signed_info_fails_only_that_signature() {
+            let xml = r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature>"#;
+            let evidence = verify_asic_e(&members(xml));
+            let failed = signature_check(&evidence, "signed_info_present");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no ds:SignedInfo"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+            // The early return leaves no further signature checks.
+            assert!(evidence.signatures[0]
+                .checks
+                .iter()
+                .all(|check| check.check != "references_verified"));
+        }
+
+        #[test]
+        fn missing_canonicalization_method_fails_its_check() {
+            let xml = r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+<ds:SignedInfo><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+<ds:Reference URI="document.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>AAAA</ds:DigestValue></ds:Reference></ds:SignedInfo>
+<ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature>"#;
+            let evidence = verify_asic_e(&members(xml));
+            let failed = signature_check(&evidence, "canonicalization_method_declared");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no CanonicalizationMethod"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn references_without_elements_transforms_digests_and_same_document_cases() {
+            // No Reference elements at all.
+            let xml = r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+<ds:SignedInfo><ds:CanonicalizationMethod Algorithm="c14n"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/></ds:SignedInfo>
+<ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature>"#;
+            let evidence = verify_asic_e(&members(xml));
+            let failed = signature_check(&evidence, "references_verified");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no Reference elements"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Transforms declared: recorded in the detail, digest still
+            // verified over the member bytes.
+            let xml = format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="c14n"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="document.txt"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature>"#,
+                doc_digest_b64()
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            let reference = &evidence.signatures[0].references[0];
+            assert!(reference.ok, "{:?}", reference.detail);
+            assert!(
+                reference.detail.contains("transforms declared"),
+                "{:?}",
+                reference.detail
+            );
+
+            // Unsupported digest algorithm.
+            let xml = signature_xml_ref(
+                "document.txt",
+                doc_digest_b64(),
+                "http://www.w3.org/2001/04/xmlenc#md5",
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            let reference = &evidence.signatures[0].references[0];
+            assert!(!reference.ok);
+            assert!(
+                reference
+                    .detail
+                    .contains("digest algorithm is not supported"),
+                "{:?}",
+                reference.detail
+            );
+
+            // SHA-1 is recognised but refused for hashing.
+            let xml = signature_xml_ref(
+                "document.txt",
+                "AAAA",
+                "http://www.w3.org/2000/09/xmldsig#sha1",
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            let reference = &evidence.signatures[0].references[0];
+            assert!(!reference.ok);
+            assert!(
+                reference.detail.contains("digest algorithm unsupported"),
+                "{:?}",
+                reference.detail
+            );
+
+            // SHA-384 / SHA-512 digests verify.
+            use base64::Engine as _;
+            for (uri, digest) in [
+                (
+                    "http://www.w3.org/2001/04/xmldsig-more#sha384",
+                    Sha384::digest(DOC).to_vec(),
+                ),
+                (
+                    "http://www.w3.org/2001/04/xmlenc#sha512",
+                    Sha512::digest(DOC).to_vec(),
+                ),
+            ] {
+                let xml = signature_xml_ref(
+                    "document.txt",
+                    base64::engine::general_purpose::STANDARD.encode(digest),
+                    uri,
+                );
+                let evidence = verify_asic_e(&members(&xml));
+                let reference = &evidence.signatures[0].references[0];
+                assert!(reference.ok, "{uri}: {:?}", reference.detail);
+            }
+
+            // Undecodable base64 DigestValue.
+            let xml = signature_xml_ref(
+                "document.txt",
+                "!!!not-base64!!!",
+                "http://www.w3.org/2001/04/xmlenc#sha256",
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            let reference = &evidence.signatures[0].references[0];
+            assert!(!reference.ok);
+            assert!(
+                reference.detail.contains("not decodable base64"),
+                "{:?}",
+                reference.detail
+            );
+
+            // Same-document reference whose Id does not exist.
+            let xml = signature_xml_ref(
+                "#no-such-id",
+                doc_digest_b64(),
+                "http://www.w3.org/2001/04/xmlenc#sha256",
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            let reference = &evidence.signatures[0].references[0];
+            assert!(!reference.ok);
+            assert!(
+                reference.detail.contains("no element with Id="),
+                "{:?}",
+                reference.detail
+            );
+
+            // Same-document digest mismatch is reported as inconclusive.
+            let xml = signature_xml_ref(
+                "#si-1",
+                doc_digest_b64(), // wrong digest for the SignedInfo octets
+                "http://www.w3.org/2001/04/xmlenc#sha256",
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            let reference = &evidence.signatures[0].references[0];
+            assert!(!reference.ok);
+            assert!(
+                reference.detail.contains("inconclusive without C14N"),
+                "{:?}",
+                reference.detail
+            );
+        }
+
+        fn signature_xml_ref(uri: &str, digest_b64: impl AsRef<str>, digest_uri: &str) -> String {
+            let digest_b64 = digest_b64.as_ref();
+            format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="sig-1"><ds:SignedInfo Id="si-1"><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="{uri}"><ds:DigestMethod Algorithm="{digest_uri}"/><ds:DigestValue>{digest_b64}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue></ds:Signature>"#
+            )
+        }
+
+        #[test]
+        fn certificate_and_signature_value_degradation_paths() {
+            let good = signature_xml("document.txt", &doc_digest_b64());
+
+            // No KeyInfo at all.
+            let no_cert = good.replace(
+                "<ds:SignatureValue>AAAA</ds:SignatureValue>",
+                "<ds:SignatureValue>AAAA</ds:SignatureValue><ds:Object/>",
+            );
+            let evidence = verify_asic_e(&members(&no_cert));
+            let failed = signature_check(&evidence, "signer_certificate_present");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no ds:X509Certificate"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+            assert!(signature_check(&evidence, "signer_certificate_parses").is_not_performed());
+            assert!(
+                signature_check(&evidence, "signature_value_over_raw_signed_info")
+                    .is_not_performed()
+            );
+
+            // Certificate bytes that are not X.509.
+            let bad_cert = format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo Id="si"><ds:CanonicalizationMethod Algorithm="c"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="document.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue><ds:KeyInfo><ds:X509Data><ds:X509Certificate>AAAA</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>"#,
+                doc_digest_b64()
+            );
+            let evidence = verify_asic_e(&members(&bad_cert));
+            let failed = signature_check(&evidence, "signer_certificate_parses");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("not a parseable X.509"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+            assert!(
+                signature_check(&evidence, "signature_value_over_raw_signed_info")
+                    .is_not_performed()
+            );
+
+            // Empty SignatureValue (missing element).
+            let missing_value = good.replace("<ds:SignatureValue>AAAA</ds:SignatureValue>", "");
+            let evidence = verify_asic_e(&members(&missing_value));
+            let failed = signature_check(&evidence, "signature_value_decodes");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("not decodable base64"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+            assert!(
+                signature_check(&evidence, "signature_value_over_raw_signed_info")
+                    .is_not_performed()
+            );
+
+            // No SignatureMethod: a hard failure, not a skip.
+            let no_method = good.replace(
+                r#"<ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>"#,
+                "",
+            );
+            let evidence = verify_asic_e(&members(&no_method));
+            let failed = signature_check(&evidence, "signature_value_over_raw_signed_info");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("no SignatureMethod"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Unsupported signature method URI (HMAC): not performed — but
+            // only judged once a parseable certificate exists, so the
+            // variant carries KeyInfo (the bare template has none, and the
+            // certificate gate would otherwise mask the method verdict).
+            let cert_b64 = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(fixture_cert_der())
+            };
+            let with_cert = format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="document.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue><ds:KeyInfo><ds:X509Data><ds:X509Certificate>{cert_b64}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></ds:Signature>"#,
+                doc_digest_b64()
+            );
+            let hmac = with_cert.replace(
+                "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+                "http://www.w3.org/2000/09/xmldsig#hmac-sha256",
+            );
+            let evidence = verify_asic_e(&members(&hmac));
+            let skipped = signature_check(&evidence, "signature_value_over_raw_signed_info");
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("not supported"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn xades_certificate_digest_paths() {
+            let cert_b64 = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(fixture_cert_der())
+            };
+            let good_digest = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(Sha256::digest(fixture_cert_der()))
+            };
+            let template = format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="c14n"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="document.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue><ds:KeyInfo><ds:X509Data><ds:X509Certificate>{cert_b64}</ds:X509Certificate></ds:X509Data></ds:KeyInfo><ds:Object><xades:QualifyingProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"><xades:SignedProperties><xades:SignedSignatureProperties><xades:SigningCertificateV2><xades:Cert><xades:CertDigest><ds:DigestMethod Algorithm="{{digest_uri}}"/><ds:DigestValue>{{digest_b64}}</ds:DigestValue></xades:CertDigest></xades:Cert></xades:SigningCertificateV2></xades:SignedSignatureProperties></xades:SignedProperties></xades:QualifyingProperties></ds:Object></ds:Signature>"#,
+                doc_digest_b64()
+            );
+
+            // Matching digest passes.
+            let xml = template
+                .replace("{digest_uri}", "http://www.w3.org/2001/04/xmlenc#sha256")
+                .replace("{digest_b64}", &good_digest);
+            let evidence = verify_asic_e(&members(&xml));
+            assert_eq!(
+                signature_check(
+                    &evidence,
+                    "signing_certificate_digest_matches_signer_certificate"
+                ),
+                &CheckOutcome::Pass
+            );
+
+            // Mismatching digest fails naming both values.
+            let xml = template
+                .replace("{digest_uri}", "http://www.w3.org/2001/04/xmlenc#sha256")
+                .replace("{digest_b64}", &{
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD.encode(Sha256::digest(b"other"))
+                });
+            let evidence = verify_asic_e(&members(&xml));
+            let failed = signature_check(
+                &evidence,
+                "signing_certificate_digest_matches_signer_certificate",
+            );
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("does not equal"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Unsupported digest algorithm: not performed.
+            let xml = template
+                .replace("{digest_uri}", "http://www.w3.org/2000/09/xmldsig#sha1")
+                .replace("{digest_b64}", "AAAA");
+            let evidence = verify_asic_e(&members(&xml));
+            let skipped = signature_check(
+                &evidence,
+                "signing_certificate_digest_matches_signer_certificate",
+            );
+            match skipped {
+                CheckOutcome::NotPerformed { reason } => {
+                    assert!(reason.contains("not supported"), "{reason}")
+                }
+                other => panic!("expected NotPerformed, got {other:?}"),
+            }
+
+            // Undecodable CertDigest base64.
+            let xml = template
+                .replace("{digest_uri}", "http://www.w3.org/2001/04/xmlenc#sha256")
+                .replace("{digest_b64}", "!!!not-base64!!!");
+            let evidence = verify_asic_e(&members(&xml));
+            let failed = signature_check(
+                &evidence,
+                "signing_certificate_digest_matches_signer_certificate",
+            );
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("not decodable base64"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // No XAdES block at all: not performed.
+            let xml = template.split("<ds:Object>").next().unwrap().to_string() + "</ds:Signature>";
+            let evidence = verify_asic_e(&members(&xml));
+            assert!(signature_check(
+                &evidence,
+                "signing_certificate_digest_matches_signer_certificate"
+            )
+            .is_not_performed());
+        }
+
+        /// The genuine fixture TSA certificate (same DER the integration
+        /// fixture carries), decoded from hex.
+        fn fixture_cert_der() -> Vec<u8> {
+            static CERT_HEX: &str = "3082038930820271a00302010202045a504558300d06092a864886f70d01010b0500305a310b3009060355040613024545311e301c060355040a0c15417065784d61696c20546573742046697874757265312b302906035504030c22417065784d61696c20546573742054534120284e4f542050524f44554354494f4e29301e170d3236303931323231313933375a170d3336303930393231313933375a305a310b3009060355040613024545311e301c060355040a0c15417065784d61696c20546573742046697874757265312b302906035504030c22417065784d61696c20546573742054534120284e4f542050524f44554354494f4e2930820122300d06092a864886f70d01010105000382010f003082010a0282010100b30a8b1ae3ecf5fb229dc9beb60b613cc02d86b4b9bc8f84d595984399dd8a1afa71521c6d91b63775378ba7bf2ed6d9d543faa71f777dc3c2632c5b4c8ea7d8a7cd26f7462694d721f5aefdbe4ef31878b78bccb9aa1acd89bd73252218420ef3b6fcd27ee010864862edacb2dcfe35901c71060284771986f2033c40309e716ca7ad9c7efb5c494b6dfd7a012bb0210b283cccca9e3059cb1a48d03a2bb604ebfce7bd1bd24e30efb99949b3966b09597e46e87483b1afb0b289a73c7bf7df4d489698ff37e223f83b046af65f51454ccdbe9f3442c4705cd5c397d9f2369fb513db37a20955e62384892c2bea6388d17583426fdc9284efb1c604d011df150203010001a3573055300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030160603551d250101ff040c300a06082b06010505070308301d0603551d0e04160414717afd522d0495d89e78f45d59795d981a0d482a300d06092a864886f70d01010b0500038201010028e4f826146b6240f3f1d13ec21284e1dbe4494cf405cebb211aca3e90c864bd314ba83591120d7dba2cf3b497022b04630a1e1e58d8fddea0e36b47bbc91ae357cc9d5fe44e50fba8e476a9850f8017070ef10628e7fa12d41bdb03411e275055c04834419c909f1a4ee683c0e3ce96ecb5334f04398b6488bbead7c74771ec913e6d927e54261ebb67dc036762683a573b2596436e0f6370f81e0e87070a556ba33e5157388a8a5853840c834a4d53a2d0d40816c99a4b1ca06b8ba847537481be1632fce7d5ff1ea419d8bd47e9ab779beaabb5de7068a2f869befb2f43c0f34f4ef92c385630cc655f0b5e8de49c4bd43a8585a5af92dd7e4b3730fb785f";
+            hex::decode(CERT_HEX).expect("fixture certificate hex")
+        }
+
+        #[test]
+        fn failing_checks_and_evidence_helpers_report_every_problem() {
+            let evidence = verify_asic_e(&[ContainerMember::new("document.txt", DOC.to_vec())]);
+            assert!(evidence.has_failures());
+            let lines = evidence.failing_checks();
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.starts_with("container:mimetype_member_present")),
+                "{lines:?}"
+            );
+            // A container with a bad reference reports through the reference
+            // branch too.
+            let xml = signature_xml("document.txt", "AAAA");
+            let evidence = verify_asic_e(&members(&xml));
+            assert!(evidence.has_failures());
+            assert!(!evidence.all_passed());
+            assert!(!evidence.strictly_passed());
+            let lines = evidence.failing_checks();
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("signature[0]:reference[document.txt]")),
+                "{lines:?}"
+            );
+            let signature_line = lines
+                .iter()
+                .find(|line| line.starts_with("signature[0]:"))
+                .expect("signature check line");
+            assert!(signature_line.contains(':'), "{lines:?}");
+        }
+
+        #[test]
+        fn member_uri_resolution_refuses_fragments_traversal_and_bad_escapes() {
+            let pool = vec![ContainerMember::new("a/b.txt", DOC.to_vec())];
+            assert!(resolve_member_uri(&pool, "#fragment").is_none());
+            assert!(resolve_member_uri(&pool, "a/b.txt").is_some());
+            assert!(resolve_member_uri(&pool, "./a/b.txt").is_some());
+            assert!(
+                resolve_member_uri(&pool, "a%2Fb.txt").is_some(),
+                "decoded path"
+            );
+            assert!(
+                resolve_member_uri(&pool, "a%2Gb.txt").is_none(),
+                "bad escape"
+            );
+            assert!(
+                resolve_member_uri(&pool, "a%2").is_none(),
+                "truncated escape"
+            );
+            assert!(resolve_member_uri(&pool, "a%2E%2E/b").is_none());
+            assert!(
+                resolve_member_uri(&pool, "FTP://host/x").is_none(),
+                "scheme case-insensitive"
+            );
+            assert!(
+                resolve_member_uri(&pool, "a\\b").is_none(),
+                "backslash refused"
+            );
+            assert!(resolve_member_uri(&pool, "a\x00b").is_none(), "NUL refused");
+            assert!(
+                resolve_member_uri(&pool, "a//b.txt").is_none(),
+                "empty segment"
+            );
+        }
+
+        #[test]
+        fn nested_signatures_are_not_descended_into_for_outer_references() {
+            // The outer Signature's SignedInfo search must not return the
+            // NESTED Signature's SignedInfo.
+            let xml = format!(
+                r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="c14n"/><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/><ds:Reference URI="document.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>{}</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>AAAA</ds:SignatureValue><ds:Object><ds:Signature><ds:SignedInfo><ds:CanonicalizationMethod Algorithm="inner-c14n"/><ds:SignatureMethod Algorithm="inner-method"/><ds:Reference URI="nested.txt"><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/><ds:DigestValue>AAAA</ds:DigestValue></ds:Reference></ds:SignedInfo><ds:SignatureValue>BBBB</ds:SignatureValue></ds:Signature></ds:Object></ds:Signature>"#,
+                doc_digest_b64()
+            );
+            let evidence = verify_asic_e(&members(&xml));
+            // collect_signature_nodes finds only the outer signature...
+            assert_eq!(evidence.signatures.len(), 1);
+            // ...and its method is the OUTER one, proving the nested
+            // SignedInfo was skipped during descent.
+            assert_eq!(
+                evidence.signatures[0].signature_method.as_deref(),
+                Some("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            );
+            // The outer reference resolved (nested.txt was never resolved).
+            let uris: Vec<&str> = evidence.signatures[0]
+                .references
+                .iter()
+                .map(|reference| reference.uri.as_str())
+                .collect();
+            assert_eq!(uris, vec!["document.txt"]);
+        }
+
+        #[test]
+        fn xml_parser_enforces_its_resource_limits() {
+            // Depth: 65 levels of nesting.
+            let mut deep = String::from("<r>");
+            for _ in 0..(MAX_XML_DEPTH + 2) {
+                deep.push_str("<e>");
+            }
+            for _ in 0..(MAX_XML_DEPTH + 2) {
+                deep.push_str("</e>");
+            }
+            deep.push_str("</r>");
+            let evidence = verify_asic_e(&members(&deep));
+            let failed =
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("depth limit"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Unclosed element at EOF.
+            let unclosed = "<r><e></r>".to_string();
+            let evidence = verify_asic_e(&members(&unclosed));
+            let failed =
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]");
+            assert!(failed.is_fail(), "{failed:?}");
+
+            // Event flood: more than MAX_XML_EVENTS events.
+            // A self-closing element is ONE event: the flood must exceed
+            // MAX_XML_EVENTS elements, not half of it.
+            let mut flood = String::with_capacity(MAX_XML_EVENTS * 5 + 32);
+            flood.push_str("<r>");
+            for _ in 0..(MAX_XML_EVENTS + 8) {
+                flood.push_str("<e/>");
+            }
+            flood.push_str("</r>");
+            let evidence = verify_asic_e(&members(&flood));
+            let failed =
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("event limit"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // Attribute flood: more than MAX_XML_ATTRIBUTES on one element.
+            let mut many_attrs = String::from("<r");
+            for index in 0..(MAX_XML_ATTRIBUTES + 2) {
+                many_attrs.push_str(&format!(" a{index}=\"v\""));
+            }
+            many_attrs.push_str("/>");
+            let evidence = verify_asic_e(&members(&many_attrs));
+            let failed =
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("attribute limit"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn xml_text_and_cdata_limits_apply() {
+            // Text content beyond MAX_XML_TEXT_TOTAL.
+            let mut big_text = String::with_capacity(MAX_XML_TEXT_TOTAL + 64);
+            big_text.push_str("<r>");
+            for _ in 0..(MAX_XML_TEXT_TOTAL / 64 + 4) {
+                for _ in 0..64 {
+                    big_text.push('x');
+                }
+            }
+            big_text.push_str("</r>");
+            let evidence = verify_asic_e(&members(&big_text));
+            let failed =
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]");
+            match failed {
+                CheckOutcome::Fail { detail } => {
+                    assert!(detail.contains("text limit"), "{detail}")
+                }
+                other => panic!("expected Fail, got {other:?}"),
+            }
+
+            // CDATA sections count toward the same budget and are accepted
+            // when within it.
+            let cdata = "<r><![CDATA[hello cdata]]></r>".to_string();
+            let evidence = verify_asic_e(&members(&cdata));
+            assert!(
+                container_check(&evidence, "signatures_xml_parses[META-INF/signatures.xml]")
+                    .is_pass()
+            );
+            // Signature XML with no signature element fails signature_present.
+            assert!(
+                container_check(&evidence, "signature_present[META-INF/signatures.xml]").is_fail()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial unit tests (module-private arms that integration tests cannot
+// reach; the transport/HTTP arms live in tests/signing_tests.rs)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod signing_unit_tests {
+    use super::der::{self, Budget, DerError, Limits, Reader};
+    use super::{all_passed, describe_failures, has_failures, strictly_passed, CheckVerdict};
+
+    fn parse_one(bytes: Vec<u8>) -> der::Tlv<'static> {
+        // Test-only: the element is leaked so every call site can pass a
+        // freshly built buffer without a binding.
+        let bytes = Box::leak(bytes.into_boxed_slice());
+        let mut budget = Budget::default();
+        let mut reader = Reader::new(bytes);
+        let tlv = reader.read(&mut budget).expect("one TLV");
+        assert!(reader.is_empty(), "expected exactly one TLV");
+        tlv
+    }
+
+    // ── check-summary helpers ───────────────────────────────────────────
+
+    #[test]
+    fn describe_failures_names_every_non_passing_check() {
+        let pass = CheckVerdict::pass("ok", true);
+        let fail = CheckVerdict::fail("boom", true, "exploded");
+        let skipped = CheckVerdict::not_performed("later", false, "unsupported");
+        assert_eq!(
+            describe_failures(std::slice::from_ref(&pass)),
+            "no failures",
+            "an all-pass list has nothing to report"
+        );
+        assert_eq!(
+            describe_failures(&[pass, fail, skipped]),
+            "boom failed (exploded); later not performed (unsupported)"
+        );
+        // The aggregate gates stay consistent with the outcomes.
+        assert!(all_passed(&[CheckVerdict::pass("x", true)]));
+        assert!(!has_failures(&[CheckVerdict::not_performed(
+            "y", true, "why"
+        )]));
+        assert!(has_failures(&[CheckVerdict::fail("z", false, "d")]));
+        assert!(!strictly_passed(&[]));
+    }
+
+    // ── DER budget / cursor / TLV surface ───────────────────────────────
+
+    #[test]
+    fn budget_and_cursor_report_their_state() {
+        let limits = Limits {
+            max_depth: 3,
+            max_elements: 5,
+            max_element_bytes: 64,
+        };
+        let mut budget = Budget::new(limits);
+        assert_eq!(budget.limits(), limits);
+        assert_eq!(budget.elements_read(), 0);
+        let blob = der::sequence(&[der::null()]);
+        let mut reader = Reader::new(&blob);
+        assert_eq!(reader.position(), 0);
+        assert_eq!(reader.remaining(), blob.as_slice());
+        assert_eq!(reader.peek_tag(), Some(der::TAG_SEQUENCE));
+        let top = reader.read(&mut budget).expect("read");
+        assert_eq!(budget.elements_read(), 1);
+        assert!(top.is_tag(der::TAG_SEQUENCE));
+        assert!(!top.is_tag(der::TAG_NULL));
+        assert!(reader.is_empty());
+        assert_eq!(reader.remaining(), b"".as_slice());
+        assert_eq!(reader.position(), blob.len());
+        assert_eq!(reader.finish(), Ok(()));
+    }
+
+    #[test]
+    fn decode_u64_rejects_wrong_tag_empty_and_oversized() {
+        let wrong_tag = parse_one(der::tlv(der::TAG_NULL, &[]));
+        assert_eq!(
+            der::decode_u64(&wrong_tag),
+            Err(DerError::UnexpectedTag {
+                expected: der::TAG_INTEGER,
+                actual: der::TAG_NULL,
+            })
+        );
+        let empty = parse_one(der::tlv(der::TAG_INTEGER, &[]));
+        assert_eq!(der::decode_u64(&empty), Err(DerError::InvalidInteger));
+        // More than 8 significant bytes does not fit in u64.
+        let huge = parse_one(der::tlv(der::TAG_INTEGER, &[0x01; 9]));
+        assert_eq!(der::decode_u64(&huge), Err(DerError::IntegerOverflow));
+        // Leading zeros are not significant: a 9-byte encoding whose eight
+        // leading zeros leave exactly one significant byte still decodes...
+        let padded = parse_one(vec![0x02, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0x01]);
+        assert_eq!(der::decode_u64(&padded), Ok(1));
+        // ...and the mis-ordered variant really is 2^56 (the significant
+        // byte's position is what matters, not the zero count alone).
+        let shifted = parse_one(vec![0x02, 0x09, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(der::decode_u64(&shifted), Ok(1_u64 << 56));
+    }
+
+    #[test]
+    fn decode_bool_is_strict() {
+        let wrong_tag = parse_one(der::tlv(der::TAG_NULL, &[]));
+        assert_eq!(
+            der::decode_bool(&wrong_tag),
+            Err(DerError::UnexpectedTag {
+                expected: der::TAG_BOOLEAN,
+                actual: der::TAG_NULL,
+            })
+        );
+        let neither = parse_one(der::tlv(der::TAG_BOOLEAN, &[0x01]));
+        assert_eq!(der::decode_bool(&neither), Err(DerError::InvalidBoolean));
+        assert_eq!(der::decode_bool(&parse_one(der::boolean(false))), Ok(false));
+        assert_eq!(der::decode_bool(&parse_one(der::boolean(true))), Ok(true));
+    }
+
+    #[test]
+    fn decode_oid_rejects_hostile_content() {
+        let wrong_tag = parse_one(der::tlv(der::TAG_NULL, &[]));
+        assert_eq!(
+            der::decode_oid(&wrong_tag),
+            Err(DerError::UnexpectedTag {
+                expected: der::TAG_OID,
+                actual: der::TAG_NULL,
+            })
+        );
+        assert_eq!(
+            der::decode_oid(&parse_one(der::tlv(der::TAG_OID, &[]))),
+            Err(DerError::InvalidOid)
+        );
+        // First arc 0 keeps small second arcs in arc 0.
+        assert_eq!(
+            der::decode_oid(&parse_one(der::tlv(der::TAG_OID, &[0x01]))),
+            Ok("0.1".to_string())
+        );
+        // 129 arcs exceed the cap.
+        let mut many = vec![0x2A_u8]; // 1.2
+        for arc in 0..130u64 {
+            let mut encoded = Vec::new();
+            let mut value = arc;
+            loop {
+                let byte = (value & 0x7F) as u8;
+                value >>= 7;
+                if value == 0 {
+                    encoded.insert(0, byte);
+                    break;
+                }
+                encoded.insert(0, byte | 0x80);
+            }
+            many.extend_from_slice(&encoded);
+        }
+        assert_eq!(
+            der::decode_oid(&parse_one(der::tlv(der::TAG_OID, &many))),
+            Err(DerError::InvalidOid)
+        );
+        // A trailing continuation byte never terminates the final arc.
+        assert_eq!(
+            der::decode_oid(&parse_one(der::tlv(der::TAG_OID, &[0x2A, 0x88]))),
+            Err(DerError::InvalidOid)
+        );
+        // A single arc byte overflowing u64 is refused before it wraps.
+        let overflow = [0x80_u8; 10];
+        assert_eq!(
+            der::decode_oid(&parse_one(der::tlv(der::TAG_OID, &overflow))),
+            Err(DerError::InvalidOid)
+        );
+    }
+
+    #[test]
+    fn oid_encoding_rejects_nonsense_arcs() {
+        let mut dotted = "1.2".to_string();
+        for arc in 0..130 {
+            dotted.push_str(&format!(".{arc}"));
+        }
+        assert_eq!(der::oid(&dotted), Err(DerError::InvalidOid));
+        assert_eq!(
+            der::oid("2.99999999999999999999"),
+            Err(DerError::InvalidOid)
+        );
+    }
+
+    #[test]
+    fn generalized_time_rejects_wrong_tag_bad_offsets_and_empty_fractions() {
+        let wrong_tag = parse_one(der::tlv(der::TAG_UTC_TIME, b"260912211944Z"));
+        assert_eq!(
+            der::decode_generalized_time(&wrong_tag),
+            Err(DerError::UnexpectedTag {
+                expected: der::TAG_GENERALIZED_TIME,
+                actual: der::TAG_UTC_TIME,
+            })
+        );
+        for bad in [
+            &b"20260912211944.Z"[..],
+            &b"20260912211944+9900"[..],
+            &b"20260912211944-0060"[..],
+        ] {
+            let tlv = parse_one(der::tlv(der::TAG_GENERALIZED_TIME, bad));
+            assert!(
+                matches!(
+                    der::decode_generalized_time(&tlv),
+                    Err(DerError::InvalidTime(_))
+                ),
+                "accepted {bad:?}"
+            );
+        }
+        // A negative offset with sane numbers parses and converts.
+        let offset = parse_one(der::tlv(der::TAG_GENERALIZED_TIME, b"20260912211944-0130"));
+        let parsed = der::decode_generalized_time(&offset).expect("offset form");
+        assert_eq!(parsed.to_rfc3339(), "2026-09-12T22:49:44+00:00");
+    }
+
+    #[test]
+    fn octet_and_bit_string_decoding_is_tag_strict() {
+        assert_eq!(
+            der::decode_octet_string(&parse_one(der::null())),
+            Err(DerError::UnexpectedTag {
+                expected: der::TAG_OCTET_STRING,
+                actual: der::TAG_NULL,
+            })
+        );
+        assert_eq!(
+            der::decode_bit_string(&parse_one(der::null())),
+            Err(DerError::UnexpectedTag {
+                expected: der::TAG_BIT_STRING,
+                actual: der::TAG_NULL,
+            })
+        );
+        for hostile in [
+            vec![der::TAG_BIT_STRING, 0x00],       // no unused-bits byte
+            vec![der::TAG_BIT_STRING, 0x01, 0x08], // impossible unused count
+            vec![der::TAG_BIT_STRING, 0x01, 0x01], // unused bits, no data
+        ] {
+            let tlv = parse_one(hostile);
+            assert_eq!(
+                der::decode_bit_string(&tlv),
+                Err(DerError::InvalidBitString)
+            );
+        }
+        let good_bytes = der::tlv(der::TAG_BIT_STRING, &[0x00, 0xFF]);
+        let good = parse_one(good_bytes);
+        assert_eq!(der::decode_bit_string(&good), Ok(&[0xFF_u8][..]));
+    }
+
+    #[test]
+    fn writers_round_trip_set_zero_and_parameterless_algorithms() {
+        // SET writer + concat.
+        let set = der::set(&[der::unsigned_integer(1), der::unsigned_integer(2)]);
+        let tlv = parse_one(set);
+        assert!(tlv.is_tag(der::TAG_SET));
+        let mut inner = tlv.reader();
+        let mut budget = Budget::default();
+        assert_eq!(
+            der::decode_u64(&inner.read(&mut budget).expect("first")),
+            Ok(1)
+        );
+        assert_eq!(
+            der::decode_u64(&inner.read(&mut budget).expect("second")),
+            Ok(2)
+        );
+
+        // All-zero magnitude encodes as INTEGER 0.
+        assert_eq!(
+            der::unsigned_integer_bytes(&[0x00, 0x00]),
+            vec![0x02, 0x01, 0x00]
+        );
+        assert_eq!(der::unsigned_integer(0), vec![0x02, 0x01, 0x00]);
+        // A high-bit magnitude gains the padding zero.
+        assert_eq!(
+            der::unsigned_integer_bytes(&[0x80]),
+            vec![0x02, 0x02, 0x00, 0x80]
+        );
+
+        // EC/Ed25519-style AlgorithmIdentifier carries no parameters.
+        let encoded = der::algorithm_identifier_without_parameters("1.3.101.112").expect("encode");
+        let tlv = parse_one(encoded);
+        let mut inner = tlv.reader();
+        let mut budget = Budget::default();
+        let oid = der::decode_oid(&inner.read_tagged(&mut budget, der::TAG_OID).expect("oid"))
+            .expect("decode");
+        assert_eq!(oid, "1.3.101.112");
+        assert!(inner.is_empty(), "no parameters element");
+
+        // RSA-style carries an explicit NULL.
+        let rsa = der::algorithm_identifier("1.2.840.113549.1.1.11").expect("encode");
+        assert!(rsa.windows(2).any(|window| window == [0x05, 0x00]));
     }
 }

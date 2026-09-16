@@ -4769,6 +4769,11 @@ mod tests {
             std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
             std::env::set_var("BILLING_COMPANY_IBAN", "EE381010220123456789");
             std::env::set_var("BILLING_COMPANY_PHONE", "+3721234567");
+            // This router builds an AWS SES client below: route it through
+            // the deterministic TLS-root environment (the macOS keychain
+            // read under load intermittently yields zero parseable roots
+            // and aborts client construction).
+            crate::test_db::ensure_aws_test_env();
         });
     }
 
