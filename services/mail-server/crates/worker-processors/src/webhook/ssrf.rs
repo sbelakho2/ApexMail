@@ -130,8 +130,16 @@ impl SsrfValidator {
             ));
         }
 
-        // If hostname is an IP, check directly
-        if let Ok(ip) = hostname.parse::<IpAddr>() {
+        // If hostname is an IP, check directly. `Url::host_str` serializes
+        // IPv6 hosts WITH brackets ("[fc00::1]"); strip them so a bracketed
+        // IPv6 literal is classified by the IP checks — not left to the DNS
+        // resolver, where refusal would depend on how the resolver treats
+        // bracketed input.
+        let ip_literal = match hostname.strip_prefix('[').and_then(|i| i.strip_suffix(']')) {
+            Some(inner) => inner,
+            None => hostname.as_str(),
+        };
+        if let Ok(ip) = ip_literal.parse::<IpAddr>() {
             if is_private_ip(&ip) {
                 return Err(ProcessorError::Job(format!(
                     "URL resolves to private IP: {}",
@@ -661,5 +669,118 @@ mod adversarial_tests {
                 // direction — either refusal or a true match is acceptable.
             }
         }
+    }
+    // ── adversarial batch 2 ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn validate_url_maps_to_the_resolve_variant() {
+        let validator = SsrfValidator::new().unwrap();
+        assert!(validator.validate_url("https://8.8.8.8/hook").await.is_ok());
+        let err = validator
+            .validate_url("https://10.0.0.5:9/hook")
+            .await
+            .expect_err("private IP literal");
+        assert!(err.to_string().contains("private IP"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ip_literal_targets_are_classified_without_dns() {
+        let validator = SsrfValidator::new().unwrap();
+        // A PUBLIC IP literal resolves to itself, flagged host_is_ip.
+        let target = validator
+            .validate_and_resolve_url("https://1.1.1.1:8443/hook")
+            .await
+            .expect("public literal");
+        assert!(target.host_is_ip);
+        assert_eq!(target.host, "1.1.1.1");
+        assert_eq!(target.port, 8443);
+        assert_eq!(target.resolved_ips.len(), 1);
+        // A PRIVATE IP literal is refused without any DNS lookup. (Literal
+        // 127.0.0.1/::1 hit the hostname blocklist first, so the private-RANGE
+        // arm is driven with non-blocklisted private addresses.)
+        for private in [
+            "https://10.0.0.5/h",
+            "https://[fc00::1]/h",
+            "https://[::ffff:192.168.0.9]/h",
+        ] {
+            let err = validator
+                .validate_and_resolve_url(private)
+                .await
+                .expect_err("private literal must be refused");
+            assert!(err.to_string().contains("private IP"), "{private}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ipv6_mapped_and_embedded_private_ranges_are_refused() {
+        // IPv4-mapped private address.
+        assert!(is_private_ip(&"::ffff:10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(!is_private_ip(&"::ffff:8.8.8.8".parse::<IpAddr>().unwrap()));
+        // NAT64-style embedded private v4 (64:ff9b:: is NOT private, but an
+        // IPv4-compatible ::8.8.8.8 form must not be flagged either).
+        assert!(!is_private_ip(&"::8.8.8.8".parse::<IpAddr>().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_public_hostname_is_refused() {
+        let validator = SsrfValidator::new().unwrap();
+        // A syntactically valid, resolvable-looking name under a reserved
+        // TLD cannot resolve: refused (never falls through to delivery).
+        let err = validator
+            .validate_and_resolve_url("https://no-such-host.invalid./hook")
+            .await
+            .expect_err("unresolvable host");
+        assert!(
+            err.to_string().contains("resolved") || err.to_string().contains("resolution"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolution_freshness_detects_a_changed_binding() {
+        let validator = SsrfValidator::new().unwrap();
+        // A STALE resolution whose re-lookup returns a different set is a
+        // refused rebinding. Host "8.8.8.8" re-resolves (literal lookup, no
+        // DNS) to {8.8.8.8}, which differs from the pinned {1.1.1.1}.
+        let stale_mismatch = ResolvedWebhookTarget {
+            host: "8.8.8.8".to_string(),
+            port: 443,
+            resolved_ips: vec!["1.1.1.1".parse::<IpAddr>().unwrap()],
+            host_is_ip: false,
+            resolved_at: std::time::Instant::now() - Duration::from_secs(3600),
+        };
+        let error = validator
+            .verify_resolution_freshness(&stale_mismatch)
+            .await
+            .expect_err("a changed binding must be refused");
+        assert!(error.to_string().contains("rebinding"), "{error}");
+
+        // The same host with the LIVE set pinned passes the recheck — and
+        // the second lookup is served from the DNS cache.
+        let stale_match = ResolvedWebhookTarget {
+            resolved_ips: vec!["8.8.8.8".parse::<IpAddr>().unwrap()],
+            host: "8.8.8.8".to_string(),
+            port: 443,
+            host_is_ip: false,
+            resolved_at: std::time::Instant::now() - Duration::from_secs(3600),
+        };
+        validator
+            .verify_resolution_freshness(&stale_match)
+            .await
+            .expect("an unchanged binding passes");
+
+        // A FRESH resolution skips the recheck entirely, even if the set is
+        // nonsense (it cannot have gone stale yet).
+        let fresh = ResolvedWebhookTarget {
+            host: "8.8.8.8".to_string(),
+            port: 443,
+            resolved_ips: vec!["1.1.1.1".parse::<IpAddr>().unwrap()],
+            host_is_ip: false,
+            resolved_at: std::time::Instant::now(),
+        };
+        validator
+            .verify_resolution_freshness(&fresh)
+            .await
+            .expect("fresh resolutions are not re-resolved");
     }
 }

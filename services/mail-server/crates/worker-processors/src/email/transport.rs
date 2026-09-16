@@ -2827,3 +2827,132 @@ mod reply_parsing_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_arms {
+    //! Batch 2: MIME serialization with the full header set (Cc, Reply-To,
+    //! attachments, custom headers) for BOTH backends, the VERP envelope
+    //! path, DKIM signer key validation, and SES client construction.
+
+    use super::*;
+    use crate::email::types::{Attachment, Mailbox};
+
+    fn full_email() -> PreparedEmail {
+        PreparedEmail {
+            send_unit: "email_queue:00000000-0000-0000-0000-000000000001:r@x.test".into(),
+            from: "sender@example.test".into(),
+            to: "rcpt@dest.test".into(),
+            mime_to: vec![
+                Mailbox {
+                    name: None,
+                    email: "rcpt@dest.test".into(),
+                },
+                Mailbox {
+                    name: Some("Second".into()),
+                    email: "second@dest.test".into(),
+                },
+            ],
+            mime_cc: vec![Mailbox {
+                name: Some("Cc Person".into()),
+                email: "cc@dest.test".into(),
+            }],
+            reply_to: Some(Mailbox {
+                name: Some("Replies".into()),
+                email: "reply@example.test".into(),
+            }),
+            subject: "Full MIME".into(),
+            html: Some("<p>html body</p>".into()),
+            text: Some("text body".into()),
+            headers: vec![("X-Custom".into(), "custom-value".into())],
+            attachments: vec![Attachment {
+                filename: "data.txt".into(),
+                content: b"attachment-bytes".to_vec(),
+                content_type: "text/plain".into(),
+            }],
+            dkim: None,
+            verp: None,
+        }
+    }
+
+    #[test]
+    fn smtp_message_builder_serializes_the_full_header_set() {
+        let transport = SmtpTransport::new(SmtpConfig::default());
+        let email = full_email();
+        let raw = transport
+            .build_message(&email)
+            .write_to_vec()
+            .expect("serialize");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("From: <sender@example.test>"), "{text}");
+        assert!(
+            text.contains("To: <rcpt@dest.test>,"),
+            "comma-listed To: {text}"
+        );
+        assert!(text.contains("second@dest.test"), "{text}");
+        assert!(text.contains("Cc: \"Cc Person\" <cc@dest.test>"), "{text}");
+        assert!(
+            text.contains("Reply-To: \"Replies\" <reply@example.test>"),
+            "{text}"
+        );
+        assert!(text.contains("Subject: Full MIME"), "{text}");
+        assert!(text.contains("X-Custom: custom-value"), "{text}");
+        assert!(text.contains("text body"), "{text}");
+        assert!(text.contains("html body"), "{text}");
+        assert!(text.contains("attachment-bytes"), "{text}");
+        assert!(text.contains("attachment;"), "MIME attachment part: {text}");
+    }
+
+    #[test]
+    fn ses_raw_mime_serializes_the_full_header_set() {
+        let raw = build_raw_mime(&full_email());
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("Cc: \"Cc Person\" <cc@dest.test>"), "{text}");
+        assert!(
+            text.contains("Reply-To: \"Replies\" <reply@example.test>"),
+            "{text}"
+        );
+        assert!(text.contains("X-Custom: custom-value"), "{text}");
+        assert!(text.contains("attachment-bytes"), "{text}");
+        // An empty visible To falls back to the envelope recipient.
+        let mut minimal = full_email();
+        minimal.mime_to.clear();
+        let raw = build_raw_mime(&minimal);
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.to_lowercase().contains("to:") && text.contains("rcpt@dest.test"),
+            "fallback envelope recipient: {text}"
+        );
+        assert!(
+            !text.contains("second@dest.test"),
+            "the cleared visible list is gone: {text}"
+        );
+    }
+
+    #[test]
+    fn dkim_signer_rejects_invalid_key_material() {
+        // The DKIM signer validates the decrypted key material from the
+        // domains table (types::DkimConfig); invalid material must be an
+        // error, never a silently unsigned send.
+        let config = crate::email::types::DkimConfig {
+            selector: "sel".into(),
+            domain: "example.test".into(),
+            private_key: zeroize::Zeroizing::new("not a pem key".into()),
+        };
+        let result = build_dkim_signer(&config);
+        assert!(result.is_err(), "invalid DKIM key material must be refused");
+    }
+
+    #[tokio::test]
+    async fn ses_transport_constructs_from_the_test_env() {
+        crate::common::ensure_aws_test_env();
+        let config = SesConfig {
+            region: "us-east-1".into(),
+            ..Default::default()
+        };
+        let transport = SesTransport::from_env(config)
+            .await
+            .expect("client construction needs no network");
+        assert_eq!(transport.transport_name(), "ses");
+        assert!(!transport.supports_source_binding());
+    }
+}

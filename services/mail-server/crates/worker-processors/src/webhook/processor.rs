@@ -2497,4 +2497,114 @@ mod adversarial_tests {
             "the poll loop must claim and fail-retry the job"
         );
     }
+    // ── poll-loop + payload-shaping arms (batch 2) ────────────────────────
+
+    fn loop_redis() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    fn loop_config() -> WebhookConfig {
+        WebhookConfig {
+            base: crate::common::ProcessorConfig {
+                name: "webhook-loop".into(),
+                concurrency: 2,
+                poll_interval: std::time::Duration::from_millis(20),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dead_db() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgresql://127.0.0.1:1/none")
+            .expect("lazy pool")
+    }
+
+    /// Empty queue + shutdown: the select on poll_interval breaks on the
+    /// shutdown notification.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn webhook_poll_loop_breaks_on_shutdown_when_queue_is_empty() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "worker_webhook_loop",
+            "webhook_loop_empty",
+        )
+        .await
+        {
+            Ok(Some(pool)) => pool,
+            Ok(None) => {
+                eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+                return;
+            }
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(pool.clone(), loop_redis(), loop_config()).expect("processor"),
+        );
+        processor.is_running.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        let p = processor.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async move { p.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits on shutdown")
+        .expect("join ok");
+        pool.close().await;
+    }
+
+    /// A dead database drives the fetch-error arm; the loop keeps polling
+    /// until shutdown.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn webhook_poll_loop_survives_fetch_errors_until_shutdown() {
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(dead_db(), loop_redis(), loop_config()).expect("processor"),
+        );
+        processor.is_running.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        let p = processor.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async move { p.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits after error polls")
+        .expect("join ok");
+    }
+
+    /// Zero available capacity parks the loop for the 100ms tick; draining
+    /// plus shutdown ends it.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn webhook_poll_loop_parks_when_capacity_is_exhausted() {
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(dead_db(), loop_redis(), loop_config()).expect("processor"),
+        );
+        processor.is_running.store(true, Ordering::SeqCst);
+        processor.active_jobs.fetch_add(2, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        processor.active_jobs.fetch_sub(2, Ordering::SeqCst);
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        let p = processor.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async move { p.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits after capacity drain")
+        .expect("join ok");
+    }
 }

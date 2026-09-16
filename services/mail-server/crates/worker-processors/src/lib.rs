@@ -39,4 +39,24 @@ pub use webhook::WebhookProcessor;
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Cross-process guard for tests that touch SHARED Redis keyspaces
+    /// (`rl:send:*` admission buckets, warmup counters keyed on real IPs):
+    /// nextest runs each test in its own process, so only a Postgres advisory
+    /// lock on the shared admin database can serialize them. Hold the
+    /// returned pool for the test's lifetime (the lock is session-scoped).
+    pub(crate) async fn redis_keys_guard(admin_url: &str, lock_name: &str) -> Option<sqlx::PgPool> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .connect(admin_url)
+            .await
+            .ok()?;
+        sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+            .bind(format!("worker-shared-redis:{lock_name}"))
+            .execute(&pool)
+            .await
+            .ok()?;
+        Some(pool)
+    }
 }

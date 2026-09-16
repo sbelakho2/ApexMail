@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 // ── programmable in-memory mailstore ────────────────────────────────────────
 
 #[derive(Clone)]
-struct MockMailstore {
+pub(crate) struct MockMailstore {
     state: Arc<StdMutex<MockState>>,
 }
 
@@ -42,7 +42,7 @@ struct MockState {
 }
 
 impl MockMailstore {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Arc::new(StdMutex::new(MockState::default())),
         }
@@ -52,18 +52,28 @@ impl MockMailstore {
         self.state.lock().expect("mock state mutex poisoned")
     }
 
-    fn fail(&self, method: &str) {
+    pub(crate) fn fail(&self, method: &str) {
         self.lock().fail.insert(method.to_string());
     }
 
-    fn add_account(&self, email: &str, account_id: &str, password: &str) {
+    pub(crate) fn add_account(&self, email: &str, account_id: &str, password: &str) {
         self.lock().accounts.insert(
             email.to_lowercase(),
             (account_id.to_string(), password.to_string()),
         );
     }
 
-    fn add_mailbox(&self, account: &str, name: &str, uidvalidity: u64) {
+    /// Overwrite a stored mailbox row (attributes / delimiter) for tests that
+    /// need non-default LIST/LSUB shapes.
+    pub(crate) fn set_mailbox_row(&self, account: &str, row: mail_proto::Mailbox) {
+        self.lock()
+            .mailboxes
+            .entry(account.to_string())
+            .or_default()
+            .insert(row.name.to_lowercase(), row);
+    }
+
+    pub(crate) fn add_mailbox(&self, account: &str, name: &str, uidvalidity: u64) {
         let mut g = self.lock();
         g.mailboxes.entry(account.to_string()).or_default().insert(
             name.to_lowercase(),
@@ -81,7 +91,7 @@ impl MockMailstore {
     }
 
     /// Append one message and return its UID.
-    fn add_message(
+    pub(crate) fn add_message(
         &self,
         account: &str,
         mailbox: &str,
@@ -137,14 +147,52 @@ impl MockMailstore {
         uid
     }
 
-    fn set_body(&self, account: &str, mailbox: &str, uid: u64, body: &[u8]) {
+    pub(crate) fn set_body(&self, account: &str, mailbox: &str, uid: u64, body: &[u8]) {
         self.lock().bodies.insert(
             (account.to_string(), mailbox.to_lowercase(), uid),
             body.to_vec(),
         );
     }
 
-    fn events_sender(&self, account: &str, mailbox: &str) -> mpsc::UnboundedSender<MailboxEvent> {
+    /// Same as [`Self::add_message`] but with explicit to/cc/bcc envelope
+    /// recipients, so SEARCH TO/CC/BCC criteria can be driven adversarially.
+    pub(crate) fn add_message_with_recipients(
+        &self,
+        account: &str,
+        mailbox: &str,
+        recipients: (&[&str], &[&str], &[&str]),
+        flags: mail_proto::MessageFlags,
+        internal_date: i64,
+    ) -> u64 {
+        let uid = self.add_message(
+            account,
+            mailbox,
+            "subj",
+            "from@example.test",
+            flags,
+            internal_date,
+        );
+        let (to, cc, bcc) = recipients;
+        let mut g = self.lock();
+        if let Some(meta) = g
+            .messages
+            .get_mut(account)
+            .and_then(|m| m.get_mut(&mailbox.to_lowercase()))
+            .and_then(|v| v.last_mut())
+        {
+            let env = meta.envelope.get_or_insert_with(Default::default);
+            env.to = to.iter().map(|s| s.to_string()).collect();
+            env.cc = cc.iter().map(|s| s.to_string()).collect();
+            env.bcc = bcc.iter().map(|s| s.to_string()).collect();
+        }
+        uid
+    }
+
+    pub(crate) fn events_sender(
+        &self,
+        account: &str,
+        mailbox: &str,
+    ) -> mpsc::UnboundedSender<MailboxEvent> {
         let key = format!("{account}|{}", mailbox.to_lowercase());
         let mut g = self.lock();
         g.events
@@ -153,7 +201,7 @@ impl MockMailstore {
             .clone()
     }
 
-    fn recorded(&self, method: &str) -> Vec<String> {
+    pub(crate) fn recorded(&self, method: &str) -> Vec<String> {
         self.lock()
             .calls
             .iter()
@@ -162,7 +210,7 @@ impl MockMailstore {
             .collect()
     }
 
-    fn message_uids(&self, account: &str, mailbox: &str) -> Vec<u64> {
+    pub(crate) fn message_uids(&self, account: &str, mailbox: &str) -> Vec<u64> {
         self.lock()
             .messages
             .get(account)
@@ -171,7 +219,7 @@ impl MockMailstore {
             .unwrap_or_default()
     }
 
-    fn mailbox_row(&self, account: &str, mailbox: &str) -> Option<mail_proto::Mailbox> {
+    pub(crate) fn mailbox_row(&self, account: &str, mailbox: &str) -> Option<mail_proto::Mailbox> {
         self.lock()
             .mailboxes
             .get(account)
@@ -181,7 +229,7 @@ impl MockMailstore {
 }
 
 /// Stream adapter for the IDLE event feed (same trait tokio_stream re-exports).
-struct MockEventStream(mpsc::UnboundedReceiver<MailboxEvent>);
+pub(crate) struct MockEventStream(mpsc::UnboundedReceiver<MailboxEvent>);
 
 impl futures::Stream for MockEventStream {
     type Item = Result<MailboxEvent, tonic::Status>;
@@ -892,7 +940,7 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for DuplexConnector {
     }
 }
 
-fn mock_connected_client(mock: MockMailstore) -> MailstoreClient {
+pub(crate) fn mock_connected_client(mock: MockMailstore) -> MailstoreClient {
     let (tx, rx) = mpsc::unbounded_channel::<Result<DuplexStream, std::io::Error>>();
     let mut rx = rx;
     let incoming = futures::stream::poll_fn(move |cx| rx.poll_recv(cx));
@@ -1117,7 +1165,9 @@ async fn greeting_and_capability_are_rfc3501_shaped() {
         "STARTTLS advertised on a TLS connection: {out:?}"
     );
     assert!(
-        out.trim_end().ends_with("OK CAPABILITY completed"),
+        out.trim_end()
+            .trim_end()
+            .ends_with("OK CAPABILITY completed"),
         "{out:?}"
     );
     h.shutdown().await;
@@ -3300,4 +3350,845 @@ async fn idle_deadline_closes_with_bye() {
         .await
         .expect("serve task ends after the IDLE deadline")
         .expect("serve loop returns Ok");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Coverage-driving adversarial batch 2: SEARCH date/criteria arms, FETCH item
+// forms and failure isolation, COPY/MOVE/APPEND/STATUS/CLOSE error arms,
+// NOOP transport tolerance, IDLE degraded modes, LSUB attributes.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// SEARCH TO/CC/BCC AND over envelope recipients, plus SINCE/BEFORE/ON date
+/// filtering (valid and malformed dates).
+#[tokio::test]
+async fn search_recipient_and_date_criteria() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    // 2024-05-10 12:00 UTC and 2024-06-01 08:00 UTC.
+    h.mock.add_message_with_recipients(
+        "acct-1",
+        "INBOX",
+        (&["alice@dest.test"], &["carol@cc.test"], &["dave@bcc.test"]),
+        mail_proto::MessageFlags::default(),
+        1_715_342_400,
+    );
+    h.mock.add_message_with_recipients(
+        "acct-1",
+        "INBOX",
+        (&["bob@dest.test"], &[], &[]),
+        mail_proto::MessageFlags::default(),
+        1_717_238_400,
+    );
+    h.mock
+        .add_message("acct-", "INBOX", "s", "f@e.test", Default::default(), 0); // wrong account: must stay invisible
+
+    let out = h.cmd("SEARCH TO \"alice\"").await;
+    assert!(out.contains("* SEARCH 1\r\n"), "TO filter: {out:?}");
+
+    let out = h.cmd("SEARCH CC \"carol\"").await;
+    assert!(out.contains("* SEARCH 1\r\n"), "CC filter: {out:?}");
+
+    let out = h.cmd("SEARCH BCC \"dave\"").await;
+    assert!(out.contains("* SEARCH 1\r\n"), "BCC filter: {out:?}");
+
+    let out = h.cmd("SEARCH TO \"nobody\"").await;
+    assert!(
+        out.contains("* SEARCH\r\n"),
+        "no match => empty SEARCH: {out:?}"
+    );
+
+    let out = h.cmd("SEARCH SINCE 1-Jun-2024").await;
+    assert!(out.contains("* SEARCH 2\r\n"), "SINCE: {out:?}");
+
+    let out = h.cmd("SEARCH BEFORE 1-Jun-2024").await;
+    assert!(out.contains("* SEARCH 1\r\n"), "BEFORE: {out:?}");
+
+    let out = h.cmd("SEARCH ON 10-May-2024").await;
+    assert!(
+        out.contains("* SEARCH 1\r\n"),
+        "ON day bounds are inclusive: {out:?}"
+    );
+
+    let out = h.cmd("SEARCH SINCE 10-May-2024").await;
+    assert!(
+        out.contains("* SEARCH 1 2"),
+        "SINCE is inclusive of the day start: {out:?}"
+    );
+
+    let out = h.cmd("SEARCH BEFORE 99-Xyz-9999").await;
+    assert!(
+        out.contains("BAD") && out.contains("Invalid date"),
+        "malformed date must be BAD: {out:?}"
+    );
+
+    // A criterion missing its date argument entirely is tolerated (i < len
+    // guard) and matches everything, like most servers.
+    let out = h.cmd("SEARCH SINCE").await;
+    assert!(
+        out.trim_end().ends_with("OK SEARCH completed"),
+        "dangling SINCE: {out:?}"
+    );
+
+    let out = h.cmd("SEARCH TO").await;
+    assert!(
+        out.trim_end().ends_with("OK SEARCH completed"),
+        "dangling TO: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_unrecent_and_header_arg_errors_are_bad() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    h.mock
+        .add_message("acct-1", "INBOX", "s", "f@e.test", Default::default(), 0);
+
+    let out = h.cmd("SEARCH UNRECENT").await;
+    assert!(
+        out.contains("BAD") && out.contains("UNRECENT is not a valid SEARCH criterion"),
+        "{out:?}"
+    );
+    let out = h.cmd("SEARCH HEADER X-Only").await;
+    assert!(
+        out.contains("BAD") && out.contains("HEADER requires a field name and a value"),
+        "{out:?}"
+    );
+    let out = h.cmd("SEARCH FROBNICATE").await;
+    assert!(
+        out.contains("BAD") && out.contains("Unsupported SEARCH criterion"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// RFC822 / RFC822.HEADER / RFC822.TEXT item forms and the FAST macro.
+#[tokio::test]
+async fn fetch_rfc822_item_forms_and_fast_macro() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    let uid = h
+        .mock
+        .add_message("acct-1", "INBOX", "s", "f@e.test", Default::default(), 0);
+    h.mock.set_body(
+        "acct-1",
+        "INBOX",
+        uid,
+        b"Subject: s\r\nFrom: f\r\n\r\nbody text\r\n",
+    );
+
+    let out = h.cmd("FETCH 1 FAST").await;
+    assert!(out.contains("FLAGS"), "FAST expands to FLAGS: {out:?}");
+    assert!(
+        out.contains("INTERNALDATE"),
+        "FAST expands to INTERNALDATE: {out:?}"
+    );
+    assert!(
+        out.contains("RFC822.SIZE"),
+        "FAST expands to RFC822.SIZE: {out:?}"
+    );
+    assert!(
+        !out.contains("ENVELOPE"),
+        "FAST must not carry ENVELOPE: {out:?}"
+    );
+
+    let out = h.cmd("FETCH 1 RFC822").await;
+    assert!(
+        out.contains("RFC822 {"),
+        "RFC822 returns a literal: {out:?}"
+    );
+    assert!(out.contains("body text"), "{out:?}");
+
+    let out = h.cmd("FETCH 1 RFC822.HEADER").await;
+    assert!(out.contains("RFC822.HEADER {"), "{out:?}");
+    assert!(out.contains("Subject: s"), "{out:?}");
+    assert!(
+        !out.contains("body text"),
+        "header form must not carry the body: {out:?}"
+    );
+
+    let out = h.cmd("FETCH 1 RFC822.TEXT").await;
+    assert!(out.contains("RFC822.TEXT {"), "{out:?}");
+    assert!(out.contains("body text"), "{out:?}");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn fetch_argument_error_arms_are_bad() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+
+    // No sequence set at all.
+    let out = h.cmd("FETCH").await;
+    assert!(
+        out.contains("BAD") && out.contains("FETCH requires a sequence set"),
+        "{out:?}"
+    );
+
+    // Empty item list.
+    let out = h.cmd("FETCH 1 ()").await;
+    assert!(
+        out.contains("BAD") && out.contains("at least one item"),
+        "{out:?}"
+    );
+
+    // Malformed partial spec (no dot).
+    let out = h.cmd("FETCH 1 BODY[]<5>").await;
+    assert!(
+        out.contains("BAD") && out.contains("expected <offset.octets>"),
+        "{out:?}"
+    );
+
+    // Non-numeric partial offset.
+    let out = h.cmd("FETCH 1 BODY[]<x.5>").await;
+    assert!(
+        out.contains("BAD") && out.contains("Invalid partial offset"),
+        "{out:?}"
+    );
+
+    // Zero-octet partial.
+    let out = h.cmd("FETCH 1 BODY[]<0.0>").await;
+    assert!(
+        out.contains("BAD") && out.contains("greater than zero"),
+        "{out:?}"
+    );
+
+    // Unknown item.
+    let out = h.cmd("FETCH 1 FROBNICATE").await;
+    assert!(
+        out.contains("BAD") && out.contains("Unknown FETCH item"),
+        "{out:?}"
+    );
+
+    // HEADER.FIELDS with an empty list.
+    let out = h.cmd("FETCH 1 BODY.PEEK[HEADER.FIELDS ()]").await;
+    assert!(
+        out.contains("BAD") && out.contains("at least one field name"),
+        "{out:?}"
+    );
+
+    // HEADER.FIELDS without a parenthesized list.
+    let out = h.cmd("FETCH 1 BODY.PEEK[HEADER.FIELDS DATE]").await;
+    assert!(
+        out.contains("BAD") && out.contains("requires a (field list)"),
+        "{out:?}"
+    );
+
+    // Unsupported section specifier.
+    let out = h.cmd("FETCH 1 BODY.PEEK[WHAT]").await;
+    assert!(
+        out.contains("BAD") && out.contains("Unsupported BODY section"),
+        "{out:?}"
+    );
+
+    // Malformed sequence set.
+    let out = h.cmd("FETCH x:y (FLAGS)").await;
+    assert!(
+        out.contains("BAD") && out.contains("invalid sequence"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// A partial fetch whose offset lies beyond the payload answers an empty
+/// literal (`{0}`), not the whole body and not an error.
+#[tokio::test]
+async fn fetch_partial_offset_past_end_yields_empty_literal() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    let uid = h
+        .mock
+        .add_message("acct-1", "INBOX", "s", "f@e.test", Default::default(), 0);
+    h.mock.set_body("acct-1", "INBOX", uid, b"short");
+    let out = h.cmd("FETCH 1 BODY.PEEK[]<9999.5>").await;
+    assert!(
+        out.contains("BODY[]<9999> {0}\r\n"),
+        "offset past end: {out:?}"
+    );
+    assert!(out.trim_end().ends_with("OK FETCH completed"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// A \Seen flag store that fails (twice — the retry too) after the FETCH
+/// response already advertised \Seen must NOT fail the FETCH: the response
+/// was consumed; the mismatch is logged for reconciliation.
+#[tokio::test]
+async fn fetch_seen_store_failure_does_not_fail_the_command() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    let uid = h
+        .mock
+        .add_message("acct-1", "INBOX", "s", "f@e.test", Default::default(), 0);
+    h.mock.set_body("acct-1", "INBOX", uid, b"body");
+    h.mock.fail("set_flags");
+    let out = h.cmd("FETCH 1 BODY[]").await;
+    assert!(
+        out.contains("BODY[] {4}"),
+        "body must still be delivered: {out:?}"
+    );
+    assert!(
+        out.trim_end().ends_with("OK FETCH completed"),
+        "FETCH must stay OK: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// COPY/MOVE answer OK with COPYUID even when the destination's status RPC
+/// fails — the uidvalidity falls back to the source session's.
+#[tokio::test]
+async fn copy_and_move_destination_status_failure_falls_back_to_source_uidvalidity() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 77);
+    h.mock.add_mailbox("acct-1", "Archive", 42);
+    h.select("INBOX").await;
+    h.mock
+        .add_message("acct-1", "INBOX", "s", "f@e.test", Default::default(), 0);
+    // Break get_mailbox_status AFTER the SELECT captured its view.
+    h.mock.fail("get_mailbox_status");
+    let out = h.cmd("COPY 1 Archive").await;
+    assert!(
+        out.contains("[COPYUID 77 1 1]"),
+        "source uidvalidity fallback: {out:?}"
+    );
+
+    h.mock
+        .add_message("acct-1", "INBOX", "s2", "f@e.test", Default::default(), 0);
+    let out = h.cmd("MOVE 1 Archive").await;
+    assert!(out.contains("[COPYUID 77 1 2]"), "MOVE fallback: {out:?}");
+    assert!(
+        out.contains("* 1 EXPUNGE"),
+        "MOVE must expunge from the source view: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn copy_and_move_precondition_arms() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    // No mailbox selected: both are BAD (never touch the store).
+    let out = h.cmd("COPY 1 INBOX").await;
+    assert!(
+        out.contains("BAD") && out.contains("No mailbox selected"),
+        "{out:?}"
+    );
+    let out = h.cmd("MOVE 1 INBOX").await;
+    assert!(
+        out.contains("BAD") && out.contains("No mailbox selected"),
+        "{out:?}"
+    );
+
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    // Malformed sequence set.
+    let out = h.cmd("COPY bogus INBOX").await;
+    assert!(out.contains("BAD"), "{out:?}");
+    let out = h.cmd("MOVE bogus INBOX").await;
+    assert!(out.contains("BAD"), "{out:?}");
+
+    // An out-of-range set resolves empty: OK with nothing copied/moved.
+    let out = h.cmd("COPY 88:88 INBOX").await;
+    assert!(
+        out.trim_end().ends_with("OK COPY completed"),
+        "empty set COPY: {out:?}"
+    );
+    let out = h.cmd("MOVE 88:88 INBOX").await;
+    assert!(
+        out.trim_end().ends_with("OK MOVE completed"),
+        "empty set MOVE: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// EXPUNGE advertises the new EXISTS after removing messages.
+#[tokio::test]
+async fn expunge_emits_exists_after_removals() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    let deleted = || mail_proto::MessageFlags {
+        deleted: true,
+        ..Default::default()
+    };
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "f@e.test", deleted(), 0);
+    h.mock
+        .add_message("acct-1", "INBOX", "b", "f@e.test", deleted(), 0);
+    h.mock
+        .add_message("acct-1", "INBOX", "c", "f@e.test", Default::default(), 0);
+    let out = h.cmd("EXPUNGE").await;
+    assert_eq!(
+        out.matches("* 1 EXPUNGE").count(),
+        2,
+        "renumbered descending expunges: {out:?}"
+    );
+    assert!(
+        out.contains("* 1 EXISTS"),
+        "EXISTS must follow the removals: {out:?}"
+    );
+    assert!(out.trim_end().ends_with("OK EXPUNGE completed"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// CLOSE reports NO (and keeps the session selected) when its silent expunge
+/// fails — swallowing it would leave silently-unexpunged \Deleted mail.
+#[tokio::test]
+async fn close_reports_no_when_expunge_fails_and_stays_selected() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "f@e.test", Default::default(), 0);
+    h.mock.fail("expunge");
+    let out = h.cmd("CLOSE").await;
+    assert!(
+        out.contains("NO") && out.contains("expunge error"),
+        "{out:?}"
+    );
+    // Still selected: a FETCH works without a fresh SELECT.
+    let out = h.cmd("FETCH 1 (FLAGS)").await;
+    assert!(
+        out.trim_end().ends_with("OK FETCH completed"),
+        "session must stay selected: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// NOOP survives transport failures of both the status and the listing RPCs.
+#[tokio::test]
+async fn noop_tolerates_status_and_list_failures() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "f@e.test", Default::default(), 0);
+
+    h.mock.fail("get_mailbox_status");
+    let out = h.cmd("NOOP").await;
+    assert!(
+        out.trim_end().ends_with("OK NOOP completed"),
+        "status failure must not fail NOOP: {out:?}"
+    );
+    h.shutdown().await;
+
+    // A CHANGED view whose re-list fails must also not fail NOOP.
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    // External arrival bumps uidnext/exists so the change gate opens.
+    h.mock
+        .add_message("acct-1", "INBOX", "new", "f@e.test", Default::default(), 0);
+    h.mock.fail("list_messages");
+    let out = h.cmd("NOOP").await;
+    assert!(
+        out.trim_end().ends_with("OK NOOP completed"),
+        "list failure must not fail NOOP: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// STATUS: session-scoped RECENT for the selected mailbox, store RECENT for
+/// others, transport-failure NO, and empty-name BAD.
+#[tokio::test]
+async fn status_recent_scoping_and_error_arms() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 5);
+    h.mock.add_mailbox("acct-1", "Other", 9);
+    // One unseen message observed at SELECT is this session's \Recent.
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "f@e.test", Default::default(), 0);
+    h.select("INBOX").await;
+
+    let out = h.cmd("STATUS INBOX (RECENT)").await;
+    assert!(
+        out.contains("RECENT 1"),
+        "selected mailbox reports session recency: {out:?}"
+    );
+
+    let out = h.cmd("STATUS Other (RECENT)").await;
+    assert!(
+        out.contains("RECENT 0"),
+        "other mailboxes report the store counter: {out:?}"
+    );
+
+    h.mock.fail("get_mailbox_status");
+    let out = h.cmd("STATUS INBOX (MESSAGES)").await;
+    assert!(
+        out.contains("NO") && out.contains("STATUS failed"),
+        "{out:?}"
+    );
+
+    let out = h.cmd("STATUS \"\" (MESSAGES)").await;
+    assert!(
+        out.contains("BAD") && out.contains("Mailbox name required"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn append_argument_and_target_error_arms() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+
+    let out = h.cmd("APPEND \"\" {5}\r\nhello").await;
+    assert!(
+        out.contains("BAD") && out.contains("APPEND requires a mailbox"),
+        "{out:?}"
+    );
+
+    // A bare non-literal token cannot be the message payload.
+    let out = h.cmd("APPEND INBOX not-a-literal").await;
+    assert!(
+        out.contains("BAD") && out.contains("requires a literal message"),
+        "{out:?}"
+    );
+
+    // A quoted token in the date position is parsed as a date-time and
+    // rejected when malformed.
+    let out = h.cmd("APPEND INBOX \"not-a-date\" {5}\r\nhello").await;
+    assert!(
+        out.contains("BAD") && out.contains("Invalid date-time"),
+        "{out:?}"
+    );
+
+    // Missing mailbox: NO [TRYCREATE] (covered elsewhere) — here break the
+    // status RPC instead: any non-NotFound failure is a plain NO.
+    h.mock.fail("get_mailbox_status");
+    let out = h.cmd("APPEND INBOX {5}\r\nhello").await;
+    assert!(
+        out.contains("NO") && out.contains("APPEND failed"),
+        "{out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// APPEND into the currently selected mailbox updates the live view: the
+/// response carries the new EXISTS/RECENT and the pushed UID joins the map.
+#[tokio::test]
+async fn append_into_selected_mailbox_updates_the_view() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    let out = h
+        .cmd_with_literal("APPEND INBOX ", b"Subject: hi\r\n\r\nbody\r\n", "")
+        .await;
+    assert!(
+        out.contains("* 1 EXISTS"),
+        "EXISTS must be advertised: {out:?}"
+    );
+    assert!(
+        out.trim_end()
+            .ends_with("OK [APPENDUID 1 1] APPEND completed"),
+        "{out:?}"
+    );
+    // The view knows the new message.
+    let out = h.cmd("FETCH 1 (UID)").await;
+    assert!(out.contains("UID 1"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// AUTHENTICATE PLAIN exchange edge arms: cancel with "*", invalid base64,
+/// malformed SASL payload, and a non-PLAIN mechanism.
+#[tokio::test]
+async fn authenticate_edge_arms_over_tls() {
+    let mut h = Harness::with_session("127.0.0.1", true, false, true);
+    h.read_greeting().await;
+
+    let out = h.cmd("AUTHENTICATE FROB").await;
+    assert!(
+        out.contains("NO") && out.contains("Unsupported AUTH mechanism"),
+        "{out:?}"
+    );
+
+    // Cancel the continuation exchange.
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} AUTHENTICATE PLAIN")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut cont)).await;
+    assert!(
+        cont.starts_with(b"+"),
+        "continuation: {:?}",
+        String::from_utf8_lossy(&cont)
+    );
+    h.send_line("*").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("BAD") && out.contains("cancelled"), "{out:?}");
+
+    // Invalid base64 on the continuation line.
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} AUTHENTICATE PLAIN")).await;
+    let mut cont = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut cont)).await;
+    h.send_line("!!!not-base64!!!").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(
+        out.contains("BAD") && out.contains("Invalid base64"),
+        "{out:?}"
+    );
+
+    // Base64 that does not decode to authcid\0passwd.
+    let bad = base64::engine::general_purpose::STANDARD.encode(b"only-authcid");
+    let out = h.cmd(&format!("AUTHENTICATE PLAIN {bad}")).await;
+    assert!(
+        out.contains("BAD") && out.contains("Invalid AUTHENTICATE payload"),
+        "{out:?}"
+    );
+
+    // Empty initial response.
+    let out = h.cmd("AUTHENTICATE PLAIN \"\"").await;
+    assert!(
+        out.contains("BAD") && out.contains("cancelled"),
+        "empty IR cancels: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// IDLE with a broken event subscription (mailstore down) must still work as
+/// a poll: no events, DONE terminates, junk lines get BAD, blank lines are
+/// ignored.
+#[tokio::test]
+async fn idle_with_failed_subscription_ignores_events_and_ends_on_done() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+    h.mock.fail("subscribe_mailbox");
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut plus = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut plus)).await;
+    assert!(
+        plus.starts_with(b"+"),
+        "idling continuation: {:?}",
+        String::from_utf8_lossy(&plus)
+    );
+
+    // A blank line is ignored (continue), junk gets BAD but IDLE continues.
+    h.send_line("").await;
+    h.send_line("x1 SELECT INBOX").await;
+    let mut bad = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut bad)).await;
+    let bad_text = String::from_utf8_lossy(&bad).into_owned();
+    assert!(
+        bad_text.starts_with("x1 BAD") && bad_text.contains("not allowed during IDLE"),
+        "{bad_text:?}"
+    );
+
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
+}
+
+/// IDLE ending on LOGOUT: BYE + tagged OK, session state Logout.
+#[tokio::test]
+async fn idle_logout_during_idle_ends_the_session() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 1);
+    h.select("INBOX").await;
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut plus = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut plus)).await;
+    assert!(
+        plus.starts_with(b"+"),
+        "{:?}",
+        String::from_utf8_lossy(&plus)
+    );
+    h.send_line("z9 LOGOUT").await;
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut out)).await;
+    let text = String::from_utf8_lossy(&out).into_owned();
+    assert!(text.contains("* BYE"), "BYE before the tagged OK: {text:?}");
+    let mut ok = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut ok)).await;
+    assert!(
+        ok.starts_with(b"z9 OK"),
+        "tagged OK under the CLIENT's tag: {:?}",
+        String::from_utf8_lossy(&ok)
+    );
+    // The server task ends.
+    let _ = tokio::time::timeout(Duration::from_secs(5), h.server).await;
+}
+
+/// LSUB reports attributes and the real delimiter for a subscribed mailbox
+/// that still exists, and no attributes for a vanished one.
+#[tokio::test]
+async fn lsub_reports_attributes_for_existing_subscriptions() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "Plain", 1);
+    h.mock.set_mailbox_row(
+        "acct-1",
+        mail_proto::Mailbox {
+            name: "Plain".to_string(),
+            delimiter: "/".to_string(),
+            attributes: vec!["\\Archive".to_string()],
+            uidvalidity: 1,
+            ..Default::default()
+        },
+    );
+    h.cmd("SUBSCRIBE Plain").await;
+    // A subscription to a mailbox the store no longer knows about.
+    h.cmd("SUBSCRIBE Ghost").await;
+    let out = h.cmd("LSUB \"\" \"*\"").await;
+    assert!(
+        out.contains("* LSUB (\\Archive) \"/\" \"Plain\""),
+        "existing subscription carries attrs+delimiter: {out:?}"
+    );
+    assert!(
+        out.contains("* LSUB () \"/\" \"Ghost\""),
+        "vanished subscription lists with no attributes: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// LIST: a mailbox whose store delimiter is empty renders as NIL.
+#[tokio::test]
+async fn list_renders_an_empty_delimiter_as_nil() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "Weird", 1);
+    h.mock.set_mailbox_row(
+        "acct-1",
+        mail_proto::Mailbox {
+            name: "Weird".to_string(),
+            delimiter: String::new(),
+            ..Default::default()
+        },
+    );
+    let out = h.cmd("LIST \"\" \"*\"").await;
+    assert!(
+        out.contains("* LIST () NIL \"Weird\""),
+        "empty delimiter must be NIL: {out:?}"
+    );
+    h.shutdown().await;
+}
+
+/// IDLE event stream: a removal and an arrival must surface as EXPUNGE (in
+/// descending order), EXISTS, RECENT and UIDNEXT — and DONE still terminates.
+#[tokio::test]
+async fn idle_events_surface_expunge_exists_recent_uidnext() {
+    let mut h = Harness::new();
+    h.login("u@e.test", "pw").await;
+    h.mock.add_mailbox("acct-1", "INBOX", 4);
+    h.select("INBOX").await;
+    let deleted = || mail_proto::MessageFlags {
+        deleted: true,
+        ..Default::default()
+    };
+    h.mock
+        .add_message("acct-1", "INBOX", "a", "f@e.test", deleted(), 0);
+    h.mock
+        .add_message("acct-1", "INBOX", "b", "f@e.test", Default::default(), 0);
+    // Sync the session view to the two messages.
+    h.noop().await;
+
+    let tag = h.fresh_tag();
+    h.send_line(&format!("{tag} IDLE")).await;
+    let mut plus = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), h.io.read_until(b'\n', &mut plus)).await;
+    assert!(
+        plus.starts_with(b"+"),
+        "{:?}",
+        String::from_utf8_lossy(&plus)
+    );
+
+    // Remove uid 1 through the real service, then announce it.
+    let _ = MailstoreService::expunge(
+        &h.mock,
+        tonic::Request::new(mail_proto::ExpungeRequest {
+            account_id: "acct-1".into(),
+            mailbox: "INBOX".into(),
+            uids: vec![1],
+        }),
+    )
+    .await
+    .expect("mock expunge");
+    h.mock
+        .events_sender("acct-1", "INBOX")
+        .send(MailboxEvent {
+            event: Some(mail_proto::mailbox_event::Event::MessageRemoved(
+                mail_proto::MessageRemoved { uid: 1 },
+            )),
+        })
+        .expect("send removal event");
+
+    // Add two fresh unseen messages and announce the arrival.
+    h.mock
+        .add_message("acct-1", "INBOX", "c", "f@e.test", Default::default(), 0);
+    h.mock
+        .add_message("acct-1", "INBOX", "d", "f@e.test", Default::default(), 0);
+    h.mock
+        .events_sender("acct-1", "INBOX")
+        .send(MailboxEvent {
+            event: Some(mail_proto::mailbox_event::Event::MessageAdded(
+                mail_proto::MessageAdded {
+                    message: Some(mail_proto::MessageMeta {
+                        uid: 3,
+                        account_id: "acct-1".into(),
+                        mailbox: "INBOX".into(),
+                        ..Default::default()
+                    }),
+                },
+            )),
+        })
+        .expect("send arrival event");
+
+    let mut seen = String::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let mut line = Vec::new();
+        let n = tokio::time::timeout(Duration::from_secs(2), h.io.read_until(b'\n', &mut line))
+            .await
+            .unwrap_or(Ok(0))
+            .unwrap_or(0);
+        if n == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        }
+        seen.push_str(&String::from_utf8_lossy(&line));
+        if seen.contains("[UIDNEXT") {
+            break;
+        }
+    }
+    assert!(seen.contains("* 1 EXPUNGE"), "removal expunged: {seen:?}");
+    assert!(seen.contains("* 3 EXISTS"), "arrivals advertised: {seen:?}");
+    assert!(
+        seen.contains("* 3 RECENT"),
+        "unseen arrivals are recent: {seen:?}"
+    );
+    assert!(
+        seen.contains("* OK [UIDNEXT 5]"),
+        "uidnext bumped: {seen:?}"
+    );
+
+    h.send_line("DONE").await;
+    let out = h.read_until_tagged(&tag).await;
+    assert!(out.contains("OK IDLE terminated"), "{out:?}");
+    h.shutdown().await;
 }

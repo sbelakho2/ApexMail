@@ -3257,4 +3257,110 @@ mod tests {
         }
         pool.close().await;
     }
+    // ── poll-loop arms (batch 2) ───────────────────────────────────────────
+
+    use crate::common::ReplyHandlerConfig as RHConfig;
+
+    fn loop_config() -> RHConfig {
+        RHConfig {
+            base: crate::common::ProcessorConfig {
+                name: "reply-loop".into(),
+                concurrency: 2,
+                poll_interval: std::time::Duration::from_millis(20),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dead_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect_lazy("postgresql://127.0.0.1:1/none")
+            .expect("lazy pool")
+    }
+
+    /// Empty queue + shutdown: the loop parks on poll_interval and BREAKS on
+    /// the shutdown notification (never a busy spin).
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn poll_loop_breaks_on_shutdown_when_queue_is_empty() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "worker_reply_loop",
+            "reply_loop_empty",
+        )
+        .await
+        {
+            Ok(Some(pool)) => pool,
+            Ok(None) => {
+                eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+                return;
+            }
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let handler = std::sync::Arc::new(ReplyHandler::new(pool.clone(), loop_config()));
+        handler.is_running.store(true, Ordering::SeqCst);
+        // Let the loop enter the empty-queue select, then signal shutdown.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Mirror stop(): clear the flag AND wake parked waiters.
+        handler.is_running.store(false, Ordering::SeqCst);
+        handler.shutdown_notify.notify_waiters();
+        let h = handler.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async move { h.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits on shutdown")
+        .expect("join ok");
+        pool.close().await;
+    }
+
+    /// A dead database drives the fetch-error arm; the loop keeps polling
+    /// (poll_interval backoff) until shutdown.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn poll_loop_survives_fetch_errors_until_shutdown() {
+        let handler = std::sync::Arc::new(ReplyHandler::new(dead_pool(), loop_config()));
+        handler.is_running.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        handler.is_running.store(false, Ordering::SeqCst);
+        handler.shutdown_notify.notify_waiters();
+        let h = handler.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async move { h.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits after error-arm polls")
+        .expect("join ok");
+    }
+
+    /// Zero available capacity parks the loop for the 100ms tick instead of
+    /// fetching; releasing capacity resumes and shutdown still ends it.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn poll_loop_parks_when_capacity_is_exhausted() {
+        let handler = std::sync::Arc::new(ReplyHandler::new(dead_pool(), loop_config()));
+        handler.is_running.store(true, Ordering::SeqCst);
+        // Fill the capacity counter.
+        handler.active_jobs.fetch_add(2, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        // Drain and shut down.
+        handler.active_jobs.fetch_sub(2, Ordering::SeqCst);
+        handler.is_running.store(false, Ordering::SeqCst);
+        handler.shutdown_notify.notify_waiters();
+        let h = handler.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn(async move { h.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits after capacity drain")
+        .expect("join ok");
+    }
+
+    #[tokio::test]
+    async fn classifier_name_accessor_matches_the_configured_classifier() {
+        let handler = ReplyHandler::new(dead_pool(), loop_config());
+        assert!(!handler.classifier_name().is_empty());
+    }
 }

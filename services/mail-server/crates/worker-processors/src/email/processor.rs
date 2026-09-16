@@ -10719,4 +10719,569 @@ mod end_to_end_db_tests {
             created_at: Utc::now(),
         }
     }
+    // ═══════════════════════════════════════════════════════════════════════
+    // Adversarial batch: pipeline deferral arms, error-class mapping, warmup
+    // reservation fail-closed, send admission, acceptance-lease arbitration.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Extended dispositions for the classification arms.
+    #[derive(Clone)]
+    enum ExtraMode {
+        SesPermanent,
+        SesTransient,
+        TransportSoftBounce,
+        TransportHardBounce,
+        RateLimited,
+    }
+
+    struct ExtraTransport {
+        mode: ExtraMode,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for ExtraTransport {
+        fn transport_name(&self) -> &str {
+            "extra-scripted"
+        }
+        fn supports_source_binding(&self) -> bool {
+            false
+        }
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            _route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                ExtraMode::SesPermanent => Err(ProcessorError::Ses {
+                    message: "InvalidParameterValue".into(),
+                    permanent: true,
+                    address_proving: true,
+                }),
+                ExtraMode::SesTransient => Err(ProcessorError::Ses {
+                    message: "Throttling".into(),
+                    permanent: false,
+                    address_proving: false,
+                }),
+                ExtraMode::TransportSoftBounce => {
+                    Err(ProcessorError::Transport("Soft bounce: greylisted".into()))
+                }
+                ExtraMode::TransportHardBounce => Err(ProcessorError::Transport(
+                    "Hard bounce: no such domain".into(),
+                )),
+                ExtraMode::RateLimited => {
+                    Err(ProcessorError::RateLimited("throttled by provider".into()))
+                }
+            }
+        }
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    /// A dedicated-relay double that CAN verify source binding, so the
+    /// pre-DATA route gate passes and the warmup reservation arms run.
+    struct DedicatedDouble {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for DedicatedDouble {
+        fn transport_name(&self) -> &str {
+            "dedicated-double"
+        }
+        fn supports_source_binding(&self) -> bool {
+            true
+        }
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(DeliveryReceipt {
+                transport: TransportType::Smtp,
+                transport_message_id: Some("relay-1".into()),
+                actual_source_ip: route.dedicated_source_ip(),
+                recipient_provider: None,
+                provider_source: None,
+            })
+        }
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    /// The row's status + metadata.last_error, for deferral assertions.
+    async fn row_deferral(pool: &PgPool, queue_id: uuid::Uuid) -> (String, Option<String>) {
+        let (status, reason): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, metadata->>'requeue_reason' FROM email_queue WHERE id = $1",
+        )
+        .bind(queue_id)
+        .fetch_one(pool)
+        .await
+        .expect("row");
+        (status, reason)
+    }
+
+    /// An OPEN circuit breaker must defer the claimed row (retryable) and
+    /// never submit it.
+    #[tokio::test]
+    async fn circuit_open_defers_row_without_submission() {
+        let Some(pool) = e2e_pool("e2e_circuit_open").await else {
+            return;
+        };
+        let fixture = seed(&pool, "circuit").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        // Trip the breaker open (the processor configures threshold 10).
+        for _ in 0..10 {
+            processor.smtp_circuit_breaker.record_failure();
+        }
+        assert!(!processor.smtp_circuit_breaker.is_allowed());
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect("deferred, not failed");
+        assert_eq!(transport.calls(), 0, "the open breaker must not submit");
+
+        let (status, reason) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending", "the row is retryable: {status}");
+        assert_eq!(
+            reason.as_deref(),
+            Some("circuit_open"),
+            "deferral reason recorded: {reason:?}"
+        );
+        pool.close().await;
+    }
+
+    /// The structured error classes map to the recorded outcome and the
+    /// queue transition: SES permanent → hard-bounce suppression, SES
+    /// transient → soft-bounce requeue, string Soft/Hard bounce transport
+    /// errors reuse the same classes, RateLimited defers.
+    #[tokio::test]
+    async fn ses_error_outcomes_map_to_bounce_classes() {
+        for (label, mode, expect_status) in [
+            ("ses_permanent", ExtraMode::SesPermanent, "bounced"),
+            ("ses_transient", ExtraMode::SesTransient, "pending"),
+            ("transport_soft", ExtraMode::TransportSoftBounce, "pending"),
+            ("transport_hard", ExtraMode::TransportHardBounce, "bounced"),
+            ("rate_limited", ExtraMode::RateLimited, "pending"),
+        ] {
+            let Some(pool) = e2e_pool(&format!("e2e_class_{label}")).await else {
+                return;
+            };
+            let fixture = seed(&pool, label).await;
+            let transport = Arc::new(ExtraTransport {
+                mode: mode.clone(),
+                calls: AtomicUsize::new(0),
+            });
+            let mut config = EmailConfig {
+                base: crate::common::ProcessorConfig {
+                    name: "e2e".into(),
+                    max_retries: 3,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            config.tracking.enabled = false;
+            config.tracking.secret_key = None;
+            config.ses.max_send_rate = 0;
+            let hybrid =
+                HybridTransport::new(Some(transport.clone() as Arc<dyn EmailTransport>), None);
+            let processor =
+                EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+                    .await
+                    .expect("processor");
+
+            let jobs = processor.fetch_jobs(10).await.expect("claim");
+            let job = jobs.into_iter().next().expect("one job");
+            processor
+                .process_job(job)
+                .await
+                .expect_err("all these modes are errors");
+            assert_eq!(transport.calls.load(Ordering::SeqCst), 1, "{label}");
+
+            let (status, _) = row_deferral(&pool, fixture.queue_id).await;
+            assert_eq!(status, expect_status, "{label}: {status}");
+
+            if label == "ses_permanent" {
+                // Only an address-PROVING failure suppresses; the codeless
+                // "Hard bounce" string class bounces without suppression.
+                let suppressed: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*)::bigint FROM suppressions WHERE tenant_id = $1",
+                )
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("suppressions");
+                assert_eq!(
+                    suppressed, 1,
+                    "{label}: the invalid recipient is suppressed"
+                );
+            }
+            pool.close().await;
+        }
+    }
+
+    /// A worker with NO transport at all defers before DATA with
+    /// ses_transport_unconfigured — the row stays retryable.
+    #[tokio::test]
+    async fn unconfigured_transport_defers_before_data() {
+        let Some(pool) = e2e_pool("e2e_no_transport").await else {
+            return;
+        };
+        let fixture = seed(&pool, "no-transport").await;
+        let mut config = EmailConfig::default();
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        let hybrid: HybridTransport = HybridTransport::new(None, None);
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor.process_job(job).await.expect("deferred");
+        let (status, reason) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(
+            reason.as_deref(),
+            Some("ses_transport_unconfigured"),
+            "{reason:?}"
+        );
+        pool.close().await;
+    }
+
+    /// Warmup reservation: a warming dedicated IP at its canonical daily cap
+    /// defers the row with warmup_limit; an unreachable quota store defers
+    /// with warmup_admission_unavailable (fail closed, never unlimited).
+    #[tokio::test]
+    async fn warmup_reservation_cap_and_store_outage_fail_closed() {
+        // Shared-keyspace guard: the warmup counters live in the shared Redis
+        // (keyed per IP+day). IPs are uuid-unique, but the guard keeps the
+        // pattern honest across parallel processes.
+        let admin_url = std::env::var("TEST_DATABASE_ADMIN_URL").ok();
+        let _guard = match &admin_url {
+            Some(url) => crate::test_support::redis_keys_guard(url, "warmup_reservation_e2e").await,
+            None => None,
+        };
+
+        // ── cap reached ──
+        let Some(pool) = e2e_pool("e2e_warmup_cap").await else {
+            return;
+        };
+        let mut fixture = seed(&pool, "warmup-cap").await;
+        let ip_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, warmup_started_at) \
+             VALUES ($1, $2, '198.51.100.77', 'warming', NOW() - INTERVAL '1 day')",
+        )
+        .bind(ip_id)
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("dedicated ip");
+        let _ = &mut fixture;
+
+        let transport = Arc::new(DedicatedDouble {
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig::default(),
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.warmup.enabled = true;
+        config.dkim.enabled = true; // dedicated routes require the local signature
+        let hybrid = HybridTransport::new(None, Some(transport.clone() as Arc<dyn EmailTransport>));
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        // Day 2 of the canonical schedule allows only a handful of sends —
+        // pre-fill the counter past it so the atomic reserve finds no room.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let counter_key = warmup_ip_counter_key("198.51.100.77", &today);
+        {
+            let mut conn = e2e_redis().get().await.expect("redis conn");
+            let _: () = redis::cmd("SET")
+                .arg(&counter_key)
+                .arg(10_000i64)
+                .query_async(&mut conn)
+                .await
+                .expect("prefill counter");
+        }
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor.process_job(job).await.expect("deferred");
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            0,
+            "a capped IP must not carry the send"
+        );
+        let (status, reason) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(reason.as_deref(), Some("warmup_limit"), "{reason:?}");
+        pool.close().await;
+
+        // ── quota store unreachable: fail closed ──
+        let Some(pool) = e2e_pool("e2e_warmup_down").await else {
+            return;
+        };
+        let mut fixture = seed(&pool, "warmup-down").await;
+        let ip_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, warmup_started_at) \
+             VALUES ($1, $2, '198.51.100.78', 'warming', NOW() - INTERVAL '2 days')",
+        )
+        .bind(ip_id)
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("dedicated ip");
+        let _ = &mut fixture;
+
+        let transport = Arc::new(DedicatedDouble {
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = EmailConfig::default();
+        config.tracking.enabled = false;
+        config.ses.max_send_rate = 0;
+        config.warmup.enabled = true;
+        config.dkim.enabled = true; // dedicated routes require the local signature
+        let hybrid = HybridTransport::new(None, Some(transport.clone() as Arc<dyn EmailTransport>));
+        // An unreachable Redis: port 1 on loopback refuses immediately.
+        let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool object");
+        let processor = EmailProcessor::with_transport(pool.clone(), dead_redis, config, hybrid)
+            .await
+            .expect("processor");
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        processor.process_job(job).await.expect("deferred");
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            0,
+            "no quota store => no send"
+        );
+        let (status, reason) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(
+            reason.as_deref(),
+            Some("warmup_admission_unavailable"),
+            "{reason:?}"
+        );
+        pool.close().await;
+    }
+
+    /// Send admission: with a 1/sec shared-pool rate, a second send for the
+    /// SAME tenant inside the same second is deferred (send_rate_limited) and
+    /// the attempt is NOT consumed.
+    #[tokio::test]
+    async fn send_admission_exhaustion_defers_the_second_send() {
+        let Some(pool) = e2e_pool("e2e_admission").await else {
+            return;
+        };
+        let fixture = seed(&pool, "admission").await;
+        // A second row for the same tenant (different recipients).
+        let second_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category) \
+             VALUES ($1, $2, ARRAY[$3], 'second', 'pending', $4, $5, $6, $3, 'body', \
+                     '{}'::jsonb, 0, 'marketing')",
+        )
+        .bind(second_id)
+        .bind(&fixture.sender)
+        .bind("other@example.org")
+        .bind(&fixture.tenant_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(fixture.domain_id)
+        .execute(&pool)
+        .await
+        .expect("second row");
+
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "e2e".into(),
+                max_retries: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 1;
+        let hybrid = HybridTransport::new(Some(transport.clone() as Arc<dyn EmailTransport>), None);
+        let processor = EmailProcessor::with_transport(pool.clone(), e2e_redis(), config, hybrid)
+            .await
+            .expect("processor");
+
+        // Poison BOTH admission buckets for an hour (tokens=0, ts in the
+        // future: the Lua clamps elapsed to >= 0, so no refill can happen):
+        // the deferral is deterministic, independent of test-run timing.
+        let job_probe = {
+            let mut jobs = processor.fetch_jobs(10).await.expect("claim");
+            assert_eq!(jobs.len(), 2, "both rows claim together");
+            jobs.sort_by(|a, b| a.to.cmp(&b.to));
+            jobs.remove(0)
+        };
+        // The DEFERRED row is the one being processed: whichever claim
+        // probe took.
+        let deferred_id = if job_probe.to == fixture.recipient {
+            fixture.queue_id
+        } else {
+            second_id
+        };
+        let future_ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+            + 3_600_000;
+        {
+            let mut conn = e2e_redis().get().await.expect("redis conn");
+            for key in send_admission_keys(&job_probe, TransportKind::SesShared) {
+                let _: () = redis::cmd("HMSET")
+                    .arg(&key)
+                    .arg("tokens")
+                    .arg(0)
+                    .arg("ts")
+                    .arg(future_ts_ms)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("poison bucket");
+            }
+        }
+
+        // Poisoned bucket: the send defers BEFORE the transport, and the
+        // attempt is untouched.
+        processor
+            .process_job(job_probe.clone())
+            .await
+            .expect("deferred, not failed");
+        assert_eq!(transport.calls(), 0, "an exhausted bucket must not submit");
+        let (status, reason) = row_deferral(&pool, deferred_id).await;
+        assert_eq!(status, "pending", "the throttled row defers: {status}");
+        assert_eq!(reason.as_deref(), Some("send_rate_limited"), "{reason:?}");
+        let attempt: i32 = sqlx::query_scalar("SELECT attempt FROM email_queue WHERE id = $1")
+            .bind(deferred_id)
+            .fetch_one(&pool)
+            .await
+            .expect("attempt");
+        assert_eq!(attempt, 0, "a deferred send does not consume an attempt");
+
+        // Un-poison and retry: the same row is admitted and completes — the
+        // deferral was a deferral, not a terminal state.
+        {
+            let mut conn = e2e_redis().get().await.expect("redis conn");
+            for key in send_admission_keys(&job_probe, TransportKind::SesShared) {
+                let _: () = redis::cmd("DEL")
+                    .arg(&key)
+                    .query_async(&mut conn)
+                    .await
+                    .expect("clear bucket");
+            }
+        }
+        sqlx::query("UPDATE email_queue SET status = 'pending', scheduled_at = NULL WHERE id = $1")
+            .bind(deferred_id)
+            .execute(&pool)
+            .await
+            .expect("requeue");
+        let jobs = processor.fetch_jobs(10).await.expect("second claim");
+        let job = jobs.into_iter().next().expect("one job again");
+        processor
+            .process_job(job)
+            .await
+            .expect("admitted after unpoison");
+        assert_eq!(transport.calls(), 1);
+        let (status, _) = row_deferral(&pool, deferred_id).await;
+        assert_eq!(status, "sent");
+        pool.close().await;
+    }
+
+    /// A LIVE acceptance reservation (unexpired lease) defers the retry with
+    /// acceptance_in_flight instead of double-submitting; once the lease
+    /// expires the claim reclaims it in place and submits.
+    #[tokio::test]
+    async fn in_flight_acceptance_reservation_defers_until_the_lease_expires() {
+        let Some(pool) = e2e_pool("e2e_inflight").await else {
+            return;
+        };
+        let fixture = seed(&pool, "inflight").await;
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+
+        let jobs = processor.fetch_jobs(10).await.expect("claim");
+        let job = jobs.into_iter().next().expect("one job");
+        let unit = send_unit_of(&job);
+
+        // Simulate a crashed previous attempt: a LIVE reserved row.
+        sqlx::query(
+            "INSERT INTO sales_delivery_acceptances \
+                 (send_unit, tenant_id, queue_id, state, transport, reserved_at) \
+             VALUES ($1, $2, $3::uuid, 'reserved', 'ses_shared', NOW())",
+        )
+        .bind(&unit)
+        .bind(&fixture.tenant_id)
+        .bind(fixture.queue_id)
+        .execute(&pool)
+        .await
+        .expect("live reservation");
+
+        processor.process_job(job.clone()).await.expect("deferred");
+        assert_eq!(transport.calls(), 0, "a live lease must not double-submit");
+        let (status, reason) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(
+            reason.as_deref(),
+            Some("acceptance_in_flight"),
+            "{reason:?}"
+        );
+
+        // Age the reservation past the 15-minute lease: the claim now
+        // RECLAIMS it in place and the send proceeds exactly once.
+        sqlx::query("UPDATE sales_delivery_acceptances SET reserved_at = NOW() - INTERVAL '20 minutes' WHERE send_unit = $1")
+            .bind(&unit)
+            .execute(&pool)
+            .await
+            .expect("age lease");
+        // Requeue the row for an immediate claim.
+        sqlx::query("UPDATE email_queue SET status = 'pending', scheduled_at = NULL WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("requeue");
+        let jobs = processor.fetch_jobs(10).await.expect("second claim");
+        let job = jobs.into_iter().next().expect("one job again");
+        processor
+            .process_job(job)
+            .await
+            .expect("dispatch after reclaim");
+        assert_eq!(transport.calls(), 1, "the reclaimed unit submits once");
+        let (status, _) = row_deferral(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        assert_eq!(
+            acceptance_state(&pool, &unit).await.as_deref(),
+            Some("accepted"),
+            "the reclaimed row records the acceptance"
+        );
+        pool.close().await;
+    }
 }

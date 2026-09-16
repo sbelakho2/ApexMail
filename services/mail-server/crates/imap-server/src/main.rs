@@ -1245,7 +1245,15 @@ fn find_literal_spec(line: &str) -> Option<(usize, usize, usize, bool)> {
             }
             b'\\' if in_quote => i += 2,
             b'{' if !in_quote => {
-                let prev_ok = i == 0 || matches!(bytes[i - 1], b' ' | b'(' | b'\t');
+                // RFC 7888: a '~' immediately before the '{' marks a
+                // non-synchronizing literal; the TOKEN BOUNDARY is whatever
+                // precedes the '~' (checking the byte before '{' itself would
+                // see the '~' and reject every ~{n} spec, desynchronizing
+                // clients that use the two-way non-sync form).
+                let tilde = i > 0 && bytes[i - 1] == b'~';
+                let spec_start = if tilde { i - 1 } else { i };
+                let prev_ok =
+                    spec_start == 0 || matches!(bytes[spec_start - 1], b' ' | b'(' | b'\t');
                 if prev_ok {
                     let mut j = i + 1;
                     let mut size: usize = 0;
@@ -1258,12 +1266,12 @@ fn find_literal_spec(line: &str) -> Option<(usize, usize, usize, bool)> {
                         digits = true;
                     }
                     if digits {
-                        let non_sync = j < bytes.len() && bytes[j] == b'+';
-                        if non_sync {
+                        let non_sync = tilde || (j < bytes.len() && bytes[j] == b'+');
+                        if non_sync && !tilde {
                             j += 1;
                         }
                         if j < bytes.len() && bytes[j] == b'}' {
-                            return Some((i, j + 1, size, non_sync));
+                            return Some((spec_start, j + 1, size, non_sync));
                         }
                     }
                 }
@@ -5752,72 +5760,127 @@ async fn main() -> Result<()> {
     // L1: one admission limiter shared by both accept loops.
     let conn_limiter = Arc::new(Mutex::new(ConnectionLimiter::default()));
 
+    let (imap_listener, imaps_listener) = bind_listeners(&cli, tls_acceptor.is_some()).await?;
+
+    // Clone the acceptor so both the IMAPS (993) and IMAP (143) paths can use it.
+    // The plaintext IMAP path needs it for STARTTLS upgrade.
+    let plaintext_tls_acceptor = tls_acceptor.clone();
+
+    let _imaps = match (imaps_listener, tls_acceptor) {
+        (Some(imaps_listener), Some(acceptor)) => {
+            let mailstore = cli.mailstore_addr.clone();
+            let mailstore_auth = mailstore_auth.clone();
+            let conn_limiter = Arc::clone(&conn_limiter);
+            Some(tokio::spawn(run_imaps_accept_loop(
+                imaps_listener,
+                acceptor,
+                mailstore,
+                mailstore_auth,
+                conn_limiter,
+            )))
+        }
+        _ => None,
+    };
+
+    let mailstore = cli.mailstore_addr.clone();
+    let mailstore_auth = mailstore_auth.clone();
+    let allow_insecure_auth = cli.allow_insecure_auth;
+    run_imap_accept_loop(
+        imap_listener,
+        plaintext_tls_acceptor,
+        mailstore,
+        mailstore_auth,
+        allow_insecure_auth,
+        conn_limiter,
+    )
+    .await;
+    Ok(())
+}
+
+/// Bind the IMAP (plaintext/STARTTLS) listener and — when TLS is configured —
+/// the IMAPS (implicit TLS) listener. Extracted from `main` so the
+/// bind-failure arms are testable without spawning the binary.
+async fn bind_listeners(
+    cli: &Cli,
+    tls_configured: bool,
+) -> Result<(TcpListener, Option<TcpListener>)> {
     let imap_addr = format!("{}:{}", cli.listen_addr, cli.imap_port);
     let imap_listener = TcpListener::bind(&imap_addr)
         .await
         .with_context(|| format!("Failed to bind IMAP on {}", imap_addr))?;
     info!("IMAP listener on {}", imap_addr);
 
-    // Clone the acceptor so both the IMAPS (993) and IMAP (143) paths can use it.
-    // The plaintext IMAP path needs it for STARTTLS upgrade.
-    let plaintext_tls_acceptor = tls_acceptor.clone();
-
-    let _imaps = if let Some(acceptor) = tls_acceptor {
+    let imaps_listener = if tls_configured {
         let imaps_addr = format!("{}:{}", cli.listen_addr, cli.imaps_port);
         let imaps_listener = TcpListener::bind(&imaps_addr)
             .await
             .with_context(|| format!("Failed to bind IMAPS on {}", imaps_addr))?;
         info!("IMAPS listener on {}", imaps_addr);
-
-        let acceptor = acceptor.clone();
-        let mailstore = cli.mailstore_addr.clone();
-        let mailstore_auth = mailstore_auth.clone();
-        let conn_limiter = Arc::clone(&conn_limiter);
-        Some(tokio::spawn(async move {
-            loop {
-                match imaps_listener.accept().await {
-                    Ok((stream, addr)) => {
-                        if !conn_limiter.lock().await.try_acquire(addr.ip()) {
-                            warn!("IMAPS connection from {} rejected: connection cap", addr);
-                            let stream = stream;
-                            tokio::spawn(reject_connection(
-                                stream,
-                                "Too many connections; try again later",
-                            ));
-                            continue;
-                        }
-                        let acceptor = acceptor.clone();
-                        let mailstore = mailstore.clone();
-                        let mailstore_auth = mailstore_auth.clone();
-                        let limiter = Arc::clone(&conn_limiter);
-                        let ip = addr.ip();
-                        tokio::spawn(async move {
-                            let result = handle_connection(
-                                stream,
-                                Some(acceptor),
-                                mailstore,
-                                mailstore_auth,
-                                true,
-                                false,
-                            )
-                            .await;
-                            limiter.lock().await.release(ip);
-                            if let Err(e) = result {
-                                error!("Connection error from {}: {}", addr, e);
-                            }
-                        });
-                    }
-                    Err(e) => error!("IMAPS accept error: {}", e),
-                }
-            }
-        }))
+        Some(imaps_listener)
     } else {
         None
     };
+    Ok((imap_listener, imaps_listener))
+}
 
-    let mailstore = cli.mailstore_addr.clone();
-    let mailstore_auth = mailstore_auth.clone();
-    let allow_insecure_auth = cli.allow_insecure_auth;
+/// IMAPS (993) accept loop: implicit TLS. Runs until the listener errors
+/// fatally; each connection is capped by the shared limiter and released
+/// when its task finishes.
+async fn run_imaps_accept_loop(
+    imaps_listener: TcpListener,
+    acceptor: TlsAcceptor,
+    mailstore: String,
+    mailstore_auth: InternalServiceAuthInterceptor,
+    conn_limiter: Arc<Mutex<ConnectionLimiter>>,
+) {
+    loop {
+        match imaps_listener.accept().await {
+            Ok((stream, addr)) => {
+                if !conn_limiter.lock().await.try_acquire(addr.ip()) {
+                    warn!("IMAPS connection from {} rejected: connection cap", addr);
+                    tokio::spawn(reject_connection(
+                        stream,
+                        "Too many connections; try again later",
+                    ));
+                    continue;
+                }
+                let acceptor = acceptor.clone();
+                let mailstore = mailstore.clone();
+                let mailstore_auth = mailstore_auth.clone();
+                let limiter = Arc::clone(&conn_limiter);
+                let ip = addr.ip();
+                tokio::spawn(async move {
+                    let result = handle_connection(
+                        stream,
+                        Some(acceptor),
+                        mailstore,
+                        mailstore_auth,
+                        true,
+                        false,
+                    )
+                    .await;
+                    limiter.lock().await.release(ip);
+                    if let Err(e) = result {
+                        error!("Connection error from {}: {}", addr, e);
+                    }
+                });
+            }
+            Err(e) => error!("IMAPS accept error: {}", e),
+        }
+    }
+}
+
+/// IMAP (143) accept loop: plaintext with optional STARTTLS upgrade. Runs
+/// until the listener errors fatally; each connection is capped by the
+/// shared limiter and released when its task finishes.
+async fn run_imap_accept_loop(
+    imap_listener: TcpListener,
+    plaintext_tls_acceptor: Option<TlsAcceptor>,
+    mailstore: String,
+    mailstore_auth: InternalServiceAuthInterceptor,
+    allow_insecure_auth: bool,
+    conn_limiter: Arc<Mutex<ConnectionLimiter>>,
+) {
     loop {
         match imap_listener.accept().await {
             Ok((stream, addr)) => {
@@ -5853,9 +5916,6 @@ async fn main() -> Result<()> {
             Err(e) => error!("IMAP accept error: {}", e),
         }
     }
-
-    #[allow(unreachable_code)]
-    Ok(())
 }
 
 #[cfg(test)]
@@ -7836,3 +7896,736 @@ mod tests {
 
 #[cfg(test)]
 mod adversarial_tests;
+
+#[cfg(test)]
+mod connection_tests;
+
+/// Unit-level arms of the pure helpers: parsers, formatters, budget gates and
+/// the subscription/auth tables — each line proven with a real input.
+#[cfg(test)]
+mod unit_arms {
+    use super::*;
+
+    // ── subscription table ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn subscription_table_operations() {
+        let acct = format!("unit-sub-{}", std::process::id());
+        subscribe_mailbox(&acct, "Box1").await;
+        subscribe_mailbox(&acct, "box2").await;
+        let subs = subscribed_mailboxes(&acct).await;
+        assert_eq!(subs.len(), 2, "case-distinct names: {subs:?}");
+
+        // Unsubscribe is case-insensitive.
+        unsubscribe_mailbox(&acct, "BOX1").await;
+        let subs = subscribed_mailboxes(&acct).await;
+        assert_eq!(
+            subs,
+            ["box2".to_string()].into_iter().collect::<HashSet<_>>()
+        );
+
+        // Rename only rewrites when the old name is subscribed.
+        rename_subscription(&acct, "not-subscribed", "whatever").await;
+        assert_eq!(subscribed_mailboxes(&acct).await.len(), 1);
+        rename_subscription(&acct, "BOX2", "Box3").await;
+        assert_eq!(
+            subscribed_mailboxes(&acct).await,
+            ["Box3".to_string()].into_iter().collect::<HashSet<_>>()
+        );
+
+        // Remove on a missing account is a no-op.
+        remove_subscription("missing-account", "Box3").await;
+        assert_eq!(subscribed_mailboxes(&acct).await.len(), 1);
+        remove_subscription(&acct, "box3").await;
+        assert!(subscribed_mailboxes(&acct).await.is_empty());
+        // Unsubscribe on a missing account is a no-op.
+        unsubscribe_mailbox("missing-account", "x").await;
+    }
+
+    // ── auth failure tables ────────────────────────────────────────────────
+
+    #[test]
+    fn auth_evict_oldest_ips_drops_half_at_the_cap() {
+        let mut table: AuthIpFailureTable = HashMap::new();
+        // Fill to exactly the cap, with ascending timestamps (oldest first).
+        let base = std::time::Instant::now();
+        for n in 0..AUTH_IP_MAX_TRACKED {
+            table.insert(format!("10.0.{n}.1"), {
+                let mut d = VecDeque::new();
+                d.push_back(base + Duration::from_millis(n as u64));
+                d
+            });
+        }
+        auth_evict_oldest_ips(&mut table);
+        assert_eq!(
+            table.len(),
+            AUTH_IP_MAX_TRACKED - AUTH_IP_MAX_TRACKED / 2,
+            "the oldest half is evicted"
+        );
+        // The NEWEST half survives: the last-inserted IPs are all present.
+        for n in (AUTH_IP_MAX_TRACKED / 2)..AUTH_IP_MAX_TRACKED {
+            assert!(
+                table.contains_key(&format!("10.0.{n}.1")),
+                "ip {n} must survive"
+            );
+        }
+        // Below the cap the function is a no-op.
+        let mut small: AuthIpFailureTable = HashMap::new();
+        auth_evict_oldest_ips(&mut small);
+        assert!(small.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_ip_failure_history_is_hard_capped() {
+        let ip = format!("cap-ip-{}", std::process::id());
+        let user = "u";
+        for _ in 0..(AUTH_IP_FAILURE_LIMIT + 5) {
+            auth_record_failure(&ip, user).await;
+        }
+        {
+            let table = AUTH_IP_FAILURES.lock().await;
+            let history = table.get(&ip).expect("ip tracked");
+            assert!(
+                history.len() <= AUTH_IP_FAILURE_LIMIT,
+                "history must be capped at {}, got {}",
+                AUTH_IP_FAILURE_LIMIT,
+                history.len()
+            );
+        }
+        assert!(
+            auth_is_locked(&ip, user).await,
+            "ip is at the aggregate cap"
+        );
+        auth_clear_failures(&ip, user).await;
+        assert!(
+            !auth_is_locked(&ip, user).await,
+            "clear resets the ip budget"
+        );
+    }
+
+    // ── sequence sets ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_sequence_set_edge_arms() {
+        assert!(
+            parse_sequence_set("  ").unwrap().is_empty(),
+            "blank input yields no intervals"
+        );
+        let err = parse_sequence_set("x:5").expect_err("non-numeric start");
+        assert!(
+            format!("{err:#}").contains("invalid sequence start"),
+            "{err:#}"
+        );
+        let err = parse_sequence_set("5:y").expect_err("non-numeric end");
+        assert!(
+            format!("{err:#}").contains("invalid sequence end"),
+            "{err:#}"
+        );
+        // `*:*` stays the (MAX, MAX) interval instead of expanding.
+        assert_eq!(
+            parse_sequence_set("*:*").unwrap(),
+            vec![(u64::MAX, u64::MAX)]
+        );
+        // Reversed ranges normalize.
+        assert_eq!(parse_sequence_set("5:2").unwrap(), vec![(2, 5)]);
+        // Too many intervals are rejected.
+        let bomb = vec!["1:2"; MAX_SEQ_INTERVALS + 1].join(",");
+        assert!(
+            parse_sequence_set(&bomb).is_err(),
+            "interval bomb must be rejected"
+        );
+    }
+
+    #[test]
+    fn resolve_intervals_enforces_the_expansion_cap_in_both_modes() {
+        // A view that exceeds MAX_RESOLVED_UIDS (possible after APPENDs push
+        // the session map past the listing cap): `1:*` must refuse, not
+        // allocate the expansion.
+        let big: Vec<u64> = (1..=(MAX_RESOLVED_UIDS as u64 + 1)).collect();
+        let max = *big.last().unwrap();
+        let err = resolve_intervals(&[(1, u64::MAX)], false, &big, max)
+            .expect_err("seq mode over-cap must bail");
+        assert!(format!("{err:#}").contains("too many messages"), "{err:#}");
+        let err = resolve_intervals(&[(1, u64::MAX)], true, &big, max)
+            .expect_err("uid mode over-cap must bail");
+        assert!(format!("{err:#}").contains("too many messages"), "{err:#}");
+    }
+
+    // ── formatters ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_envelope_carries_all_address_lists() {
+        let env = mail_proto::EmailEnvelope {
+            from: "from@x.test".into(),
+            reply_to: "reply@x.test".into(),
+            to: vec!["to@x.test".into()],
+            cc: vec!["cc@x.test".into()],
+            bcc: vec!["bcc@x.test".into()],
+            subject: "subj".into(),
+            message_id: "<m@x>".into(),
+            in_reply_to: "<p@x>".into(),
+            references: vec!["<r@x>".to_string()],
+            date: 0,
+        };
+        let out = format_envelope(&env);
+        assert!(
+            out.contains("(NIL NIL \"from\" \"x.test\")"),
+            "from addr: {out}"
+        );
+        assert!(
+            out.contains("(NIL NIL \"reply\" \"x.test\")"),
+            "reply-to addr: {out}"
+        );
+        assert!(
+            out.contains("((NIL NIL \"to\" \"x.test\"))"),
+            "to list: {out}"
+        );
+        assert!(
+            out.contains("((NIL NIL \"cc\" \"x.test\"))"),
+            "cc list: {out}"
+        );
+        assert!(
+            out.contains("((NIL NIL \"bcc\" \"x.test\"))"),
+            "bcc list: {out}"
+        );
+        assert!(
+            out.contains("\"<p@x>\" \"<m@x>\""),
+            "in-reply-to then message-id: {out}"
+        );
+        // A missing message-id renders as NIL.
+        let env2 = mail_proto::EmailEnvelope {
+            message_id: String::new(),
+            ..env
+        };
+        let out2 = format_envelope(&env2);
+        assert!(
+            out2.contains("\"<p@x>\" NIL"),
+            "empty message-id is NIL: {out2}"
+        );
+    }
+
+    #[test]
+    fn format_imap_flags_lists_every_system_flag() {
+        let flags = mail_proto::MessageFlags {
+            seen: true,
+            answered: true,
+            flagged: true,
+            deleted: true,
+            draft: true,
+            recent: true,
+            custom: vec!["$Label1".to_string()],
+        };
+        let out = format_imap_flags(&flags);
+        for f in [
+            "\\Seen",
+            "\\Answered",
+            "\\Flagged",
+            "\\Deleted",
+            "\\Draft",
+            "\\Recent",
+        ] {
+            assert!(out.contains(f), "{f} missing from {out}");
+        }
+        assert!(out.contains("$Label1"), "custom keywords survive: {out}");
+    }
+
+    #[test]
+    fn format_internal_date_is_rfc3501_shaped() {
+        // 2024-05-10 13:28:16 UTC.
+        let out = format_internal_date(1_715_347_696);
+        assert_eq!(
+            out, "\"10-May-2024 13:28:16 +0000\"",
+            "quoted RFC 3501 date-time: {out}"
+        );
+    }
+
+    // ── string helpers ─────────────────────────────────────────────────────
+
+    #[test]
+    fn unquote_strips_pairs_and_unescapes() {
+        assert_eq!(unquote("\"plain\""), "plain");
+        assert_eq!(unquote("\"a\\\"b\""), "a\"b");
+        assert_eq!(unquote("\"a\\\\b\""), "a\\b");
+        assert_eq!(unquote("bare"), "bare");
+        assert_eq!(unquote("\""), "\"");
+        assert_eq!(unquote(""), "");
+    }
+
+    #[test]
+    fn literal_index_recognizes_marker_tokens_only() {
+        assert_eq!(literal_index("\x01LIT0\x01"), Some(0));
+        assert_eq!(literal_index("\x01LIT12\x01"), Some(12));
+        assert_eq!(literal_index("plain"), None);
+        assert_eq!(literal_index("\x02LIT0\x02"), None, "wrong sentinel");
+    }
+
+    #[test]
+    fn modified_b64_decode_rejects_invalid_alphabet() {
+        assert_eq!(modified_b64_decode("AAAA"), Some(vec![0, 0, 0]));
+        assert_eq!(
+            modified_b64_decode("AB&&"),
+            None,
+            "invalid characters must not decode"
+        );
+        assert_eq!(modified_b64_decode(""), Some(Vec::new()));
+    }
+
+    #[test]
+    fn imap_utf7_decode_skips_malformed_sequences() {
+        // Round-trip: encode then decode recovers non-ASCII and literal '&'.
+        let name = "K\u{f6}lni & M\u{e9}xico";
+        let encoded = imap_utf7_encode(name);
+        assert!(encoded.contains("&-"), "literal & encodes as &-: {encoded}");
+        assert!(encoded.contains('&'), "non-ASCII runs encode: {encoded}");
+        assert_eq!(imap_utf7_decode(&encoded), name, "round-trip");
+        // "&-" decodes to a bare '&'.
+        assert_eq!(imap_utf7_decode("a&-b"), "a&b");
+        // An unterminated run is passed through verbatim.
+        assert_eq!(imap_utf7_decode("plain&AKA"), "plain&AKA");
+        // Invalid base64 inside a run is passed through.
+        assert_eq!(imap_utf7_decode("a&**&b"), "a&**&b");
+    }
+
+    #[test]
+    fn imap_pattern_match_percent_and_star_semantics() {
+        assert!(imap_pattern_match("INBOX", "INBOX"));
+        assert!(imap_pattern_match("INBOXx", "INBOX%"));
+        // % never consumes the hierarchy delimiter.
+        assert!(!imap_pattern_match("INBOX/Sent", "INBOX%"));
+        assert!(!imap_pattern_match("INBOX/Sent", "INBOXT"));
+        assert!(imap_pattern_match("INBOX/Sent/2024", "INBOX*"));
+        assert!(imap_pattern_match("anything", "*"));
+        assert!(imap_pattern_match("aXbXc", "a*b*c"));
+        assert!(!imap_pattern_match("aXbXc", "a*b*d"));
+        // Case-insensitive fold.
+        assert!(imap_pattern_match("inbox", "INBOX"));
+        // % backtracking: pattern %ab must match aab.
+        assert!(imap_pattern_match("aab", "%ab"));
+        // Empty pattern only matches the empty name.
+        assert!(imap_pattern_match("", ""));
+        assert!(!imap_pattern_match("x", ""));
+    }
+
+    #[test]
+    fn combine_list_pattern_joins_reference_and_pattern() {
+        assert_eq!(combine_list_pattern("ref/", "box*"), "ref/box*");
+        assert_eq!(combine_list_pattern("ref//", "box"), "ref/box");
+        assert_eq!(combine_list_pattern("", "box"), "box");
+        assert_eq!(combine_list_pattern("ref", ""), "*");
+        assert_eq!(combine_list_pattern("", ""), "*");
+        // An absolute pattern ignores the reference.
+        assert_eq!(combine_list_pattern("ref", "/abs"), "/abs");
+    }
+
+    // ── literal budget gate ────────────────────────────────────────────────
+
+    #[test]
+    fn literal_within_budget_enforces_every_limit() {
+        let limits = ReadLimits {
+            max_literal_size: 100,
+            max_literals_per_command: 2,
+            max_total_per_command: 150,
+            max_total_per_connection: 200,
+        };
+        assert!(literal_within_budget(0, 0, 100, &limits, 0));
+        // Count cap.
+        assert!(!literal_within_budget(2, 0, 10, &limits, 0));
+        // Single-literal size cap.
+        assert!(!literal_within_budget(0, 0, 101, &limits, 0));
+        // Per-command total.
+        assert!(!literal_within_budget(1, 100, 51, &limits, 0));
+        // Per-connection cumulative total.
+        assert!(!literal_within_budget(0, 0, 100, &limits, 150));
+        assert!(literal_within_budget(0, 0, 50, &limits, 150));
+    }
+
+    #[test]
+    fn find_literal_spec_locates_sync_and_plus_forms() {
+        let found = find_literal_spec("x {12}").expect("sync literal found");
+        assert_eq!(found.0, 2, "brace offset");
+        assert_eq!(found.1, "x {12}".len(), "spec end");
+        assert_eq!(found.2, 12);
+        assert!(!found.3, "not LITERAL+");
+        let found = find_literal_spec("x {12+}").expect("literal+ found");
+        assert!(found.3, "LITERAL+ marker");
+        let found = find_literal_spec("x ~{12}").expect("non-sync form found");
+        assert!(found.3, "the ~-prefixed form is non-synchronizing");
+        assert!(find_literal_spec("no literal").is_none());
+        assert!(
+            find_literal_spec("x z{5}").is_none(),
+            "must start at a token boundary"
+        );
+        assert!(
+            find_literal_spec("x \"{5}\"").is_none(),
+            "inside a quoted string"
+        );
+        assert!(find_literal_spec("x {}").is_none(), "digitless spec");
+    }
+
+    // ── multipart helpers ──────────────────────────────────────────────────
+
+    #[test]
+    fn multipart_boundary_extraction_arms() {
+        assert_eq!(
+            multipart_boundary("multipart/mixed; boundary=\"b1\""),
+            Some("b1".to_string())
+        );
+        assert_eq!(
+            multipart_boundary("multipart/mixed; boundary=b2; x=y"),
+            Some("b2".to_string())
+        );
+        // Not multipart.
+        assert_eq!(multipart_boundary("text/plain"), None);
+        // Multipart without a boundary.
+        assert_eq!(multipart_boundary("multipart/mixed"), None);
+        // Unterminated quoted boundary.
+        assert_eq!(multipart_boundary("multipart/mixed; boundary=\"oops"), None);
+        // Empty boundary.
+        assert_eq!(multipart_boundary("multipart/mixed; boundary="), None);
+    }
+
+    #[test]
+    fn split_part_header_and_multipart_split_arms() {
+        let part = b"Content-Type: text/plain\r\n\r\nhello";
+        let (h, b) = split_part_header(part);
+        assert_eq!(h, b"Content-Type: text/plain\r\n\r\n");
+        assert_eq!(b, b"hello");
+        // A part with no header block: everything is header, body empty.
+        let (h, b) = split_part_header(b"just body");
+        assert_eq!(h, b"just body");
+        assert!(b.is_empty());
+
+        let body = b"--b\r\nA\r\n--b\r\nB\r\n--b--\r\n";
+        let parts = split_multipart(body, "b");
+        assert_eq!(parts.len(), 2, "two parts");
+        // RFC 2046 requires the closing delimiter: a dangling final part
+        // (no --b--) is NOT delivered.
+        let body = b"--b\r\nA\r\n--b\r\nB";
+        let parts = split_multipart(body, "b");
+        assert_eq!(parts.len(), 1, "unterminated final part is dropped");
+        // A trailing delimiter with nothing after it yields just the prior part.
+        let body = b"--b\r\nA\r\n--b\r\n";
+        let parts = split_multipart(body, "b");
+        assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn extract_body_part_unknown_and_mime_arms() {
+        let raw = b"Content-Type: multipart/mixed; boundary=\"bb\"\r\n\r\n--bb\r\nContent-Type: text/plain\r\n\r\ninner\r\n--bb--\r\n";
+        // Part 1 content.
+        assert!(extract_body_part(raw, "1", false).contains(&b'i'));
+        // Part 1 MIME headers.
+        let mime = extract_body_part(raw, "1", true);
+        assert!(
+            mime.starts_with(b"Content-Type:"),
+            "{:?}",
+            String::from_utf8_lossy(&mime)
+        );
+        // A numeric part inside a non-multipart message yields the whole text.
+        let plain = b"Content-Type: text/plain\r\n\r\nbody";
+        assert_eq!(extract_body_part(plain, "1", false), b"body");
+        // Deep part numbering on a non-multipart container: no match.
+        assert!(extract_body_part(plain, "1.2", false).is_empty());
+        // A text/* part with no sub-parts asked as 1.1: empty.
+        assert!(extract_body_part(plain, "1.1", false).is_empty());
+    }
+
+    #[test]
+    fn embedded_envelope_parses_attached_rfc822() {
+        let inner = b"From: inner@x.test\r\nSubject: inner subject\r\n\r\ninner body";
+        let env = embedded_envelope(inner);
+        assert_eq!(env.from, "inner@x.test");
+        assert_eq!(env.subject, "inner subject");
+        // Garbage degrades to empty fields, never a panic.
+        let env = embedded_envelope(b"\r\n\r\n");
+        assert_eq!(env.from, "");
+        let env = embedded_envelope(b"not a header\r\nno colon\r\n\r\nbody");
+        assert_eq!(env.from, "");
+    }
+
+    #[test]
+    fn format_structure_region_covers_disposition_and_params() {
+        let region = b"Content-Type: text/plain; charset=us-ascii (comment)\r\nContent-Transfer-Encoding: quoted-printable\r\nContent-Disposition: attachment; filename=x.txt; size=12\r\nContent-ID: <cid1>\r\nContent-Description: desc here\r\n\r\nbody";
+        let out = format_structure_region(region, true);
+        assert!(
+            out.contains("\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii (comment)\")"),
+            "{out}"
+        );
+        assert!(out.contains("\"QUOTED-PRINTABLE\""), "{out}");
+        assert!(
+            out.contains("\"ATTACHMENT\" (\"FILENAME\" \"x.txt\" \"SIZE\" \"12\")"),
+            "{out}"
+        );
+        assert!(out.contains("\"<cid1>\""), "content-id: {out}");
+        assert!(out.contains("\"desc here\""), "content-description: {out}");
+        // Bare (non-extended) form omits the extension fields.
+        let bare = format_structure_region(region, false);
+        assert!(
+            !bare.contains("ATTACHMENT"),
+            "bare form has no disposition: {bare}"
+        );
+    }
+
+    #[test]
+    fn format_body_structure_multipart_and_flat() {
+        let raw = b"Content-Type: multipart/mixed; boundary=\"mx\"\r\n\r\n--mx\r\nContent-Type: text/plain\r\n\r\none\r\n--mx\r\nContent-Type: text/html\r\n\r\n<i>two</i>\r\n--mx--\r\n";
+        let out = format_body_structure(raw, false);
+        assert!(
+            out.starts_with("(\"MIXED\""),
+            "multipart wraps its parts: {out}"
+        );
+        assert!(out.contains("\"HTML\""), "{out}");
+        let _ = format_body_structure(raw, true); // extended multipart path
+    }
+
+    // ── process_mailbox_event guard arms ───────────────────────────────────
+
+    #[tokio::test]
+    async fn process_mailbox_event_guard_arms() {
+        use crate::adversarial_tests::{mock_connected_client, MockMailstore};
+
+        fn armed_session(mock: &MockMailstore) -> Arc<Mutex<ImapSession>> {
+            Arc::new(Mutex::new({
+                let mut s = ImapSession::new(mock_connected_client(mock.clone()));
+                s.state = SessionState::Selected;
+                s.account_id = "acct-g".to_string();
+                s
+            }))
+        }
+
+        // 1. Unselected (empty mailbox): immediate Ok, nothing written.
+        let mock = MockMailstore::new();
+        let session = armed_session(&mock);
+        let mut writer = SinkWriter::new();
+        process_mailbox_event(&session, &mut writer, &MailboxEvent::default())
+            .await
+            .expect("empty mailbox is a no-op");
+        assert!(writer.is_empty(), "nothing may be written");
+
+        // 2. Status RPC fails: silently Ok, nothing written.
+        let mock = MockMailstore::new();
+        mock.add_mailbox("acct-g", "INBOX", 1);
+        let session = armed_session(&mock);
+        {
+            let mut g = session.lock().await;
+            g.mailbox = "INBOX".into();
+        }
+        mock.fail("get_mailbox_status");
+        process_mailbox_event(&session, &mut writer, &MailboxEvent::default())
+            .await
+            .expect("status failure is a no-op");
+        assert!(writer.is_empty());
+
+        // 3. Unchanged snapshot (modseq/uidnext/exists equal): the gate
+        //    returns early without listing.
+        let mock = MockMailstore::new();
+        mock.add_mailbox("acct-g", "INBOX", 7);
+        mock.add_message("acct-g", "INBOX", "s", "f@e.test", Default::default(), 0);
+        let session = armed_session(&mock);
+        {
+            let mut client = mock_connected_client(mock.clone());
+            let status = client
+                .get_mailbox_status(mail_proto::GetMailboxStatusRequest {
+                    account_id: "acct-g".into(),
+                    mailbox: "INBOX".into(),
+                })
+                .await
+                .expect("status");
+            let resp = status.into_inner();
+            let row = resp.mailbox.clone().unwrap_or_default();
+            let mut g = session.lock().await;
+            g.mailbox = "INBOX".into();
+            g.mailbox_modseq = resp.highest_modseq;
+            g.uid_next = row.uidnext.max(1);
+            g.exists = row.exists;
+            g.uid_map = vec![1];
+            drop(g);
+        }
+        process_mailbox_event(&session, &mut writer, &MailboxEvent::default())
+            .await
+            .expect("unchanged snapshot is a no-op");
+        assert!(writer.is_empty(), "gate must suppress the listing");
+
+        // 4. A listing failure after the gate opened: silently Ok.
+        let mock = MockMailstore::new();
+        mock.add_mailbox("acct-g", "INBOX", 7);
+        let session = armed_session(&mock);
+        {
+            let mut g = session.lock().await;
+            g.mailbox = "INBOX".into();
+            g.mailbox_modseq = 0; // forces the gate open
+            g.uid_next = 1;
+            g.exists = 0;
+        }
+        mock.fail("list_messages");
+        process_mailbox_event(&session, &mut writer, &MailboxEvent::default())
+            .await
+            .expect("list failure is a no-op");
+        assert!(writer.is_empty());
+
+        // 5. A snapshot that differs only in ways the response would not
+        //    report (no adds/removes/EXISTS/UIDNEXT/RECENT change): early
+        //    return after the listing. Same-listing mailbox, but with the
+        //    session's exists/uidnext pre-synced to the CURRENT view.
+        let mock = MockMailstore::new();
+        mock.add_mailbox("acct-g", "INBOX", 7);
+        mock.add_message("acct-g", "INBOX", "s", "f@e.test", Default::default(), 0);
+        let session = armed_session(&mock);
+        {
+            let mut g = session.lock().await;
+            g.mailbox = "INBOX".into();
+            g.mailbox_modseq = 0; // gate open: force the listing path
+            g.uid_next = 2; // already what the listing will compute
+            g.exists = 1;
+            g.uid_map = vec![1];
+            g.recent = 1; // unseen message 1 is already this session's recent
+            g.recent_uids = [1u64].into_iter().collect();
+        }
+        process_mailbox_event(&session, &mut writer, &MailboxEvent::default())
+            .await
+            .expect("no-diff listing is a no-op");
+        assert!(
+            writer.is_empty(),
+            "an unchanged diff must not write: {:?}",
+            writer.take_output()
+        );
+    }
+
+    /// A writer that records everything written, for asserting on guard arms.
+    struct SinkWriter(Vec<u8>);
+    impl SinkWriter {
+        fn new() -> Self {
+            Self(Vec::new())
+        }
+        fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+        fn take_output(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.0)
+        }
+    }
+    impl tokio::io::AsyncWrite for SinkWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.get_mut().0.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    // ── run_idle error arms ────────────────────────────────────────────────
+
+    /// A reader that always errors: the IDLE loop must end the session
+    /// (state Logout) instead of spinning.
+    #[tokio::test]
+    async fn run_idle_read_error_ends_the_session() {
+        use crate::adversarial_tests::{mock_connected_client, MockMailstore};
+        let mock = MockMailstore::new();
+        let session = Arc::new(Mutex::new({
+            let mut s = ImapSession::new(mock_connected_client(mock));
+            s.state = SessionState::Selected;
+            s.idle = true;
+            s.account_id = "acct".into();
+            s.mailbox = "INBOX".into();
+            s
+        }));
+        let mut reader = BufReader::new(FailingReader);
+        let mut writer = SinkWriter::new();
+        run_idle(&session, &mut reader, &mut writer, "t1")
+            .await
+            .expect("run_idle returns Ok");
+        assert_eq!(
+            session.lock().await.state,
+            SessionState::Logout,
+            "read error must log out"
+        );
+    }
+
+    struct FailingReader;
+    impl tokio::io::AsyncRead for FailingReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("boom")))
+        }
+    }
+
+    /// RFC 2177 29-minute cap: with the tokio clock paused, advancing past the
+    /// deadline must end the IDLE with a BYE.
+    #[tokio::test(start_paused = true)]
+    async fn run_idle_deadline_ends_the_session_with_bye() {
+        use crate::adversarial_tests::{mock_connected_client, MockMailstore};
+        let mock = MockMailstore::new();
+        let session = Arc::new(Mutex::new({
+            let mut s = ImapSession::new(mock_connected_client(mock));
+            s.state = SessionState::Selected;
+            s.idle = true;
+            s.account_id = "acct".into();
+            s.mailbox = "INBOX".into();
+            s
+        }));
+        let (client_io, server_io) = tokio::io::duplex(64);
+        std::mem::forget(client_io); // keep the stream open so EOF cannot race the deadline
+        let mut reader = BufReader::new(server_io);
+        let mut writer = SinkWriter::new();
+
+        let task = tokio::spawn({
+            let session = session.clone();
+            async move { run_idle(&session, &mut reader, &mut writer, "t2").await }
+        });
+        // Let the IDLE loop start, then jump past the 29-minute deadline.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_secs(29 * 60 + 5)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        let g = session.lock().await;
+        assert_eq!(g.state, SessionState::Logout, "deadline must log out");
+        assert!(!g.idle, "idle flag cleared");
+    }
+
+    // ── AUTHENTICATE continuation timeout (virtual clock) ──────────────────
+
+    /// The continuation read is bounded by COMMAND_READ_TIMEOUT: a client
+    /// that never answers the prompt gets a BYE and the command fails. The
+    /// tokio clock is paused, so the 5-minute deadline fires instantly.
+    #[tokio::test(start_paused = true)]
+    async fn authenticate_continuation_timeout_says_bye() {
+        use crate::adversarial_tests::{mock_connected_client, MockMailstore};
+        let mock = MockMailstore::new();
+        let mut session = ImapSession::new(mock_connected_client(mock));
+        session.tls_active = true;
+        session.peer_ip = "127.0.0.1".to_string();
+        let (client_io, server_io) = tokio::io::duplex(64);
+        std::mem::forget(client_io); // keep the stream open: no EOF, only the deadline
+        let (server_r, _server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+        let mut writer = SinkWriter::new();
+
+        let task = tokio::spawn(async move {
+            handle_authenticate(&mut session, "t3", "PLAIN", &[], &mut reader, &mut writer).await
+        });
+        // Poll the task once so its read timeout timer is registered, then
+        // jump the virtual clock past the 5-minute deadline.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_secs(5 * 60 + 5)).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("task finishes")
+            .expect("join ok");
+        assert!(result.is_err(), "timeout must fail the command: {result:?}");
+    }
+}

@@ -1598,4 +1598,99 @@ mod adversarial_db_tests {
         assert_eq!(tenant_bucket_total(&pool, &tenant, "sent").await, 1);
         assert_eq!(tenant_bucket_total(&pool, &tenant, "delivered").await, 1);
     }
+    // ── poll-loop arms + hour-boundary fallback (batch 2) ─────────────────
+
+    fn dead_db_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_lazy("postgresql://127.0.0.1:1/none")
+            .expect("lazy pool")
+    }
+
+    /// Empty poll batch + shutdown: the select on poll_interval breaks on the
+    /// shutdown notification.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn analytics_poll_loop_breaks_on_shutdown_when_idle() {
+        let Some(pool) = test_pool("adv_poll_idle").await else {
+            return;
+        };
+        let processor = std::sync::Arc::new(AnalyticsProcessor::new(
+            pool.clone(),
+            redis_pool(),
+            test_config(),
+        ));
+        processor.is_running.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        let p = processor.clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::spawn(async move { p.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits on shutdown")
+        .expect("join ok");
+        pool.close().await;
+    }
+
+    /// A dead database drives the poll-error arm; the loop keeps polling
+    /// (backoff) until shutdown.
+    #[tokio::test] // real time: pool provisioning cannot run under a paused clock
+    async fn analytics_poll_loop_survives_poll_errors_until_shutdown() {
+        let processor = std::sync::Arc::new(AnalyticsProcessor::new(
+            dead_db_pool(),
+            redis_pool(),
+            test_config(),
+        ));
+        processor.is_running.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        let p = processor.clone();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::spawn(async move { p.poll_loop().await }),
+        )
+        .await
+        .expect("loop exits after error polls")
+        .expect("join ok");
+    }
+
+    /// `update_aggregation` truncates an event to the top of its hour (the
+    /// aggregation period key): a normal event lands on hour boundaries.
+    #[tokio::test]
+    async fn update_aggregation_buckets_the_event_to_its_hour() {
+        let Some(pool) = test_pool("adv_hour_bucket").await else {
+            return;
+        };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        let event = AnalyticsEvent {
+            id: Uuid::new_v4().to_string(),
+            tenant_id: "t-bucket".into(),
+            event_type: "sent".into(),
+            message_id: None,
+            domain_id: None,
+            campaign_id: None,
+            recipient: Some("r@x.test".into()),
+            metadata: None,
+            timestamp: "2024-05-10T12:34:56Z".parse().expect("ts"),
+        };
+        processor.update_aggregation(&event);
+        {
+            let buffer = processor
+                .aggregation_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            let first = buffer.values().next().expect("one bucket");
+            assert_eq!(
+                first.period_start.format("%H:%M:%S").to_string(),
+                "12:00:00",
+                "bucketed to the hour: {}",
+                first.period_start
+            );
+        }
+        pool.close().await;
+    }
 }

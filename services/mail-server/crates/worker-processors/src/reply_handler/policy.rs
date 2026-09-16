@@ -886,3 +886,65 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod coverage_arms {
+    //! Batch 2: every enum serialization arm and the non-finite-confidence
+    //! downgrade path.
+
+    use super::*;
+
+    #[test]
+    fn enrollment_state_strings_cover_every_variant() {
+        let cases = [
+            (EnrollmentState::Pending, "pending"),
+            (EnrollmentState::Active, "active"),
+            (EnrollmentState::Waiting, "waiting"),
+            (EnrollmentState::Paused, "paused"),
+            (EnrollmentState::Replied, "replied"),
+            (EnrollmentState::MeetingBooked, "meeting_booked"),
+            (EnrollmentState::Completed, "completed"),
+            (EnrollmentState::Suppressed, "suppressed"),
+            (EnrollmentState::Failed, "failed"),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(state.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn downgrade_reason_strings_cover_both_variants() {
+        assert_eq!(
+            DowngradeReason::BelowConfidenceThreshold.as_str(),
+            "confidence below MIN_AUTO_ACTION_CONFIDENCE"
+        );
+        assert_eq!(
+            DowngradeReason::InvalidConfidence.as_str(),
+            "non-finite confidence"
+        );
+    }
+
+    #[test]
+    fn non_finite_confidence_downgrades_with_the_invalid_reason() {
+        let decision = decide(
+            PolicyInput::new(ReplyDisposition::Positive, f64::NAN),
+            Utc::now(),
+        );
+        assert_eq!(decision.disposition, ReplyDisposition::Unknown);
+        assert_eq!(
+            decision.downgraded.map(|r| r.as_str()),
+            Some("non-finite confidence")
+        );
+        // The downgraded decision still auto-executes its SAFE action
+        // (stop the pending touch pending human review) — but never
+        // suppression or any recipient-affecting effect.
+        assert_eq!(
+            decision.suggested_action, "stop_next_touch_pending_classification",
+            "the only auto-action for Unknown is stopping the next touch"
+        );
+        assert!(
+            decision.suppression_reason.is_none(),
+            "an invalid-confidence input must never suppress"
+        );
+    }
+}

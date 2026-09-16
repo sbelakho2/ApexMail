@@ -597,4 +597,90 @@ mod tests {
         let truncated = truncate_utf8(&body, MAX_AI_INPUT_BYTES);
         assert!(truncated.len() <= MAX_AI_INPUT_BYTES);
     }
+    // ── response parsing + sanitization arms (batch 2) ────────────────────
+
+    #[test]
+    fn parse_response_covers_the_error_arms() {
+        // Missing disposition.
+        let err = HttpReplyClassifier::parse_response(&serde_json::json!({
+            "confidence": 0.9,
+            "reasoning": "r"
+        }))
+        .expect_err("disposition required");
+        assert!(err.to_string().contains("disposition"), "{err}");
+        // Wrong JSON type for disposition.
+        let err = HttpReplyClassifier::parse_response(&serde_json::json!({
+            "disposition": 42
+        }))
+        .expect_err("disposition must be a string");
+        assert!(err.to_string().contains("disposition"), "{err}");
+        // An unknown disposition string refuses to map.
+        let err = HttpReplyClassifier::parse_response(&serde_json::json!({
+            "disposition": "frobnicate"
+        }))
+        .expect_err("unknown disposition refused");
+        assert!(err.to_string().contains("refusing"), "{err}");
+    }
+
+    #[test]
+    fn sanitize_classification_clamps_confidence_and_zeroes_non_finite() {
+        let over = AiClassification {
+            disposition: ReplyDisposition::Positive,
+            confidence: 1.7,
+            reasoning: "r".into(),
+            model_version: None,
+            prompt_version: None,
+            evidence: Vec::new(),
+        };
+        assert_eq!(sanitize_classification(over).confidence, 1.0);
+        let under = AiClassification {
+            disposition: ReplyDisposition::Positive,
+            confidence: -0.5,
+            reasoning: String::new(),
+            model_version: None,
+            prompt_version: None,
+            evidence: Vec::new(),
+        };
+        assert_eq!(sanitize_classification(under).confidence, 0.0);
+        let nan = AiClassification {
+            disposition: ReplyDisposition::Positive,
+            confidence: f64::NAN,
+            reasoning: String::new(),
+            model_version: None,
+            prompt_version: None,
+            evidence: Vec::new(),
+        };
+        assert_eq!(
+            sanitize_classification(nan).confidence,
+            0.0,
+            "NaN becomes 0"
+        );
+        let inf = AiClassification {
+            disposition: ReplyDisposition::Positive,
+            confidence: f64::INFINITY,
+            reasoning: "r".into(),
+            model_version: None,
+            prompt_version: None,
+            evidence: Vec::new(),
+        };
+        assert_eq!(
+            sanitize_classification(inf).confidence,
+            0.0,
+            "inf becomes 0"
+        );
+    }
+
+    #[test]
+    fn http_classifier_debug_redacts_the_api_key() {
+        let classifier = HttpReplyClassifier::new(
+            "http://127.0.0.1:9/classify",
+            Some(zeroize::Zeroizing::new("secret-key".to_string())),
+            std::time::Duration::from_secs(1),
+        )
+        .expect("constructor validates lazily");
+        let rendered = format!("{classifier:?}");
+        assert!(rendered.contains("apexmail") || rendered.contains("classify_url"));
+        assert!(!rendered.contains("secret-key"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
 }

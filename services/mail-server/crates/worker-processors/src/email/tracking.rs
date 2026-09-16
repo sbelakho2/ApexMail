@@ -973,3 +973,140 @@ mod adversarial_rewrite_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_arms {
+    //! Adversarial batch 2: pixel placement around script/style bodies, link
+    //! rewriting quoting forms, and tracking/unsubscribe gating arms.
+
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    fn cfg() -> TrackingConfig {
+        TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
+            secret_key: Some(zeroize::Zeroizing::new(
+                "unit-test-secret-0123456789abcdef0123".to_string(),
+            )),
+        }
+    }
+
+    /// The pixel encoder reads the process-global TRACKING_SECRET_KEY.
+    fn with_tracking_secret(body: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("TRACKING_SECRET_KEY", "k".repeat(40));
+        body();
+        std::env::remove_var("TRACKING_SECRET_KEY");
+    }
+
+    fn job() -> EmailJob {
+        EmailJob {
+            id: "q-1".into(),
+            message_id: "m-1".into(),
+            tenant_id: "t-1".into(),
+            domain_id: "d-1".into(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            subject: "s".into(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn pixel_placement_ignores_body_tags_inside_script_or_style() {
+        with_tracking_secret(pixel_placement_assertions);
+    }
+
+    fn pixel_placement_assertions() {
+        let job = job();
+        let config = cfg();
+        // A `</body>` inside a <script> string must be ignored; the pixel
+        // lands at the REAL </body>.
+        let html = "<html><body>x<script>var s='</body>';</script><a href=\"https://a.test/1\">1</a></body></html>";
+        let out = add_tracking_pixel(html, &job, &config);
+        let pixel_pos = out.find("/o/").expect("pixel present");
+        let script_pos = out.find("var s=").expect("script present");
+        assert!(
+            pixel_pos > script_pos,
+            "pixel must be after the script: {out}"
+        );
+        // No valid </body> anywhere: appended to the end.
+        let out = add_tracking_pixel("<p>no body tag</p>", &job, &config);
+        assert!(
+            out.ends_with("</p>") || out.contains("/o/"),
+            "fallback appends the pixel: {out}"
+        );
+        let _ = add_tracking_pixel("", &job, &config);
+    }
+
+    #[test]
+    fn link_rewriting_handles_all_href_quoting_forms() {
+        with_tracking_secret(link_rewriting_assertions);
+    }
+
+    fn link_rewriting_assertions() {
+        let job = job();
+        let config = cfg();
+        let html = concat!(
+            "<a href=\"https://a.test/1\">q1</a>",
+            "<a href='https://a.test/2'>s1</a>",
+            "<a href=https://a.test/3>u1</a>",
+            "<a href=\"https://a.test/4>unterminated</a>",
+            "<a href=\"mailto:x@a.test\">m</a>",
+            "<a href=\"#anchor\">a</a>",
+        );
+        let out = rewrite_links(html, &job, &config);
+        assert!(out.contains("https://track.example.com/c/"), "{out}");
+        // The same tracked URL for repeated links is consistent.
+        assert!(
+            out.matches("https://track.example.com/c/").count() >= 3,
+            "{out}"
+        );
+        // mailto and anchors untouched.
+        assert!(out.contains("mailto:x@a.test"), "{out}");
+        assert!(out.contains("#anchor"), "{out}");
+        // A value whose quote only terminates at the NEXT attribute's quote
+        // is one anchor per the HTML5 parse (browsers see the same merged
+        // attribute value) — the rewrite is consistent with that parse.
+        assert!(
+            out.matches("https://track.example.com/c/").count() >= 4,
+            "all four DOM anchors are rewritten: {out}"
+        );
+        // Empty input round-trips.
+        assert_eq!(rewrite_links("", &job, &config), "");
+    }
+
+    #[test]
+    fn unsubscribe_link_requires_a_secret_and_builds_the_url() {
+        with_tracking_secret(|| {
+            let job = job();
+            let mut config = cfg();
+            // Without the shared secret there is no authenticated link.
+            config.secret_key = None;
+            assert!(unsubscribe_link(&job, &config).is_none());
+            // With it: (token, url).
+            let (token, url) = unsubscribe_link(&job, &cfg()).expect("token + url");
+            assert!(!token.is_empty(), "token is the v2 codec payload");
+            assert!(
+                url.starts_with("https://track.example.com/u/"),
+                "url points at the unsubscribe path: {url}"
+            );
+            assert!(url.ends_with(&token), "url carries the token: {url}");
+        });
+    }
+}

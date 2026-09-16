@@ -1112,3 +1112,97 @@ mod return_date_tests {
         assert_eq!(verdict.disposition, ReplyDisposition::OutOfOffice);
     }
 }
+
+#[cfg(test)]
+mod coverage_arms {
+    //! Adversarial batch 2 for the deterministic layer: the uncovered
+    //! List-Unsubscribe mailto verdict, OOO header/subject gates, and every
+    //! date-format arm of `extract_return_date`.
+
+    use super::*;
+
+    fn input_with(subject: &str, body: &str, headers: &[(&str, &str)]) -> ReplyInput {
+        let mut input = ReplyInput::new(subject, body);
+        for (k, v) in headers {
+            input
+                .headers
+                .insert(k.to_ascii_lowercase(), (*v).to_string());
+        }
+        input
+    }
+
+    #[test]
+    fn list_unsubscribe_mailto_target_is_a_deterministic_unsubscribe() {
+        let verdict = classify(&input_with(
+            "Re: pricing",
+            "plain body",
+            &[(
+                "List-Unsubscribe",
+                "<mailto:unsub@example.test?subject=bye>",
+            )],
+        ))
+        .expect("mailto target must fire");
+        assert_eq!(verdict.disposition, ReplyDisposition::Unsubscribe);
+        assert_eq!(verdict.confidence, 1.0);
+        assert!(
+            verdict.reasoning.contains("mailto"),
+            "{}",
+            verdict.reasoning
+        );
+
+        // A List-Unsubscribe without a mailto: target is NOT one.
+        let none = classify(&input_with(
+            "Re: pricing",
+            "plain body",
+            &[("List-Unsubscribe", "<https://unsub.example.test/x>")],
+        ));
+        assert!(none.is_none(), "{none:?}");
+    }
+
+    #[test]
+    fn ooo_verdicts_fire_on_headers_and_subjects() {
+        // An OOO header wins deterministically and carries a parsed return
+        // date from the body.
+        let verdict = classify(&input_with(
+            "Re: proposal",
+            "I am out of office, back on March 5, 2027.",
+            &[("Auto-Submitted", "auto-replied")],
+        ))
+        .expect("ooo header");
+        assert_eq!(verdict.disposition, ReplyDisposition::OutOfOffice);
+        let date = verdict.return_date.expect("return date parsed");
+        assert_eq!(date.format("%Y-%m-%d").to_string(), "2027-03-05");
+
+        // Subject-only OOO.
+        let verdict = classify(&input_with(
+            "Out of the office until June 2026",
+            "body",
+            &[],
+        ))
+        .expect("subject ooo");
+        assert_eq!(verdict.disposition, ReplyDisposition::OutOfOffice);
+    }
+
+    #[test]
+    fn extract_return_date_covers_every_format_arm() {
+        // ISO.
+        let iso = extract_return_date("returning on 2027-03-05 for sure").expect("iso");
+        assert_eq!(iso.format("%Y-%m-%d").to_string(), "2027-03-05");
+        // Month-first textual.
+        let mf =
+            extract_return_date("I'll be back March 5, 2027 in the morning").expect("month first");
+        assert_eq!(mf.format("%Y-%m-%d").to_string(), "2027-03-05");
+        // Day-first textual ("5 March 2027").
+        let df = extract_return_date("away until 5 March 2027").expect("day first");
+        assert_eq!(df.format("%Y-%m-%d").to_string(), "2027-03-05");
+        // Day-first numeric (EU).
+        let eu = extract_return_date("away until 05/03/2027").expect("eu");
+        assert_eq!(eu.format("%Y-%m-%d").to_string(), "2027-03-05");
+        // Invalid calendar day in an otherwise matching form.
+        assert!(extract_return_date("back on February 31, 2027").is_none());
+        // Unknown month name.
+        assert!(extract_return_date("back on Foguary 3, 2027").is_none());
+        // No date at all.
+        assert!(extract_return_date("no dates here").is_none());
+    }
+}
