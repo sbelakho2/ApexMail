@@ -87,8 +87,22 @@ pub struct BimiIndicator {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
-/// Verify BIMI for a domain.
+/// Verify BIMI for a domain (shared production resolver, shared logo
+/// client).
 pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult {
+    verify_bimi_with(&BIMI_RESOLVER, BIMI_CLIENT.as_ref(), domain, selector).await
+}
+
+/// Verify BIMI for a domain against an explicit resolver and HTTP client.
+/// `None` fails every fetch-dependent validation closed (the shared client
+/// could not be built). Tests point both at loopback mocks; production
+/// callers use [`verify_bimi`].
+pub async fn verify_bimi_with(
+    resolver: &TokioResolver,
+    client: Option<&Client>,
+    domain: &str,
+    selector: &str,
+) -> BimiVerificationResult {
     let mut result = BimiVerificationResult {
         supported: false,
         record: None,
@@ -102,9 +116,6 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
 
     // 1. Check DMARC enforcement (required for BIMI)
     let dmarc_name = format!("_dmarc.{domain}");
-    // #131:Use shared resolver instead of creating new one per call
-    let resolver = &*BIMI_RESOLVER;
-
     match resolver.txt_lookup(&dmarc_name).await {
         Ok(lookup) => {
             let has_enforcement = txt_record_strings(&lookup)
@@ -133,7 +144,10 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
 
                     // 3. Validate logo if present
                     if let Some(ref url) = parsed.logo_url {
-                        result.logo_valid = validate_bimi_logo_url(url).await;
+                        result.logo_valid = match client {
+                            Some(c) => validate_bimi_logo_url_with(c, url).await,
+                            None => false,
+                        };
                         if !result.logo_valid {
                             result.warnings.push("Logo URL failed validation".into());
                         }
@@ -141,7 +155,10 @@ pub async fn verify_bimi(domain: &str, selector: &str) -> BimiVerificationResult
 
                     // 4. Check VMC certificate
                     if let Some(ref cert_url) = parsed.certificate_url {
-                        result.certificate_valid = validate_vmc_certificate(cert_url).await;
+                        result.certificate_valid = match client {
+                            Some(c) => validate_vmc_certificate_with(c, cert_url).await,
+                            None => false,
+                        };
                     } else {
                         result
                             .warnings
@@ -185,8 +202,19 @@ pub fn generate_bimi_record(logo_url: &str, certificate_url: Option<&str>) -> St
     record
 }
 
-/// Validate a BIMI logo URL (basic checks).
+/// Validate a BIMI logo URL (basic checks) with the shared production
+/// client.
 pub async fn validate_bimi_logo_url(url: &str) -> bool {
+    // Try to fetch and validate SVG
+    let Some(client) = BIMI_CLIENT.as_ref() else {
+        return false;
+    };
+    validate_bimi_logo_url_with(client, url).await
+}
+
+/// Validate a BIMI logo URL with an explicit HTTP client (tests inject a
+/// loopback-trusting client; the wire checks are identical).
+pub async fn validate_bimi_logo_url_with(client: &Client, url: &str) -> bool {
     // Must be HTTPS
     if !url.starts_with("https://") {
         return false;
@@ -196,11 +224,6 @@ pub async fn validate_bimi_logo_url(url: &str) -> bool {
     if !url.to_lowercase().ends_with(".svg") {
         return false;
     }
-
-    // Try to fetch and validate SVG
-    let Some(client) = BIMI_CLIENT.as_ref() else {
-        return false;
-    };
 
     match client.get(url).send().await {
         Ok(resp) => {
@@ -376,8 +399,20 @@ pub fn validate_svg_content(svg: &str) -> bool {
     saw_svg_root && has_svg_namespace
 }
 
-/// Get BIMI indicator for display in email clients.
+/// Get BIMI indicator for display in email clients (shared production
+/// resolver and client).
 pub async fn get_bimi_indicator(domain: &str, dmarc_passed: bool) -> BimiIndicator {
+    get_bimi_indicator_with(&BIMI_RESOLVER, BIMI_CLIENT.as_ref(), domain, dmarc_passed).await
+}
+
+/// Indicator computation against an explicit resolver and client (tests
+/// inject loopback mocks).
+pub async fn get_bimi_indicator_with(
+    resolver: &TokioResolver,
+    client: Option<&Client>,
+    domain: &str,
+    dmarc_passed: bool,
+) -> BimiIndicator {
     if !dmarc_passed {
         return BimiIndicator {
             logo_url: None,
@@ -387,7 +422,7 @@ pub async fn get_bimi_indicator(domain: &str, dmarc_passed: bool) -> BimiIndicat
         };
     }
 
-    let result = verify_bimi(domain, "default").await;
+    let result = verify_bimi_with(resolver, client, domain, "default").await;
     BimiIndicator {
         logo_url: result.record.and_then(|r| r.logo_url),
         selector: "default".into(),
@@ -487,18 +522,12 @@ fn is_bimi_svg_content_type(content_type: &str) -> bool {
         == Some("image/svg+xml")
 }
 
-async fn validate_vmc_certificate(url: &str) -> bool {
+/// Validate a VMC certificate URL with an explicit HTTP client (tests
+/// inject a loopback-trusting client; the wire checks are identical).
+async fn validate_vmc_certificate_with(client: &Client, url: &str) -> bool {
     if !url.starts_with("https://") {
         return false;
     }
-
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
 
     let response = match client.get(url).send().await {
         Ok(resp) => resp,
@@ -555,6 +584,11 @@ fn parse_pinned_ca_pems(raw: &str) -> Vec<Vec<u8>> {
 }
 
 fn parse_vmc_cert_chain(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
+    // An empty download is no chain at all (the caller answers false without
+    // attempting to parse zero bytes as a certificate).
+    if raw.is_empty() {
+        return None;
+    }
     let mut cursor = Cursor::new(raw);
     let mut certs = rustls_pemfile::certs(&mut cursor)
         .filter_map(Result::ok)
@@ -562,6 +596,7 @@ fn parse_vmc_cert_chain(raw: &[u8]) -> Option<Vec<Vec<u8>>> {
         .collect::<Vec<_>>();
 
     if certs.is_empty() {
+        // Not PEM: treat the payload as one DER certificate.
         certs.push(raw.to_vec());
     }
 
@@ -754,14 +789,14 @@ mod tests {
 
     const VMC_EKU_OID: [u64; 9] = [1, 3, 6, 1, 5, 5, 7, 3, 31];
 
-    fn vmc_leaf_params(san: &str) -> rcgen::CertificateParams {
+    pub(super) fn vmc_leaf_params(san: &str) -> rcgen::CertificateParams {
         let mut params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
         params.extended_key_usages =
             vec![rcgen::ExtendedKeyUsagePurpose::Other(VMC_EKU_OID.to_vec())];
         params
     }
 
-    fn test_ca(san: &str) -> (rcgen::Certificate, rcgen::KeyPair) {
+    pub(super) fn test_ca(san: &str) -> (rcgen::Certificate, rcgen::KeyPair) {
         let mut params = rcgen::CertificateParams::new(vec![san.to_string()]).unwrap();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -996,5 +1031,590 @@ mod adversarial_svg_tests {
         let indicator = get_bimi_indicator("example.com", false).await;
         assert!(!indicator.verified);
         assert!(indicator.logo_url.is_none());
+    }
+}
+
+#[cfg(test)]
+mod verify_bimi_wire_tests {
+    //! Full `verify_bimi_with` / validator coverage against a loopback UDP
+    //! DNS mock and a loopback TLS HTTP mock: the real resolver wire path,
+    //! the real HTTPS fetch path, and hostile record/logo/cert payloads.
+
+    use super::super::test_dns::{DnsAnswer, MockDns};
+    use super::tests::{test_ca, vmc_leaf_params};
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    const VALID_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"64\"><rect width=\"64\" height=\"64\" fill=\"blue\"/></svg>";
+
+    /// One loopback HTTPS route: (status, content-type, body).
+    type Route = (u16, &'static str, Vec<u8>);
+
+    /// Minimal HTTPS server over tokio-rustls with the repo test fixture
+    /// certificate; requests are answered from a path-keyed table.
+    async fn https_server(routes: HashMap<String, Route>) -> (u16, tokio::task::JoinHandle<()>) {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let cert_pem = std::fs::read(format!(
+            "{}/tests/fixtures/cert.pem",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let key_pem = std::fs::read(format!(
+            "{}/tests/fixtures/key.pem",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&key_pem[..]))
+            .unwrap()
+            .unwrap();
+        let config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let routes = Arc::new(routes);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut tls) = acceptor.accept(socket).await else {
+                    continue;
+                };
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = tls.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let path = head.split(' ').nth(1).unwrap_or("/").to_string();
+                    let (status, ctype, body) = routes.get(&path).cloned().unwrap_or((
+                        404,
+                        "text/plain",
+                        b"missing".to_vec(),
+                    ));
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: {ctype}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = tls.write_all(response.as_bytes()).await;
+                    let _ = tls.write_all(&body).await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+        (port, handle)
+    }
+
+    fn trusting_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    fn txt(strings: Vec<&str>) -> DnsAnswer {
+        DnsAnswer::Txt(strings.into_iter().map(|s| vec![s.to_string()]).collect())
+    }
+
+    #[tokio::test]
+    async fn verify_bimi_full_success_path_over_dns_and_https() {
+        let _guard = ENV_LOCK.lock().await;
+
+        // A CA-signed VMC chain whose root is pinned via VMC_CA_PEMS.
+        let (ca_cert, ca_key) = test_ca("VMC Wire CA");
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = vmc_leaf_params("brand.example")
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .unwrap();
+        let mut chain_pem = String::new();
+        use std::fmt::Write as _;
+        let b64 = |der: &[u8]| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(der)
+        };
+        for der in [leaf.der(), ca_cert.der()] {
+            let enc = b64(der);
+            let _ = writeln!(chain_pem, "-----BEGIN CERTIFICATE-----");
+            for chunk in enc.as_bytes().chunks(64) {
+                let _ = writeln!(chain_pem, "{}", std::str::from_utf8(chunk).unwrap());
+            }
+            let _ = writeln!(chain_pem, "-----END CERTIFICATE-----");
+        }
+        let ca_pem_b64 = b64(ca_cert.der());
+        let mut ca_pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in ca_pem_b64.as_bytes().chunks(64) {
+            ca_pem.push_str(std::str::from_utf8(chunk).unwrap());
+            ca_pem.push('\n');
+        }
+        ca_pem.push_str("-----END CERTIFICATE-----\n");
+        std::env::set_var("VMC_CA_PEMS", &ca_pem);
+
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        routes.insert(
+            "/logo.svg".into(),
+            (200, "image/svg+xml", VALID_SVG.as_bytes().to_vec()),
+        );
+        routes.insert(
+            "/vmc.pem".into(),
+            (200, "application/x-pem-file", chain_pem.into_bytes()),
+        );
+        let (port, server) = https_server(routes).await;
+
+        let bimi_txt = format!(
+            "v=BIMI1; l=https://127.0.0.1:{port}/logo.svg; a=https://127.0.0.1:{port}/vmc.pem"
+        );
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "_dmarc.brand.example",
+            txt(vec!["v=DMARC1; p=reject; rua=mailto:d@brand.example"]),
+        );
+        rules.insert("default._bimi.brand.example", txt(vec![&bimi_txt]));
+        let dns = MockDns::start(rules).await;
+
+        let result = verify_bimi_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "brand.example",
+            "default",
+        )
+        .await;
+        assert!(
+            result.supported,
+            "errors: {:?} warnings: {:?}",
+            result.errors, result.warnings
+        );
+        assert!(result.dmarc_valid);
+        assert!(result.logo_valid, "warnings: {:?}", result.warnings);
+        assert!(result.certificate_valid);
+        assert!(result.errors.is_empty());
+        let record = result.record.expect("record parsed");
+        assert_eq!(record.version, "BIMI1");
+        assert_eq!(
+            record.logo_url.as_deref(),
+            Some(format!("https://127.0.0.1:{port}/logo.svg").as_str())
+        );
+
+        // The display indicator composes the same guarantees.
+        let indicator = get_bimi_indicator_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "brand.example",
+            true,
+        )
+        .await;
+        assert!(indicator.verified);
+        assert!(indicator.logo_url.is_some());
+
+        dns.stop();
+        server.abort();
+        std::env::remove_var("VMC_CA_PEMS");
+    }
+
+    #[tokio::test]
+    async fn verify_bimi_reports_each_dns_failure_mode_exactly() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("VMC_CA_PEMS");
+
+        // DMARC NXDOMAIN + BIMI NXDOMAIN.
+        let dns = MockDns::start(HashMap::new()).await;
+        let result = verify_bimi_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "nx.example",
+            "default",
+        )
+        .await;
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("DMARC lookup failed")));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("BIMI DNS lookup failed")));
+        assert!(
+            result
+                .recommendations
+                .iter()
+                .any(|r| r.contains("Add a BIMI DNS record at default._bimi.nx.example")),
+            "{:?}",
+            result.recommendations
+        );
+        assert!(
+            result
+                .recommendations
+                .iter()
+                .any(|r| r.contains("Set DMARC policy")),
+            "{:?}",
+            result.recommendations
+        );
+        dns.stop();
+
+        // DMARC exists but p=none; BIMI TXT exists but is not v=BIMI1.
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_dmarc.weak.example", txt(vec!["v=DMARC1; p=none"]));
+        rules.insert("default._bimi.weak.example", txt(vec!["v=spf1 -all"]));
+        let dns = MockDns::start(rules).await;
+        let result = verify_bimi_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "weak.example",
+            "default",
+        )
+        .await;
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("must be 'reject' or 'quarantine'")),
+            "{:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("No valid BIMI record found")),
+            "{:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .recommendations
+                .iter()
+                .any(|r| r.contains("v=BIMI1; l=https://example.com/logo.svg")),
+            "{:?}",
+            result.recommendations
+        );
+        assert!(!result.supported);
+        dns.stop();
+
+        // DMARC SERVFAIL must be surfaced, not silently treated as "no
+        // enforcement".
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_dmarc.broken.example", DnsAnswer::Servfail);
+        let dns = MockDns::start(rules).await;
+        let result = verify_bimi_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "broken.example",
+            "default",
+        )
+        .await;
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("DMARC lookup failed")));
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn verify_bimi_handles_record_variants_and_bad_logo_urls() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("VMC_CA_PEMS");
+
+        // l= is not https / not .svg -> logo invalid + warning; no a= ->
+        // "No VMC certificate URL" warning.
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_dmarc.h1.example", txt(vec!["v=DMARC1; p=quarantine"]));
+        rules.insert(
+            "sel._bimi.h1.example",
+            txt(vec!["v=BIMI1; l=http://cleartext.example/logo.svg"]),
+        );
+        let dns = MockDns::start(rules).await;
+        let result =
+            verify_bimi_with(&dns.resolver, Some(&trusting_client()), "h1.example", "sel").await;
+        assert!(result.supported);
+        assert!(!result.logo_valid);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Logo URL failed validation")),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("No VMC certificate URL provided")),
+            "{:?}",
+            result.warnings
+        );
+        dns.stop();
+
+        // Unreachable cert URL fails closed without aborting verification.
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_dmarc.h2.example", txt(vec!["v=DMARC1; p=reject"]));
+        rules.insert(
+            "sel._bimi.h2.example",
+            txt(vec!["v=BIMI1; a=https://127.0.0.1:1/vmc.pem"]),
+        );
+        let dns = MockDns::start(rules).await;
+        let result =
+            verify_bimi_with(&dns.resolver, Some(&trusting_client()), "h2.example", "sel").await;
+        assert!(result.supported);
+        assert!(!result.certificate_valid);
+        dns.stop();
+
+        // Multi-chunk TXT strings are joined without a separator before the
+        // v=BIMI1 scan (real DNS character-string semantics).
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_dmarc.chunk.example", txt(vec!["v=DMARC1; p=reject"]));
+        rules.insert(
+            "sel._bimi.chunk.example",
+            DnsAnswer::Txt(vec![vec![
+                "v=BIMI1".to_string(),
+                "; l=https://127.0.0.1:1/l.svg".to_string(),
+            ]]),
+        );
+        let dns = MockDns::start(rules).await;
+        let result = verify_bimi_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "chunk.example",
+            "sel",
+        )
+        .await;
+        assert!(
+            result.supported,
+            "chunked TXT must reassemble: {:?}",
+            result.errors
+        );
+        assert!(result.record.expect("record").logo_url.is_some());
+        dns.stop();
+
+        // Client=None: every fetch-dependent validation fails closed while
+        // the record still parses.
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert("_dmarc.h3.example", txt(vec!["v=DMARC1; p=reject"]));
+        rules.insert(
+            "sel._bimi.h3.example",
+            txt(vec![
+                "v=BIMI1; l=https://127.0.0.1:1/l.svg; a=https://127.0.0.1:1/c.pem",
+            ]),
+        );
+        let dns = MockDns::start(rules).await;
+        let result = verify_bimi_with(&dns.resolver, None, "h3.example", "sel").await;
+        assert!(result.supported);
+        assert!(!result.logo_valid);
+        assert!(!result.certificate_valid);
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn logo_url_validation_rejects_every_hostile_download() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("VMC_CA_PEMS");
+        let client = trusting_client();
+
+        // Scheme and extension gates fire before any network I/O.
+        assert!(!validate_bimi_logo_url_with(&client, "http://127.0.0.1/logo.svg").await);
+        assert!(!validate_bimi_logo_url_with(&client, "https://127.0.0.1/logo.png").await);
+        assert!(!validate_bimi_logo_url_with(&client, "ftp://127.0.0.1/logo.svg").await);
+        // Connection refused fails closed.
+        assert!(
+            !validate_bimi_logo_url_with(&client, "https://127.0.0.1:1/logo.svg").await,
+            "unreachable logo host must fail"
+        );
+
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        routes.insert(
+            "/good.svg".into(),
+            (200, "image/svg+xml", VALID_SVG.as_bytes().to_vec()),
+        );
+        routes.insert(
+            "/html.svg".into(),
+            (200, "text/html", VALID_SVG.as_bytes().to_vec()),
+        );
+        routes.insert(
+            "/scripty.svg".into(),
+            (
+                200,
+                "image/svg+xml",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>"
+                    .to_vec(),
+            ),
+        );
+        routes.insert("/missing.svg".into(), (404, "text/plain", b"gone".to_vec()));
+        routes.insert(
+            "/huge.svg".into(),
+            (200, "image/svg+xml", vec![b'<'; MAX_LOGO_SIZE + 1]),
+        );
+        let (port, server) = https_server(routes).await;
+
+        assert!(
+            validate_bimi_logo_url_with(&client, &format!("https://127.0.0.1:{port}/good.svg"))
+                .await,
+            "a compliant SVG must validate"
+        );
+        assert!(
+            !validate_bimi_logo_url_with(&client, &format!("https://127.0.0.1:{port}/html.svg"))
+                .await,
+            "a non-SVG content type must fail"
+        );
+        assert!(
+            !validate_bimi_logo_url_with(&client, &format!("https://127.0.0.1:{port}/scripty.svg"))
+                .await,
+            "a scripted SVG must fail content validation"
+        );
+        assert!(
+            !validate_bimi_logo_url_with(&client, &format!("https://127.0.0.1:{port}/missing.svg"))
+                .await,
+            "a 404 must fail"
+        );
+        assert!(
+            !validate_bimi_logo_url_with(&client, &format!("https://127.0.0.1:{port}/huge.svg"))
+                .await,
+            "an oversized download must fail (content-length gate)"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn vmc_certificate_validation_rejects_every_hostile_download() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("VMC_CA_PEMS");
+        let client = trusting_client();
+
+        assert!(!validate_vmc_certificate_with(&client, "http://127.0.0.1/vmc.pem").await);
+        assert!(
+            !validate_vmc_certificate_with(&client, "https://127.0.0.1:1/vmc.pem").await,
+            "unreachable cert host must fail"
+        );
+
+        let (ca_cert, ca_key) = test_ca("VMC Reject CA");
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = vmc_leaf_params("reject.example")
+            .signed_by(&leaf_key, &ca_cert, &ca_key)
+            .unwrap();
+        use base64::Engine as _;
+        use std::fmt::Write as _;
+        let mut chain_pem = String::new();
+        for der in [leaf.der(), ca_cert.der()] {
+            let _ = writeln!(chain_pem, "-----BEGIN CERTIFICATE-----");
+            let enc = base64::engine::general_purpose::STANDARD.encode(der);
+            for chunk in enc.as_bytes().chunks(64) {
+                let _ = writeln!(chain_pem, "{}", std::str::from_utf8(chunk).unwrap());
+            }
+            let _ = writeln!(chain_pem, "-----END CERTIFICATE-----");
+        }
+
+        let mut routes: HashMap<String, Route> = HashMap::new();
+        routes.insert(
+            "/vmc.pem".into(),
+            (200, "application/x-pem-file", chain_pem.into_bytes()),
+        );
+        routes.insert(
+            "/empty.pem".into(),
+            (200, "application/x-pem-file", Vec::new()),
+        );
+        routes.insert(
+            "/garbage.pem".into(),
+            (200, "application/x-pem-file", b"not a cert".to_vec()),
+        );
+        routes.insert("/missing.pem".into(), (404, "text/plain", b"gone".to_vec()));
+        routes.insert(
+            "/huge.pem".into(),
+            (200, "application/x-pem-file", vec![b'x'; MAX_CERT_SIZE + 1]),
+        );
+        let (port, server) = https_server(routes).await;
+        let base = format!("https://127.0.0.1:{port}");
+
+        assert!(
+            !validate_vmc_certificate_with(&client, &format!("{base}/vmc.pem")).await,
+            "a valid chain whose root is NOT pinned must fail closed"
+        );
+        assert!(
+            !validate_vmc_certificate_with(&client, &format!("{base}/empty.pem")).await,
+            "an empty download is no chain"
+        );
+        assert!(
+            !validate_vmc_certificate_with(&client, &format!("{base}/garbage.pem")).await,
+            "garbage bytes must fail DER parsing"
+        );
+        assert!(
+            !validate_vmc_certificate_with(&client, &format!("{base}/missing.pem")).await,
+            "a 404 must fail"
+        );
+        assert!(
+            !validate_vmc_certificate_with(&client, &format!("{base}/huge.pem")).await,
+            "an oversized certificate download must fail"
+        );
+
+        // Pinning the same CA flips the valid chain to accepted.
+        let mut ca_pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        let enc = base64::engine::general_purpose::STANDARD.encode(ca_cert.der());
+        for chunk in enc.as_bytes().chunks(64) {
+            ca_pem.push_str(std::str::from_utf8(chunk).unwrap());
+            ca_pem.push('\n');
+        }
+        ca_pem.push_str("-----END CERTIFICATE-----\n");
+        std::env::set_var("VMC_CA_PEMS", &ca_pem);
+        assert!(
+            validate_vmc_certificate_with(&client, &format!("{base}/vmc.pem")).await,
+            "the pinned CA-signed chain must validate"
+        );
+        std::env::remove_var("VMC_CA_PEMS");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn indicator_refuses_without_dmarc() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::remove_var("VMC_CA_PEMS");
+        let dns = MockDns::start(HashMap::new()).await;
+        let indicator = get_bimi_indicator_with(
+            &dns.resolver,
+            Some(&trusting_client()),
+            "anything.example",
+            false,
+        )
+        .await;
+        assert!(!indicator.verified);
+        assert_eq!(indicator.logo_url, None);
+        assert_eq!(indicator.selector, "default");
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn txt_record_strings_joins_chunks_without_separators() {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "chunk.test",
+            DnsAnswer::Txt(vec![
+                vec!["v=BIMI1".to_string(), "; l=https://x/l.svg".to_string()],
+                vec!["second record".to_string()],
+            ]),
+        );
+        let dns = MockDns::start(rules).await;
+        let lookup = dns.resolver.txt_lookup("chunk.test").await.expect("lookup");
+        let strings = txt_record_strings(&lookup);
+        assert_eq!(
+            strings,
+            vec![
+                "v=BIMI1; l=https://x/l.svg".to_string(),
+                "second record".to_string()
+            ],
+            "each TXT record's character-strings concatenate; records stay separate"
+        );
+        dns.stop();
     }
 }

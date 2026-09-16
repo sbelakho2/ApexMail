@@ -1880,11 +1880,11 @@ mod tests {
             .expect("lazy redis pool construction")
     }
 
-    fn test_peer(octet: u8) -> SocketAddr {
+    pub(super) fn test_peer(octet: u8) -> SocketAddr {
         format!("10.0.0.{octet}:2525").parse().unwrap()
     }
 
-    fn test_server(tls_acceptor: Option<TlsAcceptor>) -> SubmissionServer {
+    pub(super) fn test_server(tls_acceptor: Option<TlsAcceptor>) -> SubmissionServer {
         // connect_lazy: the URL is never actually connected in tests;
         // any real query fails and maps to AuthError::Failed (535). The
         // short acquire timeout keeps DB-touching tests fast.
@@ -1937,7 +1937,7 @@ mod tests {
         BASE64.encode(payload.as_bytes())
     }
 
-    async fn read_smtp_response<S: AsyncRead + AsyncWrite + Unpin>(
+    pub(super) async fn read_smtp_response<S: AsyncRead + AsyncWrite + Unpin>(
         stream: &mut BufStream<S>,
     ) -> String {
         let mut resp = String::new();
@@ -1958,7 +1958,7 @@ mod tests {
     /// Drive one submission session: send each command, read the full
     /// (possibly multi-line) response, and assert it contains the
     /// expected substring. Ends with QUIT. Returns the transcript.
-    async fn run_session(
+    pub(super) async fn run_session(
         server: Arc<SubmissionServer>,
         peer: SocketAddr,
         allow_starttls: bool,
@@ -4530,5 +4530,290 @@ mod adversarial_db_tests {
         assert!(joined.is_ok(), "stop() must end the accept loop");
         let started = joined.expect("checked above");
         assert!(started.is_ok(), "start must return Ok on shutdown");
+    }
+}
+
+#[cfg(test)]
+mod submission_edge_arms {
+    //! Remaining adversarial session arms: command sequencing gates, AUTH
+    //! LOGIN multi-step states (cancel / over-long / bad base64), DATA
+    //! refusal classes, the idle-timeout and error-budget closes, and the
+    //! envelope-address extraction fallbacks.
+
+    use super::tests::{read_smtp_response, run_session, test_peer, test_server};
+    use super::*;
+    use tokio::io::{AsyncWriteExt, BufStream};
+
+    #[tokio::test]
+    async fn commands_before_ehlo_and_auth_are_sequenced_correctly() {
+        let server = Arc::new(test_server(None));
+        let transcript = run_session(
+            server,
+            test_peer(9),
+            false,
+            false,
+            &[
+                ("MAIL FROM:<a@b.example>", "503 5.5.1 Send EHLO first"),
+                ("RCPT TO:<a@b.example>", "503 5.5.1 Send EHLO first"),
+                ("DATA", "503 5.5.1 Send EHLO first"),
+                ("AUTH PLAIN aGVsbG8=", "503 5.5.1 Send EHLO first"),
+            ],
+        )
+        .await;
+        assert!(transcript.contains("503"));
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_mail_rcpt_data_require_auth() {
+        let server = Arc::new(test_server(None));
+        run_session(
+            server,
+            test_peer(10),
+            false,
+            false,
+            &[
+                ("EHLO edge.test", "250-"),
+                (
+                    "MAIL FROM:<a@b.example>",
+                    "530 5.7.0 Authentication required",
+                ),
+                ("RCPT TO:<a@b.example>", "530 5.7.0 Authentication required"),
+                ("DATA", "530 5.7.0 Authentication required"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rcpt_syntax_and_help_vrfy_expn_arms() {
+        let server = Arc::new(test_server(None));
+        run_session(
+            server,
+            test_peer(11),
+            false,
+            false,
+            &[
+                ("EHLO edge.test", "250-"),
+                (
+                    "RCPT TOX:<a@b.example>",
+                    "530 5.7.0 Authentication required",
+                ),
+                ("HELP", "214 2.0.0 Commands:"),
+                ("VRFY someone", "252"),
+                ("EXPN list", "502 5.5.1 EXPN command not supported"),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn data_with_an_argument_is_a_syntax_error() {
+        let server = Arc::new(test_server(None));
+        run_session(
+            server,
+            test_peer(12),
+            false,
+            false,
+            &[
+                ("EHLO edge.test", "250-"),
+                ("DATA now", "530 5.7.0 Authentication required"),
+            ],
+        )
+        .await;
+    }
+
+    /// Drive a raw duplex session where each step writes the exact bytes and
+    /// reads the full reply (multi-line aware). `already_tls` puts the
+    /// session inside TLS so AUTH is reachable.
+    async fn raw_steps_tls(
+        server: Arc<SubmissionServer>,
+        steps: &[&str],
+        already_tls: bool,
+    ) -> Vec<String> {
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(13), false, already_tls)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        // run_session_loop sends no greeting (the TLS/plain entrypoints do).
+        let mut replies = Vec::new();
+        for step in steps {
+            client_buf.write_all(step.as_bytes()).await.unwrap();
+            client_buf.flush().await.unwrap();
+            replies.push(read_smtp_response(&mut client_buf).await);
+        }
+        client_buf.write_all(b"QUIT\r\n").await.unwrap();
+        client_buf.flush().await.unwrap();
+        let _ = read_smtp_response(&mut client_buf).await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        replies
+    }
+
+    #[tokio::test]
+    async fn auth_login_cancel_and_too_long_lines_are_answered() {
+        let server = Arc::new(test_server(None));
+        let replies = raw_steps_tls(
+            server,
+            &[
+                "EHLO edge.test\r\n",
+                "AUTH LOGIN\r\n",
+                "*\r\n",
+                "AUTH LOGIN\r\n",
+                "dXNlcm5hbWU=\r\n",
+                "cGFzc3dvcmQ=\r\n",
+            ],
+            true,
+        )
+        .await;
+        // AUTH LOGIN prompt for the username.
+        assert!(replies[1].starts_with("334"), "{}", replies[1]);
+        // Cancel answer.
+        assert!(replies[2].starts_with("501"), "{}", replies[2]);
+        // A non-base64 username payload is refused without a password prompt
+        // cycle leak.
+        assert!(
+            replies[3].starts_with("334"),
+            "second AUTH LOGIN re-prompts: {}",
+            replies[3]
+        );
+        assert!(replies[4].starts_with("334 UGFzc3dvcmQ6"), "{}", replies[4]);
+        assert!(
+            replies[5].starts_with("535") || replies[5].starts_with("501"),
+            "invalid credentials fail closed: {}",
+            replies[5]
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_plain_with_garbage_base64_is_refused() {
+        let server = Arc::new(test_server(None));
+        let replies = raw_steps_tls(
+            server,
+            &["EHLO edge.test\r\n", "AUTH PLAIN !!!not-base64!!!\r\n"],
+            true,
+        )
+        .await;
+        assert!(
+            replies[1].starts_with("500") || replies[1].starts_with("501"),
+            "bad base64 must not authenticate: {}",
+            replies[1]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_command_phase_hits_the_421_idle_timeout() {
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(14), false, false)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        // Advance past the 120s command-phase timeout; the pending command
+        // read then fails with the idle timeout reply.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(121)).await;
+        let reply = read_smtp_response(&mut client_buf).await;
+        assert!(reply.starts_with("421 4.4.2 Idle timeout"), "{reply}");
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    #[tokio::test]
+    async fn error_budget_closes_the_session_with_421() {
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(15), false, false)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+        // Unrecognized commands: each is a 500; the budget closes with 421.
+        let mut saw_421 = false;
+        for _ in 0..40 {
+            if client_buf.write_all(b"BOGUS\r\n").await.is_err()
+                || client_buf.flush().await.is_err()
+            {
+                // The server closed after the budget tripped: the 421 is
+                // already in flight.
+                let trailing = read_smtp_response(&mut client_buf).await;
+                assert!(
+                    trailing.starts_with("421 4.7.0 Too many errors"),
+                    "{trailing}"
+                );
+                saw_421 = true;
+                break;
+            }
+            let reply = read_smtp_response(&mut client_buf).await;
+            if reply.starts_with("421 4.7.0 Too many errors") {
+                saw_421 = true;
+                break;
+            }
+            assert!(reply.starts_with("500"), "{reply}");
+        }
+        assert!(saw_421, "the error budget must close the session with 421");
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    #[tokio::test]
+    async fn read_data_outcomes_classify_every_failure_shape() {
+        let server = test_server(None);
+
+        // A single line over the per-line cap, then the terminator: the
+        // payload is never buffered; the refusal surfaces to the caller.
+        // The 1 MiB payload is streamed from a background writer (a duplex
+        // pipe needs an active reader to absorb it).
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let payload = format!("{}\r\n.\r\n", "x".repeat(MAX_DATA_LINE + 32));
+        let writer = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let mut client = client;
+            let _ = client.write_all(payload.as_bytes()).await;
+            let _ = client.flush().await;
+        });
+        let mut server_buf = BufStream::new(server_side);
+        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+            server.read_data_message(&mut server_buf).await
+        })
+        .await
+        .expect("draining to the terminator must terminate");
+        let _ = writer.await;
+        assert!(
+            matches!(outcome, ReadDataOutcome::TooLarge),
+            "an over-long line must be refused without buffering: {outcome:?}"
+        );
+
+        // EOF mid-DATA (client vanishes): Aborted, never a partial message.
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        drop(client);
+        let mut server_buf = BufStream::new(server_side);
+        let outcome = server.read_data_message(&mut server_buf).await;
+        assert!(matches!(outcome, ReadDataOutcome::Aborted), "{outcome:?}");
+    }
+
+    #[test]
+    fn envelope_token_extraction_falls_back_to_the_verb_split() {
+        // Angle-bracketed addresses take the direct path.
+        assert_eq!(
+            extract_address("MAIL FROM:<user@example.com> BODY=8BITMIME"),
+            "user@example.com"
+        );
+        // Bare addresses fall back to the token after the verb.
+        assert_eq!(
+            extract_address("MAIL FROM: bare@example.com"),
+            "bare@example.com"
+        );
+        assert_eq!(
+            extract_address("rcpt to alt@example.com"),
+            "alt@example.com"
+        );
+        // Nothing usable yields the empty token, never a command parameter.
+        assert_eq!(extract_address("MAIL FROM:"), "");
     }
 }

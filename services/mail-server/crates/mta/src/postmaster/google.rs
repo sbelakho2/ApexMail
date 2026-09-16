@@ -90,10 +90,25 @@ pub struct GoogleClient {
     http: Client,
     creds: GoogleCredentials,
     cached_token: Arc<Mutex<Option<(String, Instant)>>>,
+    /// Base URL of the Postmaster API (overridable for local mock servers).
+    base_url: String,
+    /// OAuth2 token endpoint (overridable for local mock servers).
+    token_url: String,
 }
 
 impl GoogleClient {
     pub fn new(creds: GoogleCredentials) -> Result<Self, String> {
+        Self::with_endpoints(creds, POSTMASTER_BASE.to_string(), TOKEN_URL.to_string())
+    }
+
+    /// Build a client against explicit endpoints. Production callers use
+    /// [`GoogleClient::new`] (the Google constants); tests point this at a
+    /// loopback mock server so no real network is touched.
+    pub fn with_endpoints(
+        creds: GoogleCredentials,
+        base_url: String,
+        token_url: String,
+    ) -> Result<Self, String> {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(4)
@@ -103,6 +118,8 @@ impl GoogleClient {
             http,
             creds,
             cached_token: Arc::new(Mutex::new(None)),
+            base_url,
+            token_url,
         })
     }
 
@@ -118,7 +135,7 @@ impl GoogleClient {
         }
         let resp = self
             .http
-            .post(TOKEN_URL)
+            .post(&self.token_url)
             .form(&[
                 ("client_id", self.creds.client_id.as_str()),
                 ("client_secret", self.creds.client_secret.as_str()),
@@ -144,7 +161,7 @@ impl GoogleClient {
     /// List domains visible to this OAuth identity.
     pub async fn list_domains(&self) -> Result<Vec<String>, String> {
         let token = self.access_token().await?;
-        let url = format!("{POSTMASTER_BASE}/domains");
+        let url = format!("{}/domains", self.base_url);
         let resp = self
             .http
             .get(&url)
@@ -179,7 +196,8 @@ impl GoogleClient {
     pub async fn fetch_traffic_stats(&self, domain: &str) -> Result<Vec<GoogleReputation>, String> {
         let token = self.access_token().await?;
         let url = format!(
-            "{POSTMASTER_BASE}/domains/{}/trafficStats",
+            "{}/domains/{}/trafficStats",
+            self.base_url,
             urlencoding::encode(domain)
         );
         let resp = self
@@ -330,5 +348,391 @@ mod tests {
             refresh_token: "refresh".into(),
         });
         assert!(c.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod mock_server_tests {
+    //! The full client surface driven against a loopback axum mock that
+    //! speaks the real Postmaster v1 wire shapes: token caching (exactly one
+    /// token round trip per expiry window), permission filtering, hostile
+    /// payloads, and per-domain failure isolation during ingest.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use axum::routing::{get as axum_get, post as axum_post};
+    use axum::Router;
+
+    #[derive(Clone)]
+    struct Mock {
+        token_calls: Arc<AtomicUsize>,
+        domains_body: Arc<std::sync::Mutex<&'static str>>,
+        domains_status: Arc<AtomicUsize>,
+        traffic_body: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl Mock {
+        fn new() -> Self {
+            Self {
+                token_calls: Arc::new(AtomicUsize::new(0)),
+                domains_body: Arc::new(std::sync::Mutex::new(
+                    "{\"domains\":[{\"name\":\"domains/good.example\",\"permission\":\"READ\"},                     {\"name\":\"domains/hidden.example\",\"permission\":\"NONE\"},                     {\"name\":\"domains/limited.example\"},                     {\"name\":\"bare.example\"}]}",
+                )),
+                domains_status: Arc::new(AtomicUsize::new(200)),
+                traffic_body: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn serve(self) -> (String, String, tokio::task::JoinHandle<()>) {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("mock bind");
+            let port = listener.local_addr().expect("port").port();
+            let token_calls = self.token_calls.clone();
+            let domains_body = self.domains_body.clone();
+            let domains_status = self.domains_status.clone();
+            let traffic_body = self.traffic_body.clone();
+
+            let app = Router::new()
+                .route(
+                    "/token",
+                    axum_post(move || {
+                        let token_calls = token_calls.clone();
+                        async move {
+                            token_calls.fetch_add(1, Ordering::SeqCst);
+                            axum::Json(serde_json::json!({
+                                "access_token": "tok-1",
+                                "expires_in": 3600_u64,
+                            }))
+                        }
+                    }),
+                )
+                .route(
+                    "/domains",
+                    axum_get(move || {
+                        let domains_body = domains_body.clone();
+                        let domains_status = domains_status.clone();
+                        async move {
+                            let status =
+                                StatusCode::from_u16(domains_status.load(Ordering::SeqCst) as u16)
+                                    .unwrap_or(StatusCode::OK);
+                            if status == StatusCode::OK {
+                                let body = *domains_body.lock().unwrap_or_else(|e| e.into_inner());
+                                (
+                                    StatusCode::OK,
+                                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                    body.to_string(),
+                                )
+                            } else {
+                                (
+                                    status,
+                                    [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                    "nope".to_string(),
+                                )
+                            }
+                        }
+                    }),
+                )
+                .route(
+                    "/domains/:domain/trafficStats",
+                    axum_get(
+                        move |axum::extract::Path(domain): axum::extract::Path<String>| {
+                            let traffic_body = traffic_body.clone();
+                            async move {
+                                let table = traffic_body.lock().unwrap_or_else(|e| e.into_inner());
+                                match table.iter().find(|(d, _)| d == &domain) {
+                                    Some((_, body)) => (
+                                        StatusCode::OK,
+                                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                        body.clone(),
+                                    ),
+                                    None => (
+                                        StatusCode::BAD_REQUEST,
+                                        [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                                        "no stats".to_string(),
+                                    ),
+                                }
+                            }
+                        },
+                    ),
+                );
+            let handle = tokio::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
+            (
+                format!("http://127.0.0.1:{port}"),
+                format!("http://127.0.0.1:{port}/token"),
+                handle,
+            )
+        }
+    }
+
+    fn client(base: &str, token_url: &str) -> GoogleClient {
+        GoogleClient::with_endpoints(
+            GoogleCredentials {
+                client_id: "id".into(),
+                client_secret: "secret".into(),
+                refresh_token: "refresh".into(),
+            },
+            base.to_string(),
+            token_url.to_string(),
+        )
+        .expect("client")
+    }
+
+    fn stats_body(name: &str) -> String {
+        serde_json::json!({
+            "trafficStats": [{
+                "name": name,
+                "userReportedSpamRatio": 0.012,
+                "domainReputation": "HIGH",
+                "spfSuccessRatio": 0.99,
+                "dkimSuccessRatio": 0.98,
+                "dmarcSuccessRatio": 0.97,
+                "inboundEncryptionRatio": 0.9,
+                "outboundEncryptionRatio": 0.95,
+                "ipReputations": [{"reputation": "MEDIUM"}],
+                "deliveryErrors": [{"type": "ERR_SPF"}],
+            }]
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn list_domains_filters_permission_none_and_strips_the_prefix() {
+        let mock = Mock::new();
+        let (base, token, _handle) = mock.clone().serve().await;
+        let client = client(&base, &token);
+        let domains = client.list_domains().await.expect("list ok");
+        assert_eq!(
+            domains,
+            vec![
+                "good.example".to_string(),
+                "limited.example".into(),
+                "bare.example".into()
+            ],
+            "permission=NONE is filtered; missing permission defaults to visible; \
+             names without the domains/ prefix pass through unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn access_token_is_cached_until_ten_minutes_before_expiry() {
+        let mock = Mock::new();
+        let (base, token, _handle) = mock.clone().serve().await;
+        let client = client(&base, &token);
+        client
+            .list_domains()
+            .await
+            .expect("first call exchanges a token");
+        client
+            .list_domains()
+            .await
+            .expect("second call reuses the cached token");
+        client
+            .fetch_traffic_stats("good.example")
+            .await
+            .expect_err("no traffic stats staged");
+        assert_eq!(
+            mock.token_calls.load(Ordering::SeqCst),
+            1,
+            "one 3600s token must serve multiple calls (expiry is 3600-600s away)"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_domains_surfaces_http_and_parse_failures() {
+        let mock = Mock::new();
+        mock.domains_status.store(500, Ordering::SeqCst);
+        let (base, token, _handle) = mock.clone().serve().await;
+        let c = client(&base, &token);
+        let error = c.list_domains().await.expect_err("500 must fail");
+        assert!(error.contains("list_domains 500"), "{error}");
+
+        let mock = Mock::new();
+        *mock.domains_body.lock().unwrap_or_else(|e| e.into_inner()) = "not json";
+        let (base, token, _handle) = mock.clone().serve().await;
+        let c = client(&base, &token);
+        let error = c.list_domains().await.expect_err("garbage JSON must fail");
+        assert!(error.contains("list_domains JSON"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn token_endpoint_failure_is_reported_without_leaking_secrets() {
+        let mock = Mock::new();
+        mock.domains_status.store(500, Ordering::SeqCst); // unused
+        let (base, _token, _handle) = mock.serve().await;
+        // Point the token URL at a 500 route: /domains serves 500 JSON.
+        let bad_token_url = format!("{base}/domains");
+        let c = client(&base, &bad_token_url);
+        let error = c.list_domains().await.expect_err("token failure");
+        assert!(
+            error.contains("token endpoint 405"),
+            "the mock /domains route answers POST with 405: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_traffic_stats_maps_the_wire_shape_and_rejects_bad_names() {
+        let mock = Mock::new();
+        mock.traffic_body
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                "good.example".into(),
+                stats_body("domains/good.example/trafficStats/20260214"),
+            ));
+        mock.traffic_body
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                "bogus.example".into(),
+                stats_body("domains/bogus.example/trafficStats/notadate"),
+            ));
+        let (base, token, _handle) = mock.serve().await;
+        let client = client(&base, &token);
+
+        let rows = client
+            .fetch_traffic_stats("good.example")
+            .await
+            .expect("stats ok");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].domain, "good.example");
+        assert_eq!(
+            rows[0].observed_at,
+            NaiveDate::from_ymd_opt(2026, 2, 14).unwrap()
+        );
+        assert_eq!(rows[0].domain_reputation.as_deref(), Some("HIGH"));
+        assert_eq!(rows[0].user_reported_spam_ratio, Some(0.012));
+        assert_eq!(rows[0].spf_success_ratio, Some(0.99));
+        assert_eq!(rows[0].dkim_success_ratio, Some(0.98));
+        assert_eq!(rows[0].dmarc_success_ratio, Some(0.97));
+        assert_eq!(rows[0].inbound_encryption_ratio, Some(0.9));
+        assert_eq!(rows[0].outbound_encryption_ratio, Some(0.95));
+        assert_eq!(
+            rows[0].ip_reputation,
+            serde_json::json!([{"reputation": "MEDIUM"}])
+        );
+        assert_eq!(
+            rows[0].delivery_errors,
+            serde_json::json!([{"type": "ERR_SPF"}])
+        );
+
+        let error = client
+            .fetch_traffic_stats("bogus.example")
+            .await
+            .expect_err("an unparseable traffic-stat name must fail loudly");
+        assert!(error.contains("invalid traffic-stat name"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn fetch_traffic_stats_surfaces_http_errors() {
+        let mock = Mock::new(); // no stats staged -> 400
+        let (base, token, _handle) = mock.serve().await;
+        let client = client(&base, &token);
+        let error = client
+            .fetch_traffic_stats("missing.example")
+            .await
+            .expect_err("HTTP 400 must surface");
+        assert!(error.contains("traffic_stats 400"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn urlencoding_of_hostile_domain_names_reaches_the_right_route() {
+        let mock = Mock::new();
+        mock.traffic_body
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                "a b/c d.example".into(),
+                stats_body("domains/x/trafficStats/20260101"),
+            ));
+        let (base, token, _handle) = mock.serve().await;
+        let client = client(&base, &token);
+        // "a b/c d.example" percent-encodes into a single path segment and
+        // must hit that exact key, not a 404 nor a path-traversal route.
+        let rows = client
+            .fetch_traffic_stats("a b/c d.example")
+            .await
+            .expect("encoded path");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_reputation_is_idempotent_per_domain_day() {
+        let Some(pool) =
+            migrator::test_support::fresh_canonical_pool("google_postmaster_upsert", "upsert_idem")
+                .await
+                .expect("configured TEST_DATABASE_URL must provision")
+        else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed google tests");
+            return;
+        };
+        let row = GoogleReputation {
+            domain: "idem.example".into(),
+            observed_at: NaiveDate::from_ymd_opt(2026, 2, 14).unwrap(),
+            domain_reputation: Some("HIGH".into()),
+            ip_reputation: serde_json::json!([]),
+            user_reported_spam_ratio: Some(0.01),
+            spammy_feedback_loops: None,
+            spf_success_ratio: Some(1.0),
+            dkim_success_ratio: Some(1.0),
+            dmarc_success_ratio: Some(1.0),
+            inbound_encryption_ratio: Some(1.0),
+            outbound_encryption_ratio: Some(1.0),
+            delivery_errors: serde_json::json!([]),
+            raw: serde_json::json!({}),
+        };
+        let mut updated = row.clone();
+        updated.domain_reputation = Some("LOW".into());
+        assert_eq!(upsert_reputation(&pool, &[row]).await.unwrap(), 1);
+        assert_eq!(upsert_reputation(&pool, &[updated]).await.unwrap(), 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM postmaster_google_reputation")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "same (domain, day) must update, not duplicate");
+        let rep: String =
+            sqlx::query_scalar("SELECT domain_reputation FROM postmaster_google_reputation")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rep, "LOW", "the conflict update wins");
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn ingest_all_persists_good_domains_and_isolates_failures() {
+        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+            "google_postmaster_ingest",
+            "ingest_mixed",
+        )
+        .await
+        .expect("configured TEST_DATABASE_URL must provision") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed google tests");
+            return;
+        };
+        let mock = Mock::new();
+        mock.traffic_body
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                "good.example".into(),
+                stats_body("domains/good.example/trafficStats/20260215"),
+            ));
+        // limited/bare have no staged stats -> per-domain failures that must
+        // not abort the ingest.
+        let (base, token, _handle) = mock.serve().await;
+        let client = client(&base, &token);
+        let total = ingest_all(&pool, &client).await.expect("ingest completes");
+        assert_eq!(total, 1, "one domain persisted, two failed in isolation");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM postmaster_google_reputation")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        pool.close().await;
     }
 }

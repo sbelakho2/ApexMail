@@ -1107,3 +1107,80 @@ mod tests {
         assert!(received_hop_limit_exceeded(&mk(41)));
     }
 }
+
+#[cfg(test)]
+mod drain_limit_tests {
+    //! The TooLong/Overflow boundary of the shared line reader, driven with
+    //! an injected (small) drain limit.
+
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn unterminated_line_past_the_drain_limit_overflows() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, server_side) = tokio::io::duplex(64 * 1024);
+        let mut server = BufStream::new(server_side);
+
+        // A small first write flips `too_long`, then the bulk arrives in a
+        // later fill so the drain counter actually accumulates.
+        let writer = tokio::spawn(async move {
+            let _ = client.write_all(&[b'Q'; 100]).await;
+            let _ = client.flush().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = client.write_all(&[b'Q'; 10 * 1024]).await;
+        });
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
+            read_line_capped_with_drain_limit(&mut server, 64, 4 * 1024).await
+        })
+        .await
+        .expect("must terminate")
+        .expect("io ok");
+        assert!(matches!(read, LineRead::Overflow), "got {read:?}");
+        let _ = writer.await;
+    }
+
+    #[tokio::test]
+    async fn terminated_overlong_line_reports_toolong_and_stays_synchronised() {
+        use tokio::io::AsyncWriteExt as _;
+        let (client, server_side) = tokio::io::duplex(64 * 1024);
+        let mut client = BufStream::new(client);
+        let mut server = BufStream::new(server_side);
+
+        client
+            .write_all(format!("{}\n", "x".repeat(512)).as_bytes())
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let read = read_line_capped_with_drain_limit(&mut server, 64, 4 * 1024)
+            .await
+            .unwrap();
+        assert!(matches!(read, LineRead::TooLong), "got {read:?}");
+
+        // The stream is synchronised: the next short line reads cleanly.
+        client.write_all(b"ok\n").await.unwrap();
+        client.flush().await.unwrap();
+        let read = read_line_capped_with_drain_limit(&mut server, 64, 4 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&read, LineRead::Line(bytes, LineTerminator::BareLf) if bytes == b"ok\n"),
+            "the line carries its terminator bytes: got {read:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eof_mid_line_without_a_newline_returns_what_was_read() {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, server_side) = tokio::io::duplex(64 * 1024);
+        client.write_all(b"partial").await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut server = BufStream::new(server_side);
+        let read = read_line_capped_with_drain_limit(&mut server, 64, 4 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            matches!(read, LineRead::Line(bytes, LineTerminator::Unterminated) if bytes == b"partial")
+        );
+    }
+}

@@ -3916,3 +3916,264 @@ mod tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+mod adversarial_policy_tests {
+    //! The pure §28 policy ladder, exploration-budget fail-closed arms, and
+    //! the hostile-JSON budget parser.
+
+    use super::*;
+
+    fn input() -> NextActionInput {
+        NextActionInput {
+            expected_value_eur: 500.0,
+            outreach_cost_eur: 0.2,
+            evidence_count: 10,
+            evidence_confidence: 0.8,
+            reply: ReplyState::None,
+            email: EmailState::Verified,
+            intent_strength: 0.2,
+            prior_touches: 1,
+            last_angle_failed: false,
+            referral_available: false,
+            referral_requested: false,
+            opportunity_open: false,
+            cooldown_active: false,
+            disqualified: false,
+        }
+    }
+
+    #[test]
+    fn stop_rules_override_any_economics() {
+        // Disqualification stops even a huge EV.
+        let mut i = input();
+        i.disqualified = true;
+        i.expected_value_eur = 100_000.0;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::StopPermanently, "{reason}");
+        assert!(reason.contains("stopping permanently"), "{reason}");
+
+        // An opt-out is an unconditional, lawful stop.
+        let mut i = input();
+        i.reply = ReplyState::NegativeOrOptOut;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::StopPermanently, "{reason}");
+        assert!(reason.contains("opted out"), "{reason}");
+    }
+
+    #[test]
+    fn non_finite_economics_fail_closed_to_do_nothing() {
+        let mut i = input();
+        i.expected_value_eur = f64::NAN;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::DoNothing, "{reason}");
+        assert!(reason.contains("non-finite"), "{reason}");
+
+        let mut i = input();
+        i.outreach_cost_eur = f64::INFINITY;
+        let (action, _) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::DoNothing);
+    }
+
+    #[test]
+    fn an_invalid_address_is_verified_before_any_spend() {
+        let mut i = input();
+        i.email = EmailState::Invalid;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::VerifyEmail, "{reason}");
+        assert!(reason.contains("invalid"), "{reason}");
+    }
+
+    #[test]
+    fn a_human_reply_routes_to_an_operator_never_another_send() {
+        let mut i = input();
+        i.reply = ReplyState::HumanReplied;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::OperatorTask, "{reason}");
+        assert!(reason.contains("human"), "{reason}");
+    }
+
+    #[test]
+    fn weak_prospects_and_unprofitable_sends_are_refused() {
+        // Below the minimum EV: no send, and no paid information either.
+        let mut i = input();
+        i.expected_value_eur = MIN_EXPECTED_VALUE_FOR_OUTREACH_EUR - 0.01;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::DoNothing, "{reason}");
+        assert!(reason.contains("below"), "{reason}");
+
+        // Cost >= EV: never profitable.
+        let mut i = input();
+        i.outreach_cost_eur = i.expected_value_eur;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::DoNothing, "{reason}");
+        assert!(reason.contains("economically justified"), "{reason}");
+    }
+
+    #[test]
+    fn cooldown_waits_and_thin_evidence_does_not_pay_for_itself() {
+        let mut i = input();
+        i.cooldown_active = true;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::Wait, "{reason}");
+        assert!(reason.contains("cooldown"), "{reason}");
+
+        // Thin evidence + low EV: no spend, no spam.
+        let mut i = input();
+        i.evidence_count = MIN_EVIDENCE_FOR_OUTREACH - 1;
+        i.expected_value_eur = 50.0;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::DoNothing, "{reason}");
+        assert!(
+            reason.contains("neither the paid lookup nor the send pays for itself"),
+            "{reason}"
+        );
+
+        // Thin evidence + HIGH EV + unverified address: verification first.
+        let mut i = input();
+        i.evidence_count = MIN_EVIDENCE_FOR_OUTREACH - 1;
+        i.expected_value_eur = HIGH_VALUE_ACCOUNT_EV_EUR * 2.0;
+        i.email = EmailState::Unverified;
+        let (action, reason) = next_best_action(&i);
+        assert_eq!(action, DecisionAction::VerifyEmail, "{reason}");
+    }
+
+    #[test]
+    fn budgets_parse_every_hostile_json_shape() {
+        // Wrong types per key, non-i64 numbers, and non-representable f64s
+        // are all refused with the offending key named.
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            (
+                serde_json::json!({ "min_sample_before_promotion": "many" }),
+                "min_sample_before_promotion",
+            ),
+            (
+                serde_json::json!({ "min_sample_before_promotion": 1e30 }),
+                "min_sample_before_promotion",
+            ),
+            (
+                serde_json::json!({ "high_value_ev_threshold_eur": [] }),
+                "high_value_ev_threshold_eur",
+            ),
+            (
+                serde_json::json!({ "max_daily_exploration_pct": false }),
+                "max_daily_exploration_pct",
+            ),
+        ];
+        for (value, key) in cases {
+            let error = ExplorationBudget::from_json(&value)
+                .err()
+                .unwrap_or_else(|| panic!("{key} shape must be refused"));
+            let message = match &error {
+                SalesError::InvalidInput(message) => message.clone(),
+                other => panic!("expected InvalidInput, got {other:?}"),
+            };
+            assert!(message.contains(key), "{message}");
+        }
+
+        // Nulls mean "unset", not zero.
+        let budget = ExplorationBudget::from_json(
+            &serde_json::json!({ "min_sample_before_promotion": null }),
+        )
+        .expect("null is unset");
+        assert_eq!(
+            budget.min_sample_before_promotion,
+            DEFAULT_MIN_SAMPLE_BEFORE_PROMOTION
+        );
+    }
+
+    #[test]
+    fn exploration_fails_closed_on_non_finite_state() {
+        let budget = ExplorationBudget::default();
+        let mut state = ExplorationState::default();
+        // Defaults explore freely.
+        assert!(may_explore(&budget, &state).allows_exploration());
+
+        // A NaN daily share is treated as fully explored (no more spend),
+        // but only when a daily cap is actually configured.
+        let budget = ExplorationBudget {
+            max_daily_exploration_pct: Some(20.0),
+            ..ExplorationBudget::default()
+        };
+        state.daily_exploration_pct = f64::NAN;
+        let verdict = may_explore(&budget, &state);
+        assert!(
+            !verdict.allows_exploration(),
+            "non-finite daily share must fail closed"
+        );
+        assert!(verdict.reason().is_some());
+
+        // An exhausted enrichment budget forbids further paid exploration.
+        let budget = ExplorationBudget {
+            max_enrichment_spend_eur: Some(10.0),
+            ..ExplorationBudget::default()
+        };
+        let state = ExplorationState {
+            enrichment_spend_eur: 10.0,
+            ..ExplorationState::default()
+        };
+        let verdict = may_explore(&budget, &state);
+        assert!(!verdict.allows_exploration());
+        let reason = verdict.reason().expect("a human-readable reason");
+        assert!(
+            reason.contains("enrichment spend budget exhausted"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn control_arm_cannot_be_promoted_over_itself() {
+        let control = ArmPosterior::new("control", 1.0, 1.0, true);
+        let verdict = may_promote_arm(&ExplorationBudget::default(), &control, &control, 0.0);
+        let reason_text = verdict.reasons.join(" | ");
+        assert!(
+            reason_text.contains("cannot be promoted over itself"),
+            "{reason_text}"
+        );
+    }
+
+    #[test]
+    fn giant_context_keys_shorten_deterministically_without_colliding() {
+        // Two different oversized values must shorten to different keys.
+        let long_a = "x".repeat(400);
+        let long_b = "y".repeat(400);
+        let key_a = {
+            // Reach the truncation through sanitize + fnv directly (the
+            // public bucket path requires registered dimensions).
+            let joined = format!("country={}", sanitize_context_value(&long_a));
+            if joined.len() <= MAX_CONTEXT_KEY_LEN {
+                joined.clone()
+            } else {
+                let hash = fnv1a64(joined.as_bytes());
+                let keep = MAX_CONTEXT_KEY_LEN - 20;
+                let mut t: String = joined.chars().take(keep).collect();
+                t.push('~');
+                t.push_str(&format!("{hash:016x}"));
+                t
+            }
+        };
+        let key_b = {
+            let joined = format!("country={}", sanitize_context_value(&long_b));
+            let hash = fnv1a64(joined.as_bytes());
+            let keep = MAX_CONTEXT_KEY_LEN - 20;
+            let mut t: String = joined.chars().take(keep).collect();
+            t.push('~');
+            t.push_str(&format!("{hash:016x}"));
+            t
+        };
+        assert_ne!(key_a, key_b, "different giant contexts never collide");
+        assert!(key_a.len() <= MAX_CONTEXT_KEY_LEN);
+        // The FNV-1a constant chain is fixed: hash of empty is the offset basis.
+        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn json_type_names_are_stable() {
+        assert_eq!(json_type_name(&serde_json::Value::Null), "null");
+        assert_eq!(json_type_name(&serde_json::Value::Bool(true)), "boolean");
+        assert_eq!(json_type_name(&serde_json::json!(1)), "number");
+        assert_eq!(json_type_name(&serde_json::json!("s")), "string");
+        assert_eq!(json_type_name(&serde_json::json!([])), "array");
+        assert_eq!(json_type_name(&serde_json::json!({})), "object");
+    }
+}

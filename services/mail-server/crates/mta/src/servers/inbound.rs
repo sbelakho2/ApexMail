@@ -5046,3 +5046,768 @@ mod adversarial_data_tests {
         let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
     }
 }
+
+#[cfg(test)]
+mod inbound_edge_arms {
+    //! Remaining adversarial session arms: line-length policing (TooLong vs
+    //! unresynchronisable Overflow), the error budget on every reject class,
+    //! DATA-phase timeouts/aborts, STARTTLS gating arms, auth-required
+    //! refusals, directory failures at RCPT, and the real listener loops
+    //! (plain + implicit TLS, including a failed handshake).
+
+    use super::adversarial_session_tests::{peer, unroutable_redis_pool, AcceptAllDirectory};
+    use super::*;
+    use crate::servers::util::ABSOLUTE_LINE_DRAIN_LIMIT;
+    use tokio::io::BufStream;
+
+    /// A directory that refuses resolution in a chosen mode per recipient.
+    struct DirectoryByPolicy {
+        unknown: Vec<String>,
+        unavailable: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl MailboxDirectory for DirectoryByPolicy {
+        async fn resolve(
+            &self,
+            recipient: &str,
+        ) -> Result<Option<ResolvedMailbox>, DirectoryUnavailable> {
+            if self.unavailable {
+                return Err(DirectoryUnavailable("edge-test directory offline".into()));
+            }
+            if self.unknown.iter().any(|r| r == recipient) {
+                return Ok(None);
+            }
+            Ok(Some(ResolvedMailbox {
+                mailbox_id: format!("mbx-{recipient}"),
+                email: recipient.to_string(),
+            }))
+        }
+    }
+
+    struct EdgeServer {
+        server: Arc<InboundServer>,
+    }
+
+    impl EdgeServer {
+        async fn new(
+            pool: PgPool,
+            auth_required: bool,
+            max_message_size: usize,
+            directory: Arc<dyn MailboxDirectory>,
+            port: u16,
+            tls_enabled: bool,
+        ) -> Self {
+            let config = InboundConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port,
+                secure_port: 0,
+                hostname: "inbound.test".into(),
+                max_message_size,
+                max_recipients: 100,
+                auth_required,
+                advertise_auth_port25: auth_required,
+                require_fcrdns: false,
+                arc_seal: false,
+                tls: crate::config::TlsConfig {
+                    enabled: tls_enabled,
+                    ..Default::default()
+                },
+            };
+            let rate_limit = RateLimitConfig {
+                enabled: true,
+                max_connections_per_ip: 100,
+                max_messages_per_connection: 100,
+                max_recipients_per_message: 100,
+            };
+            let authenticator = Arc::new(
+                crate::auth::EmailAuthenticator::new(
+                    crate::config::EmailAuthConfig {
+                        require_spf: false,
+                        require_dkim: false,
+                        enforce_dmarc: false,
+                        allow_soft_fail: true,
+                        trusted_relays: Vec::new(),
+                        spf_cache_max_entries: 10_000,
+                    },
+                    "inbound.test".into(),
+                )
+                .await
+                .expect("authenticator"),
+            );
+            let mut server = InboundServer::new(
+                config,
+                rate_limit,
+                pool,
+                unroutable_redis_pool(),
+                authenticator,
+                "inbound.test".into(),
+                Vec::new(),
+            )
+            .expect("server");
+            server.mailbox_directory = directory;
+            Self {
+                server: Arc::new(server),
+            }
+        }
+
+        /// Duplex sessions never bind; the port only matters for the
+        /// real-listener tests, which pass a free port explicitly.
+        async fn accept_all(pool: PgPool) -> Self {
+            Self::with_port(pool, 0).await
+        }
+
+        async fn with_port(pool: PgPool, port: u16) -> Self {
+            Self::new(
+                pool,
+                false,
+                1024 * 1024,
+                Arc::new(AcceptAllDirectory),
+                port,
+                false,
+            )
+            .await
+        }
+    }
+
+    /// Duplex driver with raw-byte writes (line policing needs unterminated
+    /// and over-long writes the line-based helper cannot express). The
+    /// client side is pre-split into owned halves so a background task can
+    /// stream huge payloads while the foreground reads replies.
+    struct RawSession {
+        reader: BufStream<tokio::io::DuplexStream>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl RawSession {
+        async fn start(server: Arc<InboundServer>, peer: SocketAddr) -> Self {
+            Self::start_with_tls(server, peer, None).await
+        }
+
+        async fn start_with_tls(
+            server: Arc<InboundServer>,
+            peer: SocketAddr,
+            tls: Option<TlsAcceptor>,
+        ) -> Self {
+            let (client, server_side) = tokio::io::duplex(256 * 1024);
+            let task =
+                tokio::spawn(async move { server.run_plain_session(server_side, peer, tls).await });
+            let mut session = Self::from_parts(client, task);
+            let greeting = session.reply().await;
+            assert!(greeting.starts_with("220"), "{greeting}");
+            session
+        }
+
+        fn from_parts(client: tokio::io::DuplexStream, task: tokio::task::JoinHandle<()>) -> Self {
+            let reader = client;
+            Self {
+                reader: BufStream::new(reader),
+                task,
+            }
+        }
+
+        async fn send_raw(&mut self, bytes: &[u8]) {
+            use tokio::io::AsyncWriteExt as _;
+            self.reader.write_all(bytes).await.unwrap();
+            self.reader.flush().await.unwrap();
+        }
+
+        async fn cmd(&mut self, line: &str) -> String {
+            self.send_raw(format!("{line}\r\n").as_bytes()).await;
+            self.reply().await
+        }
+
+        async fn reply(&mut self) -> String {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut resp = String::new();
+            loop {
+                let mut line = String::new();
+                if self.reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let multiline = line.len() >= 4 && line.as_bytes()[3] == b'-';
+                resp.push_str(&line);
+                if !multiline {
+                    break;
+                }
+            }
+            resp
+        }
+    }
+
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/inbound_edge")
+            .expect("lazy pool")
+    }
+
+    #[tokio::test]
+    async fn overlong_command_lines_are_rejected_and_the_session_stays_synchronised() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+
+        // 5 KB command WITH a newline: drained, 500, session continues.
+        let long = format!("NOOP {}\r\n", "x".repeat(5000));
+        session.send_raw(long.as_bytes()).await;
+        let reply = session.reply().await;
+        assert!(reply.starts_with("500 5.5.2 Line too long"), "{reply}");
+        let reply = session.cmd("NOOP").await;
+        assert!(reply.starts_with("250"), "still synchronised: {reply}");
+        let reply = session.cmd("QUIT").await;
+        assert!(reply.starts_with("221"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn too_many_overlong_lines_close_the_session_with_421() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        for _ in 0..19 {
+            let long = format!("NOOP {}\r\n", "x".repeat(5000));
+            session.send_raw(long.as_bytes()).await;
+            let reply = session.reply().await;
+            assert!(reply.starts_with("500"), "{reply}");
+        }
+        // The 20th reject exhausts the budget: 421 follows the 500.
+        let long = format!("NOOP {}\r\n", "x".repeat(5000));
+        session.send_raw(long.as_bytes()).await;
+        let reply = session.reply().await;
+        assert!(reply.starts_with("500"), "{reply}");
+        let reply = session.reply().await;
+        assert!(reply.starts_with("421 4.7.0 Too many errors"), "{reply}");
+        let _ = session.task.await;
+    }
+
+    #[tokio::test]
+    async fn bare_lf_commands_are_refused_and_exhaust_the_error_budget() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        for i in 0..19 {
+            session.send_raw(format!("NOOP {i}\n").as_bytes()).await;
+            let reply = session.reply().await;
+            assert!(reply.starts_with("500 5.5.2 Bare LF"), "{reply}");
+        }
+        session.send_raw(b"NOOP final\n").await;
+        let reply = session.reply().await;
+        assert!(reply.starts_with("500 5.5.2 Bare LF"), "{reply}");
+        let reply = session.reply().await;
+        assert!(reply.starts_with("421 4.7.0 Too many errors"), "{reply}");
+        let _ = session.task.await;
+    }
+
+    /// Start the REAL listener and return (port, server) for full-duplex
+    /// TCP clients (64 MiB unterminated payloads deadlock a duplex pipe).
+    async fn real_listener(server: Arc<InboundServer>) -> (u16, Arc<InboundServer>) {
+        let port = server.config.port;
+        let srv = server.clone();
+        let task = tokio::spawn(async move { srv.start(None).await });
+        // Wait for the bind.
+        loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(probe) => {
+                    drop(probe);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        tokio::spawn(async move {
+            let _ = task.await;
+        });
+        (port, server)
+    }
+
+    async fn tcp_connect(port: u16) -> tokio::net::TcpStream {
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect")
+    }
+
+    /// Stream an unterminated payload past the absolute drain limit from a
+    /// writer task while the foreground reads the reply: the server latches
+    /// Overflow and closes while the client may still be streaming (the
+    /// resulting EPIPE on the write side is expected and ignored).
+    async fn stream_until_overflow_reply(
+        port: u16,
+        handshake: &[&str],
+        byte: u8,
+    ) -> (String, usize) {
+        let stream = tcp_connect(port).await;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        let (read_half, mut writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap(); // greeting
+        for cmd in handshake {
+            writer.write_all(cmd.as_bytes()).await.unwrap();
+            // Drain the FULL (possibly multiline) reply.
+            let mut full = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).await.unwrap();
+                let cont = line.len() >= 4 && line.as_bytes()[3] == b'-';
+                full.push_str(&line);
+                if !cont {
+                    break;
+                }
+            }
+            assert!(
+                full.starts_with("250") || full.starts_with("354"),
+                "handshake command {cmd:?} failed: {full}"
+            );
+        }
+        // The margin must exceed BOTH the reader's buffer AND the pre-
+        // `too_long` accumulation (up to the per-line cap: bytes accepted
+        // into `line` before it flips are never counted toward the drain
+        // total), so the counted bytes reliably exceed the limit.
+        let payload = vec![byte; ABSOLUTE_LINE_DRAIN_LIMIT + 4 * 1024 * 1024];
+        let writer_task = tokio::spawn(async move {
+            let mut writer = writer;
+            // Chunked so a mid-stream close surfaces quickly.
+            for chunk in payload.chunks(64 * 1024) {
+                if writer.write_all(chunk).await.is_err() {
+                    break;
+                }
+            }
+            let _ = writer.shutdown().await;
+        });
+        let mut everything = String::new();
+        let read = tokio::time::timeout(Duration::from_secs(60), async {
+            use tokio::io::AsyncReadExt as _;
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).await.unwrap_or_default();
+            everything = String::from_utf8_lossy(&buf).into_owned();
+            buf.len()
+        })
+        .await
+        .expect("the overflow reply must arrive");
+        let _ = writer_task.await;
+        (everything, read)
+    }
+
+    #[tokio::test]
+    async fn command_without_any_newline_past_the_drain_limit_closes_the_connection() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let edge = EdgeServer::with_port(lazy_pool(), port).await;
+        let (port, server) = real_listener(edge.server).await;
+        let (reply, _n) = stream_until_overflow_reply(port, &[], b'A').await;
+        assert!(reply.starts_with("500 5.5.2 Line too long"), "{reply}");
+        server.stop();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_command_phase_hits_the_421_idle_timeout() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        // Advance past the 120-second command-phase timeout.
+        tokio::time::advance(Duration::from_secs(121)).await;
+        let reply = session.reply().await;
+        assert!(reply.starts_with("421 4.4.2 Idle timeout"), "{reply}");
+        let _ = session.task.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_data_phase_hits_the_total_deadline_and_rejects_the_partial_payload() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        assert!(session.cmd("EHLO edge.test").await.starts_with("250"));
+        assert!(session
+            .cmd("MAIL FROM:<sender@edge.test>")
+            .await
+            .starts_with("250"));
+        assert!(session
+            .cmd("RCPT TO:<rcpt@edge.test>")
+            .await
+            .starts_with("250"));
+        assert!(session.cmd("DATA").await.starts_with("354"));
+        // Drip one body line, then stall past the total DATA deadline.
+        session.send_raw(b"Subject: partial\r\n").await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::advance(Duration::from_secs(601)).await;
+        let reply = session.reply().await;
+        assert!(reply.starts_with("421 4.4.2 Data timeout"), "{reply}");
+        let _ = session.task.await;
+    }
+
+    #[tokio::test]
+    async fn overlong_data_line_rejects_the_whole_message_with_552() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        assert!(session.cmd("EHLO edge.test").await.starts_with("250"));
+        assert!(session
+            .cmd("MAIL FROM:<sender@edge.test>")
+            .await
+            .starts_with("250"));
+        assert!(session
+            .cmd("RCPT TO:<rcpt@edge.test>")
+            .await
+            .starts_with("250"));
+        assert!(session.cmd("DATA").await.starts_with("354"));
+        // One line over MAX_DATA_LINE (1 MiB), newline-terminated: the
+        // payload is dropped, the transaction answered 552.
+        session
+            .send_raw(format!("{}\r\n", "y".repeat(MAX_DATA_LINE + 16)).as_bytes())
+            .await;
+        session.send_raw(b".\r\n").await;
+        let reply = session.reply().await;
+        assert!(
+            reply.starts_with("552 5.3.4 Message size exceeds"),
+            "{reply}"
+        );
+        // The session survives and the next transaction needs a fresh MAIL.
+        assert!(session.cmd("NOOP").await.starts_with("250"));
+    }
+
+    #[tokio::test]
+    async fn data_overflow_closes_the_connection() {
+        let pool = match migrator::test_support::fresh_canonical_pool(
+            "inbound_edge_overflow",
+            "data_overflow",
+        )
+        .await
+        .expect("configured TEST_DATABASE_URL must provision")
+        {
+            Some(pool) => pool,
+            None => {
+                eprintln!("skipping: set TEST_DATABASE_URL");
+                return;
+            }
+        };
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let edge = EdgeServer::with_port(pool, port).await;
+        let (port, server) = real_listener(edge.server).await;
+        let (reply, _n) = stream_until_overflow_reply(
+            port,
+            &[
+                "EHLO edge.test\r\n",
+                "MAIL FROM:<sender@edge.test>\r\n",
+                "RCPT TO:<rcpt@edge.test>\r\n",
+                "DATA\r\n",
+            ],
+            b'Z',
+        )
+        .await;
+        assert!(reply.starts_with("500 5.5.2 Line too long"), "{reply}");
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn eof_mid_data_aborts_the_transaction_without_a_reply() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        assert!(session.cmd("EHLO edge.test").await.starts_with("250"));
+        assert!(session
+            .cmd("MAIL FROM:<sender@edge.test>")
+            .await
+            .starts_with("250"));
+        assert!(session
+            .cmd("RCPT TO:<rcpt@edge.test>")
+            .await
+            .starts_with("250"));
+        assert!(session.cmd("DATA").await.starts_with("354"));
+        // Drop the client mid-payload: no reply may be written to a dead
+        // socket; the session task simply ends.
+        use tokio::io::AsyncWriteExt as _;
+        session.reader.shutdown().await.unwrap();
+        drop(session.reader);
+        let _ = tokio::time::timeout(Duration::from_secs(5), session.task).await;
+    }
+
+    #[tokio::test]
+    async fn starttls_before_ehlo_and_unavailable_tls_are_refused() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        // STARTTLS with no EHLO first: 503 sequencing error.
+        let reply = session.cmd("STARTTLS").await;
+        assert!(
+            reply.starts_with("503 5.5.1 Error: send HELO/EHLO first"),
+            "{reply}"
+        );
+        // After EHLO, TLS is unavailable on this duplex session (no
+        // acceptor): 454 rather than a half-upgraded stream.
+        assert!(session.cmd("EHLO edge.test").await.starts_with("250"));
+        let reply = session.cmd("STARTTLS").await;
+        assert!(reply.starts_with("454 4.7.0 TLS not available"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn auth_on_port25_is_refused_without_tls_when_tls_is_available() {
+        let server = EdgeServer::new(
+            lazy_pool(),
+            true,
+            1024 * 1024,
+            Arc::new(AcceptAllDirectory),
+            0,
+            true,
+        )
+        .await;
+        // Same session shape but WITH an acceptor: STARTTLS is advertised,
+        // and a plaintext AUTH attempt is refused with 538 until STARTTLS
+        // completes.
+        let (acceptor, _connector) = localhost_tls_material();
+        let mut session =
+            RawSession::start_with_tls(server.server.clone(), peer(), Some(acceptor)).await;
+        let caps = session.cmd("EHLO edge.test").await;
+        assert!(caps.contains("STARTTLS"), "STARTTLS advertised: {caps}");
+        let reply = session.cmd("AUTH PLAIN aGVsbG8=").await;
+        assert!(
+            reply.starts_with("538 5.7.11 Encryption required"),
+            "{reply}"
+        );
+        let reply = session.cmd("QUIT").await;
+        assert!(reply.starts_with("221"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn auth_required_sessions_refuse_mail_and_rcpt_with_530() {
+        let server = EdgeServer::new(
+            lazy_pool(),
+            true,
+            1024 * 1024,
+            Arc::new(AcceptAllDirectory),
+            0,
+            false,
+        )
+        .await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        assert!(session.cmd("EHLO edge.test").await.starts_with("250"));
+        let reply = session.cmd("MAIL FROM:<sender@edge.test>").await;
+        assert!(
+            reply.starts_with("530 5.7.0 Authentication required"),
+            "{reply}"
+        );
+        // RCPT without MAIL also hits the auth gate (after the sequence gate).
+        let reply = session.cmd("RCPT TO:<rcpt@edge.test>").await;
+        assert!(
+            reply.starts_with("530") || reply.starts_with("503"),
+            "{reply}"
+        );
+        // DATA without authentication is equally refused.
+        let reply = session.cmd("DATA").await;
+        assert!(
+            reply.starts_with("503") || reply.starts_with("530"),
+            "{reply}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rcpt_syntax_errors_and_directory_failures_are_distinguished() {
+        let server = EdgeServer::new(
+            lazy_pool(),
+            false,
+            1024 * 1024,
+            Arc::new(DirectoryByPolicy {
+                unknown: vec!["gone@edge.test".into()],
+                unavailable: false,
+            }),
+            0,
+            false,
+        )
+        .await;
+        let mut session = RawSession::start(server.server, peer()).await;
+        assert!(session.cmd("EHLO edge.test").await.starts_with("250"));
+        assert!(session
+            .cmd("MAIL FROM:<sender@edge.test>")
+            .await
+            .starts_with("250"));
+        let reply = session.cmd("RCPT").await;
+        assert!(reply.starts_with("501 5.5.4 Syntax: RCPT TO"), "{reply}");
+        let reply = session.cmd("RCPT TO:<gone@edge.test>").await;
+        assert!(reply.starts_with("550"), "unknown recipient: {reply}");
+    }
+
+    #[tokio::test]
+    async fn dropping_the_client_before_the_greeting_ends_the_session_quietly() {
+        let server = EdgeServer::accept_all(lazy_pool()).await;
+        let (client, server_side) = tokio::io::duplex(64);
+        drop(client); // greeting write must fail, not hang or panic
+        let srv = server.server.clone();
+        let task =
+            tokio::spawn(async move { srv.run_plain_session(server_side, peer(), None).await });
+        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    }
+
+    // ── real listener loops (start/stop, plain + implicit TLS) ────────────
+
+    /// A localhost CA + leaf pair materialised as BOTH the server acceptor
+    /// and a client connector that trusts the CA.
+    fn localhost_tls_material() -> (TlsAcceptor, tokio_rustls::TlsConnector) {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let mut ca_params =
+            rcgen::CertificateParams::new(vec!["edge-ca.test".to_string()]).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let leaf_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+
+        let server_config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+            )
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+        roots.add(ca_cert.der().clone()).unwrap();
+        let client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+        (acceptor, connector)
+    }
+
+    async fn server_on_free_ports() -> Arc<InboundServer> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let secure_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = InboundConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port,
+            secure_port,
+            hostname: "inbound.test".into(),
+            max_message_size: 1024 * 1024,
+            max_recipients: 100,
+            auth_required: false,
+            advertise_auth_port25: false,
+            require_fcrdns: false,
+            arc_seal: false,
+            tls: Default::default(),
+        };
+        let rate_limit = RateLimitConfig {
+            enabled: true,
+            max_connections_per_ip: 100,
+            max_messages_per_connection: 100,
+            max_recipients_per_message: 100,
+        };
+        let authenticator = Arc::new(
+            crate::auth::EmailAuthenticator::new(
+                crate::config::EmailAuthConfig {
+                    require_spf: false,
+                    require_dkim: false,
+                    enforce_dmarc: false,
+                    allow_soft_fail: true,
+                    trusted_relays: Vec::new(),
+                    spf_cache_max_entries: 10_000,
+                },
+                "inbound.test".into(),
+            )
+            .await
+            .unwrap(),
+        );
+        let mut server = InboundServer::new(
+            config,
+            rate_limit,
+            lazy_pool(),
+            unroutable_redis_pool(),
+            authenticator,
+            "inbound.test".into(),
+            Vec::new(),
+        )
+        .unwrap();
+        server.mailbox_directory = Arc::new(AcceptAllDirectory);
+        Arc::new(server)
+    }
+
+    #[tokio::test]
+    async fn start_serves_plain_sessions_and_stops_cleanly() {
+        let server = server_on_free_ports().await;
+        let port = server.config.port;
+        let srv = server.clone();
+        let task = tokio::spawn(async move { srv.start(None).await });
+
+        let mut stream = loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        let mut buf = String::new();
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(&mut stream);
+        reader.read_line(&mut buf).await.unwrap();
+        assert!(buf.starts_with("220"), "{buf}");
+        use tokio::io::AsyncWriteExt;
+        stream.write_all(b"QUIT\r\n").await.unwrap();
+
+        server.stop();
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("stop() unblocks start()")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn start_serves_implicit_tls_and_survives_a_failed_handshake() {
+        let server = server_on_free_ports().await;
+        let secure_port = server.config.secure_port;
+        let (acceptor, connector) = localhost_tls_material();
+        let srv = server.clone();
+        let task = tokio::spawn(async move { srv.start(Some(acceptor)).await });
+
+        // A plaintext client on the implicit-TLS port: the handshake must
+        // fail without killing the listener.
+        let mut garbage = loop {
+            match tokio::net::TcpStream::connect(("127.0.0.1", secure_port)).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        use tokio::io::AsyncWriteExt as _;
+        garbage
+            .write_all(
+                b"garbage not a tls client hello
+",
+            )
+            .await
+            .unwrap();
+        let _ = garbage.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A real TLS client completes the handshake and gets the greeting.
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", secure_port))
+            .await
+            .expect("second connect");
+        let name =
+            tokio_rustls::rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap();
+        let mut tls = connector.connect(name, tcp).await.expect("tls handshake");
+        use tokio::io::AsyncBufReadExt as _;
+        let mut greeting = String::new();
+        tls.read_line(&mut greeting).await.unwrap();
+        assert!(greeting.starts_with("220"), "{greeting}");
+        tls.write_all(b"QUIT\r\n").await.unwrap();
+
+        server.stop();
+        let result = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("stop unblocks")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+    }
+}

@@ -395,3 +395,258 @@ mod tests {
         assert!(MicrosoftCalendarProvider::from_env(config, internal).is_none());
     }
 }
+
+#[cfg(test)]
+mod provider_wire_tests {
+    //! The Microsoft provider against a loopback Graph mock and the
+    //! canonical schema: getSchedule parsing (free entries skipped, hostile
+    //! datetimes dropped), HTTP failure surfacing, booking gates, and the
+    //! env-driven construction.
+
+    use super::*;
+    use crate::test_db::canonical_test_pool;
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    async fn graph_mock(
+        routes: HashMap<(&'static str, String), (u16, serde_json::Value)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let routes = Arc::new(routes);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]);
+                    let method: &'static str = Box::leak(
+                        head.split(' ')
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
+                            .into_boxed_str(),
+                    );
+                    let path = head
+                        .split(' ')
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/")
+                        .to_string();
+                    let (status, body) = routes
+                        .get(&(method, path))
+                        .cloned()
+                        .unwrap_or((404, serde_json::json!({"error": {"message": "no route"}})));
+                    let body = body.to_string();
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (format!("http://127.0.0.1:{port}",), handle)
+    }
+
+    async fn make_provider(base_url: &str) -> (MicrosoftCalendarProvider, PgPool) {
+        let pool = canonical_test_pool("microsoft_calendar_wire")
+            .await
+            .expect("configured TEST_DATABASE_URL must provision");
+        let config = CalendarConfig::default();
+        let internal = Arc::new(InternalCalendarProvider::new(pool.clone(), config.clone()));
+        let provider = MicrosoftCalendarProvider {
+            client: reqwest::Client::new(),
+            base_url: base_url.to_string(),
+            user_id: "me".into(),
+            access_token: "test-token".into(),
+            internal,
+            config,
+        };
+        (provider, pool)
+    }
+
+    fn request(tenant: &str) -> AvailabilityRequest {
+        AvailabilityRequest::new(
+            tenant,
+            chrono::NaiveDate::from_ymd_opt(2031, 1, 13).unwrap(),
+            chrono_tz::Europe::Tallinn,
+            "2031-01-12T08:00:00Z".parse().unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn get_schedule_skips_free_and_hostile_entries() {
+        let payload = serde_json::json!({ "value": [
+            { "scheduleItems": [
+                { "status": "busy", "start": { "dateTime": "2031-01-13T08:00:00.0000000Z" }, "end": { "dateTime": "2031-01-13T09:00:00.0000000Z" } },
+                { "status": "Free", "start": { "dateTime": "2031-01-13T09:00:00.0000000Z" }, "end": { "dateTime": "2031-01-13T10:00:00.0000000Z" } },
+                { "status": "oof", "start": { "dateTime": "nope" }, "end": { "dateTime": "2031-01-13T11:00:00.0000000Z" } },
+                { "status": "tentative", "start": { "dateTime": "2031-01-13T12:00:00.0000000Z" }, "end": { "dateTime": "2031-01-13T12:00:00.0000000Z" } },
+                { "status": "workingElsewhere", "start": { "dateTime": "2031-01-13T13:00:00.0000000Z" }, "end": { "dateTime": "2031-01-13T14:00:00.0000000Z" } }
+            ]}
+        ]});
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/me/calendar/getSchedule".to_string()),
+            (200, payload),
+        );
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, _pool) = make_provider(&base).await;
+
+        let busy = provider
+            .busy_from_graph(&request("ms-busy"))
+            .await
+            .expect("getSchedule parses");
+        // busy + tentative-with-real-window? tentative start==end dropped,
+        // malformed dropped, free skipped, workingElsewhere counts:
+        assert_eq!(busy.len(), 2, "{busy:?}");
+        assert!(busy
+            .iter()
+            .any(|b| b.start == "2031-01-13T08:00:00Z".parse::<DateTime<Utc>>().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn get_schedule_surfaces_http_failures() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/me/calendar/getSchedule".to_string()),
+            (
+                403,
+                serde_json::json!({"error": {"code": "InvalidAuthenticationToken"}}),
+            ),
+        );
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, _pool) = make_provider(&base).await;
+        let error = provider
+            .busy_from_graph(&request("ms-http"))
+            .await
+            .expect_err("HTTP 403 must surface");
+        assert!(error.to_string().contains("HTTP 403"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn create_event_validates_time_and_requires_an_id() {
+        let (base, _server) = graph_mock(HashMap::new()).await;
+        let (provider, _pool) = make_provider(&base).await;
+
+        let request = CreateEventRequest {
+            tenant_id: "ms-create".into(),
+            title: "Demo".into(),
+            attendees: vec!["prospect@example.com".into()],
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:00:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "microsoft".into(),
+            provider_event_id: None,
+        };
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("end must be after start");
+        assert!(matches!(error, CalendarError::InvalidInput(_)), "{error}");
+
+        // 200 without an id is a provider failure.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/me/events".to_string()),
+            (200, serde_json::json!({"subject": "Demo"})),
+        );
+        let (base, _server) = graph_mock(routes).await;
+        let (provider, _pool) = make_provider(&base).await;
+        let request = CreateEventRequest {
+            end: "2031-01-13T09:30:00Z".parse().unwrap(),
+            ..request
+        };
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("no id must fail");
+        assert!(error.to_string().contains("no id"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reschedule_and_cancel_reject_non_uuid_ids() {
+        let (base, _server) = graph_mock(HashMap::new()).await;
+        let (provider, _pool) = make_provider(&base).await;
+        let error = provider
+            .reschedule("not-a-uuid", chrono::Utc::now())
+            .await
+            .expect_err("non-UUID ids are refused");
+        assert!(matches!(error, CalendarError::InvalidInput(_)), "{error}");
+        let error = provider
+            .cancel("not-a-uuid")
+            .await
+            .expect_err("non-UUID ids are refused");
+        assert!(matches!(error, CalendarError::InvalidInput(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn from_env_reads_the_documented_variables_and_trims_the_base_url() {
+        let _guard = ENV_LOCK.lock().await;
+        std::env::set_var("SALES_MICROSOFT_GRAPH_ACCESS_TOKEN", "tok");
+        std::env::set_var("SALES_MICROSOFT_GRAPH_BASE_URL", "http://127.0.0.1:9/");
+        std::env::set_var("SALES_MICROSOFT_USER_ID", "user-7");
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let internal = Arc::new(InternalCalendarProvider::new(db, CalendarConfig::default()));
+        let provider = MicrosoftCalendarProvider::from_env(CalendarConfig::default(), internal)
+            .expect("built");
+        assert_eq!(
+            provider.base_url, "http://127.0.0.1:9",
+            "trailing slash trimmed"
+        );
+        assert_eq!(provider.user_id, "user-7");
+
+        std::env::remove_var("SALES_MICROSOFT_GRAPH_ACCESS_TOKEN");
+        std::env::remove_var("SALES_MICROSOFT_GRAPH_BASE_URL");
+        std::env::remove_var("SALES_MICROSOFT_USER_ID");
+    }
+
+    #[tokio::test]
+    async fn debug_impl_never_leaks_the_token() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let internal = Arc::new(InternalCalendarProvider::new(db, CalendarConfig::default()));
+        let provider = MicrosoftCalendarProvider {
+            client: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            user_id: "user-7".into(),
+            access_token: "SECRET-TOKEN".into(),
+            internal,
+            config: CalendarConfig::default(),
+        };
+        let rendered = format!("{provider:?}");
+        assert!(!rendered.contains("SECRET-TOKEN"), "{rendered}");
+        assert!(rendered.contains("user-7"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn graph_datetime_parsing_tolerates_the_documented_shapes() {
+        assert!(parse_graph_datetime("2031-01-13T08:00:00.0000000Z").is_some());
+        assert!(parse_graph_datetime("2031-01-13T08:00:00Z").is_some());
+        assert!(parse_graph_datetime("2031-01-13T08:00:00.0000000").is_some());
+        assert!(parse_graph_datetime("garbage").is_none());
+    }
+}

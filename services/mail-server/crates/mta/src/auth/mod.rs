@@ -6,6 +6,8 @@ pub mod dane;
 pub mod email_authentication;
 pub mod lockout;
 pub mod mta_sts;
+#[cfg(test)]
+pub(crate) mod test_dns;
 
 pub use arc::*;
 pub use bimi::*;

@@ -1348,12 +1348,22 @@ mod tests {
         .await
         .expect("read B's claim");
         // The sweep is GLOBAL over the SHARED canonical test database: a
-        // parallel process's sweep may re-open B first, in which case this
-        // sweep's counter is 0. The invariant is B's own claim being open —
-        // proven here — not which process's sweep re-opened it.
+        // parallel process's sweep may re-open B first (counter 0 here), and
+        // that process's projector may even have re-applied B already
+        // (processed_at set again). The invariant is that B is never LOST:
+        // either this sweep recovered it, its claim stands open, or it has
+        // already been applied exactly once (single marker, checked below).
+        let b_applied_once: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sales_sender_health_applied WHERE event_id = $1)",
+        )
+        .bind(event_b)
+        .fetch_one(&pool)
+        .await
+        .expect("marker probe");
         assert!(
-            recovered >= 1 || reopened,
-            "the sweep must re-open the crashed claim (recovered={recovered})"
+            recovered >= 1 || reopened || b_applied_once,
+            "the crashed claim must be recovered, open, or applied exactly once \
+             (recovered={recovered}, reopened={reopened}, applied={b_applied_once})"
         );
         assert!(
             reopened,

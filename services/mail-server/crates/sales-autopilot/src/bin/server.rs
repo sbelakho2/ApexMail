@@ -36,7 +36,11 @@ fn init_tracing() -> Option<TracingGuard> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .json()
-        .init();
+        // try_init: a second initialization is a no-op rather than a panic —
+        // the first installed subscriber wins (production installs exactly
+        // one; repeated test boots must not abort the process).
+        .try_init()
+        .ok();
     None
 }
 
@@ -51,6 +55,32 @@ async fn main() -> anyhow::Result<()> {
     let is_production = std::env::var("APP_ENV")
         .map(|v| v.eq_ignore_ascii_case("production"))
         .unwrap_or(true);
+    let database_url =
+        std::env::var("DATABASE_URL").context("DATABASE_URL environment variable must be set")?;
+    let service_token = {
+        let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
+        if token.is_empty() {
+            // An empty token would make require_service_token reject every
+            // authenticated route — fail fast instead of starting a service
+            // that can only serve /health.
+            anyhow::bail!("INTERNAL_SERVICE_TOKEN must be set");
+        }
+        token
+    };
+    let shutdown_rx = spawn_signal_shutdown_watcher();
+
+    run_(cfg, is_production, database_url, service_token, shutdown_rx).await
+}
+
+/// Run the full service until `shutdown_rx` flips (the binary wires SIGINT /
+/// SIGTERM; tests flip the watch in-band).
+async fn run_(
+    cfg: SalesConfig,
+    is_production: bool,
+    database_url: String,
+    service_token: String,
+    shutdown_rx: tokio::sync::watch::Receiver<()>,
+) -> anyhow::Result<()> {
     if let Err(reason) =
         sales_autopilot::config::require_tenant_allowlist_in_production(&cfg, is_production)
     {
@@ -67,8 +97,6 @@ async fn main() -> anyhow::Result<()> {
         "starting sales-autopilot"
     );
 
-    let database_url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL environment variable must be set")?;
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -177,16 +205,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         intelligence: intelligence.clone(),
         strategist: strategist.clone(),
-        service_token: {
-            let token = std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default();
-            if token.is_empty() {
-                // An empty token would make require_service_token reject every
-                // authenticated route — fail fast instead of starting a service
-                // that can only serve /health.
-                anyhow::bail!("INTERNAL_SERVICE_TOKEN must be set");
-            }
-            token
-        },
+        service_token,
         rate_limit_fallback: std::sync::Arc::new(parking_lot::Mutex::new(
             std::collections::HashMap::new(),
         )),
@@ -210,31 +229,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %addr, "listening");
 
     // ── Background jobs ───────────────────────────────────────────────
-    // Single shutdown broadcast: SIGTERM/Ctrl-C flips the watch; the axum
-    // graceful-shutdown future AND every background job subscribe to it.
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-
-    tokio::spawn(async move {
-        let ctrl_c = async {
-            let _ = tokio::signal::ctrl_c().await;
-        };
-        #[cfg(unix)]
-        let terminate = async {
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(mut sig) => {
-                    sig.recv().await;
-                }
-                Err(_) => std::future::pending::<()>().await,
-            }
-        };
-        #[cfg(not(unix))]
-        let terminate = std::future::pending::<()>();
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
-            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
-        }
-        let _ = shutdown_tx.send(());
-    });
+    // The shutdown watch was created by the caller (signals in the binary,
+    // in-band in tests); every background job subscribes to it.
 
     // ── Durable sequence action worker ────────────────────────────────
     // The canonical execution loop: claim `sales_actions` rows with
@@ -412,6 +408,34 @@ const OUTCOME_PROJECTOR_CONCURRENCY: i64 = 4;
 /// query + one bounded prune).
 const AUTOMATION_TICK_SECS_DEFAULT: u64 = 30;
 
+/// Create the shutdown broadcast and wire SIGINT/SIGTERM to it. Returns
+/// the receiving side every job (and the axum server) subscribes to.
+fn spawn_signal_shutdown_watcher() -> tokio::sync::watch::Receiver<()> {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sig) => {
+                    sig.recv().await;
+                }
+                Err(_) => std::future::pending::<()>().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("received Ctrl+C — shutting down"),
+            _ = terminate => tracing::info!("received SIGTERM — shutting down"),
+        }
+        let _ = shutdown_tx.send(());
+    });
+    shutdown_rx
+}
+
 /// A worker identity that is unique per process across replicas.
 ///
 /// The PID alone is not a valid replica identity — separate containers
@@ -421,4 +445,233 @@ const AUTOMATION_TICK_SECS_DEFAULT: u64 = 30;
 fn unique_worker_id() -> String {
     let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into());
     format!("{}:{}:{}", host, std::process::id(), uuid::Uuid::new_v4())
+}
+
+#[cfg(test)]
+mod run_tests {
+    //! Full lifecycle coverage for the extracted `main` body: run_ boots the
+    //! router + every background job against a freshly provisioned canonical
+    //! schema and the test Redis, then shuts down from an in-band watch. No
+    //! signals, no real network beyond loopback.
+
+    use super::*;
+    use sales_autopilot::config::{DispatchConfig, SalesConfig};
+
+    /// Serialize env-mutating tests (std::env is process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral")
+            .local_addr()
+            .expect("addr")
+            .port()
+    }
+
+    fn test_config(port: u16) -> SalesConfig {
+        SalesConfig {
+            port,
+            redis_url: std::env::var("TEST_REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
+            ..SalesConfig::default()
+        }
+    }
+
+    /// Provision a fresh canonical DB and return its connection URL.
+    async fn fresh_db_url(suffix: &str) -> Option<String> {
+        let pool = migrator::test_support::fresh_canonical_pool("sales_bin_run", suffix)
+            .await
+            .expect("configured TEST_DATABASE_URL must provision")
+            .or_else(|| {
+                eprintln!("skipping: set TEST_DATABASE_URL to run the bin lifecycle tests");
+                None
+            })?;
+        let db_name: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let base = std::env::var("TEST_DATABASE_URL").unwrap();
+        let (server, _) = base.rsplit_once('/').expect("url shape");
+        Some(format!("{server}/{db_name}"))
+    }
+
+    /// Get a path over plain TCP HTTP/1.1 (loopback).
+    async fn http_get(port: u16, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connect");
+        stream
+            .write_all(
+                format!("GET {path} HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n").as_bytes(),
+            )
+            .await
+            .expect("write");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.expect("read");
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    #[tokio::test]
+    async fn run_serves_health_and_shuts_down_cleanly() {
+        let Some(db_url) = fresh_db_url("boot").await else {
+            return;
+        };
+        let port = free_port();
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let task = tokio::spawn(run_(
+            test_config(port),
+            false,
+            db_url,
+            "test-service-token".into(),
+            rx,
+        ));
+
+        // Wait for the listener (bounded; each sleep <= 20 ms).
+        let mut body = String::new();
+        for _ in 0..250 {
+            if let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                drop(stream);
+                body = http_get(port, "/health").await;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            body.starts_with("HTTP/1.1 200"),
+            "health must answer 200: {body}"
+        );
+
+        let _ = tx.send(());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .expect("run_ must return after the shutdown watch flips")
+            .expect("run_ must not panic");
+        assert!(result.is_ok(), "graceful shutdown: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn run_boots_the_action_worker_with_a_configured_dispatcher() {
+        let Some(db_url) = fresh_db_url("dispatched").await else {
+            return;
+        };
+        let port = free_port();
+        let cfg = SalesConfig {
+            dispatch: DispatchConfig {
+                from_email: "sales@apexmail.ee".into(),
+                unsubscribe_secret: "k".repeat(48),
+                ..DispatchConfig::default()
+            },
+            ..test_config(port)
+        };
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let task = tokio::spawn(run_(cfg, false, db_url, "test-service-token".into(), rx));
+        // Give the worker time to (idly) claim from the empty queue.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = tx.send(());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .expect("run_ resolves on shutdown")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn run_refuses_production_without_a_tenant_allowlist() {
+        let result = run_(
+            test_config(free_port()),
+            true,
+            "postgres://127.0.0.1:1/none".into(),
+            "tok".into(),
+            tokio::sync::watch::channel(()).1,
+        )
+        .await;
+        let error = result.expect_err("production without an allowlist must refuse to start");
+        assert!(error.to_string().contains("refusing to start"), "{error}");
+        assert!(
+            error.to_string().contains("SALES_ALLOWED_TENANTS"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_fails_fast_without_a_reachable_database() {
+        let result = run_(
+            test_config(free_port()),
+            false,
+            "postgres://127.0.0.1:1/nowhere".into(),
+            "tok".into(),
+            tokio::sync::watch::channel(()).1,
+        )
+        .await;
+        let error = result.expect_err("an unreachable DB must abort startup");
+        assert!(
+            error.to_string().contains("Failed to connect to database"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_fails_fast_when_the_listener_port_is_occupied() {
+        let Some(db_url) = fresh_db_url("bindfail").await else {
+            return;
+        };
+        let squatter = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+        let port = squatter.local_addr().unwrap().port();
+        let result = run_(
+            test_config(port),
+            false,
+            db_url,
+            "tok".into(),
+            tokio::sync::watch::channel(()).1,
+        )
+        .await;
+        let error = result.expect_err("an occupied port must abort startup");
+        assert!(error.to_string().contains("failed to bind"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn run_allows_production_with_an_explicit_tenant_allowlist() {
+        let Some(db_url) = fresh_db_url("allowed").await else {
+            return;
+        };
+        let cfg = SalesConfig {
+            allowed_tenants: Some(vec!["tenant-a".into(), "tenant-b".into()]),
+            ..test_config(free_port())
+        };
+        let (tx, rx) = tokio::sync::watch::channel(());
+        let task = tokio::spawn(run_(cfg, true, db_url, "tok".into(), rx));
+        // The allowlist check passes immediately; shutdown straight away.
+        let _ = tx.send(());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .expect("resolves")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn unique_worker_id_is_host_pid_and_random() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOSTNAME", "worker-host-9");
+        let id = unique_worker_id();
+        assert!(id.starts_with("worker-host-9:"), "{id}");
+        let parts: Vec<&str> = id.split(':').collect();
+        assert_eq!(parts.len(), 3, "host:pid:uuid — {id}");
+        assert!(parts[1].parse::<u32>().is_ok(), "pid component — {id}");
+        assert!(
+            uuid::Uuid::parse_str(parts[2]).is_ok(),
+            "random uuid component — {id}"
+        );
+        assert_ne!(id, unique_worker_id(), "ids are unique per call");
+        std::env::remove_var("HOSTNAME");
+    }
+
+    #[test]
+    fn init_tracing_without_otlp_returns_none() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        assert!(init_tracing().is_none());
+    }
 }

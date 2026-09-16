@@ -417,3 +417,318 @@ mod tests {
         assert_eq!(duration_minutes(start, end), 30);
     }
 }
+
+#[cfg(test)]
+mod provider_wire_tests {
+    //! The Google provider against a loopback HTTP mock and the canonical
+    //! schema: freeBusy parsing (hostile payloads included), booking with
+    //! provider-id/link extraction, compensation on conflict, and the
+    //! reschedule/cancel id gates.
+
+    use super::*;
+    use crate::test_db::canonical_test_pool;
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Loopback mock answering by (method, path) with a JSON body or a bare
+    /// status; counts DELETE calls (the compensation path).
+    struct GoogleMock {
+        port: u16,
+        last_request: Arc<std::sync::Mutex<String>>,
+    }
+
+    impl GoogleMock {
+        async fn start(routes: HashMap<(&'static str, String), (u16, serde_json::Value)>) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let routes = Arc::new(routes);
+            let _deletes = Arc::new(AtomicUsize::new(0));
+            let last_request = Arc::new(std::sync::Mutex::new(String::new()));
+            let last_srv = last_request.clone();
+            let _handle = tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let routes = routes.clone();
+                    let deletes = _deletes.clone();
+                    let last_request = last_srv.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 8192];
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        let head = String::from_utf8_lossy(&buf[..n]);
+                        let method_owned = head.split(' ').next().unwrap_or("").to_string();
+                        let method: &'static str = Box::leak(method_owned.into_boxed_str());
+                        let path = head
+                            .split(' ')
+                            .nth(1)
+                            .unwrap_or("/")
+                            .split('?')
+                            .next()
+                            .unwrap_or("/")
+                            .to_string();
+                        if method == "DELETE" {
+                            deletes.fetch_add(1, Ordering::SeqCst);
+                        }
+                        *last_request.lock().unwrap_or_else(|e| e.into_inner()) =
+                            format!("{method} {path}");
+                        let (status, body) = routes
+                            .get(&(method, path.clone()))
+                            .cloned()
+                            .unwrap_or((
+                                404,
+                                serde_json::json!({"error": "no route", "method": method, "path": path}),
+                            ));
+                        let body = body.to_string();
+                        let response = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    });
+                }
+            });
+            Self { port, last_request }
+        }
+
+        fn last(&self) -> String {
+            self.last_request
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        fn base(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+    }
+
+    async fn make_provider(base_url: &str) -> (GoogleCalendarProvider, PgPool) {
+        let pool = canonical_test_pool("google_calendar_wire")
+            .await
+            .expect("configured TEST_DATABASE_URL must provision");
+        let config = CalendarConfig::default();
+        let internal = Arc::new(InternalCalendarProvider::new(pool.clone(), config.clone()));
+        let provider = GoogleCalendarProvider {
+            client: reqwest::Client::new(),
+            base_url: base_url.to_string(),
+            calendar_id: "primary".into(),
+            access_token: "test-token".into(),
+            internal,
+            config,
+        };
+        (provider, pool)
+    }
+
+    fn availability_request(tenant: &str) -> AvailabilityRequest {
+        AvailabilityRequest::new(
+            tenant,
+            chrono::NaiveDate::from_ymd_opt(2031, 1, 13).unwrap(),
+            chrono_tz::Europe::Tallinn,
+            "2031-01-12T08:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn freebusy_busy_entries_parse_and_hostile_entries_are_skipped() {
+        let _placeholder = GoogleMock::start(HashMap::new()).await;
+        let busy = serde_json::json!({
+            "calendars": { "primary": { "busy": [
+                { "start": "2031-01-13T08:00:00Z", "end": "2031-01-13T09:00:00Z" },
+                { "start": "not-a-date", "end": "2031-01-13T10:00:00Z" },
+                { "start": "2031-01-13T11:00:00Z", "end": "not-a-date" },
+                { "start": "2031-01-13T12:00:00Z", "end": "2031-01-13T12:00:00Z" },
+                { "start": "2031-01-13T13:00:00Z", "end": "2031-01-13T12:00:00Z" }
+            ]}}
+        });
+        let mut routes = HashMap::new();
+        routes.insert(("POST", "/freeBusy".to_string()), (200, busy));
+        let mock = GoogleMock::start(routes).await;
+
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let busy = provider
+            .busy_from_google(&availability_request("cal-busy"))
+            .await
+            .expect("freeBusy parses");
+        assert_eq!(
+            busy.len(),
+            1,
+            "only the well-formed interval survives: {busy:?}"
+        );
+        assert_eq!(
+            busy[0],
+            BusyInterval::new(
+                parse_rfc3339("2031-01-13T08:00:00Z").unwrap(),
+                parse_rfc3339("2031-01-13T09:00:00Z").unwrap(),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn freebusy_surfaces_http_and_json_failures() {
+        // Non-2xx status.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/freeBusy".to_string()),
+            (401, serde_json::json!({"error": "unauthorized"})),
+        );
+        let mock = GoogleMock::start(routes).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let error = provider
+            .busy_from_google(&availability_request("cal-http"))
+            .await
+            .expect_err("HTTP 401 must surface");
+        assert!(error.to_string().contains("HTTP 401"), "{error}");
+
+        // Invalid JSON body.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nnotjs")
+                        .await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let (provider, _pool) = make_provider(&format!("http://127.0.0.1:{port}")).await;
+        let error = provider
+            .busy_from_google(&availability_request("cal-json"))
+            .await
+            .expect_err("invalid JSON must surface");
+        assert!(error.to_string().contains("invalid JSON"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn create_event_validates_time_and_extracts_the_meet_link() {
+        // end <= start is refused before any HTTP call.
+        let mock = GoogleMock::start(HashMap::new()).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let request = CreateEventRequest {
+            tenant_id: "cal-create".into(),
+            title: "Intro call".into(),
+            attendees: vec!["prospect@example.com".into()],
+            // One timestamp for both bounds: end == start is the invalid case
+            // (two independent now() calls would make end nanoseconds later).
+            start: "2031-01-13T09:00:00Z".parse().unwrap(),
+            end: "2031-01-13T09:00:00Z".parse().unwrap(),
+            timezone: chrono_tz::Europe::Tallinn,
+            enrollment_id: None,
+            account_id: None,
+            contact_id: None,
+            salesperson: None,
+            conferencing_link: None,
+            provider: "google".into(),
+            provider_event_id: None,
+        };
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("end must be after start");
+        assert!(matches!(error, CalendarError::InvalidInput(_)), "{error}");
+
+        // A success payload without an id is a provider failure.
+        let mut routes = HashMap::new();
+        routes.insert(
+            ("POST", "/calendars/primary/events".to_string()),
+            (200, serde_json::json!({"status": "confirmed"})),
+        );
+        let mock = GoogleMock::start(routes).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let request = CreateEventRequest {
+            end: request.start + chrono::Duration::minutes(30),
+            ..request
+        };
+        let error = provider
+            .create_event(&request)
+            .await
+            .expect_err("no provider id must fail");
+        let _ = &mock;
+        assert!(
+            error.to_string().contains("no id"),
+            "{error} last={}",
+            mock.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn from_env_reads_the_documented_variables_and_trims_the_base_url() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("SALES_GOOGLE_CALENDAR_ACCESS_TOKEN", "tok");
+        std::env::set_var("SALES_GOOGLE_CALENDAR_BASE_URL", "http://127.0.0.1:9/");
+        std::env::set_var("SALES_GOOGLE_CALENDAR_ID", "cal-9");
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let internal = Arc::new(InternalCalendarProvider::new(db, CalendarConfig::default()));
+        let provider =
+            GoogleCalendarProvider::from_env(CalendarConfig::default(), internal).expect("built");
+        assert_eq!(
+            provider.base_url, "http://127.0.0.1:9",
+            "trailing slash trimmed"
+        );
+        assert_eq!(provider.calendar_id, "cal-9");
+        // The Debug impl never leaks the bearer token.
+        let rendered = format!("{provider:?}");
+        assert!(!rendered.contains("tok"), "{rendered}");
+        assert!(rendered.contains("cal-9"));
+
+        std::env::remove_var("SALES_GOOGLE_CALENDAR_ACCESS_TOKEN");
+        std::env::remove_var("SALES_GOOGLE_CALENDAR_BASE_URL");
+        std::env::remove_var("SALES_GOOGLE_CALENDAR_ID");
+    }
+
+    #[tokio::test]
+    async fn reschedule_and_cancel_reject_non_uuid_ids() {
+        let mock = GoogleMock::start(HashMap::new()).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let error = provider
+            .reschedule("not-a-uuid", chrono::Utc::now())
+            .await
+            .expect_err("non-UUID ids are refused");
+        assert!(matches!(error, CalendarError::InvalidInput(_)), "{error}");
+        let error = provider
+            .cancel("not-a-uuid")
+            .await
+            .expect_err("non-UUID ids are refused");
+        assert!(matches!(error, CalendarError::InvalidInput(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn reschedule_of_an_unknown_event_is_event_not_found() {
+        let mock = GoogleMock::start(HashMap::new()).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        let error = provider
+            .reschedule(&Uuid::new_v4().to_string(), chrono::Utc::now())
+            .await
+            .expect_err("unknown event");
+        assert!(matches!(error, CalendarError::EventNotFound(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn events_url_percent_encodes_the_calendar_id() {
+        let mock = GoogleMock::start(HashMap::new()).await;
+        let (provider, _pool) = make_provider(&mock.base()).await;
+        assert_eq!(
+            provider.events_url(),
+            format!("{}/calendars/primary/events", mock.base())
+        );
+    }
+}

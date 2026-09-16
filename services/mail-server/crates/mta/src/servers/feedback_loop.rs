@@ -135,6 +135,10 @@ pub struct FeedbackLoopServer {
     /// Active connections per IP — enforces `max_connections_per_ip`.
     connections: Arc<DashMap<IpAddr, u32>>,
     shutdown: Arc<Notify>,
+    /// #148:Shared DNS resolver for source verification (interior mutability
+    /// so tests can point it at a loopback mock before any session runs;
+    /// production clones the process-wide static once at construction).
+    resolver: RwLock<TokioResolver>,
 }
 
 impl FeedbackLoopServer {
@@ -157,7 +161,14 @@ impl FeedbackLoopServer {
                 .build(),
             connections: Arc::new(DashMap::new()),
             shutdown: Arc::new(Notify::new()),
+            resolver: RwLock::new(FBL_RESOLVER.clone()),
         }
+    }
+
+    /// Point the source-verification resolver at a mock (tests only).
+    #[cfg(test)]
+    pub(crate) fn set_resolver_for_tests(&self, resolver: TokioResolver) {
+        *self.resolver.write().unwrap_or_else(|e| e.into_inner()) = resolver;
     }
 
     /// Replace the registry (tests, or an explicit operator-supplied set).
@@ -655,8 +666,13 @@ impl FeedbackLoopServer {
             return cached;
         }
 
-        // #148:Use shared resolver instead of creating a new one per call
-        let resolver = &*FBL_RESOLVER;
+        // #148:Use the shared resolver (a cheap Arc clone per session; the
+        // guard is never held across the awaits below).
+        let resolver = self
+            .resolver
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Reverse DNS lookup
         let result = match resolver.reverse_lookup(ip).await {
@@ -2691,5 +2707,211 @@ mod adversarial_db_tests {
             .query_async(&mut *conn)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod verify_source_wire_tests {
+    //! `verify_fbl_source` against a loopback UDP DNS mock serving PTR and
+    //! forward records: every trust decision (registered/unregistered/
+    //! mismatched/FCrDNS-confirmed/transient) is driven through the real
+    //! resolver wire path, including cache semantics.
+
+    use super::super::fbl_registry::{FblProvider, FblRegistry, FblValidationMethod, IpNet};
+    use super::*;
+    use crate::auth::test_dns::{DnsAnswer, MockDns};
+
+    use std::collections::HashMap;
+
+    /// Lazy, never-connected pool: verify_fbl_source touches no database.
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/fbl_wire_test")
+            .expect("lazy pool")
+    }
+
+    fn unroutable_redis() -> deadpool_redis::Pool {
+        let mut cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
+        let mut pool_cfg = deadpool_redis::PoolConfig::default();
+        pool_cfg.timeouts.create = Some(Duration::from_millis(100));
+        pool_cfg.timeouts.wait = Some(Duration::from_millis(100));
+        cfg.pool = Some(pool_cfg);
+        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool")
+    }
+
+    const GOOGLE_FBL_IP: std::net::IpAddr =
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10));
+
+    fn registry_with(network: Option<&str>) -> FblRegistry {
+        FblRegistry::new(vec![FblProvider {
+            provider: "google".into(),
+            rdns_patterns: vec!["google.com".into()],
+            source_networks: network.and_then(IpNet::parse).into_iter().collect(),
+            validation_method: FblValidationMethod::RdnsFcrcdns,
+            effective_version: 1,
+            enabled: true,
+        }])
+    }
+
+    fn server(registry: FblRegistry, dns: &MockDns) -> Arc<FeedbackLoopServer> {
+        let server = Arc::new(FeedbackLoopServer::new(
+            FeedbackConfig {
+                enabled: true,
+                host: "127.0.0.1".into(),
+                port: 0,
+                hostname: "fbl-wire.test".into(),
+                max_arf_size: 1024,
+                max_connections_per_ip: 5,
+                max_messages_per_connection: 5,
+            },
+            lazy_pool(),
+            unroutable_redis(),
+            "fbl-wire.test".into(),
+        ));
+        server.set_registry(registry);
+        server.set_resolver_for_tests(dns.resolver.clone());
+        server
+    }
+
+    /// Rules for the classic authoritative path: PTR → mail-by.google.com,
+    /// forward A → back to the source IP.
+    fn fcrdns_rules() -> HashMap<&'static str, DnsAnswer> {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "10.2.0.192.in-addr.arpa",
+            DnsAnswer::Ptr(vec!["mail-by.google.com.".into()]),
+        );
+        rules.insert("mail-by.google.com", DnsAnswer::Ips(vec![GOOGLE_FBL_IP]));
+        rules
+    }
+
+    #[tokio::test]
+    async fn fcrdns_confirmed_source_is_authoritative() {
+        let dns = MockDns::start(fcrdns_rules()).await;
+        let server = server(registry_with(Some("192.0.2.0/24")), &dns);
+        let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert_eq!(
+            check,
+            FblSourceCheck::Authoritative {
+                provider: "google".into(),
+                method: FblValidationMethod::RdnsFcrcdns,
+            },
+            "PTR match + network match + FCrDNS round trip"
+        );
+        // The determinate outcome is cached: the resolver is now dead but
+        // the same IP still answers from cache.
+        dns.stop();
+        let dns2 = MockDns::start(HashMap::new()).await;
+        server.set_resolver_for_tests(dns2.resolver.clone());
+        let cached = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert_eq!(cached, check, "cache hit avoids the resolver entirely");
+        dns2.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_mismatch_is_non_authoritative() {
+        let mut rules = fcrdns_rules();
+        // The PTR hostname resolves to a DIFFERENT address.
+        rules.insert(
+            "mail-by.google.com",
+            DnsAnswer::Ips(vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                198, 51, 100, 1,
+            ))]),
+        );
+        let dns = MockDns::start(rules).await;
+        let server = server(registry_with(Some("192.0.2.0/24")), &dns);
+        let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert!(
+            matches!(check, FblSourceCheck::NonAuthoritative { reason } if reason == "fcrdns_mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn unregistered_ptr_is_non_authoritative() {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "10.2.0.192.in-addr.arpa",
+            DnsAnswer::Ptr(vec!["someone.random.example.".into()]),
+        );
+        let dns = MockDns::start(rules).await;
+        let server = server(registry_with(Some("192.0.2.0/24")), &dns);
+        let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert!(
+            matches!(check, FblSourceCheck::NonAuthoritative { reason } if reason == "unregistered_source")
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_pattern_but_foreign_network_is_mismatched() {
+        // PTR matches google.com but the source IP is outside the registered
+        // 203.0.113.0/24 network.
+        let ip: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "7.100.51.198.in-addr.arpa",
+            DnsAnswer::Ptr(vec!["mail-by.google.com.".into()]),
+        );
+        rules.insert("mail-by.google.com", DnsAnswer::Ips(vec![ip]));
+        let dns = MockDns::start(rules).await;
+        let server = server(registry_with(Some("203.0.113.0/24")), &dns);
+        let check = server.verify_fbl_source(ip).await;
+        assert!(
+            matches!(&check, FblSourceCheck::NonAuthoritative { reason } if reason.contains("network") || reason.contains("provider")),
+            "mismatch must name the provider expectation: {check:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ptr_lookup_failure_is_transient_and_never_cached() {
+        let dns = MockDns::start(HashMap::new()).await; // no PTR rule -> SERVFAIL
+        let server = server(registry_with(Some("192.0.2.0/24")), &dns);
+        let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert_eq!(
+            check,
+            FblSourceCheck::Transient,
+            "resolver outage tempfails"
+        );
+        assert!(
+            server.rdns_cache.get(&GOOGLE_FBL_IP).is_none(),
+            "a transient outcome must never poison the cache"
+        );
+        dns.stop();
+    }
+
+    #[tokio::test]
+    async fn forward_lookup_failure_is_transient_even_after_a_good_ptr() {
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "10.2.0.192.in-addr.arpa",
+            DnsAnswer::Ptr(vec!["mail-by.google.com.".into()]),
+        );
+        // No A rule for mail-by.google.com -> forward SERVFAIL.
+        let dns = MockDns::start(rules).await;
+        let server = server(registry_with(Some("192.0.2.0/24")), &dns);
+        let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert_eq!(
+            check,
+            FblSourceCheck::Transient,
+            "FCrDNS forward failure is as transient as the PTR failure"
+        );
+        assert!(server.rdns_cache.get(&GOOGLE_FBL_IP).is_none());
+    }
+
+    #[tokio::test]
+    async fn second_ptr_hostname_can_confirm_fcrdns() {
+        // Multiple PTR names: the registry matches the SECOND one, whose
+        // forward record confirms the IP.
+        let mut rules: HashMap<&'static str, DnsAnswer> = HashMap::new();
+        rules.insert(
+            "10.2.0.192.in-addr.arpa",
+            DnsAnswer::Ptr(vec!["unrelated.example.".into(), "smtp.google.com.".into()]),
+        );
+        rules.insert("smtp.google.com", DnsAnswer::Ips(vec![GOOGLE_FBL_IP]));
+        let dns = MockDns::start(rules).await;
+        let server = server(registry_with(Some("192.0.2.0/24")), &dns);
+        let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
+        assert!(matches!(check, FblSourceCheck::Authoritative { .. }));
     }
 }

@@ -99,6 +99,11 @@ impl ListenerSupervisor {
         }
     }
 
+    /// True while at least one listener task is supervised.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     /// Abort every remaining task (failure path: the process is terminating).
     pub fn abort_all(&mut self) {
         self.tasks.abort_all();

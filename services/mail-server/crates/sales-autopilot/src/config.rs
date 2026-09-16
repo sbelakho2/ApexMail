@@ -555,3 +555,266 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod from_env_tests {
+    //! The environment-driven config surface: alias precedence, empty-value
+    //! fallback, hostile numeric values, slash trimming, and the production
+    //! tenant-allowlist gate.
+
+    use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const MANAGED: &[&str] = &[
+        "SALES_ENRICHMENT_API_URL",
+        "ENRICHMENT_API_URL",
+        "ENRICHMENT_API_KEY",
+        "SALES_ENRICHMENT_API_KEY",
+        "CALENDAR_SYNC_INTERVAL",
+        "MAX_CAMPAIGNS",
+        "SALES_AUTOPILOT_PORT",
+        "SALES_PORT",
+        "SCRAPER_RPM",
+        "REDIS_URL",
+        "SALES_CAMPAIGN_FROM_EMAIL",
+        "SALES_CAMPAIGN_FROM_NAME",
+        "SALES_UNSUBSCRIBE_SECRET",
+        "SALES_PUBLIC_BASE_URL",
+        "SALES_UNSUBSCRIBE_REDIRECT_URL",
+        "SALES_DISPATCH_INTERVAL_SECS",
+        "SALES_DISPATCH_BATCH_SIZE",
+        "SALES_DISPATCH_CONCURRENCY",
+        "LEAD_SCORE_ENGAGEMENT_WEIGHT",
+        "LEAD_SCORE_COMPANY_SIZE_WEIGHT",
+        "LEAD_SCORE_RECENCY_WEIGHT",
+        "SALES_ALLOWED_TENANTS",
+    ];
+
+    fn clear() {
+        for name in MANAGED {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn from_env_defaults_when_nothing_is_set() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        let cfg = SalesConfig::from_env().expect("defaults must validate");
+        assert_eq!(cfg.enrichment_api_url, "https://enrich.apexmail.ee");
+        assert_eq!(cfg.enrichment_api_key, "");
+        assert_eq!(cfg.calendar_sync_interval_secs, 300);
+        assert_eq!(cfg.max_campaigns, 50);
+        assert_eq!(cfg.port, 3010);
+        assert_eq!(cfg.scraper_rpm, 30);
+        assert_eq!(cfg.redis_url, "redis://127.0.0.1:6379");
+        assert_eq!(cfg.dispatch.from_name, "ApexMail");
+        assert_eq!(cfg.dispatch.public_base_url, "http://localhost:3010");
+        assert_eq!(cfg.dispatch.unsubscribe_redirect_url, None);
+        assert_eq!(cfg.dispatch.dispatch_interval_secs, 30);
+        assert_eq!(cfg.dispatch.dispatch_batch_size, 100);
+        assert_eq!(cfg.dispatch.dispatch_concurrency, 4);
+        assert!(cfg.allowed_tenants.is_none());
+        clear();
+    }
+
+    #[test]
+    fn from_env_parses_every_field_and_honours_alias_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        // The SALES_-prefixed alias wins over the short development name.
+        std::env::set_var("SALES_ENRICHMENT_API_URL", "https://enrich.one/api");
+        std::env::set_var("ENRICHMENT_API_URL", "https://enrich.two/api");
+        std::env::set_var("ENRICHMENT_API_KEY", "key-one");
+        std::env::set_var("SALES_ENRICHMENT_API_KEY", "key-two");
+        std::env::set_var("CALENDAR_SYNC_INTERVAL", "90");
+        std::env::set_var("MAX_CAMPAIGNS", "7");
+        std::env::set_var("SALES_AUTOPILOT_PORT", "3910");
+        std::env::set_var("SALES_PORT", "3911");
+        std::env::set_var("SCRAPER_RPM", "12");
+        std::env::set_var("REDIS_URL", "redis://redis.test:6379");
+        std::env::set_var("SALES_CAMPAIGN_FROM_EMAIL", "sales@apexmail.ee");
+        std::env::set_var("SALES_CAMPAIGN_FROM_NAME", "Apex Sales");
+        std::env::set_var("SALES_UNSUBSCRIBE_SECRET", "s".repeat(40).as_str());
+        std::env::set_var("SALES_PUBLIC_BASE_URL", "https://pub.example/");
+        std::env::set_var(
+            "SALES_UNSUBSCRIBE_REDIRECT_URL",
+            "https://Redirect.example/",
+        );
+        std::env::set_var("SALES_DISPATCH_INTERVAL_SECS", "11");
+        std::env::set_var("SALES_DISPATCH_BATCH_SIZE", "22");
+        std::env::set_var("SALES_DISPATCH_CONCURRENCY", "3");
+        std::env::set_var("LEAD_SCORE_ENGAGEMENT_WEIGHT", "50");
+        std::env::set_var("LEAD_SCORE_COMPANY_SIZE_WEIGHT", "20");
+        std::env::set_var("LEAD_SCORE_RECENCY_WEIGHT", "30");
+        std::env::set_var("SALES_ALLOWED_TENANTS", " tenant-a , tenant-b ,, ");
+
+        let cfg = SalesConfig::from_env().expect("full config must validate");
+        assert_eq!(cfg.enrichment_api_url, "https://enrich.one/api");
+        assert_eq!(
+            cfg.enrichment_api_key, "key-one",
+            "ENRICHMENT_API_KEY is checked first"
+        );
+        assert_eq!(cfg.calendar_sync_interval_secs, 90);
+        assert_eq!(cfg.max_campaigns, 7);
+        assert_eq!(cfg.port, 3910, "SALES_AUTOPILOT_PORT beats SALES_PORT");
+        assert_eq!(cfg.scraper_rpm, 12);
+        assert_eq!(cfg.redis_url, "redis://redis.test:6379");
+        assert_eq!(cfg.dispatch.from_email, "sales@apexmail.ee");
+        assert_eq!(cfg.dispatch.from_name, "Apex Sales");
+        assert_eq!(
+            cfg.dispatch.public_base_url, "https://pub.example",
+            "trailing slash trimmed"
+        );
+        assert_eq!(
+            cfg.dispatch.unsubscribe_redirect_url.as_deref(),
+            Some("https://Redirect.example"),
+            "trailing slash trimmed"
+        );
+        assert_eq!(cfg.dispatch.dispatch_interval_secs, 11);
+        assert_eq!(cfg.dispatch.dispatch_batch_size, 22);
+        assert_eq!(cfg.dispatch.dispatch_concurrency, 3);
+        assert_eq!(cfg.lead_scoring.engagement_weight, 50);
+        assert_eq!(cfg.lead_scoring.company_size_weight, 20);
+        assert_eq!(cfg.lead_scoring.recency_weight, 30);
+        assert_eq!(
+            cfg.allowed_tenants,
+            Some(vec!["tenant-a".to_string(), "tenant-b".to_string()]),
+            "entries are trimmed and empty segments dropped"
+        );
+        clear();
+    }
+
+    #[test]
+    fn from_env_treats_blank_values_as_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        // A templated .env with `KEY=` (empty or whitespace) must fall back to
+        // the default instead of failing validation.
+        std::env::set_var("SALES_ENRICHMENT_API_URL", "   ");
+        std::env::set_var("SALES_AUTOPILOT_PORT", "");
+        std::env::set_var("SALES_ALLOWED_TENANTS", "  ");
+        let cfg = SalesConfig::from_env().expect("blank values are unset values");
+        assert_eq!(cfg.enrichment_api_url, "https://enrich.apexmail.ee");
+        assert_eq!(cfg.port, 3010);
+        assert!(
+            cfg.allowed_tenants.is_none(),
+            "a whitespace-only allowlist is unset (not an empty list)"
+        );
+        clear();
+    }
+
+    #[test]
+    fn from_env_refuses_present_but_invalid_numbers() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, value) in [
+            ("SALES_AUTOPILOT_PORT", "not-a-port"),
+            ("CALENDAR_SYNC_INTERVAL", "soon"),
+            ("MAX_CAMPAIGNS", "-1"),
+            ("SCRAPER_RPM", "0.5"),
+            ("SALES_DISPATCH_BATCH_SIZE", "many"),
+            ("LEAD_SCORE_ENGAGEMENT_WEIGHT", "high"),
+        ] {
+            clear();
+            std::env::set_var(name, value);
+            let error =
+                SalesConfig::from_env().expect_err("a present-but-invalid value must fail fast");
+            assert!(
+                error.to_string().contains(name),
+                "{name} must be named in the error: {error}"
+            );
+        }
+        clear();
+    }
+
+    #[test]
+    fn validate_rejects_each_misconfiguration_class() {
+        let base = SalesConfig::default();
+        let cases: Vec<(SalesConfig, &str)> = vec![
+            (
+                SalesConfig {
+                    enrichment_api_url: String::new(),
+                    ..base.clone()
+                },
+                "must not be empty",
+            ),
+            (
+                SalesConfig {
+                    enrichment_api_url: "ftp://enrich.example".into(),
+                    ..base.clone()
+                },
+                "http/https",
+            ),
+            (
+                SalesConfig {
+                    calendar_sync_interval_secs: 0,
+                    ..base.clone()
+                },
+                "CALENDAR_SYNC_INTERVAL",
+            ),
+            (
+                SalesConfig {
+                    max_campaigns: 0,
+                    ..base.clone()
+                },
+                "MAX_CAMPAIGNS",
+            ),
+            (
+                SalesConfig {
+                    port: 0,
+                    ..base.clone()
+                },
+                "SALES_PORT",
+            ),
+            (
+                SalesConfig {
+                    scraper_rpm: 0,
+                    ..base
+                },
+                "SCRAPER_RPM",
+            ),
+        ];
+        for (cfg, needle) in cases {
+            let error = cfg.validate().expect_err("must be refused");
+            assert!(error.contains(needle), "expected {needle} in: {error}");
+        }
+    }
+
+    #[test]
+    fn tenant_allowlist_gate_is_exact() {
+        let mut cfg = SalesConfig::default();
+        // Production without an allowlist (and with an EMPTY list) refuses.
+        assert!(require_tenant_allowlist_in_production(&cfg, true).is_err());
+        cfg.allowed_tenants = Some(Vec::new());
+        assert!(
+            require_tenant_allowlist_in_production(&cfg, true).is_err(),
+            "an empty allowlist is as dangerous as none"
+        );
+        cfg.allowed_tenants = Some(vec!["t".into()]);
+        assert!(require_tenant_allowlist_in_production(&cfg, true).is_ok());
+        // Non-production may opt out.
+        cfg.allowed_tenants = None;
+        assert!(require_tenant_allowlist_in_production(&cfg, false).is_ok());
+    }
+
+    #[test]
+    fn dispatch_is_configured_requires_email_and_a_long_secret() {
+        let mut d = DispatchConfig::default();
+        assert!(!d.is_configured());
+        d.from_email = "sales@apexmail.ee".into();
+        assert!(!d.is_configured(), "secret still missing");
+        d.unsubscribe_secret = "short".into();
+        assert!(!d.is_configured(), "secret too short");
+        d.unsubscribe_secret = "s".repeat(32);
+        assert!(d.is_configured());
+        d.from_email = "not-an-email".into();
+        assert!(
+            !d.is_configured(),
+            "the from address must be a valid mailbox"
+        );
+        // Whitespace around the from address is tolerated.
+        d.from_email = "  sales@apexmail.ee  ".into();
+        assert!(d.is_configured());
+    }
+}

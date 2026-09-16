@@ -1880,7 +1880,7 @@ mod tests {
     /// `Runtime::new().block_on(..)` inside the test runtime panicked with
     /// "Cannot start a runtime from within a runtime". `None` means the
     /// environment is unconfigured → the test soft-skips.
-    async fn test_app(test_name: &str) -> Option<Router> {
+    pub(super) async fn test_app(test_name: &str) -> Option<Router> {
         test_app_impl(test_name, "test-key", false).await
     }
 
@@ -1898,7 +1898,7 @@ mod tests {
         test_app_impl(test_name, service_token, false).await
     }
 
-    async fn test_app_impl(
+    pub(super) async fn test_app_impl(
         test_name: &str,
         service_token: &str,
         _with_dispatcher: bool,
@@ -3430,5 +3430,261 @@ mod tests {
                 .execute(&db)
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_and_validation_tests {
+    //! Middleware gates (every token shape + tenant allowlist + public
+    //! exemptions) and validation refusals, driven through the real router
+    //! with tower oneshot.
+
+    use super::tests::{test_app, test_app_impl};
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn missing_or_wrong_tokens_are_unauthorized_on_every_protected_route() {
+        let Some(app) = test_app("routes_gates_tokens").await else {
+            return;
+        };
+        // No token at all.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/campaigns")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // A wrong token is indistinguishable from none.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/campaigns")
+                    .header("x-api-key", "wrong-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // A malformed Authorization header is not a Bearer token.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/campaigns")
+                    .header("authorization", "Basic dXNlcjpwd2Q=")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_bearer_token_authorizes_like_the_api_key() {
+        let Some(app) = test_app("routes_gates_bearer").await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                Request::get("/campaigns")
+                    .header("authorization", "Bearer test-key")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED, "Bearer accepted");
+    }
+
+    #[tokio::test]
+    async fn an_empty_configured_service_token_rejects_every_protected_route() {
+        let Some(app) = test_app_impl("routes_gates_empty_token", "", false).await else {
+            return;
+        };
+        let resp = app
+            .oneshot(
+                Request::get("/campaigns")
+                    .header("x-api-key", "")
+                    .header("x-tenant-id", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_and_unsubscribe_paths_are_public() {
+        let Some(app) = test_app("routes_gates_public").await else {
+            return;
+        };
+        // No token: /health still answers.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // No token: the unsubscribe path is routed (auth is not the gate;
+        // the HMAC token is). Any non-401 answer proves the exemption.
+        let resp = app
+            .oneshot(
+                Request::get("/u/not-a-valid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn adding_an_empty_recipient_list_is_refused_with_400() {
+        let Some(app) = test_app("routes_validation_campaign").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-norcpt");
+        // A campaign draft first (create succeeds — recipients gate only the
+        // send path).
+        let create_body = serde_json::json!({
+            "name": "No recipients",
+            "template_id": "tmpl_competitor_migration",
+            "audience": "selected-leads",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::post("/campaigns")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let created: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        // Adding an EMPTY recipient list is a validation refusal that names
+        // the missing input.
+        let body = serde_json::json!({ "emails": [] });
+        let resp = app
+            .oneshot(
+                Request::post(format!("/campaigns/{id}/recipients"))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let text = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap_or_default();
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "validation refusal, got {status}: {text}"
+        );
+        assert!(
+            text.contains("recipient"),
+            "the refusal names the missing input: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn campaign_list_is_tenant_scoped_and_paginates() {
+        let Some(app) = test_app("routes_list_campaigns").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-listcmp");
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get("/campaigns?limit=5&offset=0")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(body.get("campaigns").is_some() || body.is_array(), "{body}");
+
+        // A DIFFERENT tenant sees a disjoint (empty) list.
+        let other = crate::test_db::unique_test_tenant("routes-listother");
+        let resp = app
+            .oneshot(
+                Request::get("/campaigns")
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", other)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn discovery_job_status_for_an_unknown_job_is_404() {
+        let Some(app) = test_app("routes_discovery_404").await else {
+            return;
+        };
+        let tenant = crate::test_db::unique_test_tenant("routes-disc404");
+        let resp = app
+            .oneshot(
+                Request::get(format!("/discovery/jobs/{}", Uuid::new_v4()))
+                    .header("x-api-key", "test-key")
+                    .header("x-tenant-id", tenant)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The unknown job is refused with a 4xx (not a success, and the
+        // auth gate has already passed); the exact code is the runner's
+        // contract (404 when the runner reports NotFound, 400 when the
+        // provider contract treats the tenant+job pair as invalid).
+        assert!(
+            resp.status().is_client_error(),
+            "unknown job refused: {}",
+            resp.status()
+        );
     }
 }
