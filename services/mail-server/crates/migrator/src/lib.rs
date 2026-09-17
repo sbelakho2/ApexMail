@@ -142,7 +142,7 @@ pub mod test_support {
     ///
     /// Constructed only for CONFIGURED-infrastructure failures; an
     /// explicitly unconfigured suite is reported as `Ok(None)` instead.
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct ProvisionError {
         /// Short, stable identifier of the failed provisioning stage
         /// (e.g. `"admin-connect"`, `"clone"`, `"clone-ledger"`).
@@ -465,10 +465,29 @@ pub mod test_support {
         admin: &PgPool,
         server_part: &str,
     ) -> Result<(), ProvisionError> {
-        TEMPLATE_READY
-            .get_or_try_init(|| prepare_template_under_lock(admin, server_part))
-            .await
-            .map(|&()| ())
+        // Bounded retry: under a full workspace parallel run (every DB-backed
+        // test funnels through this one template) the template-connect probe
+        // can time out purely from connection queueing. The cluster advisory
+        // lock serializes real work, so a retry is safe; a persistent
+        // failure still fails the stage.
+        let mut last: Option<ProvisionError> = None;
+        for attempt in 0..3u32 {
+            match TEMPLATE_READY
+                .get_or_try_init(|| prepare_template_under_lock(admin, server_part))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last = Some(error.clone());
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_secs(2 * (attempt as u64 + 1))).await;
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            ProvisionError::new("template-ready", "template preparation failed")
+        }))
     }
 
     /// Body of [`ensure_template_ready`]: take the cluster advisory lock,
@@ -497,9 +516,12 @@ pub mod test_support {
         server_part: &str,
         template_db: &str,
     ) -> Result<PgPool, ProvisionError> {
+        // The window is deliberately generous: the probe connection queues
+        // behind every other process's clone traffic under a full workspace
+        // parallel run.
         PgPoolOptions::new()
             .max_connections(1)
-            .acquire_timeout(Duration::from_secs(60))
+            .acquire_timeout(Duration::from_secs(180))
             .connect(&format!("{server_part}/{template_db}"))
             .await
             .map_err(|error| template_connect_error(template_db, error))
