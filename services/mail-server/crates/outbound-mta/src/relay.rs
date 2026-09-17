@@ -362,6 +362,43 @@ impl Relay {
         }
     }
 
+    /// The delivery-contract fingerprint (migration 230): the send_unit's
+    /// idempotency is only sound while the CONTRACT is identical. A repeat with
+    /// a different fingerprint is a typed conflict (the ledger raises it), so a
+    /// re-selected route or an edited message can never silently inherit the
+    /// stored state.
+    pub fn request_fingerprint(request: &SubmitRequest) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"apexmail.outbound.relay/1\n");
+        hasher.update(request.tenant_id.as_deref().unwrap_or("\0"));
+        hasher.update(b"\n");
+        hasher.update(request.envelope_from.as_deref().unwrap_or("\0"));
+        hasher.update(b"\n");
+        // Canonical recipients: sorted, deduplicated, NUL-free (a recipient
+        // address cannot contain NUL — SMTP forbids it).
+        let mut recipients = request.recipients.clone();
+        recipients.sort();
+        recipients.dedup();
+        for recipient in &recipients {
+            hasher.update(recipient.as_bytes());
+            hasher.update(b"\n");
+        }
+        hasher.update(Sha256::digest(&request.message));
+        hasher.update(b"\n");
+        hasher.update(
+            request
+                .requested_source_ip
+                .map(|ip| ip.to_string())
+                .unwrap_or_default(),
+        );
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// Submit a message. Idempotent by `send_unit` (see the module docs).
     pub async fn submit(&self, request: SubmitRequest) -> Result<AcceptanceRecord, RelayError> {
         validate_request(&request, &self.config)?;
@@ -381,6 +418,7 @@ impl Relay {
             send_unit: request.send_unit.clone(),
             tenant_id: request.tenant_id.clone(),
             queue_id: request.queue_id,
+            request_fingerprint: Some(Self::request_fingerprint(&request)),
             envelope_from,
             recipients: request.recipients.clone(),
             message,
@@ -1396,6 +1434,10 @@ impl Relay {
             send_unit: dsn_unit.clone(),
             tenant_id: row.tenant_id.clone(),
             queue_id: row.queue_id,
+            // The DSN's own delivery contract (deterministic unit key +
+            // generated payload): its fingerprint is pinned on first claim
+            // by the ledger's adopt-NULL path.
+            request_fingerprint: None,
             envelope_from: None, // DSNs are sent with MAIL FROM:<>
             recipients: vec![generated.envelope_to.clone()],
             message: generated.message,
@@ -2243,6 +2285,7 @@ mod tests {
             send_unit: "email_queue:unit-1:user@example.com".to_string(),
             tenant_id: Some("tenant-1".to_string()),
             queue_id: None,
+            request_fingerprint: None,
             envelope_from: Some("sender@apexmail.ee".to_string()),
             recipients: vec!["user@example.com".to_string()],
             message: b"From: x\r\n\r\nbody".to_vec(),
@@ -2371,6 +2414,7 @@ mod tests {
                     send_unit: "email_queue:unit-1:user@example.com".to_string(),
                     tenant_id: Some("tenant-1".to_string()),
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("sender@apexmail.ee".to_string()),
                     recipients: vec!["user@example.com".to_string()],
                     message: b"From: x\r\n\r\nbody".to_vec(),
@@ -2424,6 +2468,7 @@ mod tests {
                     send_unit: "email_queue:unit-1:user@example.com".to_string(),
                     tenant_id: None,
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("sender@apexmail.ee".to_string()),
                     recipients: vec!["user@example.com".to_string()],
                     message: b"From: x\r\n\r\nbody".to_vec(),
@@ -2458,6 +2503,7 @@ mod tests {
                     send_unit: "broken:unit".to_string(),
                     tenant_id: None,
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("sender@apexmail.ee".to_string()),
                     recipients: vec!["not-an-address".to_string()],
                     message: b"From: x\r\n\r\nbody".to_vec(),
@@ -2499,6 +2545,7 @@ mod tests {
                     send_unit: "empty:unit".to_string(),
                     tenant_id: None,
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("sender@apexmail.ee".to_string()),
                     recipients: vec!["user@example.com".to_string()],
                     message: Vec::new(),
@@ -2542,6 +2589,7 @@ mod tests {
                     send_unit: "huge:unit".to_string(),
                     tenant_id: None,
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("sender@apexmail.ee".to_string()),
                     recipients: vec!["user@example.com".to_string()],
                     message: b"Subject: oversized\r\n\r\n".to_vec(),
@@ -3366,6 +3414,7 @@ mod tests {
                     send_unit: "broken-sender:unit".to_string(),
                     tenant_id: None,
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("not-an-address".to_string()),
                     recipients: vec!["user@example.com".to_string()],
                     message: b"From: x\r\n\r\nbody".to_vec(),

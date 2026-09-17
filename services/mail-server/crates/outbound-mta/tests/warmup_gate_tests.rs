@@ -441,3 +441,274 @@ async fn schema_forbids_an_unanchored_warming_ip() {
     );
     db.close().await;
 }
+
+/// ── Migration 230: the delivery-contract fingerprint ─────────────────────
+mod fingerprint_tests {
+    use super::*;
+    use outbound_mta::ledger::NewSubmission;
+    use outbound_mta::ledger::PgLedger;
+    use outbound_mta::ledger::RelayLedger;
+    use outbound_mta::SubmitRequest;
+
+    async fn fp_db() -> Option<sqlx::PgPool> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        match migrator::test_support::shared_canonical_db(&url, "apexmail_scratch_base_obm_fp")
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn fp_request(unit: &str, ip: Option<IpAddr>, body: &[u8]) -> SubmitRequest {
+        SubmitRequest {
+            send_unit: unit.to_string(),
+            tenant_id: Some("t_fp".into()),
+            queue_id: None,
+            envelope_from: Some("fp@apexmail.ee".into()),
+            recipients: vec!["fp@example.com".into()],
+            message: body.to_vec(),
+            requested_source_ip: ip,
+        }
+    }
+
+    fn unit(prefix: &str) -> String {
+        format!("{prefix}:{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// The fingerprint is a pure function of the DELIVERY CONTRACT: message
+    /// bytes, envelope, recipients, tenant, and the requested route.
+    #[test]
+    fn fingerprint_is_contract_deterministic_and_route_sensitive() {
+        let base = fp_request("u", Some("203.0.113.9".parse().unwrap()), b"m");
+        let relay = outbound_mta::Relay::new(
+            std::sync::Arc::new(outbound_mta::test_support::MemoryLedger::new()),
+            std::sync::Arc::new(outbound_mta::test_support::StaticMxResolver::new()),
+            outbound_mta::RelayConfig::default(),
+        );
+        let _ = relay; // fingerprint is an associated fn — call via the crate path
+        let f1 = outbound_mta::relay_fingerprint(&base);
+        let f2 = outbound_mta::relay_fingerprint(&base);
+        assert_eq!(f1, f2, "deterministic");
+        assert_eq!(f1.len(), 64, "sha256 hex");
+
+        // Route sensitivity (stickiness): a different requested IP changes it.
+        let other_ip = fp_request("u", Some("203.0.113.10".parse().unwrap()), b"m");
+        assert_ne!(f1, outbound_mta::relay_fingerprint(&other_ip));
+
+        // Message sensitivity.
+        let other_body = fp_request("u", Some("203.0.113.9".parse().unwrap()), b"x");
+        assert_ne!(f1, outbound_mta::relay_fingerprint(&other_body));
+
+        // Recipient-order insensitivity (canonical recipients are sorted).
+        let mut swapped = base.clone();
+        swapped.recipients = vec!["b@example.com".into(), "a@example.com".into()];
+        let mut canonical = base.clone();
+        canonical.recipients = vec!["a@example.com".into(), "b@example.com".into()];
+        assert_eq!(
+            outbound_mta::relay_fingerprint(&swapped),
+            outbound_mta::relay_fingerprint(&canonical)
+        );
+
+        // Envelope sensitivity.
+        let mut other_env = base.clone();
+        other_env.envelope_from = Some("other@apexmail.ee".into());
+        assert_ne!(f1, outbound_mta::relay_fingerprint(&other_env));
+    }
+
+    /// The typed conflict: the same send_unit with a different contract is
+    /// REFUSED (never a silent inheritance of the stored state).
+    #[tokio::test]
+    async fn same_unit_with_a_different_contract_is_a_typed_conflict() {
+        let Some(db) = fp_db().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let ledger = PgLedger::new(db.clone());
+        let unit = unit("fp:conflict");
+        let first = NewSubmission {
+            send_unit: unit.clone(),
+            tenant_id: Some("t_fp".into()),
+            queue_id: None,
+            request_fingerprint: Some("fingerprint-a".into()),
+            envelope_from: Some("fp@apexmail.ee".into()),
+            recipients: vec!["fp@example.com".into()],
+            message: b"body-a".to_vec(),
+            requested_source_ip: Some("203.0.113.9".parse().unwrap()),
+            max_attempts: 3,
+        };
+        use outbound_mta::ledger::ClaimOutcome;
+        let outcome = ledger
+            .claim_submission(
+                first,
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect("first claim");
+        assert!(matches!(outcome, ClaimOutcome::Claimed(_)));
+        // release the lease so the row is not InFlight
+        let _ = sqlx::query(
+            "UPDATE outbound_relay_ledger SET state='pending', lease_until=NULL WHERE send_unit=$1",
+        )
+        .bind(&unit)
+        .execute(&db)
+        .await;
+
+        let second = NewSubmission {
+            request_fingerprint: Some("fingerprint-b".into()),
+            send_unit: unit.clone(),
+            ..duplicate_of(&unit)
+        };
+        let conflict = ledger
+            .claim_submission(
+                second,
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect_err("a different contract under the same key must conflict");
+        assert!(
+            conflict.to_string().contains("idempotency conflict"),
+            "{conflict}"
+        );
+        db.close().await;
+    }
+
+    fn duplicate_of(unit: &str) -> NewSubmission {
+        NewSubmission {
+            send_unit: unit.to_string(),
+            tenant_id: Some("t_fp".into()),
+            queue_id: None,
+            request_fingerprint: None,
+            envelope_from: Some("fp@apexmail.ee".into()),
+            recipients: vec!["fp@example.com".into()],
+            message: b"body-a".to_vec(),
+            requested_source_ip: Some("203.0.113.9".parse().unwrap()),
+            max_attempts: 3,
+        }
+    }
+
+    /// Pin-on-first-replay: a pre-230 row (NULL fingerprint) adopts the
+    /// incoming fingerprint once, then enforces the contract.
+    #[tokio::test]
+    async fn legacy_null_fingerprint_is_pinned_on_first_replay() {
+        let Some(db) = fp_db().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let ledger = PgLedger::new(db.clone());
+        let unit = unit("fp:legacy");
+        // A pre-230 row: claimed WITHOUT a fingerprint.
+        let legacy = NewSubmission {
+            request_fingerprint: None,
+            ..duplicate_of(&unit)
+        };
+        use outbound_mta::ledger::ClaimOutcome;
+        let outcome = ledger
+            .claim_submission(
+                legacy,
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect("legacy claim");
+        assert!(matches!(outcome, ClaimOutcome::Claimed(_)));
+        let _ = sqlx::query("UPDATE outbound_relay_ledger SET state='pending', lease_until=NULL, request_fingerprint=NULL WHERE send_unit=$1")
+            .bind(&unit)
+            .execute(&db)
+            .await;
+
+        // First replay PINS the incoming fingerprint and classifies.
+        let replay = NewSubmission {
+            request_fingerprint: Some("pinned".into()),
+            ..duplicate_of(&unit)
+        };
+        let outcome = ledger
+            .claim_submission(
+                replay,
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect("pin-on-replay claim");
+        assert!(matches!(outcome, ClaimOutcome::AlreadyQueued { .. }));
+        let pinned: Option<String> = sqlx::query_scalar(
+            "SELECT request_fingerprint FROM outbound_relay_ledger WHERE send_unit=$1",
+        )
+        .bind(&unit)
+        .fetch_one(&db)
+        .await
+        .expect("read pin");
+        assert_eq!(pinned.as_deref(), Some("pinned"));
+
+        // A third submission with a DIFFERENT fingerprint now conflicts.
+        let mut conflict = duplicate_of(&unit);
+        conflict.request_fingerprint = Some("different".into());
+        let error = ledger
+            .claim_submission(
+                conflict,
+                chrono::Utc::now(),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect_err("post-pin contract enforcement");
+        assert!(
+            error.to_string().contains("idempotency conflict"),
+            "{error}"
+        );
+        db.close().await;
+    }
+
+    /// The SAME contract replays cleanly (the fingerprint never breaks
+    /// legitimate idempotency).
+    #[tokio::test]
+    async fn same_contract_replays_cleanly() {
+        let Some(db) = fp_db().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let ledger = PgLedger::new(db.clone());
+        let unit = unit("fp:replay");
+        let first = NewSubmission {
+            request_fingerprint: Some("same".into()),
+            ..duplicate_of(&unit)
+        };
+        use outbound_mta::ledger::ClaimOutcome;
+        assert!(matches!(
+            ledger
+                .claim_submission(
+                    first,
+                    chrono::Utc::now(),
+                    std::time::Duration::from_secs(60)
+                )
+                .await
+                .expect("first"),
+            ClaimOutcome::Claimed(_)
+        ));
+        let _ = sqlx::query(
+            "UPDATE outbound_relay_ledger SET state='pending', lease_until=NULL WHERE send_unit=$1",
+        )
+        .bind(&unit)
+        .execute(&db)
+        .await;
+        let second = NewSubmission {
+            request_fingerprint: Some("same".into()),
+            ..duplicate_of(&unit)
+        };
+        assert!(matches!(
+            ledger
+                .claim_submission(
+                    second,
+                    chrono::Utc::now(),
+                    std::time::Duration::from_secs(60)
+                )
+                .await
+                .expect("clean replay"),
+            ClaimOutcome::AlreadyQueued { .. }
+        ));
+        db.close().await;
+    }
+}

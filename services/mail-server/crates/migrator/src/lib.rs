@@ -2544,3 +2544,5 @@ mod tests {
 }
 
 // Migration chain re-embedded: 229 (user_id columns carry users.id).
+
+// Migration chain re-embedded: 230 (relay send_unit request fingerprint).

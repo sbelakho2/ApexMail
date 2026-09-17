@@ -39,6 +39,10 @@ pub struct NewSubmission {
     pub send_unit: String,
     pub tenant_id: Option<String>,
     pub queue_id: Option<Uuid>,
+    /// H(tenant || envelope_from || canonical_recipients ||
+    /// message_sha256 || requested_source_ip) — migration 230. `None` only
+    /// for callers that predate the field; the relay always sets it.
+    pub request_fingerprint: Option<String>,
     /// `None` = SMTP null reverse path.
     pub envelope_from: Option<String>,
     pub recipients: Vec<String>,
@@ -53,6 +57,7 @@ pub struct QueuedSubmission {
     pub send_unit: String,
     pub tenant_id: Option<String>,
     pub queue_id: Option<Uuid>,
+    pub request_fingerprint: Option<String>,
     pub state: String,
     pub envelope_from: Option<String>,
     pub recipients: Vec<String>,
@@ -215,7 +220,8 @@ impl PgLedger {
 /// Postgres driver does not provide a `Type<Postgres>` impl for
 /// `std::net::IpAddr` without extra features, and the wire form (`::text`)
 /// is unambiguous for both v4 and v6.
-const LEDGER_COLUMNS: &str = "send_unit, tenant_id, queue_id, state, envelope_from, recipients, \
+const LEDGER_COLUMNS: &str =
+    "send_unit, tenant_id, queue_id, request_fingerprint, state, envelope_from, recipients, \
      message, requested_source_ip::text AS requested_source_ip, \
      actual_source_ip::text AS actual_source_ip, remote_mx, tls_used, attempt, max_attempts, \
      next_attempt_at, lease_until, acceptance_record, last_error, created_at";
@@ -225,6 +231,7 @@ struct LedgerRow {
     send_unit: String,
     tenant_id: Option<String>,
     queue_id: Option<Uuid>,
+    request_fingerprint: Option<String>,
     state: String,
     envelope_from: Option<String>,
     recipients: serde_json::Value,
@@ -245,6 +252,7 @@ struct LedgerRow {
 #[derive(sqlx::FromRow)]
 struct ClaimStateRow {
     state: String,
+    request_fingerprint: Option<String>,
     attempt: i32,
     next_attempt_at: DateTime<Utc>,
     lease_until: Option<DateTime<Utc>>,
@@ -286,6 +294,7 @@ impl LedgerRow {
             send_unit,
             tenant_id: self.tenant_id,
             queue_id: self.queue_id,
+            request_fingerprint: self.request_fingerprint,
             state: self.state,
             envelope_from: self.envelope_from,
             recipients,
@@ -314,6 +323,7 @@ fn classify_existing(
 ) -> Result<ClaimOutcome, LedgerError> {
     let ClaimStateRow {
         state,
+        request_fingerprint: _,
         attempt,
         next_attempt_at,
         lease_until,
@@ -424,9 +434,11 @@ impl RelayLedger for PgLedger {
         );
         let insert = format!(
             "INSERT INTO outbound_relay_ledger \
-             (send_unit, tenant_id, queue_id, state, envelope_from, recipients, message, \
-              requested_source_ip, attempt, max_attempts, next_attempt_at, lease_until, updated_at) \
-             VALUES ($1, $2, $3, 'delivering', $4, $5, $6, $7::text::inet, 1, $8, $9, $10, NOW()) \
+             (send_unit, tenant_id, queue_id, request_fingerprint, state, envelope_from, \
+              recipients, message, requested_source_ip, attempt, max_attempts, next_attempt_at, \
+              lease_until, updated_at) \
+             VALUES ($1, $2, $3, $4, 'delivering', $5, $6, $7, $8::text::inet, 1, $9, $10, $11, \
+                     NOW()) \
              ON CONFLICT (send_unit) DO NOTHING \
              RETURNING {LEDGER_COLUMNS}"
         );
@@ -434,6 +446,7 @@ impl RelayLedger for PgLedger {
             .bind(&new.send_unit)
             .bind(&new.tenant_id)
             .bind(new.queue_id)
+            .bind(&new.request_fingerprint)
             .bind(&new.envelope_from)
             .bind(&recipients)
             .bind(&new.message)
@@ -448,7 +461,8 @@ impl RelayLedger for PgLedger {
         }
 
         let state: Option<ClaimStateRow> = sqlx::query_as(
-            "SELECT state, attempt, next_attempt_at, lease_until, acceptance_record, last_error \
+            "SELECT state, request_fingerprint, attempt, next_attempt_at, lease_until, \
+                    acceptance_record, last_error \
              FROM outbound_relay_ledger WHERE send_unit = $1",
         )
         .bind(&new.send_unit)
@@ -458,6 +472,34 @@ impl RelayLedger for PgLedger {
             send_unit: new.send_unit.clone(),
             message: "row vanished between insert conflict and classification".to_string(),
         })?;
+
+        // Migration 230's contract: the same send_unit with a DIFFERENT
+        // delivery contract is a typed conflict. A NULL stored fingerprint
+        // (a row claimed pre-230) is PINNED to the incoming value on first
+        // replay; after that the contract is enforced.
+        match (&state.request_fingerprint, &new.request_fingerprint) {
+            (Some(stored), Some(incoming)) if stored != incoming => {
+                return Err(LedgerError::Corrupt {
+                    send_unit: new.send_unit.clone(),
+                    message: format!(
+                        "idempotency conflict: send_unit reused with a different delivery \
+                         contract (stored fingerprint {stored:?}, incoming {incoming:?}) — \
+                         reconcile against the existing row; never re-route under the same key"
+                    ),
+                });
+            }
+            (None, Some(incoming)) => {
+                sqlx::query(
+                    "UPDATE outbound_relay_ledger SET request_fingerprint = $2 \
+                     WHERE send_unit = $1 AND request_fingerprint IS NULL",
+                )
+                .bind(&new.send_unit)
+                .bind(incoming)
+                .execute(&self.pool)
+                .await?;
+            }
+            _ => {}
+        }
         classify_existing(&new.send_unit, &state, now)
     }
 
@@ -724,6 +766,7 @@ pub mod test_support {
                 if let Some(existing) = entries.get(&new.send_unit) {
                     let row = ClaimStateRow {
                         state: existing.state.clone(),
+                        request_fingerprint: existing.request_fingerprint.clone(),
                         attempt: existing.attempt as i32,
                         next_attempt_at: existing.next_attempt_at,
                         lease_until: existing.lease_until,
@@ -739,6 +782,7 @@ pub mod test_support {
                     send_unit: new.send_unit.clone(),
                     tenant_id: new.tenant_id,
                     queue_id: new.queue_id,
+                    request_fingerprint: new.request_fingerprint.clone(),
                     state: "delivering".to_string(),
                     envelope_from: new.envelope_from,
                     recipients: new.recipients,
@@ -835,6 +879,9 @@ pub mod test_support {
                                 send_unit: plan.send_unit.clone(),
                                 tenant_id: entry.tenant_id.clone(),
                                 queue_id: entry.queue_id,
+                                // The deferred subset's own contract; the
+                                // ledger pins its fingerprint on first claim.
+                                request_fingerprint: None,
                                 state: "pending".to_string(),
                                 envelope_from: entry.envelope_from.clone(),
                                 recipients: plan.recipients.clone(),
@@ -897,6 +944,7 @@ pub mod test_support {
                         send_unit: new.send_unit,
                         tenant_id: new.tenant_id,
                         queue_id: new.queue_id,
+                        request_fingerprint: new.request_fingerprint,
                         state: "pending".to_string(),
                         envelope_from: new.envelope_from,
                         recipients: new.recipients,
@@ -1035,6 +1083,7 @@ mod tests {
             send_unit: unit.clone(),
             tenant_id: Some("tenant-test".to_string()),
             queue_id: None,
+            request_fingerprint: None,
             envelope_from: Some("sender@example.com".to_string()),
             recipients: vec!["user@example.com".to_string()],
             message: b"From: sender@example.com\r\n\r\nbody".to_vec(),
@@ -1188,6 +1237,7 @@ mod tests {
             send_unit: send_unit.to_string(),
             tenant_id: Some("tenant-classify".to_string()),
             queue_id: None,
+            request_fingerprint: None,
             envelope_from: Some("sender@example.com".to_string()),
             recipients: vec!["user@example.com".to_string()],
             message: b"From: x\r\n\r\nbody".to_vec(),
@@ -1410,6 +1460,7 @@ mod tests {
                     send_unit: unit.clone(),
                     tenant_id: Some("tenant-rt".to_string()),
                     queue_id: Some(queue_id),
+                    request_fingerprint: None,
                     envelope_from: None,
                     recipients: vec!["Ünïcode@example.com".to_string()],
                     message: b"Subject: rt\r\n\r\nbody\x00binary".to_vec(),
@@ -1509,6 +1560,7 @@ mod tests {
                     send_unit: format!("{unit}:lease"),
                     tenant_id: None,
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: None,
                     recipients: vec!["u@example.com".to_string()],
                     message: b"x".to_vec(),
@@ -1546,6 +1598,7 @@ mod tests {
                     send_unit: unit.clone(),
                     tenant_id: Some("tenant-pa".to_string()),
                     queue_id: None,
+                    request_fingerprint: None,
                     envelope_from: Some("sender@apexmail.ee".to_string()),
                     recipients: vec!["a@example.com".to_string(), "b@example.com".to_string()],
                     message: b"Subject: pa\r\n\r\nbody".to_vec(),
@@ -1649,6 +1702,7 @@ mod tests {
             send_unit: unit.to_string(),
             tenant_id: None,
             queue_id: None,
+            request_fingerprint: None,
             envelope_from: None,
             recipients: vec!["u@example.com".to_string()],
             message: b"x".to_vec(),

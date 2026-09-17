@@ -71,9 +71,16 @@ pub mod test_support {
 
 use std::net::IpAddr;
 
+pub use relay::Relay;
+
+/// The delivery-contract fingerprint (migration 230) as a free function —
+/// `Relay::request_fingerprint` re-exported for callers that hold no Relay.
+pub fn relay_fingerprint(request: &SubmitRequest) -> String {
+    Relay::request_fingerprint(request)
+}
 pub use relay::{
-    AcceptanceRecord, ProcessReport, RecipientOutcome, RecipientResult, Relay, RelayConfig,
-    RelayError, SubmitRequest,
+    AcceptanceRecord, ProcessReport, RecipientOutcome, RecipientResult, RelayConfig, RelayError,
+    SubmitRequest,
 };
 
 /// Reserved internal SMTP header carrying the dedicated delivery route.

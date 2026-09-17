@@ -26,6 +26,7 @@ path = "src/main.rs"
 # Workspace crates (reuse only: MX lookup helpers + the canonical warmup schedule)
 apexmail-dns-resolver = { path = "../dns-resolver" }
 mail-common = { path = "../mail-common" }
+sha2 = { workspace = true }
 # Warmup admission at the SMTP-effect boundary (P0): the relay is the
 # component that can transmit DATA, so it owns the warming-IP daily cap.
 deadpool-redis = { workspace = true }
