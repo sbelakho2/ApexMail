@@ -280,7 +280,7 @@ mod boundary_tests {
     /// The LIVE database role decides: a demotion takes effect immediately.
     #[tokio::test]
     async fn owner_demotion_takes_effect_immediately() {
-        let Some(db) = pool("truth_table").await else {
+        let Some(db) = pool("demotion").await else {
             eprintln!("skipping: set TEST_DATABASE_URL");
             return;
         };
@@ -309,7 +309,7 @@ mod boundary_tests {
     /// A role-lookup DB outage fails CLOSED.
     #[tokio::test]
     async fn role_lookup_outage_fails_closed() {
-        let Some(db) = pool("truth_table").await else {
+        let Some(db) = pool("outage").await else {
             eprintln!("skipping: set TEST_DATABASE_URL");
             return;
         };

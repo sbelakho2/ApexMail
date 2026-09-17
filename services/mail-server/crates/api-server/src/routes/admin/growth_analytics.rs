@@ -1721,12 +1721,16 @@ mod adversarial_tests {
                 "{uri} must not degrade on a healthy DB: {body}"
             );
         }
-        // With zero signups the activation rate is null, never 0.
+        // The fixture itself created a tenant inside the 7d window: the
+        // population is 1 with none activated, so the rate is an honest
+        // 0.0 — `null` is reserved for an EMPTY population (zero signups),
+        // proven by the activation_rate_of unit tests.
         let (status, body) = env
             .get("/v1/admin/analytics/growth/activation?period=7d")
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["activationRate"], serde_json::Value::Null);
+        assert_eq!(body["activationRate"], 0.0);
+        assert_eq!(body["totalActivated"], 0);
     }
 
     #[tokio::test]

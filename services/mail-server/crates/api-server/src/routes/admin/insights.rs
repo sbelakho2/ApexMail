@@ -1288,8 +1288,14 @@ mod router_adversarial_tests {
         assert!(body["generatedAt"]
             .as_str()
             .is_some_and(|t| t.starts_with("20")));
-        // Trend block over the same series.
-        assert!(body["trends"].as_array().is_some_and(|t| !t.is_empty()));
+        // The inline trend block keys on QUEUE depth (5+ days of email_queue
+        // rows), which this cohort-event fixture deliberately does not seed —
+        // trends have their own /trends subresource test below.
+        assert_eq!(
+            body["trends"].as_array().map(Vec::len),
+            Some(0),
+            "no queue rows seeded: the trend block must stay empty, not fabricate"
+        );
     }
 
     #[tokio::test]
@@ -1312,7 +1318,19 @@ mod router_adversarial_tests {
         }
         let (status, body) = env.get("/v1/admin/analytics/insights").await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["insights"].as_array().map(Vec::len), Some(0));
+        // No FABRICATED data insights: the 5 seeded sends are below every
+        // evidence threshold. (The growth signup insight legitimately fires —
+        // the fixture itself created tenants this period — so the guard is
+        // scoped to the data-derived categories.)
+        let insights = body["insights"].as_array().cloned().unwrap_or_default();
+        let fabricated: Vec<_> = insights
+            .iter()
+            .filter(|i| i["category"] != "growth")
+            .collect();
+        assert!(
+            fabricated.is_empty(),
+            "below-threshold data must fabricate no insights: {fabricated:?}"
+        );
 
         // Subresources answer; unknown lookback falls back to 7d.
         for uri in [

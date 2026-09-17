@@ -226,26 +226,26 @@ async fn list_ips(
               COALESCE(bounces.blocklisted, false) as blocklisted
           FROM dedicated_ips d
           LEFT JOIN (
-              SELECT ip_address::text as ip_address,
+              SELECT host(ip_address) as ip_address,
                   COALESCE(SUM(messages_sent), 0)::bigint as emails_sent_total
               FROM self_hosted_send_stats
               WHERE tenant_id = $1
-              GROUP BY ip_address::text
+              GROUP BY host(ip_address)
           ) stats ON stats.ip_address = d.ip_address
           LEFT JOIN (
-              SELECT source_ip::text as ip_address,
+              SELECT host(source_ip) as ip_address,
                   COUNT(*)::bigint as bounces_total,
                   BOOL_OR(bounce_type = 'block') as blocklisted
               FROM self_hosted_bounces
               WHERE tenant_id = $1
-              GROUP BY source_ip::text
+              GROUP BY host(source_ip)
           ) bounces ON bounces.ip_address = d.ip_address
           LEFT JOIN (
-              SELECT source_ip::text as ip_address,
+              SELECT host(source_ip) as ip_address,
                   COUNT(*)::bigint as complaints_total
               FROM self_hosted_complaints
               WHERE tenant_id = $1
-              GROUP BY source_ip::text
+              GROUP BY host(source_ip)
           ) complaints ON complaints.ip_address = d.ip_address
           WHERE d.tenant_id = $1
           ORDER BY d.created_at DESC
@@ -1039,7 +1039,7 @@ mod adversarial_tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO dedicated_ips (id, tenant_id, ip_address, region, status, warmup_progress, allocated_at)
-             VALUES ($1, $2, $3::inet, 'fsn1', $4, $5, NOW())",
+             VALUES ($1, $2, $3, 'fsn1', $4, $5, NOW())",
         )
         .bind(id)
         .bind(tenant)
@@ -1059,12 +1059,12 @@ mod adversarial_tests {
         };
         let (env, tenant) = AdvEnv::tenant(pool.clone(), &["dedicated_ips:read"]).await;
 
-        let active_ip = seed_dedicated_ip(&pool, &tenant, "203.0.113.10", "active", 40.0).await;
+        let active_ip = seed_dedicated_ip(&pool, &tenant, "203.0.113.10", "active", 0.4).await;
         seed_dedicated_ip(&pool, &tenant, "203.0.113.11", "retired", 100.0).await;
 
         // Enrichment data: sends, a bounce (block), a complaint.
         sqlx::query(
-            "INSERT INTO self_hosted_send_stats (tenant_id, ip_address, messages_sent, day)
+            "INSERT INTO self_hosted_send_stats (tenant_id, ip_address, messages_sent, stat_date)
              VALUES ($1, '203.0.113.10'::inet, 500, CURRENT_DATE)",
         )
         .bind(&tenant)
@@ -1072,7 +1072,7 @@ mod adversarial_tests {
         .await
         .expect("send stats");
         sqlx::query(
-            "INSERT INTO self_hosted_bounces (tenant_id, source_ip, bounce_type, email, occurred_at)
+            "INSERT INTO self_hosted_bounces (tenant_id, source_ip, bounce_type, recipient, received_at)
              VALUES ($1, '203.0.113.10'::inet, 'block', 'blocked@example.com', NOW())",
         )
         .bind(&tenant)
@@ -1080,7 +1080,7 @@ mod adversarial_tests {
         .await
         .expect("bounce");
         sqlx::query(
-            "INSERT INTO self_hosted_complaints (tenant_id, source_ip, email, occurred_at)
+            "INSERT INTO self_hosted_complaints (tenant_id, source_ip, recipient, received_at)
              VALUES ($1, '203.0.113.10'::inet, 'angry@example.com', NOW())",
         )
         .bind(&tenant)
@@ -1215,6 +1215,14 @@ mod adversarial_tests {
             AdvEnv::tenant_with_ip_provider(pool.clone(), &["dedicated_ips:write"], &base_url)
                 .await;
         let id = seed_dedicated_ip(&pool, &tenant, "203.0.113.99", "active", 0.0).await;
+        // Provider-backed rows carry the Hetzner floating-ip id; without it
+        // release is a DB-only retire (the BYOIP path), which is proven by
+        // its own test below.
+        sqlx::query("UPDATE dedicated_ips SET hetzner_floating_ip_id = 4242 WHERE id = $1")
+            .bind(id.to_string())
+            .execute(&pool)
+            .await
+            .expect("provider id");
 
         // Release retires the record (the mock Hetzner is called).
         let (status, _body) = env.delete(&format!("/v1/dedicated-ips/{id}")).await;

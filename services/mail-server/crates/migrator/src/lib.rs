@@ -755,7 +755,10 @@ pub mod test_support {
         drop_database(&admin, db_name).await?;
         let template_db = canonical_template_db();
         let mut last_error: Option<sqlx::Error> = None;
-        for attempt in 0..48 {
+        // Backoff ladder: 250ms for the first 24 attempts, then 1s — under
+        // a full workspace parallel run the template can be held by another
+        // process's top-up or clone for well over a flat 12-second window.
+        for attempt in 0..60u32 {
             match sqlx::query(&format!(
                 r#"CREATE DATABASE "{db_name}" TEMPLATE "{template_db}""#
             ))
@@ -777,11 +780,12 @@ pub mod test_support {
                     if stale_catalog_row {
                         drop_database(&admin, db_name).await?;
                     }
-                    if (!busy && !stale_catalog_row) || attempt == 47 {
+                    if (!busy && !stale_catalog_row) || attempt == 59 {
                         last_error = Some(error);
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let delay = if attempt < 24 { 250 } else { 1_000 };
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
         }
@@ -979,7 +983,8 @@ pub mod test_support {
         // killed drop can leave a stale catalog row): retry the same
         // transient classes the fresh path retries.
         let mut clone_error = None;
-        for attempt in 0..48 {
+        // Same backoff ladder as the fresh path (see there for why).
+        for attempt in 0..60u32 {
             match sqlx::query(&format!(
                 r#"CREATE DATABASE "{db_name}" TEMPLATE "{template_db}""#
             ))
@@ -998,11 +1003,12 @@ pub mod test_support {
                     if stale_catalog_row {
                         drop_database(&admin, db_name).await?;
                     }
-                    if (!busy && !stale_catalog_row) || attempt == 47 {
+                    if (!busy && !stale_catalog_row) || attempt == 59 {
                         clone_error = Some(error);
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let delay = if attempt < 24 { 250 } else { 1_000 };
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
         }
@@ -1023,7 +1029,42 @@ pub mod test_support {
     /// is a PRIVATE throwaway derived from the canonical chain; the shared
     /// base database is never mutated.
     #[cfg(test)]
-    mod provision_tests {
+    pub(crate) mod provision_tests {
+        /// Cross-process serialization for tests that HOLD sessions on the
+        /// canonical template (or depend on cloning it promptly): under a
+        /// full workspace parallel run every DB-backed test clones from the
+        /// ONE template, and a deliberate holder here stacks the queue past
+        /// any fixed retry window. A session-level advisory lock on the
+        /// admin database; released when the pool drops.
+        pub(crate) async fn template_clone_guard() -> sqlx::PgPool {
+            let url = std::env::var("TEST_DATABASE_ADMIN_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("TEST_DATABASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                        .and_then(|value| {
+                            value
+                                .rsplit_once('/')
+                                .map(|(server, _)| format!("{server}/postgres"))
+                        })
+                })
+                .expect("admin url");
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(120))
+                .connect(&url)
+                .await
+                .expect("admin connect for template guard");
+            sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+                .bind("migrator:provision-tests:template")
+                .execute(&pool)
+                .await
+                .expect("template advisory lock");
+            pool
+        }
+
         use super::{
             apply_canonical_migrations, canonical_lineage, canonical_template_db,
             connect_clone_with_recreate, connect_provisioned_db, create_database, drop_database,
@@ -1160,6 +1201,7 @@ pub mod test_support {
         /// to_regclass Some arm) and reports 0 on a database with no ledger.
         #[tokio::test]
         async fn applied_count_reports_ledger_and_zero_for_fresh() {
+            let _template_guard = template_clone_guard().await;
             let _guard = SERIAL.lock().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
@@ -1207,6 +1249,7 @@ pub mod test_support {
         /// extends the partition runway.
         #[tokio::test]
         async fn apply_migrations_is_idempotent_and_extends_runway() {
+            let _template_guard = template_clone_guard().await;
             let _guard = SERIAL.lock().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
@@ -1236,6 +1279,7 @@ pub mod test_support {
         /// runway as a notice, not an error.
         #[tokio::test]
         async fn apply_migrations_on_pre_partition_database_notes_absent_runway() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, _db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1277,6 +1321,7 @@ pub mod test_support {
         /// all refuse; unreadable ledger is indistinguishable (None).
         #[tokio::test]
         async fn canonical_lineage_classifies_ledgers() {
+            let _template_guard = template_clone_guard().await;
             let _guard = SERIAL.lock().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
@@ -1371,6 +1416,7 @@ pub mod test_support {
         /// ledger, and maps read failures to the named stage.
         #[tokio::test]
         async fn verify_clone_ledger_rejects_incomplete_and_unreadable() {
+            let _template_guard = template_clone_guard().await;
             let _guard = SERIAL.lock().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
@@ -1436,6 +1482,7 @@ pub mod test_support {
         /// and classifies connect/create failures at named stages.
         #[tokio::test]
         async fn ensure_template_locked_builds_rebuilds_and_classifies_failures() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1607,6 +1654,7 @@ pub mod test_support {
         /// applied.
         #[tokio::test]
         async fn ensure_template_locked_tops_up_strict_prefix_in_place() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, _db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1667,6 +1715,7 @@ pub mod test_support {
         /// and retries to success.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn drop_database_terminates_own_sessions_and_retries() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, _db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1707,6 +1756,7 @@ pub mod test_support {
         /// database, a superuser admin still succeeds through FORCE.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn drop_database_falls_back_to_force_for_superusers() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1765,6 +1815,7 @@ pub mod test_support {
         /// using: the error names the drop-database stage and the fix.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn drop_database_reports_force_failure_for_unprivileged_role() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1831,6 +1882,7 @@ pub mod test_support {
         /// once the window closes.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn clone_retries_while_template_is_busy() {
+            let _template_guard = template_clone_guard().await;
             let _guard = SERIAL.lock().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
@@ -1875,6 +1927,7 @@ pub mod test_support {
         /// window (the template stays busy) fails closed at the clone stage.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn clone_failure_after_the_full_retry_window_is_reported() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1892,13 +1945,11 @@ pub mod test_support {
             .expect("configured");
             seed.close().await;
             let holder = test_role_pool(&server, &template).await;
-            sqlx::query("SELECT 1")
-                .fetch_one(&holder)
-                .await
-                .expect("session");
+            let pinned = holder.acquire().await.expect("pin template session");
             let error = fresh_canonical_db(&format!("{server}/{db_only}"), &probe)
                 .await
                 .expect_err("a permanently busy template cannot be cloned");
+            drop(pinned);
             assert_eq!(error.stage(), "clone");
             assert!(
                 error.to_string().contains("accessed by other users"),
@@ -1912,6 +1963,7 @@ pub mod test_support {
         /// fresh_canonical_db maps admin-connect failures at their stage.
         #[tokio::test]
         async fn fresh_canonical_db_reports_admin_connect_failure() {
+            let _template_guard = template_clone_guard().await;
             let error = fresh_canonical_db("postgresql://127.0.0.1:1/nowhere", "unused")
                 .await
                 .expect_err("port 1 must refuse connections");
@@ -1923,6 +1975,7 @@ pub mod test_support {
         /// cannot be recreated fails closed at clone-connect.
         #[tokio::test]
         async fn connect_clone_with_recreate_converges_and_fails_closed() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, _db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -1967,6 +2020,7 @@ pub mod test_support {
         /// connect_provisioned_db maps failures to the caller's stage name.
         #[tokio::test]
         async fn connect_provisioned_db_maps_failures_to_stage() {
+            let _template_guard = template_clone_guard().await;
             let error =
                 connect_provisioned_db("postgresql://127.0.0.1:1", "nowhere", "shared-connect")
                     .await
@@ -1982,6 +2036,7 @@ pub mod test_support {
         /// applies the complete chain.
         #[tokio::test]
         async fn direct_provisioning_paths() {
+            let _template_guard = template_clone_guard().await;
             assert!(fresh_canonical_db_direct("", "unused")
                 .await
                 .unwrap()
@@ -2042,6 +2097,7 @@ pub mod test_support {
         /// failure is reported at the direct-migrate stage.
         #[tokio::test]
         async fn direct_provisioning_reports_migration_failure() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, _db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -2091,6 +2147,7 @@ pub mod test_support {
         /// replace-if-foreign, and the mapped failure stages.
         #[tokio::test]
         async fn shared_canonical_db_lifecycle_and_failure_stages() {
+            let _template_guard = template_clone_guard().await;
             let _guard = SERIAL.lock().await;
             assert!(shared_canonical_db("", "unused").await.unwrap().is_none());
             let error = shared_canonical_db("not-a-url", "unused")
@@ -2198,6 +2255,7 @@ pub mod test_support {
         /// shared-clone stage.
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn shared_clone_failure_is_reported() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -2212,9 +2270,14 @@ pub mod test_support {
                 .expect("configured");
             seed.close().await;
             let holder = test_role_pool(&server, &template).await;
+            // Pin the session: an idle pool connection can be closed by the
+            // server during the long retry window, which would let the
+            // clone succeed and invert the test's verdict.
+            let pinned = holder.acquire().await.expect("pin template session");
             let error = shared_canonical_db(&format!("{server}/{db_only}"), &probe)
                 .await
                 .expect_err("busy template cannot be cloned");
+            drop(pinned);
             assert_eq!(error.stage(), "shared-clone");
             holder.close().await;
             drop_quietly(&server, &probe).await;
@@ -2234,6 +2297,7 @@ pub mod test_support {
         /// mid-upgrade — the probe reproduces exactly that shape.
         #[tokio::test]
         async fn migration_229_quarantines_legacy_user_ids_and_skips_orphans() {
+            let _template_guard = template_clone_guard().await;
             let Some((server, _db_only)) = base_parts() else {
                 eprintln!("skipping: TEST_DATABASE_URL not set");
                 return;
@@ -2496,6 +2560,7 @@ mod tests {
         // reads TEST_DATABASE_URL, and the unset test above must not blank it
         // mid-flight (this race silently took the skip branch before).
         let _guard = ENV_LOCK.lock().await;
+        let _template_guard = super::test_support::provision_tests::template_clone_guard().await;
         let Ok(Some(base)) = fresh_canonical_pool(
             "f01_concurrent_init",
             &format!("conc_{}", &uuid_placeholder()[..6]),

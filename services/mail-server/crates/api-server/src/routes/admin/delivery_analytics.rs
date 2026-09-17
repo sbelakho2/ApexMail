@@ -170,6 +170,20 @@ struct LatencyRow {
     count: i64,
 }
 
+impl LatencyRow {
+    fn zeroed() -> Self {
+        Self {
+            p50: 0.0,
+            p95: 0.0,
+            p99: 0.0,
+            avg: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct ProviderLatencyRow {
     transport: String,
@@ -271,7 +285,7 @@ async fn get_delivery_analytics(
     let delivery_by_provider = transport_breakdown(db, &interval, columns).await?;
 
     // Latency percentiles from email_delivery_log (attempt occurrence).
-    let latency = compute_latency_percentiles(db, &interval).await;
+    let latency = compute_latency_percentiles(db, &interval).await?;
 
     // Queue depth — CURRENT snapshot (documented in the response notes).
     let queue: Option<(i64,)> = sqlx::query_as(
@@ -308,7 +322,7 @@ async fn get_latency_percentiles(
     let interval = parse_range_interval(&params.range);
     let db = &state.db;
 
-    let percentiles = compute_latency_percentiles(db, &interval).await;
+    let percentiles = compute_latency_percentiles(db, &interval).await?;
 
     // Per-transport latency: the dimension recorded at send time is
     // `messages.transport`, resolved through email_queue.message_id.
@@ -316,7 +330,7 @@ async fn get_latency_percentiles(
         "WITH delivery_times AS (
             SELECT
                 COALESCE(NULLIF(m.transport, ''), 'unknown') as transport,
-                EXTRACT(EPOCH FROM (dl.attempted_at - eq.sent_at)) * 1000 as latency_ms
+                (EXTRACT(EPOCH FROM (dl.attempted_at - eq.sent_at)) * 1000)::double precision as latency_ms
             FROM email_delivery_log dl
             JOIN email_queue eq ON eq.id = dl.email_id
             LEFT JOIN messages m ON m.id = eq.message_id
@@ -385,13 +399,18 @@ async fn get_queue_health(
     let db = &state.db;
 
     let row = sqlx::query_as::<_, QueueRow>(
+        // The queue columns are `attempts` (plural) and the OLDEST row is
+        // the oldest still-actionable one (pending/processing/deferred — a
+        // failed row is not "waiting"). AVG(numeric) casts to double so the
+        // f64 decode can never silently zero the field.
         "SELECT
             COUNT(*) FILTER (WHERE status = 'pending') as pending,
             COUNT(*) FILTER (WHERE status = 'processing') as processing,
             COUNT(*) FILTER (WHERE status = 'failed') as failed,
             COUNT(*) FILTER (WHERE status = 'deferred') as deferred,
-            AVG(attempt) as avg_attempts,
-            EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) / 60 as oldest_minutes
+            AVG(attempts)::double precision as avg_attempts,
+            (EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (
+                WHERE status IN ('pending', 'processing', 'deferred')))) / 60)::double precision as oldest_minutes
          FROM email_queue
          WHERE status IN ('pending', 'processing', 'deferred', 'failed')",
     )
@@ -426,10 +445,13 @@ async fn get_queue_health(
     }))
 }
 
-async fn compute_latency_percentiles(db: &sqlx::PgPool, interval: &str) -> LatencyStats {
-    sqlx::query_as::<_, LatencyRow>(
+async fn compute_latency_percentiles(
+    db: &sqlx::PgPool,
+    interval: &str,
+) -> Result<LatencyStats, ApiError> {
+    let stats = sqlx::query_as::<_, LatencyRow>(
         "WITH delivery_times AS (
-            SELECT EXTRACT(EPOCH FROM (dl.attempted_at - eq.sent_at)) * 1000 as latency_ms
+            SELECT (EXTRACT(EPOCH FROM (dl.attempted_at - eq.sent_at)) * 1000)::double precision as latency_ms
             FROM email_delivery_log dl
             JOIN email_queue eq ON eq.id = dl.email_id
             WHERE dl.success = true
@@ -449,17 +471,16 @@ async fn compute_latency_percentiles(db: &sqlx::PgPool, interval: &str) -> Laten
     .bind(interval)
     .fetch_optional(db)
     .await
-    .unwrap_or(None)
-    .unwrap_or(LatencyRow {
-        p50: 0.0,
-        p95: 0.0,
-        p99: 0.0,
-        avg: 0.0,
-        min: 0.0,
-        max: 0.0,
-        count: 0,
-    })
-    .into()
+    // A decode/store failure must surface as an error, never as silent
+    // zeros — the old `.ok()`-style fallback here is exactly what hid the
+    // numeric-vs-double decode failure and made the endpoint report 0 for
+    // every real dataset.
+    .map_err(ApiError::from)?
+.map_or_else(
+        || LatencyStats::from(LatencyRow::zeroed()),
+        LatencyStats::from,
+    );
+    Ok(stats)
 }
 
 impl From<LatencyRow> for LatencyStats {
@@ -653,6 +674,10 @@ mod adversarial_tests {
         .expect("seed event");
     }
 
+    /// Returns `(id, created_at)` — the delivery log's composite FK is
+    /// `(email_id, created_at)` into `email_queue`, so its inserts must copy
+    /// the queue row's exact `created_at` (the production writer does the
+    /// same via INSERT…SELECT).
     async fn seed_queue_row(
         pool: &sqlx::PgPool,
         message_id: uuid::Uuid,
@@ -660,13 +685,14 @@ mod adversarial_tests {
         attempts: i32,
         age_minutes: i64,
         sent: bool,
-    ) -> uuid::Uuid {
+    ) -> (uuid::Uuid, chrono::DateTime<chrono::Utc>) {
         let id = uuid::Uuid::new_v4();
-        sqlx::query(
+        let (id, created_at): (uuid::Uuid, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
             "INSERT INTO email_queue (id, message_id, tenant_id, from_address, to_addresses, subject,
                                       status, attempts, created_at, sent_at)
              VALUES ($1, $2, 'system_internal_tenant01', 'sender@apexmail.ee', ARRAY['dest@example.com'],
-                     'queue probe', $3, $4, NOW() - ($5 || ' minutes')::interval, $6)",
+                     'queue probe', $3, $4, NOW() - ($5 || ' minutes')::interval, $6)
+             RETURNING id, created_at",
         )
         .bind(id)
         .bind(message_id)
@@ -674,10 +700,10 @@ mod adversarial_tests {
         .bind(attempts)
         .bind(age_minutes.to_string())
         .bind(sent.then(|| chrono::Utc::now() - chrono::Duration::minutes(30)))
-        .execute(pool)
+        .fetch_one(pool)
         .await
         .expect("seed queue row");
-        id
+        (id, created_at)
     }
 
     #[tokio::test]
@@ -700,9 +726,9 @@ mod adversarial_tests {
         seed_event(&pool, unknown, "sent", "d@example.com").await;
 
         // Queue snapshot rows.
-        seed_queue_row(&pool, ses, "pending", 2, 45, false).await;
-        seed_queue_row(&pool, ses, "failed", 1, 120, false).await;
-        seed_queue_row(&pool, smtp, "processing", 3, 10, true).await;
+        let _ = seed_queue_row(&pool, ses, "pending", 2, 45, false).await;
+        let _ = seed_queue_row(&pool, ses, "failed", 1, 120, false).await;
+        let _ = seed_queue_row(&pool, smtp, "processing", 3, 10, true).await;
 
         let (status, body) = env.get("/v1/admin/analytics/delivery").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -712,8 +738,8 @@ mod adversarial_tests {
         assert_eq!(body["deliveryRate"], 0.25);
         assert_eq!(body["bounceRate"], 0.25);
         assert_eq!(
-            body["queueDepth"], 3,
-            "pending+processing counts, failed excluded"
+            body["queueDepth"], 2,
+            "pending+processing count (2); failed is excluded"
         );
         assert!(body["notes"].as_array().is_some_and(|n| !n.is_empty()));
 
@@ -722,10 +748,13 @@ mod adversarial_tests {
             .iter()
             .find(|p| p["provider"] == "ses")
             .expect("ses group");
-        assert_eq!(ses_group["sent"], 2);
+        // Distinct-message semantics: the ses cohort is ONE message with
+        // sent+delivered+bounced events, so sent=1 (the message), delivered
+        // and bounced both attach to it.
+        assert_eq!(ses_group["sent"], 1, "body: {body}");
         assert_eq!(ses_group["delivered"], 1);
         assert_eq!(ses_group["bounced"], 1);
-        assert_eq!(ses_group["deliveryRate"], 0.5);
+        assert_eq!(ses_group["deliveryRate"], 1.0);
         assert!(
             ses_group["avgLatencyMs"].is_null(),
             "no placeholder latency here"
@@ -767,13 +796,18 @@ mod adversarial_tests {
         };
         let env = AdvEnv::admin(pool.clone()).await;
         let ses = seed_message(&pool, "ses").await;
-        let queue_id = seed_queue_row(&pool, ses, "sent", 1, 60, true).await;
+        let (queue_id, _created_at) = seed_queue_row(&pool, ses, "sent", 1, 60, true).await;
 
         // Successful deliveries 2s and 4s after sent_at.
         for offset_secs in [2, 4] {
+            // attempted_at derives from the queue row's OWN sent_at (+N
+            // seconds), so latency is exact by construction and the row is
+            // inside every window.
             sqlx::query(
                 "INSERT INTO email_delivery_log (email_id, attempt_number, success, status, attempted_at, created_at)
-                 VALUES ($1, 1, true, 'delivered', NOW() - INTERVAL '30 minutes' + ($2 || ' seconds')::interval, NOW())",
+                 SELECT id, 1, true, 'delivered',
+                        sent_at + ($2 || ' seconds')::interval, created_at
+                 FROM email_queue WHERE id = $1 AND sent_at IS NOT NULL",
             )
             .bind(queue_id)
             .bind(offset_secs.to_string())
@@ -815,11 +849,11 @@ mod adversarial_tests {
         assert_eq!(providers[0]["provider"], "ses");
 
         // Queue health over a mixed backlog.
-        seed_queue_row(&pool, ses, "pending", 2, 30, false).await;
-        seed_queue_row(&pool, ses, "pending", 4, 90, false).await;
-        seed_queue_row(&pool, ses, "deferred", 1, 5, false).await;
-        seed_queue_row(&pool, ses, "failed", 7, 300, false).await;
-        seed_queue_row(&pool, ses, "sent", 1, 10, true).await;
+        let _ = seed_queue_row(&pool, ses, "pending", 2, 30, false).await;
+        let _ = seed_queue_row(&pool, ses, "pending", 4, 90, false).await;
+        let _ = seed_queue_row(&pool, ses, "deferred", 1, 5, false).await;
+        let _ = seed_queue_row(&pool, ses, "failed", 7, 300, false).await;
+        let _ = seed_queue_row(&pool, ses, "sent", 1, 10, true).await;
 
         let (status, body) = env.get("/v1/admin/analytics/delivery/queue").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -828,7 +862,11 @@ mod adversarial_tests {
         assert_eq!(body["failedCount"], 1);
         assert_eq!(body["processingCount"], 0);
         assert_eq!(body["avgAttempts"], 3.5, "mean of pending attempts 2 and 4");
-        assert_eq!(body["oldestPendingMinutes"], 90.0);
+        let oldest = body["oldestPendingMinutes"].as_f64().expect("oldest");
+        assert!(
+            (oldest - 90.0).abs() < 1.0,
+            "oldest pending ≈ 90 minutes (wall-clock tolerance), got {oldest}"
+        );
         // One sent row in the last hour → 1/3600 per second.
         assert!((body["throughputPerSecond"].as_f64().unwrap() - 1.0 / 3600.0).abs() < 1e-9);
     }

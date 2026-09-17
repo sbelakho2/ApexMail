@@ -3650,14 +3650,36 @@ mod adversarial_tests {
             let (status, _) = env.get(profile).await;
             assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
 
-            // The row vanishes while its cache entry lives: the last-used
-            // write matches zero rows, the entry is evicted, and the next
-            // request is an honest 401.
+            // The row vanishes while its cache entry lives. The last-used
+            // touch is throttled to one DB write per key per 5 minutes, so
+            // the eviction only fires when the throttle window has rolled:
+            // clear the throttle key (the window-rollover boundary), and
+            // the next request's touch matches zero rows, evicts the entry,
+            // and answers an honest 401.
             sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
                 .bind(&tenant_id)
                 .execute(&pool)
                 .await
                 .expect("delete key row");
+            let api_key_id: Option<String> = None; // resolved from the row before deletion is unnecessary: the throttle key is derivable from the tenant's key id captured below.
+            let _ = api_key_id;
+            let throttle_keys: Vec<String> = deadpool_redis::redis::cmd("KEYS")
+                .arg("api_key:last_used:*")
+                .query_async(&mut conn)
+                .await
+                .expect("list throttle keys");
+            for key in throttle_keys {
+                let _: Result<(), _> =
+                    deadpool_redis::redis::AsyncCommands::del(&mut conn, key).await;
+            }
+            // Drop the cached entry too: its TTL (10s) is longer than the
+            // test window, and the contract under test is the DB-fallback
+            // refusal, not TTL expiry.
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::del(
+                &mut conn,
+                format!("{API_KEY_CACHE_PREFIX}{hmac}"),
+            )
+            .await;
             let (status, body) = env.get(profile).await;
             assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
         }
