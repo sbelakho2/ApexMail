@@ -862,9 +862,7 @@ mod adversarial_tests {
         assert_eq!(body["total"], 1);
 
         // Action filter (no FTS: rank is exactly 0).
-        let (status, body) = env
-            .get(&format!("/v1/admin/audit/search?action=probe.beta"))
-            .await;
+        let (status, body) = env.get("/v1/admin/audit/search?action=probe.beta").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let results = body["results"].as_array().cloned().unwrap_or_default();
         assert_eq!(results.len(), 1);

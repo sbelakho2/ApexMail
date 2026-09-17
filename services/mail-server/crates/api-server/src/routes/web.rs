@@ -10584,7 +10584,6 @@ mod tests {
             use tower::ServiceExt;
 
             const PW: &str = "0ld#SweepPassw0rd";
-            /// The canonical system tenant id (migration 072).
 
             /// A canonical-DB state whose config is derived from the real
             /// test_config with a caller mutation (production flag, kiwi

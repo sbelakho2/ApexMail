@@ -544,10 +544,25 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/admin/calendar", routes::admin::calendar::router())
         .nest("/v1/admin/warmup", routes::admin::warmup::router())
         .nest("/v1/admin/content", routes::admin::content::router())
-        .nest("/v1/admin/autopilot", routes::admin::autopilot::router())
+        // P0: ApexMail's sales brain is OWNER-ONLY — a system admin or a
+        // machine credential is not the owner. The gate is structural (a
+        // layer around the whole router), not a per-handler check.
+        .nest(
+            "/v1/admin/autopilot",
+            routes::admin::autopilot::router().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::middleware::sales_owner::require_sales_owner,
+            )),
+        )
         .nest("/v1/admin/operators", routes::admin::operators::router())
         .nest("/v1/admin/proxy", routes::admin::proxy::router())
-        .nest("/v1/admin/sales", routes::admin::sales::router())
+        .nest(
+            "/v1/admin/sales",
+            routes::admin::sales::router().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::middleware::sales_owner::require_sales_owner,
+            )),
+        )
         .nest("/v1/admin/analytics", routes::admin::analytics::router())
         .nest(
             "/v1/admin/analytics/export",
