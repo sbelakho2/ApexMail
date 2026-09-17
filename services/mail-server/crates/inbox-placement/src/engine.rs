@@ -497,6 +497,11 @@ impl PlacementEngine {
         };
 
         let event_id = format!("evt_placement_{}", Uuid::new_v4().simple());
+        // The payload is bound as serde_json::Value (JSONB). Binding the
+        // stringified form made Postgres refuse every insert ("column payload
+        // is of type jsonb but expression is of type text"), so subscribers
+        // never received a single placement_test.completed event (the
+        // failure was swallowed as a non-fatal warn).
         let payload = serde_json::json!({
             "id": event_id,
             "type": "placement_test.completed",
@@ -514,7 +519,6 @@ impl PlacementEngine {
                 "score": summary["score"],
             }
         });
-        let payload_str = payload.to_string();
 
         let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO webhook_queue \
@@ -526,7 +530,7 @@ impl PlacementEngine {
                 .push_bind(wid)
                 .push_bind(&tenant_id_str)
                 .push_bind("placement_test.completed")
-                .push_bind(&payload_str)
+                .push_bind(&payload)
                 .push_bind("pending")
                 .push_bind(1i32)
                 .push_unseparated(", NOW()");
@@ -1204,4 +1208,7 @@ Date: Mon, 1 Jan 2025 00:00:00 +0000\r\n";
 Authentication-Results: mx.b.com; spf=fail; dkim=pass\r\n";
         assert_eq!(parse_auth_results(headers), (Some(true), Some(true), None));
     }
+
+    #[cfg(test)]
+    mod adversarial_tests;
 }

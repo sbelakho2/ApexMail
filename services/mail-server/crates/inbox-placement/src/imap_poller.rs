@@ -746,6 +746,34 @@ mod tests {
         )
     }
 
+    #[test]
+    fn poller_debug_and_constructor_do_not_leak_or_panic() {
+        let poller = ImapPoller::new(scripted_config());
+        let rendered = format!("{poller:?}");
+        assert!(rendered.contains("ImapPoller"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn poll_found_message_without_fetchable_headers_still_reports_the_folder() {
+        // The message is found but FETCH returns None (no headers/date):
+        // the folder hit still counts as a delivery with no latency.
+        let mut script = Script {
+            folders: Ok(vec!["INBOX".into()]),
+            ..Script::default()
+        };
+        script.search_results.insert("INBOX".into(), vec![1]);
+        script.fetch = None;
+        let (poller, _) = scripted_poller(script);
+        let result = poller
+            .poll_inbox(&account("seed@example.com"), "pw", Uuid::new_v4(), 1)
+            .await
+            .expect("poll ok");
+        assert!(result.delivered);
+        assert_eq!(result.folder.as_deref(), Some("INBOX"));
+        assert!(result.raw_headers.is_none());
+        assert!(result.response_time_ms.is_some(), "elapsed-based latency");
+    }
+
     #[tokio::test]
     async fn poll_finds_message_in_spam_folder_with_headers_and_latency() {
         let mut script = Script {

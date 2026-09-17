@@ -1580,3 +1580,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests;

@@ -214,13 +214,20 @@ pub async fn handle_stream(
     let channel = format!("events:{}", tenant_id);
     let redis_url = state.config.redis.url.clone();
 
+    // The guard is created HERE — the moment the slot is held — and moved
+    // into the stream. Creating it inside the (lazily polled) generator let
+    // a response whose body was dropped before the first poll leak the slot
+    // until the counter key's TTL expired, silently shrinking the tenant's
+    // live-connection budget.
+    let conn_guard = ConnCountGuard::new(conn_slot);
+
     let stream = make_event_stream(
         redis_url,
         channel,
         tenant_id.clone(),
         event_filter,
         message_filter,
-        conn_slot,
+        conn_guard,
     );
 
     Sse::new(stream)
@@ -244,13 +251,15 @@ fn make_event_stream(
     tenant_id: String,
     event_filter: Option<Vec<String>>,
     message_filter: Option<String>,
-    conn_slot: ConnSlot,
+    conn_guard: ConnCountGuard,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
     // ── Connection-count guard ───────────────────────────────────
-    // Takes ownership of the slot for the lifetime of the stream; releases
-    // on drop (client disconnect, timeout, error or normal end).
-            let _guard = ConnCountGuard::new(conn_slot);
+    // Takes ownership of the slot for the lifetime of the stream (the guard
+    // was created when the slot was acquired, so even a stream whose body
+    // is dropped before the first poll releases exactly once — via Drop);
+    // releases on drop (client disconnect, timeout, error or normal end).
+            let _guard = conn_guard;
 
     // ── Initial connection event ──────────────────────────────────
             yield Ok(Event::default()
@@ -681,4 +690,8 @@ mod tests {
         );
         assert!(extract_bearer_token(&headers).is_none());
     }
+
+    #[cfg(test)]
+    
+    mod adversarial_tests;
 }

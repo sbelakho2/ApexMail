@@ -319,3 +319,6 @@ pub async fn list_seed_providers(
         }
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests;

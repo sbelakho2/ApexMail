@@ -350,6 +350,10 @@ fn match_domain_pattern(domain: &str, pattern: &str) -> bool {
     false
 }
 
+#[cfg(test)]
+
+mod adversarial_tests;
+
 /// Return a redirect response with a locked-down CSP and the exact status code
 /// from config (typically 302).
 fn csp_redirect(url: &str, status: u16) -> Response {

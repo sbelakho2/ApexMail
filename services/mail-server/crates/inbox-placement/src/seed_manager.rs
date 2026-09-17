@@ -25,16 +25,21 @@ const BACKOFF_MAX_SECS: i64 = 86_400; // 24 hours
 
 /// Returns `true` when the failure reason indicates a permanent condition
 /// that should lead to immediate auto-disable rather than exponential backoff.
-fn is_permanent_failure(reason: &str) -> bool {
+pub fn is_permanent_failure(reason: &str) -> bool {
+    // BOTH sides are lower-cased: comparing the lowercased reason against the
+    // raw keyword left the only mixed-case keyword ("no IMAP password
+    // configured") permanently unable to match, so password-less seed
+    // accounts were retried with exponential backoff instead of being
+    // retired immediately.
     let lower = reason.to_lowercase();
     PERMANENT_FAILURE_KEYWORDS
         .iter()
-        .any(|kw| lower.contains(kw))
+        .any(|kw| lower.contains(&kw.to_lowercase()))
 }
 
 /// Compute the exponential backoff delay for a given number of consecutive
 /// failures: `min(BACKOFF_BASE_SECS * 2^(failures - 1), BACKOFF_MAX_SECS)`.
-fn backoff_seconds(consecutive_failures: u32) -> i64 {
+pub fn backoff_seconds(consecutive_failures: u32) -> i64 {
     let exponent = consecutive_failures.saturating_sub(1);
     // Cap shifting to avoid overflow on very large exponents
     let delay = if exponent >= 31 {
@@ -382,3 +387,7 @@ impl SeedManager {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "seed_manager/tests.rs"]
+mod seed_manager_tests;

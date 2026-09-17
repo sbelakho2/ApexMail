@@ -394,4 +394,19 @@ mod tests {
         let score = PlacementScore::calculate(&[]);
         assert_eq!(score.overall, 0);
     }
+
+    #[test]
+    fn zero_total_accounts_score_zero_instead_of_dividing_by_zero() {
+        // Rows exist but every account count is zero (degenerate/aggregated
+        // data): the component must short-circuit to the zero score rather
+        // than produce NaN/inf.
+        let score = PlacementScore::calculate(&[provider_result(0, 0, 0, 0)]);
+        assert_eq!(score.overall, 0);
+        assert_eq!(score.inbox_rate_score, 0);
+        assert_eq!(score.promotions_score, 0);
+        assert_eq!(score.auth_score, 0);
+        assert_eq!(score.speed_score, 0);
+        assert_eq!(score.spam_penalty, 0);
+        assert_eq!(score.absent_penalty, 0);
+    }
 }

@@ -892,6 +892,10 @@ async fn queue_unsub_webhook(
     let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "INSERT INTO webhook_queue (id, webhook_id, tenant_id, event_type, payload, status, attempt, created_at) "
     );
+    // The payload is bound as serde_json::Value (JSONB). Binding the
+    // stringified form made Postgres refuse every insert ("column payload
+    // is of type jsonb but expression is of type text"), silently dropping
+    // every recipient.unsubscribed webhook (fire-and-forget spawn).
     let payload_val = serde_json::json!({
         "id": new_id("evt"),
         "type": "recipient.unsubscribed",
@@ -899,14 +903,13 @@ async fn queue_unsub_webhook(
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "data": { "recipient": email, "method": method, "timestamp": chrono::Utc::now().to_rfc3339() },
     });
-    let payload_str = payload_val.to_string();
 
     builder.push_values(&webhook_ids, |mut b, wid| {
         b.push_bind(new_id("whj"))
             .push_bind(wid)
             .push_bind(tenant_id)
             .push_bind("recipient.unsubscribed")
-            .push_bind(&payload_str)
+            .push_bind(&payload_val)
             .push_bind("pending")
             .push_bind(1i32)
             .push_unseparated(", NOW()"); // #179:comma must precede NOW
@@ -1631,8 +1634,12 @@ mod tests {
         assert!(validate_category_preferences(&at_cap, &valid_set(), 50).is_ok());
     }
 
-    #[test]
-    fn category_prefs_empty_submission_is_ok() {
-        assert!(validate_category_preferences(&[], &valid_set(), 50).is_ok());
-    }
+#[test]
+fn category_prefs_empty_submission_is_ok() {
+    assert!(validate_category_preferences(&[], &valid_set(), 50).is_ok());
+}
+
+    #[cfg(test)]
+    
+    mod adversarial_tests;
 }

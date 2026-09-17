@@ -407,6 +407,121 @@ mod tests {
     }
 
     #[test]
+    fn gmail_tabs_and_conventions_cover_every_arm() {
+        assert_eq!(
+            classify_folder("[Gmail]/Updates", &ProviderName::Gmail),
+            InboxFolder::Updates
+        );
+        assert_eq!(
+            classify_folder("[Gmail]/Notifications", &ProviderName::Gmail),
+            InboxFolder::Updates
+        );
+        assert_eq!(
+            classify_folder("[Gmail]/All Mail", &ProviderName::Gmail),
+            InboxFolder::Archive
+        );
+        assert_eq!(
+            classify_folder("[Gmail]/Bulk", &ProviderName::Gmail),
+            InboxFolder::Bulk
+        );
+        // A non-[Gmail] custom folder falls through to the generic matcher.
+        assert!(matches!(
+            classify_folder("Custom", &ProviderName::Gmail),
+            InboxFolder::Other(_)
+        ));
+    }
+
+    #[test]
+    fn outlook_archive_sent_and_generic_arms() {
+        assert_eq!(
+            classify_folder("Archive", &ProviderName::Outlook),
+            InboxFolder::Archive
+        );
+        for folder in ["Sent", "Drafts", "Deleted", "Outbox"] {
+            assert!(matches!(
+                classify_folder(folder, &ProviderName::Outlook),
+                InboxFolder::Other(_)
+            ));
+        }
+        // Outlook's generic fall-through: promotions-ish folder.
+        assert_eq!(
+            classify_folder("Offers", &ProviderName::Outlook),
+            InboxFolder::Promotions
+        );
+    }
+
+    #[test]
+    fn remaining_providers_spam_arms() {
+        for provider in [
+            ProviderName::Yahoo,
+            ProviderName::Icloud,
+            ProviderName::Aol,
+            ProviderName::Zoho,
+            ProviderName::Protonmail,
+            ProviderName::Gmx,
+            ProviderName::Yandex,
+        ] {
+            assert_eq!(
+                classify_folder("INBOX", &provider),
+                InboxFolder::Inbox,
+                "{provider:?}"
+            );
+            assert_eq!(
+                classify_folder("SPAM", &provider),
+                InboxFolder::Spam,
+                "{provider:?}"
+            );
+        }
+        // Junk for the providers that treat it as spam.
+        for provider in [
+            ProviderName::Protonmail,
+            ProviderName::Gmx,
+            ProviderName::Yandex,
+        ] {
+            assert_eq!(classify_folder("Junk", &provider), InboxFolder::Spam);
+        }
+        // Yahoo's bulk arm is an exact-match on "bulk"; the longer "Bulk
+        // Mail" convention is caught upstream by placement_from_folder's
+        // contains-rule, and the classifier itself falls through to Other.
+        assert_eq!(
+            classify_folder("Bulk", &ProviderName::Yahoo),
+            InboxFolder::Spam
+        );
+        assert!(matches!(
+            classify_folder("Bulk mail", &ProviderName::Yahoo),
+            InboxFolder::Other(_)
+        ));
+        assert_eq!(
+            classify_folder("Deals", &ProviderName::Yahoo),
+            InboxFolder::Promotions
+        );
+        assert_eq!(
+            classify_folder("Social", &ProviderName::Yahoo),
+            InboxFolder::Social
+        );
+        assert_eq!(
+            classify_folder("Updates", &ProviderName::Yahoo),
+            InboxFolder::Updates
+        );
+        assert_eq!(
+            classify_folder("Archived", &ProviderName::Yahoo),
+            InboxFolder::Archive
+        );
+        assert!(matches!(
+            classify_folder("Whatever", &ProviderName::Aol),
+            InboxFolder::Other(_)
+        ));
+    }
+
+    #[test]
+    fn delivery_category_maps_every_variant() {
+        assert_eq!(delivery_category(&InboxFolder::Updates), "promotions");
+        assert_eq!(delivery_category(&InboxFolder::Junk), "spam");
+        assert_eq!(delivery_category(&InboxFolder::Bulk), "spam");
+        assert_eq!(delivery_category(&InboxFolder::Archive), "inbox");
+    }
+
+    #[test]
     fn test_placement_from_folder_other_uses_classifier_fallback() {
         // Gmail tabs fall back to the provider classifier ("promotions").
         assert_eq!(
