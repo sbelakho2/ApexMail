@@ -6609,13 +6609,21 @@ mod coverage_adversarial {
 
         start_periodic_jobs(env.state.clone());
         // The startup sweeps run immediately; interval ticks are >= 30s away
-        // and never fire within this bounded, real-time window.
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-
-        let archived: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_archives")
-            .fetch_one(&env.pool)
-            .await
-            .expect("archives");
+        // and never fire within this bounded, real-time window. Under a full
+        // workspace parallel run 40ms is far too short for the sweeps to
+        // reach a freshly-provisioned database — poll to a bounded deadline
+        // instead of sleeping a fixed instant.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let archived = loop {
+            let archived: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM invoice_archives")
+                .fetch_one(&env.pool)
+                .await
+                .expect("archives");
+            if archived >= 1 || std::time::Instant::now() > deadline {
+                break archived;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        };
         assert_eq!(
             archived, 1,
             "startup archival archived the old paid invoice"
