@@ -610,3 +610,245 @@ mod tests {
         pool.close().await;
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_message(pool: &sqlx::PgPool, transport: &str) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, transport, created_at)
+             VALUES ($1, 'system_internal_tenant01', 'sender@apexmail.ee', '[]', 'delivery probe', 'sent', $2, NOW())",
+        )
+        .bind(id)
+        .bind(transport)
+        .execute(pool)
+        .await
+        .expect("seed message");
+        id
+    }
+
+    async fn seed_event(
+        pool: &sqlx::PgPool,
+        message_id: uuid::Uuid,
+        event_type: &str,
+        recipient: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+             VALUES ($1, 'system_internal_tenant01', $2, $3, $4, NOW())",
+        )
+        .bind(format!(
+            "evt_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        ))
+        .bind(message_id.to_string())
+        .bind(event_type)
+        .bind(recipient)
+        .execute(pool)
+        .await
+        .expect("seed event");
+    }
+
+    async fn seed_queue_row(
+        pool: &sqlx::PgPool,
+        message_id: uuid::Uuid,
+        status: &str,
+        attempts: i32,
+        age_minutes: i64,
+        sent: bool,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue (id, message_id, tenant_id, from_address, to_addresses, subject,
+                                      status, attempts, created_at, sent_at)
+             VALUES ($1, $2, 'system_internal_tenant01', 'sender@apexmail.ee', ARRAY['dest@example.com'],
+                     'queue probe', $3, $4, NOW() - ($5 || ' minutes')::interval, $6)",
+        )
+        .bind(id)
+        .bind(message_id)
+        .bind(status)
+        .bind(attempts)
+        .bind(age_minutes.to_string())
+        .bind(sent.then(|| chrono::Utc::now() - chrono::Duration::minutes(30)))
+        .execute(pool)
+        .await
+        .expect("seed queue row");
+        id
+    }
+
+    #[tokio::test]
+    async fn delivery_analytics_reports_cohort_rates_by_transport_and_queue_depth() {
+        let Some(pool) = crate::test_db::canonical_pool("delan_main").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // Transport ses: 2 sends, 1 delivered, 1 bounced. Transport smtp: 1 send.
+        let ses = seed_message(&pool, "ses").await;
+        let smtp = seed_message(&pool, "smtp").await;
+        seed_event(&pool, ses, "sent", "a@example.com").await;
+        seed_event(&pool, ses, "delivered", "a@example.com").await;
+        seed_event(&pool, ses, "sent", "b@example.com").await;
+        seed_event(&pool, ses, "bounced", "b@example.com").await;
+        seed_event(&pool, smtp, "sent", "c@example.com").await;
+        // A message with NO transport falls into the unknown group.
+        let unknown = seed_message(&pool, "").await;
+        seed_event(&pool, unknown, "sent", "d@example.com").await;
+
+        // Queue snapshot rows.
+        seed_queue_row(&pool, ses, "pending", 2, 45, false).await;
+        seed_queue_row(&pool, ses, "failed", 1, 120, false).await;
+        seed_queue_row(&pool, smtp, "processing", 3, 10, true).await;
+
+        let (status, body) = env.get("/v1/admin/analytics/delivery").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["totalSent"], 4);
+        assert_eq!(body["totalDelivered"], 1);
+        assert_eq!(body["totalBounced"], 1);
+        assert_eq!(body["deliveryRate"], 0.25);
+        assert_eq!(body["bounceRate"], 0.25);
+        assert_eq!(
+            body["queueDepth"], 3,
+            "pending+processing counts, failed excluded"
+        );
+        assert!(body["notes"].as_array().is_some_and(|n| !n.is_empty()));
+
+        let providers = body["deliveryByProvider"].as_array().expect("providers");
+        let ses_group = providers
+            .iter()
+            .find(|p| p["provider"] == "ses")
+            .expect("ses group");
+        assert_eq!(ses_group["sent"], 2);
+        assert_eq!(ses_group["delivered"], 1);
+        assert_eq!(ses_group["bounced"], 1);
+        assert_eq!(ses_group["deliveryRate"], 0.5);
+        assert!(
+            ses_group["avgLatencyMs"].is_null(),
+            "no placeholder latency here"
+        );
+        let unknown_group = providers
+            .iter()
+            .find(|p| p["provider"] == "unknown")
+            .expect("unknown");
+        assert_eq!(unknown_group["sent"], 1);
+        assert_eq!(unknown_group["deliveryRate"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn delivery_analytics_empty_window_reports_null_rates() {
+        let Some(pool) = crate::test_db::canonical_pool("delan_empty").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool).await;
+        let (status, body) = env.get("/v1/admin/analytics/delivery?range=24h").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["totalSent"], 0);
+        assert_eq!(body["deliveryRate"], serde_json::Value::Null);
+        assert_eq!(body["bounceRate"], serde_json::Value::Null);
+        assert_eq!(body["queueDepth"], 0);
+        // Unknown ranges fall back to the 7-day interval without error.
+        let (status, body) = env.get("/v1/admin/analytics/delivery?range=century").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Hostile query fields are refused.
+        let (status, _body) = env
+            .get("/v1/admin/analytics/delivery?range=7d&granularity=1h")
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn latency_percentiles_and_transport_grouping() {
+        let Some(pool) = crate::test_db::canonical_pool("delan_latency").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let ses = seed_message(&pool, "ses").await;
+        let queue_id = seed_queue_row(&pool, ses, "sent", 1, 60, true).await;
+
+        // Successful deliveries 2s and 4s after sent_at.
+        for offset_secs in [2, 4] {
+            sqlx::query(
+                "INSERT INTO email_delivery_log (email_id, attempt_number, success, status, attempted_at, created_at)
+                 VALUES ($1, 1, true, 'delivered', NOW() - INTERVAL '30 minutes' + ($2 || ' seconds')::interval, NOW())",
+            )
+            .bind(queue_id)
+            .bind(offset_secs.to_string())
+            .execute(&pool)
+            .await
+            .expect("seed delivery log");
+        }
+
+        let (status, body) = env.get("/v1/admin/analytics/delivery/latency").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let percentiles = &body["percentiles"];
+        assert_eq!(percentiles["sampleCount"], 2);
+        assert_eq!(percentiles["minMs"], 2000.0);
+        assert_eq!(percentiles["maxMs"], 4000.0);
+        assert_eq!(percentiles["p50Ms"], 3000.0);
+        assert_eq!(percentiles["avgMs"], 3000.0);
+        let transports = body["byProvider"].as_array().expect("by provider");
+        let ses_group = transports
+            .iter()
+            .find(|t| t["transport"] == "ses")
+            .expect("ses");
+        assert_eq!(ses_group["sampleCount"], 2);
+        assert_eq!(ses_group["p50Ms"], 3000.0);
+    }
+
+    #[tokio::test]
+    async fn provider_breakdown_and_queue_health() {
+        let Some(pool) = crate::test_db::canonical_pool("delan_queue").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let ses = seed_message(&pool, "ses").await;
+        seed_event(&pool, ses, "sent", "a@example.com").await;
+
+        let (status, body) = env.get("/v1/admin/analytics/delivery/provider").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let providers = body["providers"].as_array().expect("providers");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["provider"], "ses");
+
+        // Queue health over a mixed backlog.
+        seed_queue_row(&pool, ses, "pending", 2, 30, false).await;
+        seed_queue_row(&pool, ses, "pending", 4, 90, false).await;
+        seed_queue_row(&pool, ses, "deferred", 1, 5, false).await;
+        seed_queue_row(&pool, ses, "failed", 7, 300, false).await;
+        seed_queue_row(&pool, ses, "sent", 1, 10, true).await;
+
+        let (status, body) = env.get("/v1/admin/analytics/delivery/queue").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["pendingCount"], 2);
+        assert_eq!(body["deferredCount"], 1);
+        assert_eq!(body["failedCount"], 1);
+        assert_eq!(body["processingCount"], 0);
+        assert_eq!(body["avgAttempts"], 3.5, "mean of pending attempts 2 and 4");
+        assert_eq!(body["oldestPendingMinutes"], 90.0);
+        // One sent row in the last hour → 1/3600 per second.
+        assert!((body["throughputPerSecond"].as_f64().unwrap() - 1.0 / 3600.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn delivery_analytics_gates() {
+        let Some(pool) = crate::test_db::canonical_pool("delan_gates").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["analytics:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        for uri in [
+            "/v1/admin/analytics/delivery",
+            "/v1/admin/analytics/delivery/latency",
+            "/v1/admin/analytics/delivery/provider",
+            "/v1/admin/analytics/delivery/queue",
+        ] {
+            let (status, body) = scoped.get(uri).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+        }
+    }
+}

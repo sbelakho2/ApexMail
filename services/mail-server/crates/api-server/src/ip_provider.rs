@@ -1487,6 +1487,17 @@ impl DedicatedIpProvider {
         })
     }
 
+    /// Test-only constructor wiring the provider to a caller-provided API
+    /// root (a loopback mock server). In-crate route tests use this to drive
+    /// the dedicated-IP endpoints without network access.
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(api_base: &str, db: PgPool) -> Self {
+        let mut provider =
+            Self::new("hetzner-test-token".into(), db, "fsn1".into(), Some(42)).expect("provider");
+        provider.api_base = api_base.to_string();
+        provider
+    }
+
     /// Create from environment. Returns `None` if `HETZNER_API_TOKEN` is unset
     /// or the HTTP client cannot be built.
     pub fn from_env(db: PgPool) -> Option<Self> {
@@ -4964,10 +4975,12 @@ mod mock_hetzner_tests {
         // honest LookupUnavailable too (lookup executed, query failed).
         let unreachable = DnsRdnsVerifier {
             make_lookup: || {
-                let mut config = dns_resolver::DnsConfig::default();
-                config.query_timeout_ms = 1;
-                config.retries = 0;
-                config.nameservers = vec!["127.0.0.1:1".to_string()];
+                let config = dns_resolver::DnsConfig {
+                    query_timeout_ms: 1,
+                    retries: 0,
+                    nameservers: vec!["127.0.0.1:1".to_string()],
+                    ..dns_resolver::DnsConfig::default()
+                };
                 dns_resolver::DnsLookup::from_config(&config)
             },
         };

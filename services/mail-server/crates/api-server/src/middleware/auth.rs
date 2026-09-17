@@ -313,6 +313,21 @@ impl FromRequestParts<AppState> for AuthUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // Reuse an identity the `require_auth` layer ALREADY authenticated
+        // for this request. Without this, a handler's `AuthUser` extractor
+        // re-ran the whole credential flow — and inside a nested router
+        // axum has STRIPPED the mount prefix from `parts.uri.path()`, so
+        // every path-dependent policy in the re-run saw a relative path:
+        // the F18 billing-recovery allowlist (all four entries are nested
+        // under /v1/billing) could never match, leaving a suspended tenant
+        // unable to pay/reactivate, and the control-plane static key's
+        // `/v1/admin/` surface check refused the key on its own surface.
+        // The extension is only inserted AFTER a successful authentication,
+        // so reusing it cannot weaken any gate.
+        if let Some(user) = parts.extensions.get::<AuthUser>() {
+            return Ok(user.clone());
+        }
+
         let headers = &parts.headers;
         let host = headers
             .get(axum::http::header::HOST)
@@ -3250,5 +3265,683 @@ mod adversarial_tests {
         assert_eq!(char_safe_prefix("abc", 10), "abc");
         assert_eq!(char_safe_prefix("", 4), "");
         assert_eq!(char_safe_prefix("😀x", 2), "");
+    }
+    // ─── Wave D: extractor/cache/state-machine arms through the real router ──
+    mod wave_d {
+        use super::*;
+        use crate::app::test_support::test_config;
+        use crate::app::test_support::test_state_over_with_config_and_redis;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        fn dead_db_pool() -> sqlx::PgPool {
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+                .expect("lazy dead pool")
+        }
+
+        fn rsa_config() -> crate::config::Config {
+            use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+            let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("rsa keypair");
+            let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+                .expect("pkcs8");
+            let mut config = test_config();
+            config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+            config.jwt_public_key_pem = private_key
+                .to_public_key()
+                .to_public_key_pem(LineEnding::LF)
+                .expect("public pem");
+            config
+        }
+
+        fn mint_token(config: &crate::config::Config, claims: JwtClaims) -> String {
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+                &claims,
+                &jsonwebtoken::EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+                    .expect("encoding key"),
+            )
+            .expect("sign token")
+        }
+
+        fn base_claims(user_id: &str, tenant_id: &str, typ: Option<&str>) -> JwtClaims {
+            let now = Utc::now().timestamp();
+            JwtClaims {
+                sub: user_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+                scopes: vec!["*".into()],
+                exp: now + 3600,
+                iat: now,
+                jti: uuid::Uuid::new_v4().to_string(),
+                typ: typ.map(str::to_string),
+            }
+        }
+
+        async fn bearer_request(
+            app: &axum::Router,
+            token: &str,
+            uri: &str,
+        ) -> (axum::http::StatusCode, serde_json::Value) {
+            use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri(uri)
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+            (status, value)
+        }
+
+        /// A user row + tenant for the session flows.
+        async fn seed_session_user(
+            db: &sqlx::PgPool,
+            status: &str,
+            tenant_status: &str,
+        ) -> (String, String) {
+            let tenant_id = apexmail_lib::id::generate_id("wvau", 20);
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                 VALUES ($1, 'Wave D Auth', $2, 'free', $3, NOW(), NOW())",
+            )
+            .bind(&tenant_id)
+            .bind(format!("slug-{tenant_id}"))
+            .bind(tenant_status)
+            .execute(db)
+            .await
+            .expect("seed tenant");
+            let user_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+                 VALUES ($1::uuid, $2, $3, 'Wave D', 'x', 'owner', $4, true)",
+            )
+            .bind(&user_id)
+            .bind(&tenant_id)
+            .bind(format!("waved-{}@example.com", user_id))
+            .bind(status)
+            .execute(db)
+            .await
+            .expect("seed user");
+            (tenant_id, user_id)
+        }
+
+        /// Redis-outage contracts, called directly: every arm maps to its
+        /// documented failure mode instead of an unwrap or a silent pass.
+        #[tokio::test]
+        async fn redis_outage_maps_each_lookup_to_its_documented_failure() {
+            let state = test_state_over_with_config_and_redis(
+                dead_db_pool(),
+                test_config(),
+                "redis://127.0.0.1:1",
+            )
+            .await;
+
+            // Token blacklist check fails CLOSED (503), never "not revoked".
+            assert!(matches!(
+                is_token_blacklisted("token", &state).await,
+                Err(ApiError::ServiceUnavailable(_))
+            ));
+            // Session revocation lookup ditto.
+            assert!(matches!(
+                lookup_session_revoked_after("ten", "usr", &state).await,
+                Err(ApiError::ServiceUnavailable(_))
+            ));
+            // The user-status and API-key caches degrade to a MISS (Err(())).
+            assert!(lookup_cached_user_status("ten", "usr", &state)
+                .await
+                .is_err());
+            assert!(lookup_cached_api_key("deadbeef", &state).await.is_err());
+            // DB lookups behind the dead pool surface as Internal, never 401.
+            assert!(matches!(
+                tenant_status_for_auth(&state, "ten").await,
+                Err(ApiError::Internal(_))
+            ));
+            assert!(matches!(
+                verify_tenant_membership("usr", "ten", &state.db).await,
+                Err(ApiError::Internal(_))
+            ));
+        }
+
+        /// Tenant-status caching with a LIVE Redis but a dead database: the
+        /// MISSING sentinel write happens before the DB error surfaces, and
+        /// a pre-seeded sentinel short-circuits to "workspace no longer
+        /// exists" without touching the database at all.
+        #[tokio::test]
+        async fn tenant_status_sentinel_short_circuits_before_the_database() {
+            let Some(redis_url) = std::env::var("TEST_REDIS_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                eprintln!("skipping tenant_status_sentinel_short_circuits: no TEST_REDIS_URL");
+                return;
+            };
+            // Live Redis + dead DB: an unknown tenant takes the DB-error arm
+            // (Internal), and the sentinel write is attempted on the way.
+            let state =
+                test_state_over_with_config_and_redis(dead_db_pool(), test_config(), &redis_url)
+                    .await;
+            assert!(matches!(
+                tenant_status_for_auth(&state, "sentinel-probe-tenant").await,
+                Err(ApiError::Internal(_))
+            ));
+
+            // Seeded sentinel: refused as "no longer exists" without a DB.
+            let tenant = apexmail_lib::id::generate_id("wvst", 20);
+            let mut conn = state.redis.get().await.expect("redis conn");
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set(
+                &mut conn,
+                tenant_status_cache_key(&tenant),
+                TENANT_STATUS_CACHE_MISSING,
+            )
+            .await;
+            assert!(matches!(
+                tenant_status_for_auth(&state, &tenant).await,
+                Err(ApiError::Unauthorized(message)) if message.contains("no longer exists")
+            ));
+        }
+
+        /// The session-verifier matrix, through the REAL router: stream
+        /// tokens, empty subjects/tenants, revoked tokens, disabled users,
+        /// and vanished workspaces each get their exact 401; a suspended
+        /// tenant keeps ONLY the billing-recovery allowlist.
+        #[tokio::test]
+        async fn verify_session_rejects_the_forged_token_family() {
+            let Some(pool) = crate::test_db::canonical_pool("waved_mw_session").await else {
+                eprintln!(
+                    "skipping verify_session_rejects_the_forged_token_family: no TEST_DATABASE_URL"
+                );
+                return;
+            };
+            let Some(redis_url) = std::env::var("TEST_REDIS_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                eprintln!(
+                    "skipping verify_session_rejects_the_forged_token_family: no TEST_REDIS_URL"
+                );
+                return;
+            };
+            let config = rsa_config();
+            let state =
+                test_state_over_with_config_and_redis(pool.clone(), config.clone(), &redis_url)
+                    .await;
+            let app = crate::app::build_app(state.clone());
+
+            let (tenant_id, user_id) = seed_session_user(&pool, "active", "active").await;
+
+            // A stream token must never authenticate an API session.
+            let stream_token =
+                mint_token(&config, base_claims(&user_id, &tenant_id, Some("stream")));
+            let (status, body) = bearer_request(&app, &stream_token, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
+
+            // Empty subject / empty tenant claims are refused by name.
+            let empty_sub = mint_token(&config, {
+                let mut claims = base_claims(&user_id, &tenant_id, None);
+                claims.sub = String::new();
+                claims
+            });
+            let (status, _) = bearer_request(&app, &empty_sub, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+
+            let empty_tenant = mint_token(&config, {
+                let mut claims = base_claims(&user_id, &tenant_id, None);
+                claims.tenant_id = String::new();
+                claims
+            });
+            let (status, _) = bearer_request(&app, &empty_tenant, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+
+            // A blacklisted (revoked) token is refused before anything else.
+            let revoked = mint_token(&config, base_claims(&user_id, &tenant_id, Some("session")));
+            let mut conn = state.redis.get().await.expect("redis conn");
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
+                &mut conn,
+                crate::routes::helpers::token_blacklist_key(&revoked),
+                "1",
+                60_u64,
+            )
+            .await;
+            let (status, body) = bearer_request(&app, &revoked, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("revoked"));
+
+            // A disabled user's still-valid token stops authenticating.
+            sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1::uuid")
+                .bind(&user_id)
+                .execute(&pool)
+                .await
+                .expect("disable user");
+            let disabled_token = mint_token(&config, base_claims(&user_id, &tenant_id, None));
+            let (status, body) = bearer_request(&app, &disabled_token, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("disabled"));
+
+            // A vanished workspace is refused by the cached sentinel even
+            // though the user row and token are perfectly valid.
+            let (ghost_tenant, ghost_user) = seed_session_user(&pool, "active", "active").await;
+            let mut conn = state.redis.get().await.expect("redis conn");
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set(
+                &mut conn,
+                tenant_status_cache_key(&ghost_tenant),
+                TENANT_STATUS_CACHE_MISSING,
+            )
+            .await;
+            let ghost_token = mint_token(&config, base_claims(&ghost_user, &ghost_tenant, None));
+            let (status, body) = bearer_request(&app, &ghost_token, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no longer exists"));
+
+            // F18 recovery: a suspended tenant keeps the billing-recovery
+            // allowlist (authentication succeeds) while everything else is
+            // refused with the suspension-specific denial.
+            let (susp_tenant, susp_user) = seed_session_user(&pool, "active", "suspended").await;
+            let susp_token = mint_token(&config, base_claims(&susp_user, &susp_tenant, None));
+            assert!(
+                enforce_tenant_not_restricted(
+                    &state,
+                    &susp_tenant,
+                    &Method::GET,
+                    "/v1/billing/invoices",
+                )
+                .await
+                .is_ok(),
+                "the recovery allowlist must admit GET /v1/billing/invoices"
+            );
+            let (status, body) = bearer_request(&app, &susp_token, "/v1/billing/invoices").await;
+            assert_ne!(
+                status,
+                axum::http::StatusCode::UNAUTHORIZED,
+                "billing recovery must stay reachable for a suspended tenant: {body}"
+            );
+            let (status, body) = bearer_request(&app, &susp_token, "/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("suspended"));
+        }
+
+        /// The API-key cache lifecycle through the REAL router: hits, a
+        /// corrupted entry, an entry with empty required fields, and a key
+        /// whose row vanished mid-flight.
+        #[tokio::test]
+        async fn api_key_cache_survives_corruption_and_vanishing_rows() {
+            let Some(pool) = crate::test_db::canonical_pool("waved_mw_keycache").await else {
+                eprintln!("skipping api_key_cache_survives_corruption_and_vanishing_rows: no TEST_DATABASE_URL");
+                return;
+            };
+            let Some(redis_url) = std::env::var("TEST_REDIS_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                eprintln!("skipping api_key_cache_survives_corruption_and_vanishing_rows: no TEST_REDIS_URL");
+                return;
+            };
+            let (env, tenant_id) =
+                crate::app::test_support::adv::AdvEnv::tenant(pool.clone(), &["*"]).await;
+
+            let profile = "/v1/account/profile";
+            let (first, _) = env.get(profile).await;
+            assert_eq!(first, axum::http::StatusCode::NOT_FOUND);
+            // Second call = Redis cache hit (same verdict, cache path).
+            let (second, _) = env.get(profile).await;
+            assert_eq!(second, first, "cache hit must not change the verdict");
+
+            // Corrupt the cached entry: evicted, DB fallback, still 404.
+            let secret = crate::app::test_support::test_config()
+                .api_key_hash_secret
+                .clone();
+            let hmac = apexmail_lib::hash_api_key_with_secret(&env.credential, &secret);
+            let mut conn = deadpool_redis::Config::from_url(&redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool")
+                .get()
+                .await
+                .expect("redis conn");
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set(
+                &mut conn,
+                format!("{API_KEY_CACHE_PREFIX}{hmac}"),
+                "definitely-not-json",
+            )
+            .await;
+            let (status, _) = env.get(profile).await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+            // A structurally-valid entry with an EMPTY tenant id is evicted
+            // (never authenticated as the empty tenant).
+            let empty_tenant_entry = serde_json::json!({
+                "user": {
+                    "tenant_id": "",
+                    "user_id": null,
+                    "api_key_id": null,
+                    "session_id": null,
+                    "scopes": ["*"]
+                },
+                "expires_at": null
+            });
+            let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set(
+                &mut conn,
+                format!("{API_KEY_CACHE_PREFIX}{hmac}"),
+                empty_tenant_entry.to_string(),
+            )
+            .await;
+            let (status, _) = env.get(profile).await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+            // The row vanishes while its cache entry lives: the last-used
+            // write matches zero rows, the entry is evicted, and the next
+            // request is an honest 401.
+            sqlx::query("DELETE FROM api_keys WHERE tenant_id = $1")
+                .bind(&tenant_id)
+                .execute(&pool)
+                .await
+                .expect("delete key row");
+            let (status, body) = env.get(profile).await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED, "{body}");
+        }
+
+        /// Legacy SHA-256 and Argon2id API keys authenticate through their
+        /// fallback paths and are upgraded to the fast HMAC lookup — and an
+        /// expired Argon2 key stays refused on the fallback scan.
+        #[tokio::test]
+        async fn legacy_and_argon2_api_keys_authenticate_and_upgrade() {
+            let Some(pool) = crate::test_db::canonical_pool("waved_mw_legacy_keys").await else {
+                eprintln!("skipping legacy_and_argon2_api_keys_authenticate_and_upgrade: no TEST_DATABASE_URL");
+                return;
+            };
+            let secret = crate::app::test_support::test_config()
+                .api_key_hash_secret
+                .clone();
+
+            // ── Legacy SHA-256 ──
+            let legacy_raw = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+            let legacy_hash = apexmail_lib::hash_api_key(&legacy_raw);
+            seed_raw_key(&pool, "wvlg", &legacy_hash).await;
+            let env = crate::app::test_support::adv::AdvEnv::over(pool.clone(), legacy_raw).await;
+            let (status, _) = env.get("/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+            // The spawned upgrade re-hashes to Argon2id; wait for it.
+            let key_row: (String,) = sqlx::query_as(
+                "SELECT key_hash FROM api_keys WHERE key_prefix = 'am_test_' ORDER BY created_at DESC LIMIT 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("key row");
+            let mut upgraded = key_row.0 != legacy_hash;
+            for _ in 0..40 {
+                if upgraded {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let key_row: (String,) = sqlx::query_as(
+                    "SELECT key_hash FROM api_keys WHERE key_prefix = 'am_test_' ORDER BY created_at DESC LIMIT 1",
+                )
+                .fetch_one(&pool)
+                .await
+                .expect("key row");
+                upgraded = key_row.0 != legacy_hash;
+            }
+            assert!(upgraded, "the legacy hash must be re-hashed after auth");
+
+            // ── Argon2id (as the upgraded row now carries, or seeded) ──
+            let argon_raw = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+            let argon_hash = apexmail_lib::hash_api_key_argon2(&argon_raw).expect("argon hash");
+            seed_raw_key(&pool, "wvar", &argon_hash).await;
+            let env =
+                crate::app::test_support::adv::AdvEnv::over(pool.clone(), argon_raw.clone()).await;
+            let (status, _) = env.get("/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+            // The fallback upgrades to HMAC for the next lookup.
+            let final_hash = apexmail_lib::hash_api_key_with_secret(&argon_raw, &secret);
+            let stored: String =
+                sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE key_hash = $1")
+                    .bind(&final_hash)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("scan")
+                    .unwrap_or_default();
+            assert_eq!(stored, final_hash, "argon2id key must upgrade to HMAC");
+
+            // ── An EXPIRED Argon2id key is refused on the fallback scan ──
+            let expired_raw = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+            let expired_hash = apexmail_lib::hash_api_key_argon2(&expired_raw).expect("argon hash");
+            let tenant = apexmail_lib::id::generate_id("wvex", 20);
+            sqlx::query(
+                "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, expires_at, created_at, updated_at)
+                 VALUES ($1, $2, 'expired probe', 'am_test_', $3, '[\"*\"]'::jsonb, NOW() - INTERVAL '1 day', NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(&tenant)
+            .bind(&expired_hash)
+            .execute(&pool)
+            .await
+            .expect("seed expired key");
+            let env = crate::app::test_support::adv::AdvEnv::over(pool, expired_raw).await;
+            let (status, _) = env.get("/v1/account/profile").await;
+            assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        }
+
+        async fn seed_raw_key(pool: &sqlx::PgPool, tenant_prefix: &str, hash: &str) -> String {
+            let tenant = apexmail_lib::id::generate_id(tenant_prefix, 20);
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                 VALUES ($1, 'Wave D Keys', $2, 'free', 'active', NOW(), NOW())",
+            )
+            .bind(&tenant)
+            .bind(format!("slug-{tenant}"))
+            .execute(pool)
+            .await
+            .expect("seed tenant");
+            sqlx::query(
+                "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+                 VALUES ($1, $2, 'wave d key', 'am_test_', $3, '[\"*\"]'::jsonb, NOW(), NOW())",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(&tenant)
+            .bind(hash)
+            .execute(pool)
+            .await
+            .expect("seed key");
+            tenant
+        }
+
+        /// The control-plane static key is bound to the CP admin surface:
+        /// the same secret that authenticates /v1/admin/* on the CP host is
+        /// refused everywhere else.
+        #[tokio::test]
+        async fn control_plane_static_key_is_surface_bound() {
+            let Some(pool) = crate::test_db::canonical_pool("waved_mw_cp_key").await else {
+                eprintln!(
+                    "skipping control_plane_static_key_is_surface_bound: no TEST_DATABASE_URL"
+                );
+                return;
+            };
+            let mut config = test_config();
+            config.control_plane_api_key = Some("cp-static-key-wave-d".into());
+            let state = crate::app::test_support::test_state_over_with_config(pool, config).await;
+
+            // On the control-plane host, the admin surface admits the static
+            // key as the system sentinel machine identity.
+            let admitted = authenticate_api_key(
+                "cp-static-key-wave-d",
+                &Method::GET,
+                "/v1/admin/tenants",
+                true,
+                &state,
+            )
+            .await
+            .expect("static key admits on the CP admin surface");
+            assert_eq!(admitted.tenant_id, "system");
+            assert!(admitted.user_id.is_none());
+
+            // The SAME key on a non-admin path is refused.
+            assert!(matches!(
+                authenticate_api_key(
+                    "cp-static-key-wave-d",
+                    &Method::GET,
+                    "/v1/account/profile",
+                    true,
+                    &state,
+                )
+                .await,
+                Err(ApiError::Unauthorized(_))
+            ));
+
+            // The same key OFF the control-plane host is refused even on the
+            // admin path — the secret never becomes a general API key.
+            assert!(matches!(
+                authenticate_api_key(
+                    "cp-static-key-wave-d",
+                    &Method::GET,
+                    "/v1/admin/tenants",
+                    false,
+                    &state,
+                )
+                .await,
+                Err(ApiError::Unauthorized(_))
+            ));
+
+            // A DIFFERENT key never matches the static comparison and falls
+            // through to the (empty) database lookup.
+            assert!(matches!(
+                authenticate_api_key(
+                    "cp-static-key-wave-d-x",
+                    &Method::GET,
+                    "/v1/admin/tenants",
+                    true,
+                    &state,
+                )
+                .await,
+                Err(ApiError::Unauthorized(_))
+            ));
+        }
+
+        /// X-Tenant-ID header injection: a claimed tenant that is not the
+        /// authenticated tenant is refused for BOTH session and API-key
+        /// identities (an API key has no user id, so cross-tenant access is
+        /// structurally unverifiable).
+        #[tokio::test]
+        async fn x_tenant_id_injection_is_refused_for_sessions_and_keys() {
+            let Some(pool) = crate::test_db::canonical_pool("waved_mw_xtenant").await else {
+                eprintln!("skipping x_tenant_id_injection_is_refused: no TEST_DATABASE_URL");
+                return;
+            };
+            let other_tenant = apexmail_lib::id::generate_id("wvot", 20);
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                 VALUES ($1, 'Other Tenant', $2, 'free', 'active', NOW(), NOW())",
+            )
+            .bind(&other_tenant)
+            .bind(format!("slug-{other_tenant}"))
+            .execute(&pool)
+            .await
+            .expect("seed other tenant");
+
+            // Session identity: claiming a foreign tenant is a 403.
+            let Some((env, _t, _u)) =
+                crate::app::test_support::adv::AdvEnv::session(pool.clone(), "owner").await
+            else {
+                eprintln!(
+                    "skipping x_tenant_id_injection session half: TEST_REDIS_URL unreachable"
+                );
+                return;
+            };
+            let response = env
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri("/v1/account/profile")
+                        .header(
+                            axum::http::header::AUTHORIZATION,
+                            format!("Bearer {}", env.credential),
+                        )
+                        .header("x-tenant-id", &other_tenant)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+
+            // API-key identity: same refusal (cannot verify membership).
+            let (env, _tenant) = crate::app::test_support::adv::AdvEnv::tenant(pool, &["*"]).await;
+            let response = env
+                .app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri("/v1/account/profile")
+                        .header("x-api-key", &env.credential)
+                        .header("x-tenant-id", &other_tenant)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        }
+
+        /// The user-status cache invalidation sweep: seeded keys are
+        /// SCANned and UNLINKed by the tenant-wide invalidator.
+        #[tokio::test]
+        async fn tenant_wide_user_status_invalidation_unlinks_every_key() {
+            let Some(redis_url) = std::env::var("TEST_REDIS_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                eprintln!("skipping tenant_wide_user_status_invalidation: no TEST_REDIS_URL");
+                return;
+            };
+            let state =
+                test_state_over_with_config_and_redis(dead_db_pool(), test_config(), &redis_url)
+                    .await;
+            let tenant = apexmail_lib::id::generate_id("wvin", 20);
+            let mut conn = state.redis.get().await.expect("redis conn");
+            for i in 0..3 {
+                let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
+                    &mut conn,
+                    user_status_cache_key(&tenant, &format!("user-{i}")),
+                    "active|owner",
+                    60_u64,
+                )
+                .await;
+            }
+            invalidate_tenant_user_status_cache(&tenant, &state).await;
+            for i in 0..3 {
+                let exists: bool = deadpool_redis::redis::AsyncCommands::exists(
+                    &mut conn,
+                    user_status_cache_key(&tenant, &format!("user-{i}")),
+                )
+                .await
+                .unwrap_or(true);
+                assert!(!exists, "key user-{i} must be unlinked");
+            }
+        }
     }
 }

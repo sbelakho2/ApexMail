@@ -26,6 +26,10 @@ path = "src/main.rs"
 # Workspace crates (reuse only: MX lookup helpers + the canonical warmup schedule)
 apexmail-dns-resolver = { path = "../dns-resolver" }
 mail-common = { path = "../mail-common" }
+# Warmup admission at the SMTP-effect boundary (P0): the relay is the
+# component that can transmit DATA, so it owns the warming-IP daily cap.
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
 
 # Async runtime
 tokio.workspace = true
@@ -62,6 +66,9 @@ anyhow.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "macros"] }
+# The gate tests drive the fake SMTP server through the crate's own
+# test-support surface.
+outbound-mta = { path = ".", features = ["test-support"] }
 # Canonical test fixtures: a PRIVATE migration-chain database per DB test
 # (the shared-table variant raced under nextest's process-per-test model).
 migrator = { path = "../migrator" }

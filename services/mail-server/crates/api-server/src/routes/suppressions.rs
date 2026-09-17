@@ -323,6 +323,12 @@ async fn bulk_suppress(
             .filter(|entry| !existing_set.contains(entry.email.as_str()))
             .collect();
 
+        // Entries that already exist are duplicates too: the response
+        // previously counted only in-file duplicates and chunk-insert races,
+        // silently under-reporting the rows skipped because they were
+        // already stored.
+        duplicates += valid_entries.len() - to_insert.len();
+
         let now = Utc::now();
         for chunk in to_insert.chunks(SUPPRESSION_BULK_CHUNK_SIZE) {
             if chunk.is_empty() {
@@ -509,5 +515,281 @@ mod tests {
 
         assert!(prepared.is_empty());
         assert_eq!(invalid, 1);
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    #[tokio::test]
+    async fn suppression_lifecycle_create_check_list_delete() {
+        let Some(pool) = crate::test_db::canonical_pool("supp_lifecycle").await else {
+            return;
+        };
+        let (env, tenant) =
+            AdvEnv::tenant(pool.clone(), &["suppressions:read", "suppressions:write"]).await;
+        let (other_env, other_tenant) =
+            AdvEnv::tenant(pool.clone(), &["suppressions:read", "suppressions:write"]).await;
+        let _ = other_tenant;
+
+        let email = format!(
+            "victim-{}@example.com",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let (status, body) = env
+            .post(
+                "/v1/suppressions",
+                &serde_json::json!({
+                    "email": email.to_uppercase(),
+                    "reason": "hard bounce",
+                    "source": "api probe"
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body["email"], email,
+            "address is canonicalized to lowercase"
+        );
+        assert_eq!(body["reason"], "hard bounce");
+        assert_eq!(body["source"], "api probe");
+        let id = body["id"].as_str().expect("id").to_string();
+
+        // Duplicate is a 409.
+        let (status, body) = env
+            .post(
+                "/v1/suppressions",
+                &serde_json::json!({ "email": email, "reason": "again" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Check endpoint answers suppressed with the reason (case-insensitive).
+        let (status, body) = env
+            .get(&format!("/v1/suppressions/check/{}", email.to_uppercase()))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["suppressed"], true);
+        assert_eq!(body["reason"], "hard bounce");
+
+        // Another tenant sees the address as clean.
+        let (status, body) = other_env
+            .get(&format!("/v1/suppressions/check/{email}"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["suppressed"], false);
+        assert!(body["reason"].is_null());
+
+        // List is tenant-scoped, newest first, paginated.
+        let (status, body) = env.get("/v1/suppressions").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body.as_array().expect("array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], id);
+        let other_email = format!(
+            "other-{}@example.com",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        env.post(
+            "/v1/suppressions",
+            &serde_json::json!({ "email": other_email, "reason": "complaint" }).to_string(),
+        )
+        .await;
+        let (status, body) = env.get("/v1/suppressions?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        let (status, body) = env
+            .get("/v1/suppressions?limit=99&offset=-4&cursor=1")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body.as_array().map(Vec::len),
+            Some(1),
+            "cursor wins over offset"
+        );
+
+        // Delete is tenant-bound; the neighbour's id is an opaque 404.
+        let (status, body) = other_env.delete(&format!("/v1/suppressions/{id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        let (status, _body) = env.delete(&format!("/v1/suppressions/{id}")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, body) = env.get(&format!("/v1/suppressions/check/{email}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["suppressed"], false,
+            "deleted row no longer suppresses"
+        );
+        // Second delete is 404.
+        let (status, _body) = env.delete(&format!("/v1/suppressions/{id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let _ = tenant;
+    }
+
+    #[tokio::test]
+    async fn suppression_validation_refusals() {
+        let Some(pool) = crate::test_db::canonical_pool("supp_refusals").await else {
+            return;
+        };
+        let (env, _tenant) =
+            AdvEnv::tenant(pool, &["suppressions:write", "suppressions:read"]).await;
+
+        // Invalid emails.
+        for email in ["", "no-at-sign", "@example.com", "a b@example.com"] {
+            let (status, body) = env
+                .post(
+                    "/v1/suppressions",
+                    &serde_json::json!({ "email": email, "reason": "probe" }).to_string(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{email}: {body}");
+        }
+
+        // Reason/source length gates map to 400, never a VARCHAR overflow 500.
+        let (status, body) = env
+            .post(
+                "/v1/suppressions",
+                &serde_json::json!({ "email": "ok@example.com", "reason": "" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = env
+            .post(
+                "/v1/suppressions",
+                &serde_json::json!({ "email": "ok@example.com", "reason": "x".repeat(51) })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let (status, body) = env
+            .post(
+                "/v1/suppressions",
+                &serde_json::json!({ "email": "ok@example.com", "reason": "fine", "source": "s".repeat(101) }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // deny_unknown_fields.
+        let (status, _body) = env
+            .post(
+                "/v1/suppressions",
+                r#"{"email":"ok@example.com","reason":"fine","extra":1}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn bulk_suppress_counts_created_duplicates_and_invalid() {
+        let Some(pool) = crate::test_db::canonical_pool("supp_bulk").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["suppressions:write"]).await;
+        let unique = &uuid::Uuid::new_v4().simple().to_string()[..8];
+
+        // Pre-existing row for the duplicate-in-database arm.
+        let existing = format!("existing-{unique}@example.com");
+        env.post(
+            "/v1/suppressions",
+            &serde_json::json!({ "email": existing, "reason": "already there" }).to_string(),
+        )
+        .await;
+
+        let (status, body) = env
+            .post(
+                "/v1/suppressions/bulk",
+                &serde_json::json!({
+                    "entries": [
+                        { "email": format!("a-{unique}@Example.COM "), "reason": "bounce" },
+                        { "email": format!("A-{unique}@example.com"), "reason": "duplicate within file" },
+                        { "email": "not-an-email", "reason": "invalid" },
+                        { "email": format!("b-{unique}@example.com"), "reason": "" },
+                        { "email": existing, "reason": "duplicate against db" }
+                    ]
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["created"], 1, "one net-new row");
+        assert_eq!(body["invalid"], 2, "bad email + empty reason");
+        assert_eq!(body["duplicates"], 2, "in-file + in-database duplicates");
+
+        // The created row landed with source='bulk' and the canonical email.
+        let (stored_source,): (String,) =
+            sqlx::query_as("SELECT source FROM suppressions WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(format!("a-{unique}@example.com"))
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(stored_source, "bulk");
+
+        // Re-running the identical bulk is all duplicates, nothing new.
+        let (status, body) = env
+            .post(
+                "/v1/suppressions/bulk",
+                &serde_json::json!({
+                    "entries": [
+                        { "email": format!("a-{unique}@example.com"), "reason": "bounce" },
+                        { "email": existing, "reason": "again" }
+                    ]
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["created"], 0);
+        assert_eq!(body["duplicates"], 2);
+
+        // Over the entry cap.
+        let oversized: Vec<serde_json::Value> = (0..10_001)
+            .map(|i| serde_json::json!({ "email": format!("x{i}@example.com"), "reason": "r" }))
+            .collect();
+        let (status, body) = env
+            .post(
+                "/v1/suppressions/bulk",
+                &serde_json::json!({ "entries": oversized }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("10000")
+                || body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("10,000")
+        );
+
+        // deny_unknown_fields.
+        let (status, _body) = env
+            .post("/v1/suppressions/bulk", r#"{"entries":[],"nope":1}"#)
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn suppressions_require_scopes() {
+        let Some(pool) = crate::test_db::canonical_pool("supp_scopes").await else {
+            return;
+        };
+        let (read_only, _t) = AdvEnv::tenant(pool.clone(), &["suppressions:read"]).await;
+        let (status, body) = read_only
+            .post(
+                "/v1/suppressions",
+                &serde_json::json!({ "email": "x@example.com", "reason": "r" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (write_only, _t2) = AdvEnv::tenant(pool, &["suppressions:write"]).await;
+        let (status, body) = write_only.get("/v1/suppressions").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 }

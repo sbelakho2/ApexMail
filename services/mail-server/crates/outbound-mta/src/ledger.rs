@@ -104,6 +104,12 @@ pub struct LedgerStats {
     pub delivering: i64,
     pub accepted: i64,
     pub failed: i64,
+    /// Age of the OLDEST pending row (EXTRACT(EPOCH FROM NOW() -
+    /// MIN(next_attempt_at))), 0 when the queue is empty. This is the
+    /// daemon's queue-drain SLO signal: the poll loop claims due rows every
+    /// OUTBOUND_MTA_POLL_SECS, so an old pending row means the daemon is
+    /// down/wedged or the retry schedule starved legitimate sends.
+    pub oldest_pending_age_secs: i64,
 }
 
 /// Durable ledger failure. Callers fail closed: an unguarded submit would
@@ -129,6 +135,13 @@ impl From<sqlx::Error> for LedgerError {
 /// in-memory test double used by the delivery tests.
 #[async_trait]
 pub trait RelayLedger: Send + Sync {
+    /// The Postgres pool when this ledger is Postgres-backed. Relay-owned
+    /// warmup admission reads the dedicated-IP lifecycle from it; the
+    /// in-memory double returns None (embedded tests inject their own gate).
+    fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        None
+    }
+
     /// Idempotent submission claim (see the module docs).
     async fn claim_submission(
         &self,
@@ -392,6 +405,10 @@ fn lease_deadline(now: DateTime<Utc>, lease: Duration) -> Result<DateTime<Utc>, 
 
 #[async_trait]
 impl RelayLedger for PgLedger {
+    fn pg_pool(&self) -> Option<&PgPool> {
+        Some(&self.pool)
+    }
+
     async fn claim_submission(
         &self,
         new: NewSubmission,
@@ -651,6 +668,13 @@ impl RelayLedger for PgLedger {
                 _ => {}
             }
         }
+        stats.oldest_pending_age_secs = sqlx::query_scalar(
+            "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(next_attempt_at)))::bigint, 0) \
+             FROM outbound_relay_ledger WHERE state = 'pending'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
         Ok(stats)
     }
 }
@@ -924,15 +948,25 @@ pub mod test_support {
         async fn stats(&self) -> Result<LedgerStats, LedgerError> {
             Ok(self.with_entries(|entries| {
                 let mut stats = LedgerStats::default();
+                let mut oldest_pending: Option<DateTime<Utc>> = None;
                 for entry in entries.values() {
                     match entry.state.as_str() {
-                        "pending" => stats.pending += 1,
+                        "pending" => {
+                            stats.pending += 1;
+                            oldest_pending = Some(match oldest_pending {
+                                Some(oldest) if oldest <= entry.next_attempt_at => oldest,
+                                _ => entry.next_attempt_at,
+                            });
+                        }
                         "delivering" => stats.delivering += 1,
                         "accepted" => stats.accepted += 1,
                         "failed" => stats.failed += 1,
                         _ => {}
                     }
                 }
+                stats.oldest_pending_age_secs = oldest_pending
+                    .map(|oldest| (Utc::now() - oldest).num_seconds().max(0))
+                    .unwrap_or(0);
                 stats
             }))
         }

@@ -4,7 +4,6 @@
 //! - GET  /v1/admin/audit/search  — ranked FTS with tsvector/tsquery
 //! - POST /v1/admin/audit/export  — CSV export of filtered audit logs
 
-use std::future::Future;
 // Stream combinators (chain) resolve against futures, not Iterator.
 use futures::StreamExt as _;
 
@@ -469,8 +468,8 @@ async fn audit_export(
         remaining: limit,
     };
 
-    let body_stream =
-        futures::stream::once(async { csv_record_bytes(true, None) }).chain(chunk_state);
+    let body_stream = futures::stream::once(async { csv_record_bytes(true, None) })
+        .chain(export_chunk_stream(chunk_state));
 
     let filename = format!("audit_export_{}.csv", Utc::now().format("%Y%m%dT%H%M%SZ"));
 
@@ -525,20 +524,26 @@ fn build_export_chunk_conditions(state: &ExportChunkState) -> String {
     conditions.join(" AND ")
 }
 
-impl futures::Stream for ExportChunkState {
-    type Item = Result<Vec<u8>, std::io::Error>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        if self.remaining <= 0 {
-            return std::task::Poll::Ready(None);
+/// Chunk stream over [`ExportChunkState`].
+///
+/// Built with `futures::stream::unfold` and NOT a hand-written
+/// `futures::Stream` impl: a manual `poll_next` that constructs the chunk
+/// query future inline (as this stream originally did) polls it ONCE and
+/// then drops it. A Postgres fetch is pending at that first poll, so the
+/// future — and the waker it registered — was destroyed before completion
+/// and nothing ever re-polled the stream: `/v1/admin/audit/export` hung
+/// forever on its first chunk. `unfold` owns the async block across polls,
+/// making the Pending → wake → re-poll contract the executor's, not ours.
+fn export_chunk_stream(
+    state: ExportChunkState,
+) -> impl futures::Stream<Item = Result<Vec<u8>, std::io::Error>> {
+    futures::stream::unfold(state, |mut state| async move {
+        if state.remaining <= 0 {
+            return None;
         }
-        let state = &mut *self;
         let chunk_limit = state.remaining.min(EXPORT_CHUNK_ROWS);
 
-        let conditions = build_export_chunk_conditions(state);
+        let conditions = build_export_chunk_conditions(&state);
         let filter_count = usize::from(state.tenant_id.is_some())
             + usize::from(state.action.is_some())
             + usize::from(state.q.is_some());
@@ -553,35 +558,26 @@ impl futures::Stream for ExportChunkState {
              LIMIT ${limit_idx} OFFSET ${offset_idx}"
         );
 
-        // The future OWNS every bind input (pool clone is an Arc bump):
-        // nothing borrows `state`, so the offset/remaining mutations after
-        // the ready branch stay legal.
-        let window_start = state.window_start;
-        let window_end = state.window_end;
-        let tenant_id = state.tenant_id.clone();
-        let action = state.action.clone();
-        let q = state.q.clone();
-        let offset = state.offset;
-        let pool = state.pool.clone();
+        let mut query = sqlx::query_as::<_, AuditExportRow>(&sql)
+            .bind(state.window_start)
+            .bind(state.window_end);
+        if let Some(ref tenant_id) = state.tenant_id {
+            query = query.bind(tenant_id.clone());
+        }
+        if let Some(ref action) = state.action {
+            query = query.bind(action.clone());
+        }
+        if let Some(ref q) = state.q {
+            query = query.bind(q.clone());
+        }
+        let result = query
+            .bind(chunk_limit)
+            .bind(state.offset)
+            .fetch_all(&state.pool)
+            .await;
 
-        let mut fut = std::pin::pin!(async move {
-            let mut query = sqlx::query_as::<_, AuditExportRow>(&sql)
-                .bind(window_start)
-                .bind(window_end);
-            if let Some(ref tenant_id) = tenant_id {
-                query = query.bind(tenant_id.clone());
-            }
-            if let Some(ref action) = action {
-                query = query.bind(action.clone());
-            }
-            if let Some(ref q) = q {
-                query = query.bind(q.clone());
-            }
-            query.bind(chunk_limit).bind(offset).fetch_all(&pool).await
-        });
-
-        match fut.as_mut().poll(cx) {
-            std::task::Poll::Ready(Ok(rows)) => {
+        match result {
+            Ok(rows) => {
                 let fetched = rows.len() as i64;
                 state.remaining -= fetched;
                 state.offset += fetched;
@@ -590,24 +586,25 @@ impl futures::Stream for ExportChunkState {
                     state.remaining = 0;
                 }
                 if rows.is_empty() {
-                    return std::task::Poll::Ready(None);
+                    return None;
                 }
                 let mut buffer = Vec::with_capacity(rows.len() * 128);
                 for row in &rows {
-                    let record = csv_record_bytes(false, Some(row))?;
-                    buffer.extend_from_slice(&record);
+                    match csv_record_bytes(false, Some(row)) {
+                        Ok(record) => buffer.extend_from_slice(&record),
+                        Err(error) => return Some((Err(error), state)),
+                    }
                 }
-                std::task::Poll::Ready(Some(Ok(buffer)))
+                Some((Ok(buffer), state))
             }
-            std::task::Poll::Ready(Err(error)) => {
+            Err(error) => {
                 // End the body after surfacing the failure — a truncated,
                 // error-terminated download beats a hung one.
                 state.remaining = 0;
-                std::task::Poll::Ready(Some(Err(std::io::Error::other(error))))
+                Some((Err(std::io::Error::other(error)), state))
             }
-            std::task::Poll::Pending => std::task::Poll::Pending,
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -785,5 +782,234 @@ mod tests {
             .is_ok(),
             "an 89-day window must be accepted"
         );
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_audit_row(
+        pool: &sqlx::PgPool,
+        tenant_id: &str,
+        action: &str,
+        details: serde_json::Value,
+    ) {
+        crate::audit_log::insert_audit_log(
+            pool,
+            Some(tenant_id),
+            None,
+            action,
+            "probe_resource",
+            Some("res-1"),
+            details,
+            Some("198.51.100.9"),
+            Some("probe-agent"),
+        )
+        .await
+        .expect("seed audit row");
+    }
+
+    #[tokio::test]
+    async fn audit_search_filters_rank_and_paginates() {
+        let Some(pool) = crate::test_db::canonical_pool("asearch_main").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = format!("srch{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+        seed_audit_row(
+            &pool,
+            &tenant,
+            "probe.alpha",
+            serde_json::json!({"note": "billing invoice adjustment"}),
+        )
+        .await;
+        seed_audit_row(
+            &pool,
+            &tenant,
+            "probe.beta",
+            serde_json::json!({"note": "unrelated content"}),
+        )
+        .await;
+        seed_audit_row(
+            &pool,
+            "other-tenant",
+            "probe.gamma",
+            serde_json::json!({"note": "billing"}),
+        )
+        .await;
+
+        // Full-text search finds the billing rows across tenants.
+        let (status, body) = env.get("/v1/admin/audit/search?q=billing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let results = body["results"].as_array().cloned().unwrap_or_default();
+        assert_eq!(results.len(), 2, "{body}");
+        assert!(results
+            .iter()
+            .all(|r| r["rank"].as_f64().unwrap_or(0.0) > 0.0));
+        assert!(results[0]["highlights"]["headline"].is_string());
+
+        // Tenant filter scopes.
+        let (status, body) = env
+            .get(&format!(
+                "/v1/admin/audit/search?tenantId={tenant}&q=billing"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["total"], 1);
+
+        // Action filter (no FTS: rank is exactly 0).
+        let (status, body) = env
+            .get(&format!("/v1/admin/audit/search?action=probe.beta"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let results = body["results"].as_array().cloned().unwrap_or_default();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["action"], "probe.beta");
+        assert_eq!(results[0]["rank"], 0.0);
+        assert_eq!(results[0]["ipAddress"], "198.51.100.9");
+
+        // Pagination: limit clamps, offset pages, echoes resolved values.
+        let (status, body) = env.get("/v1/admin/audit/search?limit=1&offset=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["offset"], 1);
+        assert_eq!(body["results"].as_array().map(Vec::len), Some(1));
+
+        // Hostile params: negative offset floors to 0; huge limit clamps.
+        let (status, body) = env
+            .get("/v1/admin/audit/search?limit=99999&offset=-9")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["limit"], 200);
+        assert_eq!(body["offset"], 0);
+    }
+
+    #[tokio::test]
+    async fn audit_search_window_validation() {
+        let Some(pool) = crate::test_db::canonical_pool("asearch_window").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool).await;
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let past = (chrono::Utc::now() - chrono::Duration::days(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        // Malformed timestamps are a 400 naming the field.
+        let (status, body) = env.get("/v1/admin/audit/search?from=yesterday").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]["details"].as_array().is_some_and(|d| d
+            .iter()
+            .any(|x| x.as_str().is_some_and(|x| x.contains("from")))));
+
+        // Inverted range.
+        let (status, body) = env
+            .get(&format!("/v1/admin/audit/search?from={now}&to={past}"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Over-90-day window.
+        let far = (chrono::Utc::now() - chrono::Duration::days(91))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let (status, body) = env
+            .get(&format!("/v1/admin/audit/search?from={far}&to={now}"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Exactly 90 days is fine.
+        let edge = (chrono::Utc::now() - chrono::Duration::days(90))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let (status, _body) = env
+            .get(&format!("/v1/admin/audit/search?from={edge}&to={now}"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // deny_unknown_fields on the query.
+        let (status, _body) = env.get("/v1/admin/audit/search?surprise=1").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn audit_export_streams_csv_and_escapes_and_audits_itself() {
+        let Some(pool) = crate::test_db::canonical_pool("aexport").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = format!("exp{}", &uuid::Uuid::new_v4().simple().to_string()[..19]);
+        seed_audit_row(
+            &pool,
+            &tenant,
+            "export,probe",
+            serde_json::json!({"k": "v"}),
+        )
+        .await;
+
+        let (status, headers, bytes) = env
+            .post_raw(
+                "/v1/admin/audit/export",
+                &serde_json::json!({ "tenantId": tenant }).to_string(),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            headers.get("content-type").and_then(|v| v.to_str().ok()),
+            Some("text/csv; charset=utf-8")
+        );
+        assert!(headers
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|d| d.starts_with("attachment; filename=\"audit_export_")));
+        let csv = String::from_utf8(bytes).expect("utf8 csv");
+        // Header row + the seeded row, with the comma escaped by quoting.
+        assert!(csv.starts_with("timestamp,action,resource,"), "{csv}");
+        assert!(
+            csv.contains("\"export,probe\""),
+            "CSV quoting of embedded commas: {csv}"
+        );
+        assert!(csv.contains(&tenant));
+
+        // The export audited itself.
+        let (action,): (String,) = sqlx::query_as(
+            "SELECT action FROM audit_logs WHERE action = 'control_plane.audit.exported' LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("export audit");
+        assert_eq!(action, "control_plane.audit.exported");
+
+        // Export window validation mirrors search.
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let status = env
+            .post_raw(
+                "/v1/admin/audit/export",
+                &serde_json::json!({ "from": "not-a-time", "to": now }).to_string(),
+            )
+            .await
+            .0;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn audit_search_gates() {
+        let Some(pool) = crate::test_db::canonical_pool("asearch_gates").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["audit:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        let (status, body) = scoped.get("/v1/admin/audit/search").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (customer, _tenant) = AdvEnv::tenant(pool, &["*"]).await;
+        let (status, _body) = customer.get("/v1/admin/audit/search").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

@@ -140,17 +140,21 @@ async fn list_warmup(
         return Ok(Json(vec![]));
     }
 
-    // Fetch addresses for all pools
+    // Fetch addresses for all pools. Canonical ip_pool_addresses ids are
+    // UUIDs and ip_address is INET — both cast to text at the boundary so
+    // the String row decode matches the canonical schema.
     let addr_rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        "SELECT id, pool_id, ip_address, status FROM ip_pool_addresses WHERE pool_id = ANY($1)",
+        "SELECT id::text AS id, pool_id, ip_address::text AS ip_address, status \
+         FROM ip_pool_addresses WHERE pool_id = ANY($1)",
     )
     .bind(&pool_ids)
     .fetch_all(db)
     .await?;
 
-    // Fetch schedules for all pools
+    // Fetch schedules for all pools (canonical ids are UUIDs — cast to text).
     let schedule_rows: Vec<(String, String, i32, i64, Option<i64>, String)> = sqlx::query_as(
-        "SELECT id, pool_id, day, target_volume, actual_volume, status FROM isp_warmup_schedules WHERE pool_id = ANY($1) ORDER BY day ASC",
+        "SELECT id::text AS id, pool_id, day, target_volume, actual_volume, status \
+         FROM isp_warmup_schedules WHERE pool_id = ANY($1) ORDER BY day ASC",
     )
     .bind(&pool_ids)
     .fetch_all(db)
@@ -349,5 +353,208 @@ mod tests {
                  advisory and the live control is the canonical per-IP path"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_pool_with_plan(pool: &sqlx::PgPool, name: &str, status: &str) -> String {
+        let pool_id = apexmail_lib::id::generate_id("ipp", 22);
+        let ip = format!("192.0.2.{}", uuid::Uuid::new_v4().as_bytes()[0]);
+        sqlx::query("INSERT INTO ip_pools (id, name, status) VALUES ($1, $2, $3)")
+            .bind(&pool_id)
+            .bind(name)
+            .bind(status)
+            .execute(pool)
+            .await
+            .expect("seed ip pool");
+        sqlx::query(
+            "INSERT INTO ip_pool_addresses (id, pool_id, ip_address, status)
+             VALUES ($1, $2, $3::inet, 'active')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&pool_id)
+        .bind(&ip)
+        .execute(pool)
+        .await
+        .expect("seed pool address");
+        for day in 1..=2i32 {
+            sqlx::query(
+                "INSERT INTO isp_warmup_schedules (id, pool_id, day, target_volume, actual_volume, status)
+                 VALUES ($1, $2, $3, $4, $5, 'active')",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(&pool_id)
+            .bind(day)
+            .bind((day as i64) * 500)
+            .bind(Option::<i64>::Some(120))
+            .execute(pool)
+            .await
+            .expect("seed warmup schedule");
+        }
+        pool_id
+    }
+
+    #[tokio::test]
+    async fn warmup_lists_the_advisory_plan_with_addresses_and_schedules() {
+        let Some(pool) = crate::test_db::canonical_pool("warmup_list").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        seed_pool_with_plan(&pool, "Primary", "active").await;
+
+        let (status, body) = env.get("/v1/admin/warmup").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let pools = body.as_array().expect("array");
+        assert_eq!(pools.len(), 1);
+        assert_eq!(pools[0]["name"], "Primary");
+        assert_eq!(pools[0]["status"], "active");
+        assert_eq!(pools[0]["advisory"], true);
+        let addresses = pools[0]["addresses"].as_array().expect("addresses");
+        assert_eq!(addresses.len(), 1);
+        // INET::text renders in CIDR form (192.0.2.x/32).
+        assert!(addresses[0]["ipAddress"]
+            .as_str()
+            .is_some_and(|ip| ip.starts_with("192.0.2.")));
+        let schedules = pools[0]["schedules"].as_array().expect("schedules");
+        assert_eq!(schedules.len(), 2);
+        assert_eq!(schedules[0]["day"], 1);
+        assert_eq!(schedules[0]["targetVolume"], 500);
+        assert_eq!(schedules[0]["actualVolume"], 120);
+        assert_eq!(schedules[0]["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn warmup_empty_state_and_pagination_clamps() {
+        let Some(pool) = crate::test_db::canonical_pool("warmup_empty").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        seed_pool_with_plan(&pool, "Pool-A", "pending").await;
+        seed_pool_with_plan(&pool, "Pool-B", "paused").await;
+
+        let (status, body) = env.get("/v1/admin/warmup?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        let (status, body) = env.get("/v1/admin/warmup?limit=0&offset=-4").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1), "limit clamps to 1");
+    }
+
+    #[tokio::test]
+    async fn warmup_actions_toggle_status_reset_clears_and_audit() {
+        let Some(pool) = crate::test_db::canonical_pool("warmup_actions").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let pool_id = seed_pool_with_plan(&pool, "Actionable", "active").await;
+
+        // pause → paused, advisory flags explicit.
+        let (status, headers, bytes) = env
+            .post_raw(
+                "/v1/admin/warmup",
+                &serde_json::json!({ "poolId": pool_id, "action": "pause" }).to_string(),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["advisory"], true);
+        assert_eq!(body["admissionControl"], false);
+        assert_eq!(body["status"], "paused");
+        assert!(headers.contains_key("content-type"));
+
+        // start → active again.
+        let (status, body) = env
+            .post(
+                "/v1/admin/warmup",
+                &serde_json::json!({ "poolId": pool_id, "action": "start" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "active");
+
+        // reset → pending AND the plan rows reset.
+        let (status, body) = env
+            .post(
+                "/v1/admin/warmup",
+                &serde_json::json!({ "poolId": pool_id, "action": "reset" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "pending");
+        let (sched_status, actual): (String, Option<i64>) = sqlx::query_as(
+            "SELECT status, actual_volume FROM isp_warmup_schedules WHERE pool_id = $1 AND day = 1",
+        )
+        .bind(&pool_id)
+        .fetch_one(&pool)
+        .await
+        .expect("schedule row");
+        assert_eq!(sched_status, "pending");
+        assert!(actual.is_none(), "reset clears actual_volume");
+
+        // The audit trail carries actor-attributed entries per action.
+        let actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM audit_logs WHERE resource_id = $1 ORDER BY action",
+        )
+        .bind(&pool_id)
+        .fetch_all(&pool)
+        .await
+        .expect("audit rows");
+        assert!(actions.contains(&"warmup.start".to_string()));
+        assert!(actions.contains(&"warmup.pause".to_string()));
+        assert!(actions.contains(&"warmup.reset".to_string()));
+    }
+
+    #[tokio::test]
+    async fn warmup_action_refusals() {
+        let Some(pool) = crate::test_db::canonical_pool("warmup_refusals").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let pool_id = seed_pool_with_plan(&pool, "Refusal", "pending").await;
+
+        // Unknown action.
+        let (status, body) = env
+            .post(
+                "/v1/admin/warmup",
+                &serde_json::json!({ "poolId": pool_id, "action": "detonate" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Unknown pool id.
+        let (status, body) = env
+            .post(
+                "/v1/admin/warmup",
+                &serde_json::json!({ "poolId": "ipp_missing", "action": "start" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Unknown body fields.
+        let (status, _body) = env
+            .post(
+                "/v1/admin/warmup",
+                &serde_json::json!({ "poolId": pool_id, "action": "start", "force": true })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Scope gate.
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["warmup:read"]).await;
+        let scoped = AdvEnv::over(pool, key).await;
+        let (status, body) = scoped.get("/v1/admin/warmup").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 }

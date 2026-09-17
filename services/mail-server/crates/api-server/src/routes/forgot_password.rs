@@ -322,3 +322,280 @@ mod tests {
         assert_eq!(html_escape("plain text"), "plain text");
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::extract::ConnectInfo;
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+
+    const CSRF_SECRET: &str = "test-csrf-secret-1234567890abcd";
+
+    fn csrf_header() -> String {
+        ui_foundation::csrf::generate_csrf_token(CSRF_SECRET)
+    }
+
+    /// Make the platform sender READY: generate + encrypt DKIM material for
+    /// the seeded system domain and mark it verified (mirrors what the
+    /// system-sender bootstrap + verification flow leaves behind).
+    async fn make_system_sender_ready(pool: &sqlx::PgPool) {
+        use apexmail_lib::dkim::{
+            dkim_private_key_aad, encrypt_dkim_private_key, generate_dkim_keypair,
+        };
+        // Set the env under the lock, then drop the guard before any await
+        // (clippy: std MutexGuard must not live across await points).
+        {
+            let _guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+            );
+        }
+        let domain_id: uuid::Uuid =
+            sqlx::query_scalar("SELECT id FROM domains WHERE tenant_id = $1 FOR UPDATE")
+                .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+                .fetch_one(pool)
+                .await
+                .expect("system domain row");
+        let key_pair = generate_dkim_keypair().expect("keypair");
+        let aad = dkim_private_key_aad(
+            crate::routes::system_sender::SYSTEM_TENANT_ID,
+            &domain_id.to_string(),
+        );
+        let encrypted = encrypt_dkim_private_key(&key_pair.private_key_pem, &aad).expect("encrypt");
+        let public_b64 = key_pair.public_key;
+        sqlx::query(
+            "UPDATE domains
+                SET status = 'verified', dkim_enabled = true, dkim_selector = 'apexmail',
+                    dkim_public_key = $2, dkim_private_key = $3, ses_verified = true
+              WHERE id = $1",
+        )
+        .bind(domain_id)
+        .bind(public_b64)
+        .bind(encrypted)
+        .execute(pool)
+        .await
+        .expect("ready the sender");
+    }
+
+    async fn post_forgot(
+        env: &crate::app::test_support::adv::AdvEnv,
+        csrf: Option<&str>,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        use axum::body::Body;
+        let mut builder = axum::http::Request::post("/v1/auth/forgot-password")
+            .header("content-type", "application/json");
+        if let Some(token) = csrf {
+            builder = builder.header("x-csrf-token", token);
+        }
+        let mut request = builder.body(Body::from(body.to_string())).unwrap();
+        if let Some(addr) = env.client_ip {
+            request.extensions_mut().insert(ConnectInfo(addr));
+        }
+        let response = env.app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// Deterministic per-test client identity: a fixed TEST-NET-3 address
+    /// whose rate-limit bucket is DELETED up front, so reruns and parallel
+    /// tests never inherit or share state.
+    async fn env_with_ip(pool: sqlx::PgPool, ip: [u8; 4]) -> crate::app::test_support::adv::AdvEnv {
+        let mut env = crate::app::test_support::adv::AdvEnv::admin(pool).await;
+        env.client_ip = Some(std::net::SocketAddr::from((ip, 40000)));
+        if let Ok(redis) = deadpool_redis::Config::from_url(
+            std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into()),
+        )
+        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        {
+            if let Ok(mut conn) = redis.get().await {
+                let key = format!(
+                    "apexmail:forgot_password_rate:ip:{}.{}.{}.{}",
+                    ip[0], ip[1], ip[2], ip[3]
+                );
+                let _: Result<(), _> =
+                    deadpool_redis::redis::AsyncCommands::del(&mut conn, key).await;
+            }
+        }
+        env
+    }
+
+    #[tokio::test]
+    async fn forgot_password_validation_gates_come_first() {
+        let Some(pool) = crate::test_db::canonical_pool("forgot_gates").await else {
+            return;
+        };
+        let env = env_with_ip(pool, [198, 51, 100, 77]).await;
+
+        // Missing CSRF header.
+        let (status, body) = post_forgot(&env, None, r#"{"email":"a@example.com"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Invalid CSRF token.
+        let (status, body) =
+            post_forgot(&env, Some("garbage.token"), r#"{"email":"a@example.com"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Malformed emails (empty, over-length, no @).
+        for email in ["", "x".repeat(255).as_str(), "not-an-email"] {
+            let (status, body) = post_forgot(
+                &env,
+                Some(&csrf_header()),
+                &serde_json::json!({ "email": email }).to_string(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{email}: {body}");
+        }
+
+        // deny_unknown_fields.
+        let (status, _body) = post_forgot(
+            &env,
+            Some(&csrf_header()),
+            r#"{"email":"a@example.com","extra":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn forgot_password_is_non_enumerating_and_queues_the_reset_email() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("forgot_ok").await else {
+            return;
+        };
+        let env = env_with_ip(pool.clone(), [198, 51, 100, 78]).await;
+
+        // Sender NOT ready: the service-level refusal applies to every
+        // address equally (no enumeration oracle). The email is unique per
+        // run: the email-based limiter bucket is keyed by address hash and
+        // persists in Redis across reruns.
+        let probe_email = format!(
+            "nobody-{}@example.com",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        );
+        let (status, body) = post_forgot(
+            &env,
+            Some(&csrf_header()),
+            &serde_json::json!({ "email": probe_email }).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+
+        make_system_sender_ready(&pool).await;
+
+        // Unknown email: identical success, nothing queued (unique per run,
+        // same email-bucket rationale).
+        let ghost_email = format!(
+            "ghost-{}@example.com",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        );
+        let (status, body) = post_forgot(
+            &env,
+            Some(&csrf_header()),
+            &serde_json::json!({ "email": ghost_email }).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["success"], true);
+        let queued: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE subject LIKE 'Reset your%'")
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(queued, 0, "no mail for unknown addresses");
+
+        // Known active user: token stored, mail queued under the system tenant.
+        let user_id = uuid::Uuid::new_v4();
+        let email = format!("reset-{user_id}@example.com");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1::uuid, $2, $3, 'Reset Target', 'x', 'owner', 'active', true)",
+        )
+        .bind(user_id)
+        .bind("system_internal_tenant01")
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("seed user");
+
+        let (status, body) = post_forgot(
+            &env,
+            Some(&csrf_header()),
+            &serde_json::json!({ "email": email.to_uppercase() }).to_string(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["success"], true);
+
+        let (token_hash, expires): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT metadata->>'password_reset_token_hash', metadata->>'password_reset_expires' \
+             FROM users WHERE id = $1::uuid",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("user row");
+        assert!(token_hash.is_some(), "reset token hash stored");
+        assert!(expires.is_some());
+
+        let (subject, html): (String, String) = sqlx::query_as(
+            "SELECT subject, html FROM email_queue WHERE to_addresses = ARRAY[$1] LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("queued reset email");
+        assert!(subject.contains("Reset your ApexMail password"));
+        // CWE-598: the token rides the PATH, never the query string.
+        assert!(html.contains("/reset-password/"), "{subject}");
+        assert!(!html.contains("token="), "no query-string token leakage");
+    }
+
+    #[tokio::test]
+    async fn forgot_password_rate_limits_by_ip_and_email() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("forgot_rate").await else {
+            return;
+        };
+        let env = env_with_ip(pool.clone(), [198, 51, 100, 79]).await;
+        make_system_sender_ready(&pool).await;
+
+        // 5 requests from this client's bucket: the 6th is 429.
+        let mut saw_limit = false;
+        for i in 0..6 {
+            let (status, _body) = post_forgot(
+                &env,
+                Some(&csrf_header()),
+                &serde_json::json!({ "email": format!("victim{i}@example.com") }).to_string(),
+            )
+            .await;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                saw_limit = true;
+                break;
+            }
+            assert_eq!(status, StatusCode::OK, "request {i}");
+        }
+        assert!(saw_limit, "the IP bucket must cap at 5 per window");
+    }
+}

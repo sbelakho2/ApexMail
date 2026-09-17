@@ -465,3 +465,241 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::{query_dashboard_snapshot, query_new_alerts};
+    use axum::http::StatusCode;
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    /// Issue an SSE request and return (status, content-type, FIRST stream
+    /// frame text). Only the first frame is awaited: the live-poll loop
+    /// sleeps 5-10s per tick by design, so a full drain would be a slow
+    /// test; the bounded-stream semantics are already pinned by the
+    /// paused-time tests on `build_alerts_stream` above.
+    async fn sse_first_frame(env: &AdvEnv, uri: &str) -> (StatusCode, String, Option<String>) {
+        let request = axum::http::Request::get(uri)
+            .header("x-api-key", &env.credential)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = env.app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let (mut parts, body) = response.into_parts();
+        let _ = &mut parts;
+        let mut stream = body.into_data_stream();
+        let mut first = String::new();
+        // The alerts backlog is emitted immediately; the dashboard's first
+        // snapshot arrives after its 5s tick, so take whatever is ready.
+        if let Ok(Some(Ok(bytes))) =
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next()).await
+        {
+            first = String::from_utf8_lossy(&bytes).to_string();
+        }
+        (
+            status,
+            content_type,
+            if first.is_empty() { None } else { Some(first) },
+        )
+    }
+
+    #[tokio::test]
+    async fn dashboard_sse_answers_with_an_event_stream() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_dash").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'sse probe', $2, 'free', 'active')",
+        )
+        .bind(format!("sset{}", &uuid::Uuid::new_v4().simple().to_string()[..17]))
+        .bind("sse-slug")
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let (status, content_type, _first) =
+            sse_first_frame(&env, "/v1/admin/dashboard/sse/dashboard").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "{content_type}"
+        );
+    }
+
+    #[tokio::test]
+    async fn alerts_sse_replays_the_backlog_immediately() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_alerts").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        // Canonical severity vocabulary: info/warning/critical.
+        sqlx::query(
+            "INSERT INTO system_alerts (id, severity, alert_type, message, acknowledged, created_at)
+             VALUES ($1, 'critical', 'delivery', 'alert backlog probe', false, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed alert");
+
+        let (status, content_type, first) =
+            sse_first_frame(&env, "/v1/admin/dashboard/sse/alerts").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "{content_type}"
+        );
+        let first = first.expect("the 24h backlog streams immediately");
+        assert!(first.contains("event: alert"), "{first}");
+        assert!(first.contains("alert backlog probe"), "{first}");
+        assert!(first.contains("\"severity\":\"critical\""), "{first}");
+        // component falls back to alert_type when the column is empty.
+        assert!(first.contains("\"component\":\"delivery\""), "{first}");
+    }
+
+    #[tokio::test]
+    async fn sse_routes_require_the_wildcard_scope() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_scope").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["dashboard:read"]).await;
+        let env = AdvEnv::over(pool, key).await;
+        for uri in [
+            "/v1/admin/dashboard/sse/dashboard",
+            "/v1/admin/dashboard/sse/alerts",
+        ] {
+            let (status, _ct, _first) = sse_first_frame(&env, uri).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+    }
+
+    // ── The snapshot queries the streams poll (direct, deterministic) ──
+
+    #[tokio::test]
+    async fn dashboard_snapshot_aggregates_tenants_queue_mrr_and_health() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_snapshot").await else {
+            return;
+        };
+        // One active tenant (the seeded system tenant is active already);
+        // seed plan + active stripe subscription so MRR is non-zero.
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, description, price_monthly, price_yearly,
+                                email_limit, api_call_limit, features, is_active, sort_order)
+             VALUES ('plan_sse_probe', 'sse-probe', 'SSE Probe', '', 12000, 120000, 0, 0,
+                     '{}'::jsonb, true, 0)
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed plan");
+        sqlx::query("UPDATE tenants SET plan = 'sse-probe' WHERE id = 'system_internal_tenant01'")
+            .execute(&pool)
+            .await
+            .expect("set plan");
+        sqlx::query(
+            "INSERT INTO stripe_subscriptions
+                (id, tenant_id, stripe_subscription_id, status, billing_interval)
+             VALUES ($1, 'system_internal_tenant01', 'sub_sse_probe', 'active', 'monthly')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed subscription");
+
+        // No unacknowledged critical/high alerts: healthy.
+        let snapshot = query_dashboard_snapshot(&pool).await.expect("snapshot");
+        assert!(snapshot.tenants >= 1);
+        assert_eq!(snapshot.mrr, 120.0, "monthly price in currency units");
+        assert_eq!(snapshot.queue, 0);
+        assert_eq!(snapshot.health_status.as_deref(), Some("healthy"));
+
+        // One unacknowledged critical alert degrades health.
+        sqlx::query(
+            "INSERT INTO system_alerts (id, severity, alert_type, message, acknowledged)
+             VALUES ($1, 'critical', 'delivery', 'degrade probe', false)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed critical alert");
+        let snapshot = query_dashboard_snapshot(&pool).await.expect("snapshot");
+        assert_eq!(snapshot.health_status.as_deref(), Some("degraded"));
+
+        // Five unacknowledged critical alerts take it down.
+        for _ in 0..4 {
+            sqlx::query(
+                "INSERT INTO system_alerts (id, severity, alert_type, message, acknowledged)
+                 VALUES ($1, 'critical', 'delivery', 'downward probe', false)",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .expect("seed critical alert");
+        }
+        let snapshot = query_dashboard_snapshot(&pool).await.expect("snapshot");
+        assert_eq!(snapshot.health_status.as_deref(), Some("down"));
+
+        // Acknowledged alerts never count.
+        sqlx::query("UPDATE system_alerts SET acknowledged = true")
+            .execute(&pool)
+            .await
+            .expect("acknowledge all");
+        let snapshot = query_dashboard_snapshot(&pool).await.expect("snapshot");
+        assert_eq!(snapshot.health_status.as_deref(), Some("healthy"));
+
+        // Yearly subscriptions normalise to price_yearly/12.
+        sqlx::query("UPDATE stripe_subscriptions SET billing_interval = 'yearly'")
+            .execute(&pool)
+            .await
+            .expect("flip interval");
+        let snapshot = query_dashboard_snapshot(&pool).await.expect("snapshot");
+        assert_eq!(snapshot.mrr, 100.0, "120000 cents / 12 months / 100");
+    }
+
+    #[tokio::test]
+    async fn new_alerts_query_scopes_by_time_and_maps_fields() {
+        let Some(pool) = crate::test_db::canonical_pool("sse_new_alerts").await else {
+            return;
+        };
+        let fresh = query_new_alerts(&pool, chrono::Utc::now() - chrono::Duration::hours(1))
+            .await
+            .expect("query");
+        assert!(fresh.is_empty(), "no backlog in a fresh database");
+
+        sqlx::query(
+            "INSERT INTO system_alerts (id, severity, alert_type, message, acknowledged, created_at)
+             VALUES ($1, 'warning', 'backup', 'fresh warning', false, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed warning");
+        sqlx::query(
+            "INSERT INTO system_alerts (id, severity, alert_type, message, acknowledged, created_at)
+             VALUES ($1, 'info', 'legacy', 'ancient info', false, NOW() - INTERVAL '3 days')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed old info");
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(24);
+        let alerts = query_new_alerts(&pool, since).await.expect("query");
+        assert_eq!(alerts.len(), 1, "only the in-window alert is returned");
+        assert_eq!(alerts[0].severity, "warning");
+        assert_eq!(alerts[0].message, "fresh warning");
+        assert_eq!(alerts[0].component.as_deref(), Some("backup"));
+        assert!(!alerts[0].acknowledged);
+        assert!(alerts[0].timestamp.contains('T'));
+    }
+}

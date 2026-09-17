@@ -130,14 +130,18 @@ async fn cancel_challenge_handler(
     State(state): State<AppState>,
     Json(body): Json<CancelChallengeRequest>,
 ) -> axum::http::StatusCode {
-    // Shape-validate the nonce before it becomes part of a Redis key:
-    // canonical base64url characters, bounded length — anything else is
-    // ignored (the record still expires via TTL).
+    // Shape-validate the nonce before it becomes part of a Redis key.
+    // kiwicaptcha mints nonces with the STANDARD base64 alphabet (see
+    // challenge.rs: `base64::engine::general_purpose::STANDARD`), so the
+    // accepted charset must include `+`, `/` and the `=` padding — the
+    // previous base64url-only check silently dropped ~29% of real nonces
+    // (any containing those characters), leaving their records to linger
+    // until TTL instead of being retired.
     let nonce = body.nonce.trim();
     let well_formed = (1..=64).contains(&nonce.len())
         && nonce
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+' | b'/' | b'='));
     if !well_formed {
         return axum::http::StatusCode::NO_CONTENT;
     }
@@ -233,7 +237,13 @@ async fn issue_challenge_handler(
         .map(|ConnectInfo(addr)| {
             extract_public_client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
         })
-        .unwrap_or_else(|| "unknown".to_string());
+        // The fallback MUST be a parseable IP: the challenge's IP-binding tag
+        // parses this string (kiwicaptcha::binding_tag), and the previous
+        // "unknown" sentinel made EVERY fallback issuance fail with 500
+        // (SignError::InvalidIp). 0.0.0.0 keeps the shared-bucket semantics
+        // (all unidentified clients rate-limit together) while remaining a
+        // valid binding input.
+        .unwrap_or_else(|| "0.0.0.0".to_string());
 
     // Per-IP rate limiting: prevent bots from requesting thousands of
     // challenges. PRIVACY: the key is a keyed digest of the IP
@@ -444,5 +454,207 @@ mod tests {
                 .query_async(&mut *conn)
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use crate::app::test_support::adv::AdvEnv;
+
+    fn kiwi_config(enabled: bool, secret: &str) -> crate::config::Config {
+        let mut config = crate::app::test_support::test_config();
+        config.kiwi_enabled = enabled;
+        config.kiwi_secret_key = secret.into();
+        config.kiwi_difficulty_bits = 8; // cheap for tests
+        config.kiwi_algorithm = kiwicaptcha::PoWAlgorithm::Sha256;
+        config
+    }
+
+    async fn redis_available() -> bool {
+        let Some(url) = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        else {
+            return false;
+        };
+        let Ok(pool) = deadpool_redis::Config::from_url(&url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        else {
+            return false;
+        };
+        let Ok(mut conn) = pool.get().await else {
+            return false;
+        };
+        deadpool_redis::redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn dev_secret_in_debug_builds_yields_the_bypass_challenge() {
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_dev").await else {
+            return;
+        };
+        // kiwi_enabled=false + secret "dev" → the dev bypass arm wins first.
+        let env = AdvEnv::over_with_config(pool, kiwi_config(false, "dev"), "unused".into()).await;
+        let (status, body) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["nonce"], "dev");
+        assert_eq!(body["algorithm"], "sha256");
+        assert_eq!(body["ttlSecs"], 120);
+        assert_eq!(body["prefix"], "dev|dev|");
+    }
+
+    #[tokio::test]
+    async fn disabled_captcha_is_service_unavailable() {
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_disabled").await else {
+            return;
+        };
+        // Non-"dev" secret skips the debug bypass and hits the enablement gate.
+        let env =
+            AdvEnv::over_with_config(pool, kiwi_config(false, "not-dev"), "unused".into()).await;
+        let (status, body) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "{body}"
+        );
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not enabled"));
+    }
+
+    #[tokio::test]
+    async fn invalid_scope_is_rejected_before_any_state_changes() {
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_scope").await else {
+            return;
+        };
+        let env =
+            AdvEnv::over_with_config(pool, kiwi_config(true, "kiwi-test-secret"), "unused".into())
+                .await;
+        let (status, body) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"admin-login"}"#)
+            .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        // deny_unknown_fields on the wire shape.
+        let (status, _body) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"login","extra":1}"#)
+            .await;
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn challenge_issuance_persists_and_rate_limits_per_ip() {
+        if !redis_available().await {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_issue").await else {
+            return;
+        };
+        let mut env = AdvEnv::over_with_config(
+            pool.clone(),
+            kiwi_config(true, "kiwi-test-secret"),
+            "unused".into(),
+        )
+        .await;
+        let octet = uuid::Uuid::new_v4().as_bytes()[0];
+        env.client_ip = Some(std::net::SocketAddr::from(([198, 51, 100, octet], 40000)));
+
+        let (status, body) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let nonce = body["nonce"].as_str().expect("nonce").to_string();
+        assert!(!nonce.is_empty());
+        assert_eq!(body["algorithm"], "sha256");
+        assert!(body["ttlSecs"].as_u64().unwrap_or_default() > 0);
+        assert!(body["prefix"].as_str().is_some_and(|p| !p.is_empty()));
+
+        // The record is stored in Redis under the nonce, single-use TTL'd.
+        let redis_url = std::env::var("TEST_REDIS_URL").unwrap();
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let mut conn = redis.get().await.unwrap();
+        let record: Option<String> = deadpool_redis::redis::AsyncCommands::get(
+            &mut conn,
+            format!("{}{nonce}", super::KIWI_CHALLENGE_PREFIX),
+        )
+        .await
+        .expect("redis get");
+        let record = record.expect("challenge record persisted");
+        assert!(serde_json::from_str::<serde_json::Value>(&record).is_ok());
+
+        // The repeat window serves the SAME challenge from the memory cache.
+        let (status, cached) = env
+            .post("/api/kcaptcha/challenge", r#"{"scope":"login"}"#)
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{cached}");
+        assert_eq!(cached["nonce"], nonce.as_str());
+
+        // Retiring the challenge via cancel answers 204 and deletes it.
+        let (status, _body) = env
+            .post(
+                "/api/kcaptcha/challenge/cancel",
+                &serde_json::json!({ "nonce": nonce }).to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+        let gone: Option<String> = deadpool_redis::redis::AsyncCommands::get(
+            &mut conn,
+            format!("{}{nonce}", super::KIWI_CHALLENGE_PREFIX),
+        )
+        .await
+        .expect("redis get");
+        assert!(gone.is_none(), "cancel retires the record");
+
+        // Hostile flood: the 31st issuance from this client is a 429.
+        let mut last_status = axum::http::StatusCode::OK;
+        for _ in 0..31 {
+            let (status, body) = env
+                .post("/api/kcaptcha/challenge", r#"{"scope":"signup"}"#)
+                .await;
+            last_status = status;
+            if status == axum::http::StatusCode::TOO_MANY_REQUESTS {
+                assert!(body["error"]["message"].is_string());
+                break;
+            }
+        }
+        assert_eq!(last_status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn cancel_ignores_malformed_nonces_without_touching_redis() {
+        let Some(pool) = crate::test_db::canonical_pool("kiwi_cancel").await else {
+            return;
+        };
+        let env =
+            AdvEnv::over_with_config(pool, kiwi_config(true, "kiwi-test-secret"), "unused".into())
+                .await;
+        for nonce in ["", "has spaces", "unicode-ñ", &"x".repeat(65)] {
+            let (status, _body) = env
+                .post(
+                    "/api/kcaptcha/challenge/cancel",
+                    &serde_json::json!({ "nonce": nonce }).to_string(),
+                )
+                .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::NO_CONTENT,
+                "nonce {nonce:?}"
+            );
+        }
+        // deny_unknown_fields.
+        let (status, _body) = env
+            .post("/api/kcaptcha/challenge/cancel", r#"{"nonce":"x","y":1}"#)
+            .await;
+        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

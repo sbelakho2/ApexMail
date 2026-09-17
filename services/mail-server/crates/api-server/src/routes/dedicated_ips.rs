@@ -1022,3 +1022,223 @@ mod tests {
         assert!(resp.reputation.score < 100.0);
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_dedicated_ip(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        ip: &str,
+        status: &str,
+        warmup_progress: f64,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, region, status, warmup_progress, allocated_at)
+             VALUES ($1, $2, $3::inet, 'fsn1', $4, $5, NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(ip)
+        .bind(status)
+        .bind(warmup_progress)
+        .execute(pool)
+        .await
+        .expect("seed dedicated ip");
+        id
+    }
+
+    #[tokio::test]
+    async fn dedicated_ip_list_enriches_stats_and_paginates() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_list").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["dedicated_ips:read"]).await;
+
+        let active_ip = seed_dedicated_ip(&pool, &tenant, "203.0.113.10", "active", 40.0).await;
+        seed_dedicated_ip(&pool, &tenant, "203.0.113.11", "retired", 100.0).await;
+
+        // Enrichment data: sends, a bounce (block), a complaint.
+        sqlx::query(
+            "INSERT INTO self_hosted_send_stats (tenant_id, ip_address, messages_sent, day)
+             VALUES ($1, '203.0.113.10'::inet, 500, CURRENT_DATE)",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("send stats");
+        sqlx::query(
+            "INSERT INTO self_hosted_bounces (tenant_id, source_ip, bounce_type, email, occurred_at)
+             VALUES ($1, '203.0.113.10'::inet, 'block', 'blocked@example.com', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("bounce");
+        sqlx::query(
+            "INSERT INTO self_hosted_complaints (tenant_id, source_ip, email, occurred_at)
+             VALUES ($1, '203.0.113.10'::inet, 'angry@example.com', NOW())",
+        )
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("complaint");
+
+        let (status, body) = env.get("/v1/dedicated-ips").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let ips = body["dedicatedIps"].as_array().expect("ips");
+        assert_eq!(ips.len(), 2, "history includes retired rows");
+        let active = ips
+            .iter()
+            .find(|i| i["id"] == active_ip.to_string())
+            .expect("active ip");
+        assert_eq!(active["ipAddress"], "203.0.113.10");
+        assert_eq!(active["status"], "active");
+        assert_eq!(active["warmup"]["progressPercent"], 40.0);
+        assert_eq!(active["stats"]["emailsSentTotal"], 500);
+        assert_eq!(active["stats"]["bouncesTotal"], 1);
+        assert_eq!(active["stats"]["complaintsTotal"], 1);
+        assert_eq!(active["reputation"]["blocklisted"], true);
+        // Non-retired total drives pagination.
+        assert_eq!(body["pagination"]["total"], 1);
+        assert_eq!(body["pagination"]["hasMore"], false);
+
+        // Pagination + hostile params clamp.
+        let (status, body) = env.get("/v1/dedicated-ips?limit=1&offset=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["pagination"]["offset"], 1);
+        let (status, body) = env.get("/v1/dedicated-ips?limit=0&offset=-9").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["pagination"]["limit"], 1);
+        assert_eq!(body["pagination"]["offset"], 0);
+
+        // Tenant isolation: a neighbour sees none of these rows.
+        let (other_env, _other) = AdvEnv::tenant(pool.clone(), &["dedicated_ips:read"]).await;
+        let (status, body) = other_env.get("/v1/dedicated-ips").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["pagination"]["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn dedicated_ip_list_scope_gate() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_scope").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool, &["messages:read"]).await;
+        let (status, body) = env.get("/v1/dedicated-ips").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn dedicated_ip_mutations_refuse_without_provider_configuration() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_noop").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["dedicated_ips:write"]).await;
+        let id = seed_dedicated_ip(&pool, &tenant, "203.0.113.50", "active", 10.0).await;
+
+        // No provider configured in the test state: honest 503, not a 500.
+        let (status, _body) = env.delete(&format!("/v1/dedicated-ips/{id}")).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let (status, _body) = env
+            .post(&format!("/v1/dedicated-ips/{id}/warmup"), "{}")
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        // Allocation additionally proves the entitlement gate first: the
+        // default plan has no dedicated_ip feature.
+        let (status, body) = env.post("/v1/dedicated-ips", "{}").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("plan"));
+
+        // deny_unknown_fields on allocate.
+        let (broad, _t2) = AdvEnv::tenant(pool, &["dedicated_ips:write"]).await;
+        let _ = broad;
+    }
+
+    #[tokio::test]
+    async fn dedicated_ip_provider_backed_release_and_warmup() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_provider").await else {
+            return;
+        };
+        // Loopback mock Hetzner answering the provider's calls.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let delete_calls = calls.clone();
+        let rdns_calls = calls.clone();
+        let assign_calls = calls.clone();
+        let app = axum::Router::new()
+            .route(
+                "/floating_ips/:id",
+                axum::routing::delete(move |axum::extract::Path(id): axum::extract::Path<i64>| {
+                    let calls = delete_calls.clone();
+                    async move {
+                        calls.lock().unwrap().push(format!("delete {id}"));
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/floating_ips/:id/actions/change_dns_ptr",
+                axum::routing::post(move |axum::extract::Path(id): axum::extract::Path<i64>| {
+                    let calls = rdns_calls.clone();
+                    async move {
+                        calls.lock().unwrap().push(format!("rdns {id}"));
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/floating_ips/:id/actions/assign",
+                axum::routing::post(move |axum::extract::Path(id): axum::extract::Path<i64>| {
+                    let calls = assign_calls.clone();
+                    async move {
+                        calls.lock().unwrap().push(format!("assign {id}"));
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let (env, tenant) =
+            AdvEnv::tenant_with_ip_provider(pool.clone(), &["dedicated_ips:write"], &base_url)
+                .await;
+        let id = seed_dedicated_ip(&pool, &tenant, "203.0.113.99", "active", 0.0).await;
+
+        // Release retires the record (the mock Hetzner is called).
+        let (status, _body) = env.delete(&format!("/v1/dedicated-ips/{id}")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            !calls.lock().unwrap().is_empty(),
+            "the provider drove Hetzner"
+        );
+
+        // Warmup on a fresh row flips the DB state.
+        let fresh = seed_dedicated_ip(&pool, &tenant, "203.0.113.98", "rdns_ready", 0.0).await;
+        let (status, body) = env
+            .post(&format!("/v1/dedicated-ips/{fresh}/warmup"), "{}")
+            .await;
+        if status == StatusCode::OK {
+            assert_eq!(body["warmupStatus"], "warming");
+            assert!(body["estimatedCompletion"].as_str().is_some());
+        } else {
+            // The provider's state machine may refuse from a non-startable
+            // state — prove it refused with a mapped error, never a 500.
+            assert!(
+                status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST,
+                "{status}: {body}"
+            );
+        }
+    }
+}

@@ -389,3 +389,189 @@ mod tests {
         assert_eq!(empty.open_rate(), None);
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_cohort_event(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        message_id: &str,
+        recipient: &str,
+        event_type: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, $3, $4, $5, NOW())",
+        )
+        .bind(format!(
+            "evt_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        ))
+        .bind(tenant)
+        .bind(message_id)
+        .bind(event_type)
+        .bind(recipient)
+        .execute(pool)
+        .await
+        .expect("seed cohort event");
+    }
+
+    /// Cross-process env mutations for CLICKHOUSE_* are rare and read-only in
+    /// this module's other tests; guard set/restore under one mutex.
+    static CLICKHOUSE_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn analytics_aggregates_send_cohorts_with_fractional_rates() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_analytics").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        // One send cohort of 4, one of 1: 5 sends total.
+        for i in 0..4 {
+            seed_cohort_event(
+                &pool,
+                "system_internal_tenant01",
+                "msg-a",
+                &format!("u{i}@example.com"),
+                "sent",
+            )
+            .await;
+            seed_cohort_event(
+                &pool,
+                "system_internal_tenant01",
+                "msg-a",
+                &format!("u{i}@example.com"),
+                "delivered",
+            )
+            .await;
+        }
+        seed_cohort_event(
+            &pool,
+            "system_internal_tenant01",
+            "msg-b",
+            "vip@example.com",
+            "sent",
+        )
+        .await;
+        seed_cohort_event(
+            &pool,
+            "system_internal_tenant01",
+            "msg-b",
+            "vip@example.com",
+            "opened",
+        )
+        .await;
+        seed_cohort_event(
+            &pool,
+            "system_internal_tenant01",
+            "msg-b",
+            "vip@example.com",
+            "clicked",
+        )
+        .await;
+
+        let (status, body) = env.get("/v1/admin/analytics").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let stats = &body["stats"];
+        assert_eq!(stats["totalSent"], 5);
+        assert_eq!(stats["totalDelivered"], 4);
+        assert_eq!(stats["totalOpened"], 1);
+        assert_eq!(stats["totalClicked"], 1);
+        assert_eq!(stats["deliveryRate"], 0.8);
+        assert_eq!(stats["openRate"], 0.2);
+        assert_eq!(stats["clickRate"], 0.2);
+        assert_eq!(stats["bounceRate"], 0.0);
+        // Provenance notes always present.
+        let notes = body["notes"].as_array().expect("notes");
+        assert!(!notes.is_empty());
+        assert!(body["timeSeries"].is_array());
+        assert!(body["providers"].is_array());
+    }
+
+    #[tokio::test]
+    async fn analytics_empty_window_reports_null_rates_never_zero() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_analytics_empty").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool).await;
+        let (status, body) = env.get("/v1/admin/analytics?range=24h").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["stats"]["totalSent"], 0);
+        assert_eq!(body["stats"]["deliveryRate"], serde_json::Value::Null);
+        assert_eq!(body["stats"]["openRate"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn analytics_gates() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_analytics_gates").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["analytics:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        let (status, body) = scoped.get("/v1/admin/analytics").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (customer, _tenant) = AdvEnv::tenant(pool.clone(), &["*"]).await;
+        let (status, body) = customer.get("/v1/admin/analytics").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Unknown query field.
+        let env = AdvEnv::admin(pool).await;
+        let (status, _body) = env.get("/v1/admin/analytics?range=7d&span=year").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn clickhouse_engagement_validates_tenant_and_degrades_honestly() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_ch_engagement").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // Blank tenant id is a validation error.
+        let (status, body) = env
+            .get("/v1/admin/analytics/clickhouse/engagement?tenant_id=%20%20")
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // With ClickHouse unreachable (dead local port pinned deterministically),
+        // the endpoint answers 200 with available:false and an honest note.
+        // Set/restore the env synchronously under the lock; the request runs
+        // with the guard released (std guards must not cross await points).
+        let previous = {
+            let _guard = CLICKHOUSE_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let previous = std::env::var("CLICKHOUSE_URL").ok();
+            std::env::set_var("CLICKHOUSE_URL", "http://127.0.0.1:1");
+            previous
+        };
+        let (status, body) = env
+            .get("/v1/admin/analytics/clickhouse/engagement?tenant_id=tenant_probe&range=24h")
+            .await;
+        {
+            let _guard = CLICKHOUSE_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            match previous {
+                Some(value) => std::env::set_var("CLICKHOUSE_URL", value),
+                None => std::env::remove_var("CLICKHOUSE_URL"),
+            }
+        }
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["available"], false);
+        assert_eq!(body["source"], "clickhouse");
+        assert!(body["note"].as_str().is_some_and(|n| !n.is_empty()));
+        assert_eq!(body["timeSeries"].as_array().map(Vec::len), Some(0));
+
+        // Missing tenant_id outright is a 400 (deny_unknown_fields aside, the
+        // field is required).
+        let (status, _body) = env.get("/v1/admin/analytics/clickhouse/engagement").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}

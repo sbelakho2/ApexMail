@@ -311,13 +311,47 @@ pub async fn insert_audit_log_in_tx_with_env(
     .bind(action)
     .bind(resource)
     .bind(resource_id)
-    .bind(details)
+    .bind(&details)
     .bind(ip_address)
     .bind(user_agent)
     .bind(timestamp)
     .bind(&hash)
     .bind(&previous_hash)
     .bind(&signature)
+    .execute(&mut **tx)
+    .await?;
+
+    // FTS upkeep: migration 081 populates `audit_logs.fts_vector` once, but
+    // nothing maintains it afterwards (no trigger, no GENERATED column) —
+    // every row appended since the migration ran carried a NULL vector, so
+    // `/v1/admin/audit/search?q=…` matched NOTHING written after deploy.
+    // Maintain the vector here, in the append's own transaction, with
+    // exactly migration 081's expression. The catalog probe keeps the
+    // statement legal on test-fixture schemas that omit the column (the
+    // runtime apexmail-db SCHEMA never had it either, by 081's own guard).
+    sqlx::query(
+        "UPDATE audit_logs
+            SET fts_vector = to_tsvector('english',
+                  coalesce($2, '') || ' ' ||
+                  coalesce($3, '') || ' ' ||
+                  coalesce($4, '') || ' ' ||
+                  coalesce($5, '') || ' ' ||
+                  coalesce($6, '') || ' ' ||
+                  coalesce($7, '') || ' ' ||
+                  coalesce($8::jsonb::text, ''))
+          WHERE id = $1
+            AND EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'audit_logs'
+                          AND column_name = 'fts_vector')",
+    )
+    .bind(&id)
+    .bind(action)
+    .bind(resource)
+    .bind(resource_id)
+    .bind(user_id)
+    .bind(tenant_id)
+    .bind(ip_address)
+    .bind(details)
     .execute(&mut **tx)
     .await?;
 

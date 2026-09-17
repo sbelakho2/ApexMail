@@ -134,3 +134,184 @@ async fn dashboard_stats(
         period: "last_30_days".into(),
     }))
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_message(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        status: &str,
+        opened: bool,
+        clicked: bool,
+        days_ago: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status,
+                                   first_opened_at, first_clicked_at, created_at)
+             VALUES ($1::uuid, $2, 'sender@example.com', '[]', 'stat probe', $3, $4, $5,
+                     NOW() - ($6 || ' days')::interval)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(tenant)
+        .bind(status)
+        .bind(opened.then(chrono::Utc::now))
+        .bind(clicked.then(chrono::Utc::now))
+        .bind(days_ago.to_string())
+        .execute(pool)
+        .await
+        .expect("seed message");
+    }
+
+    #[tokio::test]
+    async fn stats_are_tenant_scoped_and_rate_arithmetic_holds() {
+        let Some(pool) = crate::test_db::canonical_pool("dash_stats").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["analytics:read"]).await;
+        // A second tenant's rows must not leak into the first's stats.
+        let (other_env, other_tenant) = AdvEnv::tenant(pool.clone(), &["analytics:read"]).await;
+        seed_message(&pool, &other_tenant, "delivered", true, false, 1).await;
+
+        // In-window mix: 2 delivered (1 opened+clicked), 1 bounced,
+        // 1 complained, 1 queued-but-unopened. 5 total, in-window.
+        seed_message(&pool, &tenant, "delivered", true, true, 0).await;
+        seed_message(&pool, &tenant, "delivered", false, false, 5).await;
+        seed_message(&pool, &tenant, "bounced", false, false, 10).await;
+        seed_message(&pool, &tenant, "complained", false, false, 20).await;
+        seed_message(&pool, &tenant, "queued", false, false, 29).await;
+        // Out-of-window rows are excluded entirely (40 days > 30-day window).
+        seed_message(&pool, &tenant, "delivered", true, true, 40).await;
+
+        let (status, body) = env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["total_messages_sent"], 5);
+        assert_eq!(body["total_messages_delivered"], 2);
+        assert_eq!(body["total_messages_bounced"], 1);
+        assert_eq!(body["total_messages_complained"], 1);
+        assert_eq!(body["delivery_rate"], 0.4);
+        assert_eq!(body["bounce_rate"], 0.2);
+        assert_eq!(body["open_rate"], 0.2);
+        assert_eq!(body["click_rate"], 0.2);
+        assert_eq!(body["period"], "last_30_days");
+
+        // The neighbouring tenant sees ONLY its own single delivered row.
+        let (status, body) = other_env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["total_messages_sent"], 1);
+        assert_eq!(body["delivery_rate"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn stats_are_zero_when_the_tenant_has_no_messages() {
+        let Some(pool) = crate::test_db::canonical_pool("dash_empty").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool, &["analytics:read"]).await;
+        let (status, body) = env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["total_messages_sent"], 0);
+        assert_eq!(body["delivery_rate"], 0.0);
+        assert_eq!(body["bounce_rate"], 0.0);
+        assert_eq!(body["open_rate"], 0.0);
+        assert_eq!(body["click_rate"], 0.0);
+        // Resource counters (verified domains only count as active).
+        assert_eq!(body["total_contacts"], 0);
+        assert_eq!(body["total_lists"], 0);
+        assert_eq!(body["total_campaigns"], 0);
+        assert_eq!(body["total_templates"], 0);
+        assert_eq!(body["active_domains"], 0);
+    }
+
+    #[tokio::test]
+    async fn stats_count_resource_rows_for_the_tenant_only() {
+        let Some(pool) = crate::test_db::canonical_pool("dash_counts").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["analytics:read"]).await;
+        let (other_env, other_tenant) = AdvEnv::tenant(pool.clone(), &["analytics:read"]).await;
+
+        for table in ["contacts", "lists", "campaigns", "templates"] {
+            let uuid = uuid::Uuid::new_v4();
+            let name_col = if table == "contacts" { "email" } else { "name" };
+            // templates ids are VARCHAR(26) (ULID-style); every other
+            // canonical resource id is a UUID — bind per table shape.
+            if table == "templates" {
+                // templates.subject is NOT NULL on the canonical schema.
+                sqlx::query(&format!(
+                    "INSERT INTO {table} (id, tenant_id, {name_col}, subject, html_body) VALUES ($1, $2, 'dash-probe', 'dash-probe', '<p>probe</p>')"
+                ))
+                .bind(uuid.simple().to_string()[..26].to_string())
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("seed {table}: {e}"));
+            } else {
+                sqlx::query(&format!(
+                    "INSERT INTO {table} (id, tenant_id, {name_col}) VALUES ($1, $2, 'dash-probe')"
+                ))
+                .bind(uuid)
+                .bind(&tenant)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("seed {table}: {e}"));
+            }
+        }
+        // Verified domain counts; pending does not; other tenant's does not.
+        sqlx::query("INSERT INTO domains (id, tenant_id, name, status) VALUES ($1, $2, 'dash-ok.example', 'verified')")
+            .bind(uuid::Uuid::new_v4())
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed verified domain");
+        sqlx::query("INSERT INTO domains (id, tenant_id, name, status) VALUES ($1, $2, 'dash-pending.example', 'pending')")
+            .bind(uuid::Uuid::new_v4())
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed pending domain");
+        sqlx::query("INSERT INTO domains (id, tenant_id, name, status) VALUES ($1, $2, 'dash-other.example', 'verified')")
+            .bind(uuid::Uuid::new_v4())
+            .bind(&other_tenant)
+            .execute(&pool)
+            .await
+            .expect("seed other tenant domain");
+
+        let (status, body) = env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["total_contacts"], 1);
+        assert_eq!(body["total_lists"], 1);
+        assert_eq!(body["total_campaigns"], 1);
+        assert_eq!(body["total_templates"], 1);
+        assert_eq!(body["active_domains"], 1);
+
+        let (status, body) = other_env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["total_contacts"], 0);
+        assert_eq!(body["active_domains"], 1);
+    }
+
+    #[tokio::test]
+    async fn stats_require_the_analytics_read_scope() {
+        let Some(pool) = crate::test_db::canonical_pool("dash_scope").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool, &["messages:read"]).await;
+        let (status, body) = env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn stats_require_authentication() {
+        let Some(pool) = crate::test_db::canonical_pool("dash_anon").await else {
+            return;
+        };
+        let (mut env, _tenant) = AdvEnv::tenant(pool, &["analytics:read"]).await;
+        env.credential = "am_not_a_real_key".into();
+        let (status, _body) = env.get("/v1/dashboard/stats").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}

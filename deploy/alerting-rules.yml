@@ -35,6 +35,30 @@ groups:
           description: "MTA {{ $labels.instance }} has been unreachable for more than 1 minute."
           runbook_url: "https://apexmail.ee/docs/alerts#mta-down"
 
+      - alert: OutboundMtaDown
+        expr: up{job="apexmail-outbound-mta"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ApexMail outbound-MTA relay daemon is down"
+          description: "The outbound relay daemon {{ $labels.instance }} has been unreachable for more than 2 minutes. Durable retries in outbound_relay_ledger are NOT being drained — mail with transient failures stalls in pending until the daemon returns."
+          runbook_url: "https://apexmail.ee/docs/alerts#outbound-mta-down"
+
+      - alert: OutboundMtaPendingOldestAgeSlo
+        # SLO: the oldest pending durable retry must not exceed 30 minutes —
+        # the poll loop claims due rows every OUTBOUND_MTA_POLL_SECS, so an
+        # old pending row means the daemon is down, wedged, or the retry
+        # ceiling config starved legitimate sends.
+        expr: apexmail_outbound_mta_pending_oldest_age_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound-MTA pending queue oldest row exceeds the 30m SLO"
+          description: "The oldest pending row in outbound_relay_ledger is {{ $value }} seconds old (>30m). Check daemon liveness, ledger errors and retry ceilings."
+          runbook_url: "https://apexmail.ee/docs/alerts#outbound-mta-pending-oldest"
+
       - alert: WorkerDown
         expr: up{job="apexmail-worker"} == 0
         for: 2m

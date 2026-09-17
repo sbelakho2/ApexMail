@@ -524,3 +524,261 @@ mod tests {
         assert!(verify_impersonation_token(&tampered, "secret").is_err());
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::create_signed_token;
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    const SECRET: &str = "test-impersonation-secret-12345";
+
+    fn impersonation_token(payload: serde_json::Value) -> String {
+        create_signed_token(&payload, SECRET).expect("sign token")
+    }
+
+    fn valid_payload(jti: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "impersonation",
+            "tenantId": "ten_victim_probe",
+            "operatorId": "op_probe",
+            "operatorName": "Probe Operator",
+            "exp": chrono::Utc::now().timestamp_millis() + 600_000,
+            "jti": jti,
+        })
+    }
+
+    async fn start(env: &AdvEnv, token: &str) -> (StatusCode, Vec<String>) {
+        let (status, headers, _bytes) = env
+            .post_raw(
+                "/v1/auth/impersonate",
+                &serde_json::json!({ "token": token }).to_string(),
+            )
+            .await;
+        let cookies = headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(str::to_string))
+            .collect();
+        (status, cookies)
+    }
+
+    #[tokio::test]
+    async fn impersonation_start_happy_path_sets_cookie_and_audits() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("imp_start_ok").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let jti = format!("jti-{}", uuid::Uuid::new_v4().simple());
+        let (status, cookies) = start(&env, &impersonation_token(valid_payload(&jti))).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "redirects to /dashboard");
+        let cookie = cookies
+            .iter()
+            .find(|c| c.starts_with("impersonation_session="))
+            .expect("impersonation cookie set");
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(
+            cookie.contains("Max-Age=5"),
+            "max-age derived from exp: {cookie}"
+        );
+
+        // The audit entry names the session and the operator.
+        let (action, resource, operator): (String, String, String) = sqlx::query_as(
+            "SELECT action, resource_id, details->>'operator_id' FROM audit_logs \
+             WHERE action = 'impersonation_session_started' AND resource_id = $1",
+        )
+        .bind(&jti)
+        .fetch_one(&pool)
+        .await
+        .expect("audit row");
+        assert_eq!(action, "impersonation_session_started");
+        assert_eq!(operator, "op_probe");
+        let _ = resource;
+
+        // Replay of the same token is rejected: the jti is single-use.
+        let (status, _cookies) = start(&env, &impersonation_token(valid_payload(&jti))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn impersonation_start_refuses_bad_tokens() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("imp_start_bad").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool).await;
+
+        // Empty token.
+        let (status, _cookies) = start(&env, "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Wrong secret (bad signature).
+        let forged = create_signed_token(&valid_payload("jti-forged"), "wrong-secret").unwrap();
+        let (status, _cookies) = start(&env, &forged).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Garbage format.
+        let (status, _cookies) = start(&env, "not-a-token").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Expired.
+        let mut expired = valid_payload("jti-expired");
+        expired["exp"] = (chrono::Utc::now().timestamp_millis() - 1000).into();
+        let (status, _cookies) = start(&env, &impersonation_token(expired)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Over-long lifetime.
+        let mut longlived = valid_payload("jti-long");
+        longlived["exp"] = (chrono::Utc::now().timestamp_millis() + 3_600_000 + 60_000).into();
+        let (status, _cookies) = start(&env, &impersonation_token(longlived)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Missing expiry.
+        let mut noexp = valid_payload("jti-noexp");
+        noexp.as_object_mut().unwrap().remove("exp");
+        let (status, _cookies) = start(&env, &impersonation_token(noexp)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Missing jti.
+        let mut nojti = valid_payload("");
+        nojti.as_object_mut().unwrap().remove("jti");
+        let (status, _cookies) = start(&env, &impersonation_token(nojti)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Wrong token type.
+        let mut wrongtype = valid_payload("jti-type");
+        wrongtype["type"] = "session".into();
+        let (status, _cookies) = start(&env, &impersonation_token(wrongtype)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        // Missing tenant_id / operator_id.
+        let mut notenant = valid_payload("jti-tenant");
+        notenant.as_object_mut().unwrap().remove("tenantId");
+        let (status, _cookies) = start(&env, &impersonation_token(notenant)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let mut noop = valid_payload("jti-op");
+        noop.as_object_mut().unwrap().remove("operatorId");
+        let (status, _cookies) = start(&env, &impersonation_token(noop)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // deny_unknown_fields on the wire body.
+        let status = env
+            .post_raw("/v1/auth/impersonate", r#"{"token":"x","y":1}"#)
+            .await
+            .0;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn impersonation_gates_reject_customer_tenants_and_weak_scopes() {
+        let Some(pool) = crate::test_db::canonical_pool("imp_gates").await else {
+            return;
+        };
+        // Customer tenant with the wildcard scope must NOT reach the handler
+        // (audit D: scope alone is insufficient).
+        let (customer, _tenant) = AdvEnv::tenant(pool.clone(), &["*"]).await;
+        let (status, _cookies) =
+            start(&customer, &impersonation_token(valid_payload("jti-cust"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let status = customer.post_raw("/v1/auth/impersonate/end", "").await.0;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // System tenant without the wildcard scope.
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["support:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        let (status, _cookies) =
+            start(&scoped, &impersonation_token(valid_payload("jti-scope"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn impersonation_end_clears_cookie_and_audits_the_session() {
+        let Some(pool) = crate::test_db::canonical_pool("imp_end").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // Without a cookie: still succeeds (idempotent clear).
+        let (status, headers, _bytes) = env.post_raw("/v1/auth/impersonate/end", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get_all("set-cookie").iter().any(|c| c
+            .to_str()
+            .is_ok_and(|c| c.starts_with("impersonation_session=;"))));
+
+        // With a VALID impersonation-session cookie: audited with tokenId.
+        let jti = format!("jti-end-{}", uuid::Uuid::new_v4().simple());
+        let session_payload = serde_json::json!({
+            "type": "impersonation",
+            "tenantId": "ten_victim_probe",
+            "operatorId": "op_probe",
+            "tokenId": jti,
+            "exp": chrono::Utc::now().timestamp_millis() + 600_000,
+        });
+        let session_token =
+            create_signed_token(&session_payload, "test-session-secret-1234567890ab").unwrap();
+        let (status, headers, bytes) = env
+            .post_raw_with_cookie(
+                "/v1/auth/impersonate/end",
+                "",
+                &format!("impersonation_session={session_token}"),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "end-with-cookie: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _ = headers;
+        let (action, resource): (String, String) = sqlx::query_as(
+            "SELECT action, resource_id FROM audit_logs WHERE action = 'impersonation_session_ended' AND resource_id = $1",
+        )
+        .bind(&jti)
+        .fetch_one(&pool)
+        .await
+        .expect("end audit row");
+        assert_eq!(action, "impersonation_session_ended");
+        assert_eq!(resource, jti);
+
+        // With a GARBAGE cookie: no audit row, still a clean clear.
+        let count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'impersonation_session_ended'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (status, _, _) = env
+            .post_raw_with_cookie(
+                "/v1/auth/impersonate/end",
+                "",
+                "impersonation_session=garbage.value",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let count_after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'impersonation_session_ended'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count_before, count_after, "garbage cookies are not audited");
+    }
+}

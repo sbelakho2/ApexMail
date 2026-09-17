@@ -199,3 +199,167 @@ mod tests {
         .is_err());
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    #[derive(serde::Deserialize)]
+    struct DecodedStreamClaims {
+        sub: String,
+        tenant_id: String,
+        scopes: Vec<String>,
+        exp: u64,
+        iat: u64,
+        typ: String,
+        events: Option<Vec<String>>,
+        message_id: Option<String>,
+    }
+
+    fn decode_token(token: &str) -> DecodedStreamClaims {
+        // The claims set is what this module owns — signature correctness is
+        // proven by the 500-on-bad-key arm and by RS256 being the only
+        // signing path.
+        use base64::Engine as _;
+        let payload = token.split('.').nth(1).expect("jwt payload segment");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("payload base64");
+        serde_json::from_slice(&bytes).expect("stream claims decode")
+    }
+
+    #[tokio::test]
+    async fn issues_a_scoped_rs256_stream_token_for_a_session() {
+        let Some(pool) = crate::test_db::canonical_pool("stream_ok").await else {
+            return;
+        };
+        let Some((env, tenant_id, user_id)) = AdvEnv::session(pool, "owner").await else {
+            return;
+        };
+
+        let (status, body) = env
+            .post(
+                "/v1/stream/token",
+                r#"{"events":["message.sent"],"message_id":"msg-42","ttl_seconds":120}"#,
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let token = body["token"].as_str().expect("token");
+        assert_eq!(body["stream_url"], "/v1/stream");
+
+        let claims = decode_token(token);
+        assert_eq!(claims.sub, user_id);
+        assert_eq!(claims.tenant_id, tenant_id);
+        assert_eq!(claims.scopes, vec!["stream".to_string()]);
+        assert_eq!(claims.typ, "stream");
+        assert_eq!(
+            claims.events.as_deref(),
+            Some(&["message.sent".to_string()][..])
+        );
+        assert_eq!(claims.message_id.as_deref(), Some("msg-42"));
+        // Requested TTL honoured exactly.
+        assert_eq!(claims.exp - claims.iat, 120);
+        assert_eq!(body["expires_at"].as_u64(), Some(claims.exp));
+    }
+
+    #[tokio::test]
+    async fn ttl_is_clamped_into_the_documented_range() {
+        let Some(pool) = crate::test_db::canonical_pool("stream_ttl").await else {
+            return;
+        };
+        let Some((env, _t, _u)) = AdvEnv::session(pool, "owner").await else {
+            return;
+        };
+
+        // Hostile low TTL is clamped up to 60s.
+        let (status, body) = env.post("/v1/stream/token", r#"{"ttl_seconds":0}"#).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let claims = decode_token(body["token"].as_str().expect("token"));
+        assert_eq!(claims.exp - claims.iat, 60);
+
+        // Hostile high TTL is clamped down to 3600s (audit J: docs say 1h).
+        let (status, body) = env
+            .post("/v1/stream/token", r#"{"ttl_seconds":99999999}"#)
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let claims = decode_token(body["token"].as_str().expect("token"));
+        assert_eq!(claims.exp - claims.iat, 3600);
+
+        // Absent TTL defaults to 300s.
+        let (status, body) = env.post("/v1/stream/token", "{}").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let claims = decode_token(body["token"].as_str().expect("token"));
+        assert_eq!(claims.exp - claims.iat, 300);
+        // No filters → the optional claims are omitted entirely.
+        assert!(claims.events.is_none());
+        assert!(claims.message_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn api_key_identities_mint_tokens_scoped_to_the_key() {
+        let Some(pool) = crate::test_db::canonical_pool("stream_apikey").await else {
+            return;
+        };
+        // A real RSA pair: minting must succeed for key identities too.
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key =
+            rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str()).unwrap();
+        let mut config = crate::app::test_support::test_config();
+        config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+        config.jwt_public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .to_string();
+        let (env, _tenant) = AdvEnv::tenant_with_config(pool, &["messages:read"], config).await;
+        let (status, body) = env.post("/v1/stream/token", "{}").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let claims = decode_token(body["token"].as_str().expect("token"));
+        // sub is the api_key row id (a UUID), never empty.
+        assert!(!claims.sub.is_empty());
+        assert_eq!(claims.typ, "stream");
+    }
+
+    #[tokio::test]
+    async fn token_issuance_requires_the_messages_read_scope() {
+        let Some(pool) = crate::test_db::canonical_pool("stream_scope").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool, &["contacts:read"]).await;
+        let (status, body) = env.post("/v1/stream/token", "{}").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn unknown_body_fields_are_rejected() {
+        let Some(pool) = crate::test_db::canonical_pool("stream_unknown").await else {
+            return;
+        };
+        let Some((env, _t, _u)) = AdvEnv::session(pool, "owner").await else {
+            return;
+        };
+        let (status, _body) = env
+            .post("/v1/stream/token", r#"{"ttl_seconds":60,"whoami":true}"#)
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_signing_key_surfaces_as_internal_error() {
+        let Some(pool) = crate::test_db::canonical_pool("stream_badkey").await else {
+            return;
+        };
+        // Default test config carries a placeholder PEM ("BEGIN TEST"),
+        // which is not an RSA key: signing must fail loudly (500) instead of
+        // returning an unverifiable token.
+        let (env, _tenant) = AdvEnv::tenant(pool, &["messages:read"]).await;
+        let (status, body) = env.post("/v1/stream/token", "{}").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        // The failure detail is deliberately not leaked to the wire; only
+        // the code identifies it as an internal signing failure.
+        assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
+    }
+}

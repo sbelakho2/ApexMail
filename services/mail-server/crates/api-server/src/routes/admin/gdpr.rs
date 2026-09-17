@@ -590,7 +590,7 @@ mod adversarial_tests {
             return;
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
-        seed_tenant(&pool, "ten_gdpr_gamma_003");
+        seed_tenant(&pool, "ten_gdpr_gamma_003").await;
         seed_request(
             &pool,
             "gdpr_req_gamma_000003",
@@ -635,7 +635,7 @@ mod adversarial_tests {
 
         // All five allowed statuses are accepted vocabulary-wise.
         for status in ["pending", "verified", "processing", "rejected"] {
-            update_gdpr_request(
+            let updated = update_gdpr_request(
                 State(state.clone()),
                 system_auth(),
                 Json(UpdateGdprRequest {
@@ -646,6 +646,7 @@ mod adversarial_tests {
             )
             .await
             .unwrap_or_else(|e| panic!("status {status} must be accepted: {e:?}"));
+            assert_eq!(updated.0["success"], true, "status {status} body");
         }
         let (status, fulfilled_at) = request_status(&pool, "gdpr_req_gamma_000003").await;
         assert_eq!(status, "rejected");
@@ -665,8 +666,8 @@ mod adversarial_tests {
             return;
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
-        seed_tenant(&pool, "ten_gdpr_victim_004");
-        seed_tenant(&pool, "ten_gdpr_other_005");
+        seed_tenant(&pool, "ten_gdpr_victim_004").await;
+        seed_tenant(&pool, "ten_gdpr_other_005").await;
         seed_request(
             &pool,
             "gdpr_req_victim_000004",
@@ -710,7 +711,7 @@ mod adversarial_tests {
             return;
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
-        seed_tenant(&pool, "ten_gdpr_gate_000006");
+        seed_tenant(&pool, "ten_gdpr_gate_000006").await;
         seed_request(
             &pool,
             "gdpr_req_export_0006",
@@ -794,7 +795,7 @@ mod adversarial_tests {
         assert!(matches!(err, ApiError::Validation(_)));
 
         // Artifact + real evidence: completion succeeds and stamps fulfilled_at.
-        update_gdpr_request(
+        let completed = update_gdpr_request(
             State(state.clone()),
             system_auth(),
             Json(UpdateGdprRequest {
@@ -805,6 +806,7 @@ mod adversarial_tests {
         )
         .await
         .expect("evidenced export completion");
+        assert_eq!(completed.0["success"], true);
         let (status, fulfilled_at) = request_status(&pool, "gdpr_req_export_0006").await;
         assert_eq!(status, "completed");
         assert!(fulfilled_at.is_some(), "completion stamps fulfilled_at");
@@ -842,7 +844,7 @@ mod adversarial_tests {
         );
 
         // Erasure with an erasure-job reference: completes.
-        update_gdpr_request(
+        let completed = update_gdpr_request(
             State(state.clone()),
             system_auth(),
             Json(UpdateGdprRequest {
@@ -853,6 +855,7 @@ mod adversarial_tests {
         )
         .await
         .expect("evidenced erasure completion");
+        assert_eq!(completed.0["success"], true);
         let (status, fulfilled_at) = request_status(&pool, "gdpr_req_erase_0008").await;
         assert_eq!(status, "completed");
         assert!(fulfilled_at.is_some());
@@ -868,7 +871,7 @@ mod adversarial_tests {
             return;
         };
         let state = crate::app::test_support::test_state_over(pool.clone()).await;
-        seed_tenant(&pool, "ten_gdpr_audit_0009");
+        seed_tenant(&pool, "ten_gdpr_audit_0009").await;
         seed_request(
             &pool,
             "gdpr_req_audit_000009",
@@ -880,7 +883,7 @@ mod adversarial_tests {
 
         let mut operator = tenant_auth("ten_gdpr_audit_0009");
         operator.user_id = Some("00000000-0000-0000-0000-0000000000cc".into());
-        update_gdpr_request(
+        let completed = update_gdpr_request(
             State(state),
             operator,
             Json(UpdateGdprRequest {
@@ -891,6 +894,7 @@ mod adversarial_tests {
         )
         .await
         .expect("audited completion");
+        assert_eq!(completed.0["success"], true);
 
         let (actor_tenant, actor_user, resource_id): (String, String, String) = sqlx::query_as(
             "SELECT tenant_id, user_id, resource_id FROM audit_logs

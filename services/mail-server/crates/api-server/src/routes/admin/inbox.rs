@@ -81,7 +81,7 @@ fn build_list_inbox_sql(params: &InboxQuery, tenant_scoped: bool) -> String {
     };
 
     format!(
-        "SELECT id, classification, subject, from_address, to_address,
+        "SELECT id::text AS id, classification, subject, from_address, to_address,
                 summary, is_read, is_archived, action_taken, created_at
          FROM autopilot_inbox_messages
          {where_clause}
@@ -240,11 +240,17 @@ async fn update_message(
     Json(body): Json<UpdateInboxMessage>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    // autopilot_inbox_messages.id is a UUID: parse the client-supplied id
+    // here so a malformed value is a 400 (validation) and the WHERE bind is
+    // typed — the previous text bind against a uuid column errored with
+    // 42883 on EVERY update, and malformed ids surfaced as 500s.
+    let id = uuid::Uuid::parse_str(body.id.trim())
+        .map_err(|_| ApiError::Validation(vec!["id must be a UUID".into()]))?;
     // Slug-aware system-tenant resolution (audit F1) — see list_inbox.
     let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
     let sql = build_update_inbox_sql(&body, tenant_scoped)?;
 
-    let mut query = sqlx::query(&sql).bind(&body.id);
+    let mut query = sqlx::query(&sql).bind(id);
 
     if tenant_scoped {
         query = query.bind(&auth.tenant_id);
@@ -339,5 +345,288 @@ mod tests {
         assert!(sql.contains("WHERE id = $1 AND tenant_id = $2"));
         assert!(sql.contains("is_read = $3"));
         assert!(sql.contains("action_taken = $4"));
+    }
+}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_inbox_message(
+        pool: &sqlx::PgPool,
+        tenant: Option<&str>,
+        classification: &str,
+        subject: &str,
+        read: bool,
+        archived: bool,
+    ) -> uuid::Uuid {
+        seed_inbox_message_aged(pool, tenant, classification, subject, read, archived, 0).await
+    }
+
+    async fn seed_inbox_message_aged(
+        pool: &sqlx::PgPool,
+        tenant: Option<&str>,
+        classification: &str,
+        subject: &str,
+        read: bool,
+        archived: bool,
+        minutes_ago: i32,
+    ) -> uuid::Uuid {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO autopilot_inbox_messages
+                (id, tenant_id, classification, subject, from_address, to_address,
+                 summary, is_read, is_archived, action_taken, created_at)
+             VALUES ($1, $2, $3, $4, 'ops@example.com', 'cp@example.com',
+                     'inbox probe', $5, $6, NULL,
+                     NOW() - ($7 || ' minutes')::interval)",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(classification)
+        .bind(subject)
+        .bind(read)
+        .bind(archived)
+        .bind(minutes_ago.to_string())
+        .execute(pool)
+        .await
+        .expect("seed inbox message");
+        id
+    }
+
+    #[tokio::test]
+    async fn inbox_lists_and_filters_for_the_system_operator() {
+        let Some(pool) = crate::test_db::canonical_pool("inbox_admin_list").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let customer_tenant = format!("inbx{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'inbox customer', $2, 'free', 'active')",
+        )
+        .bind(&customer_tenant)
+        .bind(format!("slug-{customer_tenant}"))
+        .execute(&pool)
+        .await
+        .expect("seed customer tenant");
+
+        // System-tenant row (operator view), customer rows, and filters.
+        // Explicit ages make the DESC ordering deterministic.
+        let sys_id = seed_inbox_message_aged(
+            &pool,
+            Some("system"),
+            "security",
+            "sys alert",
+            false,
+            false,
+            0,
+        )
+        .await;
+        seed_inbox_message_aged(
+            &pool,
+            Some(&customer_tenant),
+            "sales",
+            "customer lead",
+            true,
+            false,
+            5,
+        )
+        .await;
+        seed_inbox_message_aged(
+            &pool,
+            Some(&customer_tenant),
+            "billing",
+            "archived invoice",
+            false,
+            true,
+            10,
+        )
+        .await;
+
+        let (status, body) = env.get("/v1/admin/inbox").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body.as_array().expect("array");
+        // System caller sees everything (unscoped).
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["id"], sys_id.to_string());
+        assert_eq!(items[0]["classification"], "security");
+        assert_eq!(items[0]["isRead"], false);
+        assert_eq!(items[0]["summary"], "inbox probe");
+
+        // classification + archived filters compose.
+        let (status, body) = env
+            .get("/v1/admin/inbox?classification=sales&archived=false")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body.as_array().expect("array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["subject"], "customer lead");
+
+        let (status, body) = env.get("/v1/admin/inbox?archived=true").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body.as_array().expect("array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["subject"], "archived invoice");
+
+        // Pagination clamps: zero limit floors to one row; negative offset to 0.
+        let (status, body) = env.get("/v1/admin/inbox?limit=0").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        let (status, body) = env.get("/v1/admin/inbox?limit=200&offset=-5").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(3));
+    }
+
+    #[tokio::test]
+    async fn inbox_customer_sessions_are_scoped_to_their_tenant() {
+        // A customer SESSION (non-system tenant) with wildcard scope lists
+        // ONLY its own tenant's messages — the slug-aware scoping arm.
+        let Some(pool) = crate::test_db::canonical_pool("inbox_tenant_scope").await else {
+            return;
+        };
+        let Some((env, tenant, _user)) = AdvEnv::session(pool.clone(), "owner").await else {
+            return;
+        };
+        seed_inbox_message(
+            &pool,
+            Some(&tenant),
+            "security",
+            "own tenant alert",
+            false,
+            false,
+        )
+        .await;
+        seed_inbox_message(
+            &pool,
+            Some("system"),
+            "security",
+            "foreign sys alert",
+            false,
+            false,
+        )
+        .await;
+
+        let (status, body) = env.get("/v1/admin/inbox").await;
+        // The admin router's system-tenant gate rejects the customer first.
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn inbox_update_mutates_only_the_named_fields_and_audits() {
+        let Some(pool) = crate::test_db::canonical_pool("inbox_update").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let id =
+            seed_inbox_message(&pool, Some("system"), "sales", "to triage", false, false).await;
+
+        let (status, body) = env
+            .patch(
+                "/v1/admin/inbox",
+                &serde_json::json!({ "id": id.to_string(), "isRead": true, "actionTaken": "triaged" })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["success"], true);
+
+        let (is_read, action_taken, archived): (bool, Option<String>, bool) = sqlx::query_as(
+            "SELECT is_read, action_taken, is_archived FROM autopilot_inbox_messages WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert!(is_read);
+        assert_eq!(action_taken.as_deref(), Some("triaged"));
+        assert!(!archived, "untouched field must not change");
+
+        let (action, resource): (String, Option<String>) = sqlx::query_as(
+            "SELECT action, resource_id FROM audit_logs WHERE action = 'control_plane.inbox.updated' AND resource_id = $1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("audit row");
+        assert_eq!(action, "control_plane.inbox.updated");
+        assert_eq!(resource.as_deref(), Some(id.to_string().as_str()));
+
+        // Archiving alone works; combined flags map to the right binds.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/inbox",
+                &serde_json::json!({ "id": id.to_string(), "isArchived": true }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let archived: bool =
+            sqlx::query_scalar("SELECT is_archived FROM autopilot_inbox_messages WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("archived");
+        assert!(archived);
+    }
+
+    #[tokio::test]
+    async fn inbox_update_refuses_empty_and_unknown_and_missing_bodies() {
+        let Some(pool) = crate::test_db::canonical_pool("inbox_update_refusals").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let id = seed_inbox_message(&pool, Some("system"), "sales", "refusals", false, false).await;
+
+        // No fields to update.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/inbox",
+                &serde_json::json!({ "id": id.to_string() }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Unknown id is a 404, indistinguishable per-row.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/inbox",
+                &serde_json::json!({ "id": uuid::Uuid::new_v4().to_string(), "isRead": true })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Malformed (non-UUID) ids are rejected as validation errors before
+        // the database sees them (previously a 500 from the uuid/text bind).
+        let (status, body) = env
+            .patch(
+                "/v1/admin/inbox",
+                &serde_json::json!({ "id": "not-a-uuid", "isRead": true }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // deny_unknown_fields.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/inbox",
+                &serde_json::json!({ "id": id.to_string(), "isRead": true, "surprise": 1 })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn inbox_requires_the_wildcard_scope() {
+        let Some(pool) = crate::test_db::canonical_pool("inbox_scope").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["inbox:read"]).await;
+        let env = AdvEnv::over(pool, key).await;
+        let (status, body) = env.get("/v1/admin/inbox").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 }

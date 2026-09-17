@@ -1602,3 +1602,149 @@ mod tests {
         pool.close().await;
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_tenant(pool: &sqlx::PgPool, suffix: &str, plan: &str, days_ago: i64) -> String {
+        let id = format!(
+            "grw{}{}",
+            suffix,
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        );
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at)
+             VALUES ($1, 'growth probe', $2, $3, 'active', NOW() - ($4 || ' days')::interval)",
+        )
+        .bind(&id)
+        .bind(format!("slug-{id}"))
+        .bind(plan)
+        .bind(days_ago.to_string())
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+        id
+    }
+
+    async fn seed_event(pool: &sqlx::PgPool, tenant: &str, event_type: &str, hours_ago: i64) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, $3, 'growth@example.com', NOW() - ($4 || ' hours')::interval)",
+        )
+        .bind(format!(
+            "evt_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        ))
+        .bind(tenant)
+        .bind(event_type)
+        .bind(hours_ago.to_string())
+        .execute(pool)
+        .await
+        .expect("seed event");
+    }
+
+    #[tokio::test]
+    async fn growth_analytics_reports_signups_engagement_and_null_rates_when_empty() {
+        let Some(pool) = crate::test_db::canonical_pool("growth_main").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let _ = seed_tenant(&pool, "a", "free", 1).await;
+        let sender = seed_tenant(&pool, "b", "pro", 2).await;
+        seed_event(&pool, &sender, "sent", 1).await;
+        seed_event(&pool, &sender, "opened", 20).await;
+
+        let (status, body) = env.get("/v1/admin/analytics/growth").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The canonical seed tenants are older than the window; the two
+        // freshly seeded tenants are the window population.
+        assert!(body["signups"]["totalSignups"].as_i64().unwrap_or(0) >= 2);
+        assert!(body["signups"]["newToday"].as_i64().unwrap_or(0) >= 1);
+        let by_plan = body["signups"]["byPlan"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(by_plan.iter().any(|p| p["plan"] == "pro"), "{by_plan:?}");
+        // Activation: milestone counts and absent rate fields never zero.
+        let milestones = body["activation"]["activationMilestones"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(!milestones.is_empty(), "milestones are always reported");
+        assert!(
+            body["engagement"]["activeTenantsToday"]
+                .as_i64()
+                .unwrap_or(0)
+                >= 1
+        );
+        assert!(body["engagement"]["activeTenants7d"].as_i64().unwrap_or(0) >= 1);
+        assert!(
+            body["engagement"]["sendingTenants30d"]
+                .as_i64()
+                .unwrap_or(0)
+                >= 1
+        );
+        // Trials: no stripe subscriptions in a fresh DB — absent rates.
+        assert_eq!(
+            body["trialConversion"]["conversionRate"],
+            serde_json::Value::Null
+        );
+        assert_eq!(body["trialConversion"]["trialsStarted"], 0);
+
+        // Unknown period falls back to 30d without error; hostile fields 400.
+        let (status, body) = env.get("/v1/admin/analytics/growth?period=decade").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _body) = env
+            .get("/v1/admin/analytics/growth?period=30d&segment=eu")
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn growth_subresources_answer_with_honest_empty_states() {
+        let Some(pool) = crate::test_db::canonical_pool("growth_sub").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool).await;
+        for uri in [
+            "/v1/admin/analytics/growth/signups",
+            "/v1/admin/analytics/growth/activation",
+            "/v1/admin/analytics/growth/engagement",
+        ] {
+            let (status, body) = env.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+            assert!(
+                !body.to_string().contains("Unavailable"),
+                "{uri} must not degrade on a healthy DB: {body}"
+            );
+        }
+        // With zero signups the activation rate is null, never 0.
+        let (status, body) = env
+            .get("/v1/admin/analytics/growth/activation?period=7d")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["activationRate"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn growth_gates_require_the_wildcard_scope() {
+        let Some(pool) = crate::test_db::canonical_pool("growth_gates").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["growth:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        for uri in [
+            "/v1/admin/analytics/growth",
+            "/v1/admin/analytics/growth/signups",
+            "/v1/admin/analytics/growth/activation",
+            "/v1/admin/analytics/growth/engagement",
+        ] {
+            let (status, body) = scoped.get(uri).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}: {body}");
+        }
+    }
+}

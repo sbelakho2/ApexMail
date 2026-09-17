@@ -1488,6 +1488,18 @@ pub async fn create_transport_from_config_with_db(
     config: &EmailConfig,
     db: Option<&sqlx::PgPool>,
 ) -> ProcessorResult<HybridTransport> {
+    create_transport_from_config_with_db_and_redis(config, db, None).await
+}
+
+/// [`create_transport_from_config_with_db`] with the worker's Redis pool:
+/// when supplied, the in-process outbound MTA installs its relay-owned
+/// WARMUP ADMISSION gate (P0) so per-attempt warming-IP accounting happens
+/// at the SMTP-effect boundary for inline sends AND durable daemon retries.
+pub async fn create_transport_from_config_with_db_and_redis(
+    config: &EmailConfig,
+    db: Option<&sqlx::PgPool>,
+    redis: Option<&deadpool_redis::Pool>,
+) -> ProcessorResult<HybridTransport> {
     info!(region = %config.ses.region, "Initialising SES shared-pool transport");
     let ses_shared: Arc<dyn EmailTransport> =
         Arc::new(SesTransport::from_env(config.ses.clone()).await?);
@@ -1497,7 +1509,7 @@ pub async fn create_transport_from_config_with_db(
     // (see [`OutboundMtaTransport`]).
     let mut dedicated_smtp: Option<Arc<dyn EmailTransport>> = None;
     if let Some(pool) = db {
-        match OutboundMtaTransport::from_pool(pool) {
+        match OutboundMtaTransport::from_pool(pool, redis) {
             Ok(transport) => {
                 info!(
                     "Initialising in-process outbound MTA transport \

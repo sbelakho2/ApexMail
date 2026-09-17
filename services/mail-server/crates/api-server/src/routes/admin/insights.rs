@@ -1201,3 +1201,143 @@ mod adversarial_tests {
             .expect("cleanup tenant");
     }
 }
+
+#[cfg(test)]
+mod router_adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_cohort_event(
+        pool: &sqlx::PgPool,
+        message_id: &str,
+        recipient: &str,
+        event_type: &str,
+        days_ago: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, timestamp)
+             VALUES ($1, 'system_internal_tenant01', $2, $3, $4, NOW() - ($5 || ' days')::interval)",
+        )
+        .bind(format!("evt_{}", &uuid::Uuid::new_v4().simple().to_string()[..20]))
+        .bind(message_id)
+        .bind(event_type)
+        .bind(recipient)
+        .bind(days_ago.to_string())
+        .execute(pool)
+        .await
+        .expect("seed event");
+    }
+
+    #[tokio::test]
+    async fn insights_surface_delivery_change_and_recommendations() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_main").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // Current window (7d): 20 sends, 20 delivered. Previous window
+        // (7-14d): 20 sends, 10 delivered — a delivery-rate improvement.
+        for i in 0..20 {
+            seed_cohort_event(
+                &pool,
+                &format!("msg-c{i}"),
+                &format!("c{i}@example.com"),
+                "sent",
+                1,
+            )
+            .await;
+            seed_cohort_event(
+                &pool,
+                &format!("msg-c{i}"),
+                &format!("c{i}@example.com"),
+                "delivered",
+                1,
+            )
+            .await;
+            seed_cohort_event(
+                &pool,
+                &format!("msg-p{i}"),
+                &format!("p{i}@example.com"),
+                "sent",
+                10,
+            )
+            .await;
+            if i < 10 {
+                seed_cohort_event(
+                    &pool,
+                    &format!("msg-p{i}"),
+                    &format!("p{i}@example.com"),
+                    "delivered",
+                    10,
+                )
+                .await;
+            }
+        }
+
+        let (status, body) = env.get("/v1/admin/analytics/insights").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let insights = body["insights"].as_array().cloned().unwrap_or_default();
+        let delivery = insights
+            .iter()
+            .find(|i| i["metricName"] == "delivery_rate")
+            .expect("delivery-rate insight above the 10-send threshold");
+        assert_eq!(delivery["direction"], "up");
+        assert_eq!(delivery["currentValue"], "100.0%");
+        assert_eq!(delivery["previousValue"], "50.0%");
+        assert!(body["generatedAt"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("20")));
+        // Trend block over the same series.
+        assert!(body["trends"].as_array().is_some_and(|t| !t.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn insights_below_threshold_and_empty_states_are_honest() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_empty").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // Under the 10-send evidence threshold: no fabricated insights.
+        for i in 0..5 {
+            seed_cohort_event(
+                &pool,
+                &format!("msg-x{i}"),
+                &format!("x{i}@example.com"),
+                "sent",
+                1,
+            )
+            .await;
+        }
+        let (status, body) = env.get("/v1/admin/analytics/insights").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["insights"].as_array().map(Vec::len), Some(0));
+
+        // Subresources answer; unknown lookback falls back to 7d.
+        for uri in [
+            "/v1/admin/analytics/insights/trends",
+            "/v1/admin/analytics/insights/recommendations",
+            "/v1/admin/analytics/insights/trends?lookback=30d",
+        ] {
+            let (status, body) = env.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        }
+        let (status, _body) = env
+            .get("/v1/admin/analytics/insights?lookback=7d&extra=1")
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn insights_require_the_wildcard_scope() {
+        let Some(pool) = crate::test_db::canonical_pool("insights_gates").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["insights:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        let (status, body) = scoped.get("/v1/admin/analytics/insights").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+}

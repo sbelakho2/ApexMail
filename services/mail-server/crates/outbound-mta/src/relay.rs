@@ -326,6 +326,12 @@ pub struct Relay {
     resolver: Arc<dyn MxResolver>,
     config: RelayConfig,
     dsn: DsnGenerator,
+    /// Warmup admission at the SMTP-effect boundary (P0): when installed,
+    /// EVERY delivery attempt on a warming requested IP is admitted here —
+    /// inline submissions and daemon retries alike — so a durable retry can
+    /// never bypass the IP's daily cap. Absent = a caller-side authority
+    /// owns admission.
+    warmup: crate::warmup::WarmupGate,
 }
 
 impl Relay {
@@ -334,12 +340,25 @@ impl Relay {
         resolver: Arc<dyn MxResolver>,
         config: RelayConfig,
     ) -> Self {
+        Self::with_warmup_gate(ledger, resolver, config, crate::warmup::WarmupGate::none())
+    }
+
+    /// [`Self::new`] with a relay-owned warmup gate: the production worker
+    /// and the daemon install this so per-attempt admission happens at the
+    /// boundary that can actually transmit DATA.
+    pub fn with_warmup_gate(
+        ledger: Arc<dyn RelayLedger>,
+        resolver: Arc<dyn MxResolver>,
+        config: RelayConfig,
+        warmup: crate::warmup::WarmupGate,
+    ) -> Self {
         let dsn = DsnGenerator::new(config.reporting_mta.clone());
         Self {
             ledger,
             resolver,
             config,
             dsn,
+            warmup,
         }
     }
 
@@ -483,6 +502,102 @@ impl Relay {
                 reason,
                 dsn_send_units: dsn_units,
             });
+        }
+
+        // ── Warmup admission at the SMTP-effect boundary (P0) ──────────────
+        // BEFORE any connection is opened: when this relay owns warmup
+        // accounting, a warming requested IP must be admitted for the day
+        // on EVERY attempt. A refusal or an admission-store outage defers
+        // the send — nothing has hit the wire, so the durable retry
+        // schedule applies with a named reason. This is what makes a daemon
+        // retry unable to bypass the IP's daily cap after the inline
+        // attempt deferred.
+        if self.warmup.is_installed() {
+            match self
+                .warmup
+                .admit(
+                    &row.send_unit,
+                    row.requested_source_ip,
+                    self.ledger.pg_pool(),
+                )
+                .await
+            {
+                Ok(None | Some(crate::warmup::WarmupAdmission::Admitted)) => {}
+                Ok(Some(crate::warmup::WarmupAdmission::AtCap)) => {
+                    let reason = format!(
+                        "warming IP {} is at its canonical daily cap — deferring before any \
+                         connection is opened",
+                        row.requested_source_ip
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_default()
+                    );
+                    let now = Utc::now();
+                    match self.config.retry.next_attempt_at(attempt, now) {
+                        Some(next_attempt_at) => {
+                            self.ledger
+                                .record_retry(&row.send_unit, attempt, next_attempt_at, &reason)
+                                .await?;
+                            return Err(RelayError::RetryScheduled {
+                                send_unit: row.send_unit,
+                                attempt,
+                                next_attempt_at,
+                                reason,
+                            });
+                        }
+                        None => {
+                            // Ceiling reached while parked at the cap: the
+                            // delivery expires like any other retry
+                            // exhaustion, with a DSN.
+                            let dsn_units = self.enqueue_expired_dsns(&row, arrival).await;
+                            let full_reason = format!(
+                                "retry ceiling reached at the warming-IP daily cap: {reason}"
+                            );
+                            self.ledger
+                                .record_permanent(&row.send_unit, attempt, &full_reason)
+                                .await?;
+                            return Err(RelayError::Permanent {
+                                send_unit: row.send_unit,
+                                attempt,
+                                reason: full_reason,
+                                dsn_send_units: dsn_units,
+                            });
+                        }
+                    }
+                }
+                Err(reason) => {
+                    // Fail closed: an admission-store outage defers the
+                    // send rather than letting an unaccounted attempt hit
+                    // the wire.
+                    let now = Utc::now();
+                    match self.config.retry.next_attempt_at(attempt, now) {
+                        Some(next_attempt_at) => {
+                            self.ledger
+                                .record_retry(&row.send_unit, attempt, next_attempt_at, &reason)
+                                .await?;
+                            return Err(RelayError::RetryScheduled {
+                                send_unit: row.send_unit,
+                                attempt,
+                                next_attempt_at,
+                                reason,
+                            });
+                        }
+                        None => {
+                            let dsn_units = self.enqueue_expired_dsns(&row, arrival).await;
+                            let full_reason =
+                                format!("retry ceiling reached while warmup admission was unavailable: {reason}");
+                            self.ledger
+                                .record_permanent(&row.send_unit, attempt, &full_reason)
+                                .await?;
+                            return Err(RelayError::Permanent {
+                                send_unit: row.send_unit,
+                                attempt,
+                                reason: full_reason,
+                                dsn_send_units: dsn_units,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         let groups = group_recipients(&row.recipients)?;

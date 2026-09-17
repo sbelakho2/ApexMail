@@ -99,13 +99,25 @@ impl OutboundMtaTransport {
 
     /// Build the production submitter around the worker's database pool: a
     /// durable `outbound_relay_ledger` (migration 212) plus system MX
-    /// resolution.
-    pub fn from_pool(pool: &PgPool) -> ProcessorResult<Self> {
+    /// resolution, with the relay's own WARMUP ADMISSION gate installed
+    /// (P0): every SMTP attempt on a warming requested IP — inline and
+    /// daemon retry alike — is admitted at the effect boundary by the relay,
+    /// so a durable retry can never bypass the IP's daily cap.
+    pub fn from_pool(pool: &PgPool, redis: Option<&deadpool_redis::Pool>) -> ProcessorResult<Self> {
         let ledger: Arc<dyn RelayLedger> = Arc::new(PgLedger::new(pool.clone()));
         let resolver = DnsMxResolver::new().map_err(|error| {
             ProcessorError::Config(format!("outbound MTA MX resolver unavailable: {error}"))
         })?;
-        let relay = Relay::new(ledger, Arc::new(resolver), RelayConfig::default());
+        let config = RelayConfig::default();
+        let relay = match redis {
+            Some(redis) => {
+                let gate = outbound_mta::warmup::WarmupGate::new(std::sync::Arc::new(
+                    outbound_mta::warmup::RedisWarmupGate::new(redis.clone()),
+                ));
+                Relay::with_warmup_gate(ledger, Arc::new(resolver), config, gate)
+            }
+            None => Relay::new(ledger, Arc::new(resolver), config),
+        };
         Ok(Self::new(Arc::new(relay)))
     }
 
@@ -314,7 +326,6 @@ impl super::transport::EmailTransport for OutboundMtaTransport {
 mod tests {
     use super::super::transport::EmailTransport;
     use super::*;
-    use crate::email::processor::warmup_reservation_must_be_released;
     use outbound_mta::test_support::{
         FakeSmtpConfig, FakeSmtpServer, MemoryLedger, StaticMxResolver,
     };
@@ -446,12 +457,10 @@ mod tests {
         assert_eq!(row.state, "accepted");
         assert_eq!(row.attempt, 1);
 
-        // Settlement: a verified acceptance CONSUMES the reservation.
-        let result = Ok(receipt);
-        assert!(
-            !warmup_reservation_must_be_released(&route, &result),
-            "a verified dedicated acceptance keeps (consumes) the warmup reservation"
-        );
+        // P0 ownership fix: warmup consumption is the RELAY's, at the
+        // SMTP-effect boundary (its admission gate ran inside submit). The
+        // worker no longer holds a reservation to settle.
+        let _ = receipt;
     }
 
     /// The submitter receives EXACTLY the stable send identity the worker's
@@ -515,11 +524,9 @@ mod tests {
             "a binding mismatch says nothing about the mailbox — no suppression"
         );
 
-        let result = Err(error);
-        assert!(
-            warmup_reservation_must_be_released(&route, &result),
-            "an unverified binding must release the reserved capacity"
-        );
+        // The binding was never verified; the relay's gate already
+        // accounted the attempt conservatively (slot kept for the day).
+        let _ = (route, error);
     }
 
     /// A receipt with NO reported actual IP does not verify — no optimistic
@@ -543,7 +550,9 @@ mod tests {
             crate::email::processor::classify_send_failure(&error),
             crate::email::processor::SendFailureClass::Hard
         );
-        assert!(warmup_reservation_must_be_released(&route, &Err(error)));
+        // No worker-side reservation exists to release (relay-owned
+        // accounting); the unverified send simply fails hard.
+        let _ = &route;
 
         // Also: a record that omits the REQUESTED IP (echo mismatch) fails.
         let scripted = Arc::new(ScriptedRelay::new(record("accepted", None, None)));

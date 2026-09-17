@@ -1979,6 +1979,410 @@ pub(crate) mod test_support {
         .expect("seed api key");
         raw_key
     }
+
+    /// Shared adversarial router-test environment: the REAL `build_app`
+    /// router over a per-test canonical database, plus credential minting
+    /// (machine admin key, customer tenant key, full browser-style session
+    /// JWT) and request helpers. Shrinks the per-route test modules to the
+    /// behaviours under test instead of fixture boilerplate.
+    pub(crate) mod adv {
+        use super::super::build_app;
+        use axum::body::Body;
+        use axum::extract::ConnectInfo;
+        use axum::http::{header, HeaderMap, Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        /// The REAL router plus the credential its helpers send by default.
+        pub(crate) struct AdvEnv {
+            pub app: axum::Router,
+            pub pool: sqlx::PgPool,
+            /// Raw credential: sent as `x-api-key` for API-key envs and as
+            /// `Authorization: Bearer` for session envs.
+            pub credential: String,
+            /// Bearer (`true`) vs API-key (`false`) wire form.
+            bearer: bool,
+            pub tenant_id: String,
+            pub user_id: Option<String>,
+            /// Simulated peer address inserted as `ConnectInfo` (rate-limit
+            /// buckets, captcha IP binding). Distinct per test so parallel
+            /// tests never share a bucket.
+            pub client_ip: Option<std::net::SocketAddr>,
+        }
+
+        impl AdvEnv {
+            /// An env whose default credential is a caller-minted raw value.
+            pub(crate) async fn over(pool: sqlx::PgPool, credential: String) -> AdvEnv {
+                let state = super::test_state_over(pool.clone()).await;
+                AdvEnv {
+                    app: build_app(state),
+                    pool,
+                    credential,
+                    bearer: false,
+                    tenant_id: String::new(),
+                    user_id: None,
+                    client_ip: None,
+                }
+            }
+
+            /// An env with a caller-supplied Config (e.g. a real RSA signing
+            /// pair for JWT surfaces).
+            pub(crate) async fn over_with_config(
+                pool: sqlx::PgPool,
+                config: crate::config::Config,
+                credential: String,
+            ) -> AdvEnv {
+                let state = super::test_state_over_with_config(pool.clone(), config).await;
+                AdvEnv {
+                    app: build_app(state),
+                    pool,
+                    credential,
+                    bearer: false,
+                    tenant_id: String::new(),
+                    user_id: None,
+                    client_ip: None,
+                }
+            }
+
+            /// Machine-operator env: a `system`-tenant wildcard API key — the
+            /// credential that passes `require_auth`, the system-tenant gate
+            /// AND the CP-session gate (machine identity) on every
+            /// `/v1/admin/*` route.
+            pub(crate) async fn admin(pool: sqlx::PgPool) -> AdvEnv {
+                let key = super::seed_api_key_for(&pool, "system", &["*"]).await;
+                let mut env = AdvEnv::over(pool, key).await;
+                env.tenant_id = "system".into();
+                env
+            }
+
+            /// Fresh ACTIVE customer tenant with a scoped API key.
+            pub(crate) async fn tenant(pool: sqlx::PgPool, scopes: &[&str]) -> (AdvEnv, String) {
+                let tenant_id = apexmail_lib::id::generate_id("advt", 20);
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'adversarial tenant', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(&tenant_id)
+                .bind(format!("slug-{tenant_id}"))
+                .execute(&pool)
+                .await
+                .expect("seed adversarial tenant");
+                let key = super::seed_api_key_for(&pool, &tenant_id, scopes).await;
+                let mut env = AdvEnv::over(pool, key).await;
+                env.tenant_id = tenant_id.clone();
+                (env, tenant_id)
+            }
+
+            /// [`AdvEnv::tenant`] with a caller-supplied Config (e.g. a real
+            /// RSA signing pair for JWT-issuing surfaces driven by an API
+            /// key identity).
+            pub(crate) async fn tenant_with_config(
+                pool: sqlx::PgPool,
+                scopes: &[&str],
+                config: crate::config::Config,
+            ) -> (AdvEnv, String) {
+                let tenant_id = apexmail_lib::id::generate_id("advt", 20);
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'adversarial tenant', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(&tenant_id)
+                .bind(format!("slug-{tenant_id}"))
+                .execute(&pool)
+                .await
+                .expect("seed adversarial tenant");
+                let key = super::seed_api_key_for(&pool, &tenant_id, scopes).await;
+                let mut env = AdvEnv::over_with_config(pool, config, key).await;
+                env.tenant_id = tenant_id.clone();
+                (env, tenant_id)
+            }
+
+            /// [`AdvEnv::tenant`] whose AppState carries a
+            /// [`crate::ip_provider::DedicatedIpProvider`] wired to the
+            /// caller's mock Hetzner API root (loopback TCP server).
+            pub(crate) async fn tenant_with_ip_provider(
+                pool: sqlx::PgPool,
+                scopes: &[&str],
+                hetzner_base_url: &str,
+            ) -> (AdvEnv, String) {
+                let provider = crate::ip_provider::DedicatedIpProvider::new_for_tests(
+                    hetzner_base_url,
+                    pool.clone(),
+                );
+                let tenant_id = apexmail_lib::id::generate_id("advt", 20);
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'adversarial tenant', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(&tenant_id)
+                .bind(format!("slug-{tenant_id}"))
+                .execute(&pool)
+                .await
+                .expect("seed adversarial tenant");
+                let key = super::seed_api_key_for(&pool, &tenant_id, scopes).await;
+
+                let redis_url = std::env::var("TEST_REDIS_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+                let redis = deadpool_redis::Config::from_url(&redis_url)
+                    .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                    .expect("lazy redis pool");
+                let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+                    .load()
+                    .await;
+                let ses_provider = std::sync::Arc::new(crate::ses_provider::SesIpProvider::new(
+                    aws_sdk_sesv2::Client::new(&aws_config),
+                    pool.clone(),
+                    "apexmail".into(),
+                    "us-east-1".into(),
+                ));
+                let state = crate::state::AppStateInner::with_ddos_protector(
+                    pool.clone(),
+                    apexmail_db::pool::PoolPair {
+                        rw: pool.clone(),
+                        ro: pool.clone(),
+                    },
+                    redis,
+                    super::test_config(),
+                    reqwest::Client::new(),
+                    (*ses_provider).clone(),
+                    Some(provider),
+                    std::sync::Arc::new(
+                        ddos_protection::DdosProtector::new(
+                            ddos_protection::ProtectorConfig::default(),
+                        )
+                        .await
+                        .expect("ddos protector"),
+                    ),
+                    None,
+                    None,
+                    crate::resilience::ResilientClient::new_from_config(&super::test_config()),
+                );
+                let mut env = AdvEnv {
+                    app: build_app(state),
+                    pool,
+                    credential: key,
+                    bearer: false,
+                    tenant_id: tenant_id.clone(),
+                    user_id: None,
+                    client_ip: None,
+                };
+                env.tenant_id = tenant_id.clone();
+                (env, tenant_id)
+            }
+
+            /// Full browser-session env over a REAL RSA signing pair: seeds
+            /// an active tenant + active user of `role`, mints a session
+            /// JWT (typ "session") signed with the state's private key, and
+            /// authenticates requests with `Authorization: Bearer`.
+            /// Returns `(env, tenant_id, user_id)`; `None` (soft-skip) when
+            /// Redis is unreachable — the session path consults it for
+            /// blacklist/revocation state.
+            pub(crate) async fn session(
+                pool: sqlx::PgPool,
+                role: &str,
+            ) -> Option<(AdvEnv, String, String)> {
+                let redis_url = std::env::var("TEST_REDIS_URL")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())?;
+                let redis = deadpool_redis::Config::from_url(&redis_url)
+                    .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                    .ok()?;
+                let mut conn = redis.get().await.ok()?;
+                let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+                    .query_async(&mut *conn)
+                    .await;
+                if ping.is_err() {
+                    eprintln!("skipping session env: TEST_REDIS_URL unreachable");
+                    return None;
+                }
+
+                use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+                let key_pair =
+                    apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+                let private_key =
+                    rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+                        .expect("valid PKCS8 private key");
+                let mut config = super::test_config();
+                config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+                config.jwt_public_key_pem = private_key
+                    .to_public_key()
+                    .to_public_key_pem(LineEnding::LF)
+                    .expect("public PEM")
+                    .to_string();
+
+                let tenant_id = apexmail_lib::id::generate_id("advs", 20);
+                let user_id = uuid::Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                     VALUES ($1, 'adversarial session tenant', $2, 'free', 'active', NOW(), NOW())",
+                )
+                .bind(&tenant_id)
+                .bind(format!("slug-{tenant_id}"))
+                .execute(&pool)
+                .await
+                .expect("seed session tenant");
+                let email = format!("sess-{}@example.com", user_id);
+                sqlx::query(
+                    "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+                     VALUES ($1::uuid, $2, $3, 'Adversarial Session', $4, $5, 'active', true)",
+                )
+                .bind(&user_id)
+                .bind(&tenant_id)
+                .bind(&email)
+                .bind(
+                    apexmail_lib::hash_password("correct horse battery staple")
+                        .expect("hash password"),
+                )
+                .bind(role)
+                .execute(&pool)
+                .await
+                .expect("seed session user");
+
+                let now = chrono::Utc::now().timestamp();
+                let claims = crate::middleware::auth::JwtClaims {
+                    sub: user_id.clone(),
+                    tenant_id: tenant_id.clone(),
+                    scopes: crate::routes::auth::scopes_for_role(role)
+                        .into_iter()
+                        .collect(),
+                    exp: now + 3600,
+                    iat: now,
+                    jti: uuid::Uuid::new_v4().to_string(),
+                    typ: Some("session".into()),
+                };
+                let encoding_key =
+                    jsonwebtoken::EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+                        .expect("encoding key");
+                let token = jsonwebtoken::encode(
+                    &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+                    &claims,
+                    &encoding_key,
+                )
+                .expect("sign session jwt");
+
+                let mut env = AdvEnv::over_with_config(pool, config, token).await;
+                env.bearer = true;
+                env.tenant_id = tenant_id.clone();
+                env.user_id = Some(user_id.clone());
+                Some((env, tenant_id, user_id))
+            }
+
+            /// Issue a request that carries the env's default credential.
+            pub(crate) async fn send(
+                &self,
+                method: Method,
+                uri: &str,
+                body: Body,
+            ) -> (StatusCode, HeaderMap, Vec<u8>) {
+                let mut builder = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json");
+                builder = if self.bearer {
+                    builder.header(header::AUTHORIZATION, format!("Bearer {}", self.credential))
+                } else {
+                    builder.header("x-api-key", &self.credential)
+                };
+                let mut request = builder.body(body).expect("request");
+                if let Some(addr) = self.client_ip {
+                    request.extensions_mut().insert(ConnectInfo(addr));
+                }
+                let response = self.app.clone().oneshot(request).await.expect("response");
+                let status = response.status();
+                let headers = response.headers().clone();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body")
+                    .to_vec();
+                (status, headers, bytes)
+            }
+
+            /// `send` + JSON decoding of the body (Null when not JSON).
+            pub(crate) async fn send_json(
+                &self,
+                method: Method,
+                uri: &str,
+                body: Option<&str>,
+            ) -> (StatusCode, serde_json::Value) {
+                let body = match body {
+                    Some(text) => Body::from(text.to_string()),
+                    None => Body::empty(),
+                };
+                let (status, _headers, bytes) = self.send(method, uri, body).await;
+                let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                (status, value)
+            }
+
+            pub(crate) async fn get(&self, uri: &str) -> (StatusCode, serde_json::Value) {
+                self.send_json(Method::GET, uri, None).await
+            }
+
+            pub(crate) async fn post(
+                &self,
+                uri: &str,
+                body: &str,
+            ) -> (StatusCode, serde_json::Value) {
+                self.send_json(Method::POST, uri, Some(body)).await
+            }
+
+            pub(crate) async fn patch(
+                &self,
+                uri: &str,
+                body: &str,
+            ) -> (StatusCode, serde_json::Value) {
+                self.send_json(Method::PATCH, uri, Some(body)).await
+            }
+
+            pub(crate) async fn delete(&self, uri: &str) -> (StatusCode, serde_json::Value) {
+                self.send_json(Method::DELETE, uri, None).await
+            }
+
+            /// Raw bytes + headers (CSV exports, redirects, cookies).
+            pub(crate) async fn get_raw(&self, uri: &str) -> (StatusCode, HeaderMap, Vec<u8>) {
+                self.send(Method::GET, uri, Body::empty()).await
+            }
+
+            pub(crate) async fn post_raw(
+                &self,
+                uri: &str,
+                body: &str,
+            ) -> (StatusCode, HeaderMap, Vec<u8>) {
+                self.send(Method::POST, uri, Body::from(body.to_string()))
+                    .await
+            }
+
+            /// [`AdvEnv::post_raw`] with an explicit Cookie header (session
+            /// and impersonation-cookie flows).
+            pub(crate) async fn post_raw_with_cookie(
+                &self,
+                uri: &str,
+                body: &str,
+                cookie: &str,
+            ) -> (StatusCode, HeaderMap, Vec<u8>) {
+                let mut builder = Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, cookie);
+                builder = if self.bearer {
+                    builder.header(header::AUTHORIZATION, format!("Bearer {}", self.credential))
+                } else {
+                    builder.header("x-api-key", &self.credential)
+                };
+                let request = builder.body(Body::from(body.to_string())).expect("request");
+                let response = self.app.clone().oneshot(request).await.expect("response");
+                let status = response.status();
+                let headers = response.headers().clone();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body")
+                    .to_vec();
+                (status, headers, bytes)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -172,4 +172,173 @@ mod tests {
         );
         assert!(source.contains("sales_campaigns"));
     }
+
+    mod adversarial_tests {
+        use axum::http::StatusCode;
+
+        use crate::app::test_support::adv::AdvEnv;
+
+        /// Canonical migration 201 provisions sales_campaign_recipients; the
+        /// handler still probes because sales-service bootstraps may lag.
+        /// The no-join arm therefore needs the table DROPPED inside this
+        /// test's own database.
+        async fn drop_recipients(pool: &sqlx::PgPool) {
+            sqlx::query("DROP TABLE IF EXISTS sales_campaign_recipients")
+                .execute(pool)
+                .await
+                .expect("drop recipients table");
+        }
+
+        async fn seed_sales_campaign(
+            pool: &sqlx::PgPool,
+            name: &str,
+            status: &str,
+            sent: i64,
+            opened: i64,
+            clicked: i64,
+            days_ago: i32,
+        ) -> uuid::Uuid {
+            let id = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO sales_campaigns (id, tenant_id, name, template_id, audience, status, sent, opened, clicked, created_at)
+                 VALUES ($1, 'system', $2, 'tpl', 'audience', $3, $4, $5, $6,
+                         NOW() - ($7 || ' days')::interval)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(status)
+            .bind(sent)
+            .bind(opened)
+            .bind(clicked)
+            .bind(days_ago.to_string())
+            .execute(pool)
+            .await
+            .expect("seed sales campaign");
+            id
+        }
+
+        #[tokio::test]
+        async fn campaigns_list_without_the_recipients_table_still_reports() {
+            // Canonical schema has sales_campaigns but NOT
+            // sales_campaign_recipients (the sales service creates it at
+            // bootstrap): the no-join arm must list campaigns with zeroed
+            // recipient counts.
+            let Some(pool) = crate::test_db::canonical_pool("adm_camp_norec").await else {
+                return;
+            };
+            drop_recipients(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+            let old = seed_sales_campaign(&pool, "older blast", "completed", 10, 5, 2, 5).await;
+            seed_sales_campaign(&pool, "newer blast", "running", 3, 0, 0, 1).await;
+
+            let (status, body) = env.get("/v1/admin/campaigns").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 2);
+            // Newest first.
+            assert_eq!(rows[0]["name"], "newer blast");
+            assert_eq!(rows[0]["status"], "running");
+            assert_eq!(rows[0]["totalRecipients"], 0);
+            assert_eq!(rows[0]["sent"], 3);
+            assert_eq!(rows[1]["name"], "older blast");
+            assert_eq!(rows[1]["totalRecipients"], 0);
+            assert_eq!(rows[1]["sent"], 10);
+            assert_eq!(rows[1]["opened"], 5);
+            assert_eq!(rows[1]["clicked"], 2);
+            // replied is not a canonical campaign column — always 0.
+            assert_eq!(rows[1]["replied"], 0);
+            assert_eq!(rows[1]["id"], old.to_string());
+            assert!(rows[0]["createdAt"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("20")));
+            assert_eq!(rows[0]["updatedAt"], rows[0]["createdAt"]);
+        }
+
+        #[tokio::test]
+        async fn campaigns_list_joins_the_recipients_table_when_present() {
+            let Some(pool) = crate::test_db::canonical_pool("adm_camp_rec").await else {
+                return;
+            };
+            let env = AdvEnv::admin(pool.clone()).await;
+            // The canonical schema already carries sales_campaign_recipients
+            // (migration 201): the join arm runs against it as provisioned.
+            let campaign =
+                seed_sales_campaign(&pool, "joined blast", "completed", 0, 0, 0, 0).await;
+            for email in ["a@example.com", "b@example.com", "c@example.com"] {
+                sqlx::query(
+                    "INSERT INTO sales_campaign_recipients (campaign_id, email) VALUES ($1, $2)",
+                )
+                .bind(campaign)
+                .bind(email)
+                .execute(&pool)
+                .await
+                .expect("seed recipient");
+            }
+
+            let (status, body) = env.get("/v1/admin/campaigns").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["totalRecipients"], 3);
+        }
+
+        #[tokio::test]
+        async fn campaigns_pagination_clamps_hostile_params() {
+            let Some(pool) = crate::test_db::canonical_pool("adm_camp_page").await else {
+                return;
+            };
+            let env = AdvEnv::admin(pool.clone()).await;
+            for i in 0..3 {
+                seed_sales_campaign(&pool, &format!("page-{i}"), "draft", 0, 0, 0, i).await;
+            }
+            // Negative offset floors to 0; oversized limit clamps to 200.
+            let (status, body) = env.get("/v1/admin/campaigns?limit=100000&offset=-9").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body.as_array().map(Vec::len), Some(3));
+
+            let (status, body) = env.get("/v1/admin/campaigns?limit=0").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            // limit=0 clamps to 1 — a page of exactly one row.
+            assert_eq!(body.as_array().map(Vec::len), Some(1));
+
+            let (status, body) = env.get("/v1/admin/campaigns?limit=2&offset=2").await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["name"], "page-2");
+        }
+
+        #[tokio::test]
+        async fn campaigns_reject_unknown_query_fields() {
+            let Some(pool) = crate::test_db::canonical_pool("adm_camp_unknown").await else {
+                return;
+            };
+            let env = AdvEnv::admin(pool).await;
+            let (status, _body) = env.get("/v1/admin/campaigns?limit=5&bogus=1").await;
+            // axum's Query extractor rejects unknown fields with 400.
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn campaigns_require_the_wildcard_scope() {
+            let Some(pool) = crate::test_db::canonical_pool("adm_camp_scope").await else {
+                return;
+            };
+            let key =
+                crate::app::test_support::seed_api_key_for(&pool, "system", &["sales:read"]).await;
+            let env = AdvEnv::over(pool, key).await;
+            let (status, body) = env.get("/v1/admin/campaigns").await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        }
+
+        #[tokio::test]
+        async fn campaigns_reject_customer_tenants() {
+            let Some(pool) = crate::test_db::canonical_pool("adm_camp_tenant").await else {
+                return;
+            };
+            let (env, _tenant) = AdvEnv::tenant(pool, &["*"]).await;
+            let (status, body) = env.get("/v1/admin/campaigns").await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        }
+    }
 }

@@ -581,6 +581,64 @@ services:
     logging: *default-logging
 
   # ===========================================================================
+  # OUTBOUND MTA RELAY DAEMON
+  # ===========================================================================
+  # The ONLY component that drains the durable outbound queue
+  # (`outbound_relay_ledger`): it reclaims expired delivery leases and claims
+  # due rows every poll tick, delivering them through the relay. Inline
+  # worker submissions that hit a TRANSIENT SMTP/DNS/network failure persist
+  # into this ledger — without this service those retries never happen and
+  # mail stalls in `pending` forever (see
+  # docs/architecture/delivery-transport.md).
+  outbound-mta:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: outbound-mta
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "outbound-mta"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      # The daemon dials out only; no SMTP ports. The health listener answers
+      # /healthz (process liveness) and /readyz (ledger queue stats; a ledger
+      # failure is 503, never masked).
+      OUTBOUND_MTA_HEALTH_ADDR: 127.0.0.1:8093
+      OUTBOUND_MTA_POLL_SECS: ${OUTBOUND_MTA_POLL_SECS:-5}
+      OUTBOUND_MTA_BATCH_SIZE: ${OUTBOUND_MTA_BATCH_SIZE:-100}
+      OUTBOUND_MTA_MAX_ATTEMPTS: ${OUTBOUND_MTA_MAX_ATTEMPTS:-12}
+      OUTBOUND_MTA_HELO_DOMAIN: ${OUTBOUND_MTA_HELO_DOMAIN:-relay.apexmail.ee}
+      # ── Backend datastore (URL assembled by the entrypoint wrapper) ───────
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 64M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+    logging: *default-logging
+
+  # ===========================================================================
   # PDF RENDERER (Typst-based PDF generation)
   # ===========================================================================
   pdf-renderer:

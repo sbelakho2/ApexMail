@@ -293,3 +293,128 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    /// Seed one canonical lead (the migration-223 view's base rows) for
+    /// `tenant`: an account, a contact carrying the lead mapping, and an
+    /// email contact point.
+    async fn seed_canonical_lead(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        company: &str,
+        source: &str,
+        score: i32,
+    ) -> String {
+        let account_id = uuid::Uuid::new_v4();
+        let contact_id = uuid::Uuid::new_v4();
+        let lead_id = format!("lead-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, industry)
+             VALUES ($1, $2, $3, $4, 'Email Infrastructure')",
+        )
+        .bind(account_id)
+        .bind(tenant)
+        .bind(company)
+        .bind(format!(
+            "{}-{}.example",
+            company.to_lowercase(),
+            &account_id.simple().to_string()[..6]
+        ))
+        .execute(pool)
+        .await
+        .expect("seed account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name)
+             VALUES ($1, $2, $3, 'Canonical Prospect')",
+        )
+        .bind(contact_id)
+        .bind(tenant)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("seed contact");
+        sqlx::query(
+            "UPDATE sales_contacts
+                SET legacy_lead_id = $1, lead_source = $2, lead_score = $3
+              WHERE id = $4",
+        )
+        .bind(&lead_id)
+        .bind(source)
+        .bind(score)
+        .bind(contact_id)
+        .execute(pool)
+        .await
+        .expect("map the contact as a lead");
+        lead_id
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_sources_and_leads_for_the_operator() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_discovery").await else {
+            return;
+        };
+        let env = crate::app::test_support::adv::AdvEnv::admin(pool.clone()).await;
+        let tenant = format!(
+            "advdisc{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..14]
+        );
+        seed_canonical_lead(&pool, &tenant, "Acme Radar", "linkedin", 80).await;
+        seed_canonical_lead(&pool, &tenant, "Beta Radar", "linkedin", 60).await;
+        seed_canonical_lead(&pool, &tenant, "Gamma Tools", "apex-plugin", 40).await;
+
+        let (status, body) = env.get("/v1/admin/leads/discovery").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let sources = body["sources"].as_array().expect("sources");
+        assert_eq!(sources.len(), 2, "one per distinct source");
+        let linkedin = sources
+            .iter()
+            .find(|s| s["name"] == "linkedin")
+            .expect("linkedin source");
+        assert_eq!(linkedin["leadsFound"], 2);
+        assert_eq!(linkedin["enabled"], true);
+        assert_eq!(linkedin["status"], "active");
+        assert!(linkedin["icon"].as_str().is_some_and(|i| !i.is_empty()));
+
+        let leads = body["leads"].as_array().expect("leads");
+        assert_eq!(leads.len(), 3);
+        assert!(leads.iter().all(|l| l["imported"] == true));
+        assert!(leads
+            .iter()
+            .all(|l| l["foundAt"].as_str().is_some_and(|t| t.starts_with("20"))));
+        // The industry from the joined account surfaces as the description.
+        assert!(leads
+            .iter()
+            .all(|l| l["description"] == "Email Infrastructure"));
+    }
+
+    #[tokio::test]
+    async fn discovery_with_no_leads_is_an_empty_report() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_discovery_empty").await else {
+            return;
+        };
+        let env = crate::app::test_support::adv::AdvEnv::admin(pool).await;
+        let (status, body) = env.get("/v1/admin/leads/discovery").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["sources"].as_array().map(Vec::len), Some(0));
+        assert_eq!(body["leads"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn discovery_requires_the_wildcard_scope_and_system_tenant() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_discovery_gates").await else {
+            return;
+        };
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["sales:read"]).await;
+        let scoped = crate::app::test_support::adv::AdvEnv::over(pool.clone(), key).await;
+        let (status, body) = scoped.get("/v1/admin/leads/discovery").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (customer, _tenant) = crate::app::test_support::adv::AdvEnv::tenant(pool, &["*"]).await;
+        let (status, body) = customer.get("/v1/admin/leads/discovery").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+}

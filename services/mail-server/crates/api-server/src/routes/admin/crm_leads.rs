@@ -261,3 +261,118 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    /// Seed one canonical lead (the migration-223 view's base rows) for
+    /// `tenant`: an account, a contact carrying the lead mapping, and an
+    /// email contact point.
+    async fn seed_canonical_lead(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        company: &str,
+        source: &str,
+        score: i32,
+    ) -> String {
+        let account_id = uuid::Uuid::new_v4();
+        let contact_id = uuid::Uuid::new_v4();
+        let lead_id = format!("lead-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO sales_accounts (id, tenant_id, company, domain, industry)
+             VALUES ($1, $2, $3, $4, 'Email Infrastructure')",
+        )
+        .bind(account_id)
+        .bind(tenant)
+        .bind(company)
+        .bind(format!(
+            "{}-{}.example",
+            company.to_lowercase(),
+            &account_id.simple().to_string()[..6]
+        ))
+        .execute(pool)
+        .await
+        .expect("seed account");
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name)
+             VALUES ($1, $2, $3, 'Canonical Prospect')",
+        )
+        .bind(contact_id)
+        .bind(tenant)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("seed contact");
+        sqlx::query(
+            "UPDATE sales_contacts
+                SET legacy_lead_id = $1, lead_source = $2, lead_score = $3
+              WHERE id = $4",
+        )
+        .bind(&lead_id)
+        .bind(source)
+        .bind(score)
+        .bind(contact_id)
+        .execute(pool)
+        .await
+        .expect("map the contact as a lead");
+        lead_id
+    }
+
+    #[tokio::test]
+    async fn crm_leads_list_maps_the_canonical_projection() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_crm_leads").await else {
+            return;
+        };
+        let env = crate::app::test_support::adv::AdvEnv::admin(pool.clone()).await;
+        // The system-tenant gate pins the caller to `system`, so the leads
+        // must live under that tenant to be visible.
+        let tenant = "system".to_string();
+        seed_canonical_lead(&pool, &tenant, "High Score Co", "linkedin", 90).await;
+        seed_canonical_lead(&pool, &tenant, "Low Score Co", "apex-plugin", 10).await;
+
+        let (status, body) = env.get("/v1/admin/crm/leads").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let leads = body.as_array().expect("array");
+        assert_eq!(leads.len(), 2);
+        // Ordered by score DESC.
+        assert_eq!(leads[0]["companyName"], "High Score Co");
+        assert_eq!(leads[0]["score"], 90);
+        assert_eq!(leads[0]["source"], "linkedin");
+        assert!(leads[0]["stage"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(leads[0]["tags"], serde_json::json!([]));
+        assert!(leads[0]["createdAt"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("20")));
+        // No execution history yet: lastActivity is absent.
+        assert_eq!(leads[0]["lastActivity"], serde_json::Value::Null);
+
+        // Pagination clamps: limit=0 → 1 row; hostile offsets floor to 0.
+        let (status, body) = env.get("/v1/admin/crm/leads?limit=0").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        let (status, body) = env.get("/v1/admin/crm/leads?limit=999999&offset=-7").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn crm_leads_empty_and_gates() {
+        let Some(pool) = crate::test_db::canonical_pool("adv_crm_leads_gates").await else {
+            return;
+        };
+        let env = crate::app::test_support::adv::AdvEnv::admin(pool.clone()).await;
+        let (status, body) = env.get("/v1/admin/crm/leads").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(0));
+
+        let key = crate::app::test_support::seed_api_key_for(&pool, "system", &["crm:read"]).await;
+        let scoped = crate::app::test_support::adv::AdvEnv::over(pool.clone(), key).await;
+        let (status, body) = scoped.get("/v1/admin/crm/leads").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        let (customer, _tenant) = crate::app::test_support::adv::AdvEnv::tenant(pool, &["*"]).await;
+        let (status, body) = customer.get("/v1/admin/crm/leads").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+}

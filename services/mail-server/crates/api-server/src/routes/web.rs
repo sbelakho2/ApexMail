@@ -10575,6 +10575,620 @@ mod tests {
                 "seed_tenant/fixtures seed generate_id-prefixed 26-char tenant ids",
             );
         }
+
+        // ─── Wave D: adversarial gate matrix for the auth forms ──────
+        mod wave_d_auth_gate_tests {
+            use super::*;
+            use crate::app::test_support::test_state_over_with_config;
+            use axum::routing::post;
+            use tower::ServiceExt;
+
+            const PW: &str = "0ld#SweepPassw0rd";
+            /// The canonical system tenant id (migration 072).
+
+            /// A canonical-DB state whose config is derived from the real
+            /// test_config with a caller mutation (production flag, kiwi
+            /// enforcement, broken signing key, …) over a REAL RSA pair.
+            async fn gated_state(
+                db: sqlx::PgPool,
+                mutate: impl FnOnce(&mut crate::config::Config),
+            ) -> AppState {
+                let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("rsa keypair");
+                let mut config = test_config();
+                config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+                mutate(&mut config);
+                test_state_over_with_config(db, config).await
+            }
+
+            /// The public auth form twins (no session identity involved).
+            fn public_forms(state: AppState) -> axum::Router {
+                axum::Router::new()
+                    .route("/web/auth/login", post(form_login))
+                    .route("/web/auth/mfa/verify", post(form_mfa_verify))
+                    .route("/web/auth/signup", post(form_signup))
+                    .route("/web/auth/forgot-password", post(form_forgot_password))
+                    .route("/web/auth/reset-password", post(form_reset_password))
+                    .route("/web/auth/logout", post(form_logout))
+                    .route("/web/cp/login", post(form_cp_login))
+                    .with_state(state)
+            }
+
+            /// A form POST carrying the CSRF double-submit pair (when the body
+            /// carries `_csrf`) plus any extra cookies.
+            fn form_post_with_cookie(uri: &str, body: &str, extra_cookies: &str) -> Request<Body> {
+                let csrf_cookie = body
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("_csrf="))
+                    .map(|token| format!("csrf_token={token}"))
+                    .unwrap_or_default();
+                let cookies = if csrf_cookie.is_empty() {
+                    extra_cookies.to_string()
+                } else if extra_cookies.is_empty() {
+                    csrf_cookie
+                } else {
+                    format!("{csrf_cookie}; {extra_cookies}")
+                };
+                let mut builder = Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/x-www-form-urlencoded");
+                if !cookies.is_empty() {
+                    builder = builder.header(header::COOKIE, cookies);
+                }
+                builder.body(Body::from(body.to_string())).unwrap()
+            }
+
+            /// Flash text of a response (empty when none).
+            async fn flash_of(response: Response, secret: &str) -> String {
+                flash_text(&response_flash(&response, secret))
+            }
+
+            /// Seed one user with the given gates and a known password;
+            /// returns (user_id, email).
+            async fn seed_user(
+                db: &sqlx::PgPool,
+                tenant: &str,
+                role: &str,
+                status: &str,
+                email_verified: bool,
+                mfa_enabled: bool,
+            ) -> (Uuid, String) {
+                let user_id = Uuid::new_v4();
+                let email = format!("waved-{}@example.com", user_id.simple());
+                let hash = hash_password(PW).expect("hash password");
+                sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled)
+                 VALUES ($1, $2, $3, 'Wave D', $4, $5, $6, $7, $8)",
+            )
+            .bind(user_id)
+            .bind(tenant)
+            .bind(&email)
+            .bind(&hash)
+            .bind(role)
+            .bind(status)
+            .bind(email_verified)
+            .bind(mfa_enabled)
+            .execute(db)
+            .await
+            .expect("seed wave-d user");
+                (user_id, email)
+            }
+
+            async fn seed_tenant(db: &sqlx::PgPool, id: &str, slug: &str) {
+                sqlx::query(
+                    "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                 VALUES ($1, 'Wave D Tenant', $2, 'free', 'active', NOW(), NOW())
+                 ON CONFLICT (id) DO NOTHING",
+                )
+                .bind(id)
+                .bind(slug)
+                .execute(db)
+                .await
+                .expect("seed wave-d tenant");
+            }
+
+            /// The CP-login gate matrix: every refusal is a PRG redirect with a
+            /// flash, never a 4xx/5xx; only a system-tenant operator mints the
+            /// dual cookie pair.
+            #[tokio::test]
+            async fn cp_login_gate_matrix_refuses_customers_and_non_operators() {
+                let Some(db) = crate::test_db::canonical_pool("waved_cp_login").await else {
+                    eprintln!("skipping cp_login_gate_matrix: no TEST_DATABASE_URL");
+                    return;
+                };
+                // The canonical chain already seeds the system tenant (migration 072:
+                // id "system_internal_tenant01", slug "system").
+                let customer = apexmail_lib::id::generate_id("wvcx", 20);
+                seed_tenant(&db, &customer, &format!("slug-{customer}")).await;
+
+                let disabled = seed_user(&db, &customer, "owner", "disabled", true, false).await;
+                let unverified = seed_user(&db, &customer, "owner", "active", false, false).await;
+                let verified_customer =
+                    seed_user(&db, &customer, "owner", "active", true, false).await;
+                let operator = seed_user(
+                    &db,
+                    crate::routes::system_sender::SYSTEM_TENANT_ID,
+                    "admin",
+                    "active",
+                    true,
+                    false,
+                )
+                .await;
+                let mfa_operator = seed_user(
+                    &db,
+                    crate::routes::system_sender::SYSTEM_TENANT_ID,
+                    "admin",
+                    "active",
+                    true,
+                    true,
+                )
+                .await;
+
+                let state = gated_state(db, |_| {}).await;
+                let app = public_forms(state.clone());
+
+                // Unknown email: generic refusal, no account oracle.
+                let body = csrf_body(&state, &[("email", "ghost@example.com"), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("Invalid email or password"));
+
+                // Disabled account says so BEFORE the password is checked.
+                let body = csrf_body(&state, &[("email", &disabled.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("not active yet"));
+
+                // Wrong password: the same generic refusal as the unknown email.
+                let body = csrf_body(
+                    &state,
+                    &[("email", &verified_customer.1), ("password", "wrong")],
+                );
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("Invalid email or password"));
+
+                // Unverified: only revealed once the password proved identity.
+                let body = csrf_body(&state, &[("email", &unverified.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("Verify your email address"));
+
+                // A perfectly valid CUSTOMER session must never reach the CP.
+                let body = csrf_body(&state, &[("email", &verified_customer.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                let cp_session = set_cookie_value(&response, "apexmail_cp_session");
+                assert!(
+                    flash_of(response, &state.config.csrf_secret)
+                        .await
+                        .contains("restricted to ApexMail operators"),
+                    "a customer must be refused the control plane"
+                );
+                assert!(cp_session.is_none());
+
+                // Operator success mints BOTH cookies.
+                let body = csrf_body(&state, &[("email", &operator.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                let am_session = set_cookie_value(&response, "am_session");
+                let cp_session = set_cookie_value(&response, "apexmail_cp_session");
+                let flash = flash_of(response, &state.config.csrf_secret).await;
+                assert!(flash.contains("Signed in to the control plane"));
+                assert!(am_session.is_some());
+                assert!(cp_session.is_some());
+
+                // An MFA operator gets the challenge redirect, not a session.
+                let body = csrf_body(&state, &[("email", &mfa_operator.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                let location = response
+                    .headers()
+                    .get(header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
+                assert!(
+                    location.starts_with("/login?mfa=1&email="),
+                    "MFA operator must be routed to the challenge form, got {location}"
+                );
+                assert!(set_cookie_value(&response, "apexmail_login_challenge").is_some());
+                assert!(set_cookie_value(&response, "apexmail_cp_session").is_none());
+            }
+
+            /// A broken JWT signing key must fail CLOSED at both login twins
+            /// ("temporarily unavailable"), never mint a session and never 500.
+            #[tokio::test]
+            async fn login_fails_closed_when_the_signing_key_is_broken() {
+                let Some(db) = crate::test_db::canonical_pool("waved_broken_key").await else {
+                    eprintln!(
+                    "skipping login_fails_closed_when_the_signing_key_is_broken: no TEST_DATABASE_URL"
+                );
+                    return;
+                };
+                // The canonical chain already seeds the system tenant (migration 072:
+                // id "system_internal_tenant01", slug "system").
+                let operator = seed_user(
+                    &db,
+                    crate::routes::system_sender::SYSTEM_TENANT_ID,
+                    "admin",
+                    "active",
+                    true,
+                    false,
+                )
+                .await;
+
+                let mut config = test_config();
+                config.jwt_private_key_pem = "NOT A PEM".into();
+                let state = test_state_over_with_config(db, config).await;
+                let app = public_forms(state.clone());
+
+                let body = csrf_body(&state, &[("email", &operator.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("temporarily unavailable"));
+
+                let response = app
+                    .oneshot(form_post_with_cookie("/web/auth/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("temporarily unavailable"));
+            }
+
+            /// Missing CSRF and an enforced KiwiCaptcha gate each refuse the
+            /// POST twins of every public auth form.
+            #[tokio::test]
+            async fn public_auth_forms_enforce_csrf_and_kiwi_gates() {
+                let Some(db) = crate::test_db::canonical_pool("waved_form_gates").await else {
+                    eprintln!("skipping public_auth_forms_enforce_csrf_and_kiwi_gates: no TEST_DATABASE_URL");
+                    return;
+                };
+
+                // CSRF: a body with NO _csrf pair at all.
+                let state = gated_state(db.clone(), |_| {}).await;
+                let app = public_forms(state.clone());
+                let no_csrf = "email=x%40example.com&password=y&code=000000&token=t&e=e";
+                for uri in [
+                    "/web/auth/login",
+                    "/web/cp/login",
+                    "/web/auth/mfa/verify",
+                    "/web/auth/signup",
+                    "/web/auth/forgot-password",
+                    "/web/auth/reset-password",
+                ] {
+                    let response = app
+                        .clone()
+                        .oneshot(form_post_with_cookie(uri, no_csrf, ""))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::SEE_OTHER,
+                        "{uri} must stay PRG on CSRF refusal"
+                    );
+                    let flash = flash_of(response, &state.config.csrf_secret).await;
+                    let lowered = flash.to_lowercase();
+                    assert!(
+                        lowered.contains("csrf")
+                            || lowered.contains("session expired")
+                            || lowered.contains("reload the page"),
+                        "{uri} must name the CSRF failure, got {flash:?}"
+                    );
+                }
+
+                // KiwiCaptcha enforced: no kiwi__token in the body is refused
+                // before any credential is consulted.
+                let state = gated_state(db, |config| {
+                    config.kiwi_enabled = true;
+                    config.kiwi_secret_key = "not-dev".into();
+                })
+                .await;
+                let app = public_forms(state.clone());
+                for uri in [
+                    "/web/auth/login",
+                    "/web/cp/login",
+                    "/web/auth/signup",
+                    "/web/auth/forgot-password",
+                    "/web/auth/reset-password",
+                ] {
+                    let body = csrf_body(&state, &[("email", "x@example.com"), ("password", "y")]);
+                    let response = app
+                        .clone()
+                        .oneshot(form_post_with_cookie(uri, &body, ""))
+                        .await
+                        .unwrap();
+                    let flash = flash_of(response, &state.config.csrf_secret).await;
+                    assert!(
+                        flash.to_lowercase().contains("captcha"),
+                        "{uri} must refuse without a CAPTCHA token, got {flash:?}"
+                    );
+                }
+            }
+
+            /// Production sets the Secure attribute on every auth cookie the
+            /// login and logout flows write.
+            #[tokio::test]
+            async fn production_marks_every_auth_cookie_secure() {
+                let Some(db) = crate::test_db::canonical_pool("waved_secure_cookies").await else {
+                    eprintln!(
+                        "skipping production_marks_every_auth_cookie_secure: no TEST_DATABASE_URL"
+                    );
+                    return;
+                };
+                // The canonical chain already seeds the system tenant (migration 072:
+                // id "system_internal_tenant01", slug "system").
+                let operator = seed_user(
+                    &db,
+                    crate::routes::system_sender::SYSTEM_TENANT_ID,
+                    "admin",
+                    "active",
+                    true,
+                    false,
+                )
+                .await;
+
+                let state = gated_state(db, |config| {
+                    config.environment = crate::config::Environment::Production;
+                })
+                .await;
+                let app = public_forms(state.clone());
+
+                let body = csrf_body(&state, &[("email", &operator.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/cp/login", &body, ""))
+                    .await
+                    .unwrap();
+                assert!(set_cookie_value(&response, "am_session").is_some());
+                let all_cookies: Vec<&str> = response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .collect();
+                assert!(
+                    all_cookies.iter().all(|cookie| cookie.contains("; Secure")),
+                    "every production auth cookie must be Secure: {all_cookies:?}"
+                );
+
+                let response = app
+                    .oneshot(form_post_with_cookie(
+                        "/web/auth/logout",
+                        &csrf_body(&state, &[]),
+                        "",
+                    ))
+                    .await
+                    .unwrap();
+                assert!(set_cookie_value(&response, "am_session").is_some());
+                let logout_cookies: Vec<&str> = response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .filter_map(|v| v.to_str().ok())
+                    .collect();
+                assert!(
+                    logout_cookies
+                        .iter()
+                        .all(|cookie| cookie.contains("; Secure")),
+                    "logout clear cookies must be Secure: {logout_cookies:?}"
+                );
+            }
+
+            /// The MFA verify step: an unverified account is refused even with
+            /// a valid challenge; a wrong code is refused and counted; the
+            /// counter eventually locks the step out.
+            #[tokio::test]
+            async fn mfa_verify_refuses_unverified_counts_wrong_codes_and_locks() {
+                let Some(db) = crate::test_db::canonical_pool("waved_mfa_verify").await else {
+                    eprintln!("skipping mfa_verify_refuses_unverified_counts_wrong_codes_and_locks: no TEST_DATABASE_URL");
+                    return;
+                };
+                let customer = apexmail_lib::id::generate_id("wvmf", 20);
+                seed_tenant(&db, &customer, &format!("slug-{customer}")).await;
+
+                // The MFA-step verification gate fires when verification was
+                // REVOKED between the password step and the code step: the
+                // challenge was legitimately issued to a verified account.
+                let revoked = seed_user(&db, &customer, "owner", "active", true, true).await;
+                let secretless = seed_user(&db, &customer, "owner", "active", true, true).await;
+
+                let state = gated_state(db.clone(), |_| {}).await;
+                let app = public_forms(state.clone());
+
+                // Password step → challenge cookie (the account was verified).
+                let body = csrf_body(&state, &[("email", &revoked.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/auth/login", &body, ""))
+                    .await
+                    .unwrap();
+                let challenge = set_cookie_value(&response, "apexmail_login_challenge")
+                    .expect("challenge cookie for the verified account");
+
+                // Verification revoked mid-flow: the still-signed challenge
+                // must NOT complete the sign-in.
+                sqlx::query("UPDATE users SET email_verified = false WHERE id = $1")
+                    .bind(revoked.0)
+                    .execute(&db)
+                    .await
+                    .expect("revoke verification mid-flow");
+                let body = csrf_body(&state, &[("email", &revoked.1), ("code", "123456")]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie(
+                        "/web/auth/mfa/verify",
+                        &body,
+                        &format!("apexmail_login_challenge={challenge}"),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("Verify your email address"));
+
+                // A secret-less MFA row can never validate a code: every code is
+                // wrong, each one counted, until the brute-force bound locks out.
+                let body = csrf_body(&state, &[("email", &secretless.1), ("password", PW)]);
+                let response = app
+                    .clone()
+                    .oneshot(form_post_with_cookie("/web/auth/login", &body, ""))
+                    .await
+                    .unwrap();
+                let challenge = set_cookie_value(&response, "apexmail_login_challenge")
+                    .expect("challenge cookie");
+
+                let mut last_flash = String::new();
+                let mut last_session_cookie: Option<String> = None;
+                for attempt in 0..11 {
+                    let body = csrf_body(&state, &[("email", &secretless.1), ("code", "000000")]);
+                    let response = app
+                        .clone()
+                        .oneshot(form_post_with_cookie(
+                            "/web/auth/mfa/verify",
+                            &body,
+                            &format!("apexmail_login_challenge={challenge}"),
+                        ))
+                        .await
+                        .unwrap();
+                    let session_cookie = set_cookie_value(&response, "am_session");
+                    last_flash = flash_of(response, &state.config.csrf_secret).await;
+                    last_session_cookie = session_cookie;
+                    if attempt < 10 {
+                        assert!(
+                            last_flash.contains("did not match"),
+                            "attempt {attempt}: wrong code must be refused, got {last_flash:?}"
+                        );
+                    }
+                }
+                assert!(
+                    last_flash.contains("Too many verification attempts"),
+                    "the 11th attempt must be locked out, got {last_flash:?}"
+                );
+                assert!(
+                    last_session_cookie.is_none(),
+                    "a locked-out step must not mint a session"
+                );
+            }
+
+            /// A session whose user row vanished must never be told its profile
+            /// was saved.
+            #[tokio::test]
+            async fn profile_update_for_a_missing_user_fails_closed() {
+                let Some(db) = crate::test_db::canonical_pool("waved_profile_missing").await else {
+                    eprintln!("skipping profile_update_for_a_missing_user_fails_closed: no TEST_DATABASE_URL");
+                    return;
+                };
+                let tenant = apexmail_lib::id::generate_id("wvpr", 20);
+                seed_tenant(&db, &tenant, &format!("slug-{tenant}")).await;
+
+                let state = gated_state(db, |_| {}).await;
+                let ghost = AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: Some(Uuid::new_v4().to_string()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                };
+                let app = canonical_handlers(state.clone(), ghost);
+                let response = app
+                    .oneshot(post_form(
+                        "/web/account/profile",
+                        &csrf_body(&state, &[("name", "Ghost Name")]),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(flash_of(response, &state.config.csrf_secret)
+                    .await
+                    .contains("Could not save your profile. Sign in again."));
+            }
+
+            /// CSV import parser edges: empty input, rows shorter than the
+            /// header, RFC 4180 quote escaping, and the final unterminated
+            /// record.
+            #[test]
+            fn contact_csv_parser_covers_header_and_quote_edges() {
+                // Empty input: column defaults without a header record.
+                let parsed = parse_contact_csv("");
+                assert!(!parsed.had_header);
+                assert!(parsed.rows.is_empty());
+                assert!(parsed.invalid.is_empty());
+
+                // Header present but a data row shorter than the header: the
+                // email column is missing on that row only.
+                let parsed = parse_contact_csv("name,email\nAlice\nBob,bob@example.com\n");
+                assert!(parsed.had_header);
+                assert_eq!(parsed.rows.len(), 1);
+                assert_eq!(parsed.rows[0].email, "bob@example.com");
+                assert_eq!(parsed.invalid.len(), 1);
+                assert_eq!(
+                    parsed.invalid[0].0, 2,
+                    "line number is 1-based after the header"
+                );
+                assert_eq!(parsed.invalid[0].1, "row has no email column");
+
+                // Doubled quotes inside a quoted field are one literal quote
+                // (the closing field quote makes it a triple), and a record
+                // without a trailing newline still lands.
+                let records = parse_csv_records("\"say \"\"hi\"\"\",\"friend\"\na@b.com,Ann");
+                assert_eq!(
+                    records,
+                    vec![
+                        vec!["say \"hi\"".to_string(), "friend".to_string()],
+                        vec!["a@b.com".to_string(), "Ann".to_string()],
+                    ]
+                );
+
+                // A quoted field with an embedded comma survives as ONE cell
+                // (the name column keeps "Last, First" intact).
+                let parsed = parse_contact_csv("email,name\nfirst@example.com,\"Last, First\"\n");
+                assert!(parsed.had_header);
+                assert_eq!(parsed.rows.len(), 1);
+                assert_eq!(parsed.rows[0].email, "first@example.com");
+                assert_eq!(
+                    parsed.rows[0].name.as_deref(),
+                    Some("Last, First"),
+                    "a quoted comma must not split the name cell"
+                );
+            }
+        }
     }
 }
 

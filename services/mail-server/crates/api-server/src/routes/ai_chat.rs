@@ -298,3 +298,238 @@ async fn chat_rate_limit(
 // Unused-import guard for HeaderMap (kept for future client-IP extraction).
 #[allow(dead_code)]
 fn _header_guard(_h: &HeaderMap) {}
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    /// Minimal in-process ai-service twin: serves /chat and
+    /// /admin/chat/history with canned payloads, recording requests.
+    async fn start_mock_ai() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        use axum::routing::post;
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let state = seen.clone();
+        let app = axum::Router::new()
+            .route(
+                "/chat",
+                post(move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    state.lock().unwrap().push(body);
+                    axum::Json(serde_json::json!({
+                        "answer": "Ship the adversarial test.",
+                        "citations": [{"title": "ApexMail docs", "url": "https://apexmail.ee/docs"}],
+                        "escalated": false,
+                        "disclosure": "AI-powered. Escalation: support@apexmail.ee.",
+                        "docs_version": "v42",
+                    }))
+                }),
+            )
+            .route(
+                "/admin/chat/history",
+                post(|| async {
+                    axum::Json(serde_json::json!({
+                        "conversations": [{"id": "c1", "messages": 3}]
+                    }))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (base_url, seen)
+    }
+
+    fn ai_config(ai_url: &str) -> crate::config::Config {
+        let mut config = crate::app::test_support::test_config();
+        config.ai_service_base_url = ai_url.into();
+        config
+    }
+
+    #[tokio::test]
+    async fn chat_requires_scope_feature_message_and_service() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_chat_gates").await else {
+            return;
+        };
+        let Some((env, tenant, _user)) = AdvEnv::session(pool.clone(), "owner").await else {
+            return;
+        };
+
+        // Member-role session lacks ai:read.
+        let Some((member, _t, _u)) = AdvEnv::session(pool.clone(), "member").await else {
+            return;
+        };
+        let (status, body) = member.post("/v1/ai/chat", r#"{"message":"hi"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+        // Empty message.
+        let (status, body) = env.post("/v1/ai/chat", r#"{"message":"   "}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Over-length message (hostile boundary).
+        let long = "x".repeat(4001);
+        let (status, body) = env
+            .post(
+                "/v1/ai/chat",
+                &serde_json::json!({ "message": long }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Unconfigured assistant (empty URL) is a 500 with a clear code.
+        let (unconfigured, _t2) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config("")).await;
+        let (status, body) = unconfigured
+            .post("/v1/ai/chat", r#"{"message":"hi"}"#)
+            .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
+
+        // Unreachable assistant (dead port) is likewise a clean 500.
+        let (dead, _t3) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config("http://127.0.0.1:1"))
+                .await;
+        let (status, body) = dead.post("/v1/ai/chat", r#"{"message":"hi"}"#).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+        // Feature disabled per tenant → 403 naming the capability. Probed on
+        // a FRESH env: the flag service caches resolved values per state, so
+        // an env that already evaluated the flag would keep its cached
+        // `true`. The fresh env points at a dead ai-service so a bypassed
+        // gate could never pass silently.
+        let (flag_off, flag_off_tenant) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config("http://127.0.0.1:1"))
+                .await;
+        sqlx::query(
+            "INSERT INTO feature_flag_overrides (id, flag_key, tenant_id, value, created_at)
+             VALUES ($1, 'ai_chat', $2, 'false'::jsonb, NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&flag_off_tenant)
+        .execute(&pool)
+        .await
+        .expect("disable flag");
+        let (status, body) = flag_off.post("/v1/ai/chat", r#"{"message":"hi"}"#).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not enabled"));
+        let _ = tenant;
+    }
+
+    #[tokio::test]
+    async fn chat_forwards_tenant_context_and_parses_the_answer() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_chat_ok").await else {
+            return;
+        };
+        let (ai_url, seen) = start_mock_ai().await;
+        let Some((env, tenant, _user)) = AdvEnv::session(pool.clone(), "owner").await else {
+            return;
+        };
+        // Rebuild the SAME session env but with the mock ai URL — the shared
+        // helper builds its own config; drive a tenant API key instead so
+        // the URL override rides along.
+        let (key_env, key_tenant) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config(&ai_url)).await;
+        let _ = (env, tenant);
+
+        let (status, body) = key_env
+            .post(
+                "/v1/ai/chat",
+                &serde_json::json!({
+                    "message": "How do I verify a domain?",
+                    "history": [
+                        {"role": "user", "content": "earlier"},
+                        {"role": "assistant", "content": "answer"},
+                        {"role": "bogus", "content": "dropped"},
+                        {"role": "user", "content": ""}
+                    ]
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["answer"], "Ship the adversarial test.");
+        assert_eq!(body["docs_version"], "v42");
+        assert_eq!(body["escalated"], false);
+        assert_eq!(body["citations"][0]["title"], "ApexMail docs");
+
+        // The forwarded payload is tenant-scoped and filters history.
+        let forwarded = seen.lock().unwrap()[0].clone();
+        assert_eq!(forwarded["tenant_id"], key_tenant.as_str());
+        assert_eq!(forwarded["message"], "How do I verify a domain?");
+        let history = forwarded["history"].as_array().expect("history");
+        assert_eq!(history.len(), 2, "bogus role and empty content dropped");
+        assert_eq!(history[0]["role"], "user");
+        let context = &forwarded["account_context"];
+        assert!(context["plan"].is_string());
+        assert!(context["emails_sent_this_month"].is_i64());
+    }
+
+    #[tokio::test]
+    async fn chat_rate_limit_caps_per_user() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("ai_chat_rate").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let (env, _tenant) =
+            AdvEnv::tenant_with_config(pool, &["ai:read"], ai_config(&ai_url)).await;
+
+        let mut hit_limit = false;
+        for i in 0..21 {
+            let (status, body) = env
+                .post(
+                    "/v1/ai/chat",
+                    &serde_json::json!({ "message": format!("q{i}") }).to_string(),
+                )
+                .await;
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                hit_limit = true;
+                assert!(body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("rate limit"));
+                break;
+            }
+            assert_eq!(status, StatusCode::OK, "request {i}: {body}");
+        }
+        assert!(hit_limit, "the 21st chat in a minute must be refused");
+    }
+
+    #[tokio::test]
+    async fn chat_history_proxies_the_service() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_chat_history").await else {
+            return;
+        };
+        let (ai_url, _seen) = start_mock_ai().await;
+        let (env, _tenant) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config(&ai_url)).await;
+        let (status, body) = env.get("/v1/ai/chat/history").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["conversations"].is_array());
+
+        // Unconfigured / unreachable service arms.
+        let (unconfigured, _t) =
+            AdvEnv::tenant_with_config(pool.clone(), &["ai:read"], ai_config("")).await;
+        let (status, _body) = unconfigured.get("/v1/ai/chat/history").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let (dead, _t2) =
+            AdvEnv::tenant_with_config(pool, &["ai:read"], ai_config("http://127.0.0.1:1")).await;
+        let (status, _body) = dead.get("/v1/ai/chat/history").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}

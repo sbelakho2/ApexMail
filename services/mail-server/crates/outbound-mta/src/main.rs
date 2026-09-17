@@ -155,6 +155,116 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Prometheus text exposition for the daemon's own counters and the ledger
+/// queue stats. The pending-oldest-age gauge backs the
+/// OutboundMtaPendingOldestAgeSlo alert (deploy/alerting-rules.yml).
+async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let counters = state.counters.snapshot();
+    let mut body = String::new();
+    fn metric_line(body: &mut String, kind: &str, name: &str, help: &str, value: i64) {
+        body.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {value}\n"
+        ));
+    }
+    match state.ledger.stats().await {
+        Ok(stats) => {
+            metric_line(
+                &mut body,
+                "gauge",
+                "apexmail_outbound_mta_queue_pending",
+                "Rows in outbound_relay_ledger state=pending.",
+                stats.pending,
+            );
+            metric_line(
+                &mut body,
+                "gauge",
+                "apexmail_outbound_mta_queue_delivering",
+                "Rows in outbound_relay_ledger state=delivering.",
+                stats.delivering,
+            );
+            metric_line(
+                &mut body,
+                "gauge",
+                "apexmail_outbound_mta_queue_accepted",
+                "Rows in outbound_relay_ledger state=accepted.",
+                stats.accepted,
+            );
+            metric_line(
+                &mut body,
+                "gauge",
+                "apexmail_outbound_mta_queue_failed",
+                "Rows in outbound_relay_ledger state=failed.",
+                stats.failed,
+            );
+            metric_line(
+                &mut body,
+                "gauge",
+                "apexmail_outbound_mta_pending_oldest_age_seconds",
+                "Age of the oldest pending durable retry (SLO signal; 0 when empty).",
+                stats.oldest_pending_age_secs,
+            );
+        }
+        Err(error) => {
+            // A ledger failure must be visible in scrape output, not masked.
+            body.push_str(&format!(
+                "# HELP apexmail_outbound_mta_ledger_up Ledger stats readable\n\
+                 # TYPE apexmail_outbound_mta_ledger_up gauge\n\
+                 apexmail_outbound_mta_ledger_up 0\n\
+                 # ledger error: {error}\n"
+            ));
+            let _ = error;
+        }
+    }
+    let counter_value = |key: &str| counters[key].as_i64().unwrap_or(0);
+    metric_line(
+        &mut body,
+        "counter",
+        "apexmail_outbound_mta_sweeps_total",
+        "Queue sweep ticks completed.",
+        counter_value("sweeps"),
+    );
+    metric_line(
+        &mut body,
+        "counter",
+        "apexmail_outbound_mta_claimed_total",
+        "Rows claimed for delivery.",
+        counter_value("claimed"),
+    );
+    metric_line(
+        &mut body,
+        "counter",
+        "apexmail_outbound_mta_accepted_total",
+        "Deliveries accepted (post-DATA 250).",
+        counter_value("accepted"),
+    );
+    metric_line(
+        &mut body,
+        "counter",
+        "apexmail_outbound_mta_retry_scheduled_total",
+        "Transient failures scheduled for retry.",
+        counter_value("retry_scheduled"),
+    );
+    metric_line(
+        &mut body,
+        "counter",
+        "apexmail_outbound_mta_permanently_failed_total",
+        "Permanently failed deliveries (DSN'd).",
+        counter_value("permanently_failed"),
+    );
+    metric_line(
+        &mut body,
+        "counter",
+        "apexmail_outbound_mta_errors_total",
+        "Delivery attempts returning an internal error.",
+        counter_value("errors"),
+    );
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4")],
+        body,
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -191,6 +301,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(healthz))
+        .route("/metrics", get(metrics))
         .with_state(app_state);
     let listener = tokio::net::TcpListener::bind(config.health_addr)
         .await
@@ -370,6 +481,7 @@ mod tests {
                 delivering: 1,
                 accepted: 5,
                 failed: 2,
+                oldest_pending_age_secs: 42,
             })
         }
     }

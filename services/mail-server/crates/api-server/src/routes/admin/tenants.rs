@@ -888,3 +888,311 @@ mod tests {
         assert!(audited >= 1, "direct name/status edits must be audited");
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use axum::http::StatusCode;
+
+    use crate::app::test_support::adv::AdvEnv;
+
+    async fn seed_tenant(pool: &sqlx::PgPool, suffix: &str) -> String {
+        let id = format!(
+            "ten{}{}",
+            suffix,
+            &uuid::Uuid::new_v4().simple().to_string()[..14]
+        );
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Adversarial Tenant', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(format!("slug-{id}"))
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+        id
+    }
+
+    #[tokio::test]
+    async fn tenants_list_and_paginate() {
+        let Some(pool) = crate::test_db::canonical_pool("ten_list").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let a = seed_tenant(&pool, "a").await;
+        seed_tenant(&pool, "b").await;
+
+        let (status, body) = env.get("/v1/admin/tenants").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body.as_array().expect("array");
+        assert!(items.len() >= 2);
+        assert!(items
+            .iter()
+            .all(|t| t["id"].is_string() && t["slug"].is_string()));
+
+        let (status, body) = env.get("/v1/admin/tenants?limit=1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        let (status, body) = env.get("/v1/admin/tenants?limit=0&offset=-9").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(1), "limit clamps to 1");
+        // deny_unknown_fields.
+        let (status, _body) = env.get("/v1/admin/tenants?filter=plan").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let _ = a;
+    }
+
+    #[tokio::test]
+    async fn tenant_suspend_unsuspend_transition_gates() {
+        let Some(pool) = crate::test_db::canonical_pool("ten_suspend").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = seed_tenant(&pool, "s").await;
+
+        // Suspend an active tenant.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "suspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+        assert_eq!(status, "suspended");
+
+        // Double-suspend is a conflict naming the state rule.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "suspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Unsuspend restores active; unsuspending an active tenant conflicts.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "unsuspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "unsuspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Unknown action is a validation error; unknown tenant 404s.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "action": "detonate" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": "ten_missing", "action": "suspend" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The action path is audited.
+        let (action,): (String,) = sqlx::query_as(
+            "SELECT action FROM audit_logs WHERE action = 'suspend' AND resource_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("suspend audit");
+        assert_eq!(action, "suspend");
+    }
+
+    #[tokio::test]
+    async fn tenant_direct_field_updates_and_refusals() {
+        let Some(pool) = crate::test_db::canonical_pool("ten_edit").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = seed_tenant(&pool, "e").await;
+
+        // Name edit is audited.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "name": "Renamed Tenant" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let name: String = sqlx::query_scalar("SELECT name FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("row");
+        assert_eq!(name, "Renamed Tenant");
+        let (action,): (String,) = sqlx::query_as(
+            "SELECT action FROM audit_logs WHERE action = 'tenant_edited' AND resource_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("edit audit");
+        assert_eq!(action, "tenant_edited");
+
+        // The plan field is refused: entitlements flow through the billing
+        // override endpoint only.
+        let (status, body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "plan": "enterprise" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]["details"].to_string().contains("billing"));
+
+        // Arbitrary status strings never reach the UPDATE.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "status": "obliterated" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // An allowlisted status write works and is audited.
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": tenant, "status": "pending" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Unknown tenant id 404s (rows_affected gate).
+        let (status, _body) = env
+            .patch(
+                "/v1/admin/tenants",
+                &serde_json::json!({ "id": "ten_missing", "name": "X" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tenant_delete_guards_confirmation_hold_retention_and_scopes() {
+        let Some(pool) = crate::test_db::canonical_pool("ten_delete").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = seed_tenant(&pool, "d").await;
+
+        // Wrong confirmation phrase is a 400 naming the expected phrase.
+        let (status, body) = env
+            .send_json(
+                axum::http::Method::DELETE,
+                "/v1/admin/tenants",
+                Some(
+                    &serde_json::json!({ "id": tenant, "confirmation": "DELETE wrong" })
+                        .to_string(),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // Legal hold blocks deletion (P1-6).
+        sqlx::query("UPDATE tenants SET legal_hold = true WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("set hold");
+        let (status, body) = env
+            .send_json(
+                axum::http::Method::DELETE,
+                "/v1/admin/tenants",
+                Some(&serde_json::json!({ "id": tenant, "confirmation": format!("DELETE {tenant}") }).to_string()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(remaining, 1, "held tenant survives");
+
+        // Retention obligation blocks deletion until it ages out.
+        sqlx::query("UPDATE tenants SET legal_hold = false, retention_days = 365 WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("set retention");
+        let (status, body) = env
+            .send_json(
+                axum::http::Method::DELETE,
+                "/v1/admin/tenants",
+                Some(&serde_json::json!({ "id": tenant, "confirmation": format!("DELETE {tenant}") }).to_string()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("retention"));
+
+        // Clearing the obligation lets the delete proceed and preserves the
+        // audit evidence rows.
+        sqlx::query("UPDATE tenants SET retention_days = NULL WHERE id = $1")
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("clear retention");
+        let (status, _body) = env
+            .send_json(
+                axum::http::Method::DELETE,
+                "/v1/admin/tenants",
+                Some(&serde_json::json!({ "id": tenant, "confirmation": format!("DELETE {tenant}") }).to_string()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(remaining, 0, "tenant row gone");
+        let (action,): (String,) = sqlx::query_as(
+            "SELECT action FROM audit_logs WHERE action = 'control_plane.tenant.deleted' AND resource_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("deletion audit survives the deletion");
+        assert_eq!(action, "control_plane.tenant.deleted");
+
+        // Unknown tenant is a 404 after confirmation validates.
+        let (status, _body) = env
+            .send_json(
+                axum::http::Method::DELETE,
+                "/v1/admin/tenants",
+                Some(&serde_json::json!({ "id": "ten_missing", "confirmation": "DELETE ten_missing" }).to_string()),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Scope/tenant gates.
+        let key =
+            crate::app::test_support::seed_api_key_for(&pool, "system", &["tenants:read"]).await;
+        let scoped = AdvEnv::over(pool.clone(), key).await;
+        let (status, _body) = scoped.get("/v1/admin/tenants").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+}

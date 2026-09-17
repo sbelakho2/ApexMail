@@ -585,11 +585,20 @@ pub(crate) async fn verify_domain_for_tenant(
     // A malformed path id can never match a row: 404 it here, before any
     // `$1::uuid` bind can surface a 22P02 cast error as a 500.
     let id = validated_domain_id(id)?.to_string();
-    let dns = DNS_LOOKUP.as_ref().map_err(|e| {
+    let dns = global_dns_lookup()?;
+    verify_domain_for_tenant_with_dns(state, tenant_id, &id, dns).await
+}
+
+/// The process-wide production resolver, as a typed error for route callers.
+/// Split out so the control-plane system-sender route (and any future route
+/// that verifies a domain) resolves the transport exactly like this path —
+/// and so tests can substitute a deterministic backend via the `_with_dns`
+/// variants instead of touching the global.
+pub(crate) fn global_dns_lookup() -> Result<&'static DnsLookup, ApiError> {
+    DNS_LOOKUP.as_ref().map_err(|e| {
         tracing::error!(error = %e, "DNS resolver initialization failed");
         ApiError::ServiceUnavailable("DNS verification is temporarily unavailable".into())
-    })?;
-    verify_domain_for_tenant_with_dns(state, tenant_id, &id, dns).await
+    })
 }
 
 /// [`verify_domain_for_tenant`] with an injected DNS backend. Production

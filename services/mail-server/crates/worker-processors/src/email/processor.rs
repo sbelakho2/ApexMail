@@ -21,7 +21,9 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
-use super::transport::{create_transport_from_config_with_db, EmailTransport, HybridTransport};
+use super::transport::{
+    create_transport_from_config_with_db_and_redis, EmailTransport, HybridTransport,
+};
 use super::transport_router::{transport_kind_for, TransportKind};
 use super::types::{
     Attachment, CachedSuppression, DedicatedIp, DeliveryReceipt, DeliveryRoute, DkimConfig, Domain,
@@ -1115,21 +1117,6 @@ fn warmup_ip_counter_key(ip_address: &str, utc_day: &str) -> String {
     format!("apexmail:warmup:ip:{}:{}", ip_address, utc_day)
 }
 
-/// Fix 3: idempotency marker for one send unit (queue row + recipient) on one
-/// source IP and UTC day. `attempt` is intentionally NOT part of the key: a
-/// retry of the same row must not double-count against the IP quota. Distinct
-/// recipients of a multi-recipient row carry distinct keys — each is a
-/// separate send through the IP.
-fn warmup_ip_send_marker_key(ip_address: &str, utc_day: &str, job: &EmailJob) -> String {
-    format!(
-        "apexmail:warmup:sent:{}:{}:{}:{}",
-        ip_address,
-        utc_day,
-        job.id,
-        canonical_recipient(&job.to)
-    )
-}
-
 /// P0 aggregate-pool warmup reservation (one Lua script, one round trip).
 ///
 /// KEYS[1..n]   — per-IP/day counters (format preserved:
@@ -1154,20 +1141,20 @@ fn warmup_ip_send_marker_key(ip_address: &str, utc_day: &str, job: &EmailJob) ->
 ///
 /// Returns the chosen 1-based index, or 0 when every warming candidate is at
 /// its cap and no active candidate exists.
-const WARMUP_AGGREGATE_RESERVE_LUA: &str = r#"
+const WARMUP_SELECT_LUA: &str = r#"
 local n = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[2])
-for i = 1, n do
-    if redis.call('EXISTS', KEYS[n + i]) == 1 then
-        return i
-    end
-end
+-- Selection only (P0 ownership fix): pick the eligible candidate with the
+-- lowest utilisation, breaking ties by rank (warming before active). NO
+-- writes — the counter increment + send-unit marker happen at the
+-- SMTP-effect boundary in the outbound relay's warmup gate, so inline
+-- sends and durable daemon retries are accounted by the component that
+-- can actually transmit DATA.
 local best = nil
 local best_rank = nil
 local best_count = nil
 for i = 1, n do
-    local limit = tonumber(ARGV[2 + i])
-    local rank = tonumber(ARGV[2 + 2 * n + i])
+    local limit = tonumber(ARGV[1 + i])
+    local rank = tonumber(ARGV[1 + n + i])
     local count = 0
     local eligible = true
     if limit >= 0 then
@@ -1182,86 +1169,51 @@ for i = 1, n do
         best_count = count
     end
 end
-if best == nil then
-    return 0
-end
-if tonumber(ARGV[2 + n + best]) == 1 then
-    local new = redis.call('INCR', KEYS[best])
-    if new == 1 then
-        redis.call('EXPIRE', KEYS[best], ttl)
-    end
-    redis.call('SET', KEYS[n + best], '1', 'EX', ttl)
-end
-return best
+return best or 0
 "#;
 
-/// The Redis keys and identity of the warmup slot reserved for ONE send unit.
-/// Kept alongside the route so a confirmed source-IP contract violation can
-/// release the exact slot the reservation took (accounting correction only —
-/// never a retry trigger).
-#[derive(Debug, Clone)]
-struct WarmupReservation {
-    /// `dedicated_ips.id` of the reserved IP.
-    dedicated_ip_id: String,
-    /// Parsed source IP (`dedicated_ips.ip_address`).
-    source_ip: std::net::IpAddr,
-    /// `apexmail:warmup:ip:{ip_address}:{utc_day}` — the counter the
-    /// aggregate reservation incremented.
-    counter_key: String,
-    /// The per-send-unit idempotency marker.
-    marker_key: String,
-}
-
-/// The chosen dedicated IP for one send, plus the warmup slot it consumed
-/// (only warming IPs consume).
+/// The chosen dedicated IP for one send. Selection only — the warmup
+/// COUNTER is consumed at the SMTP-effect boundary by the outbound relay's
+/// admission gate (P0 ownership fix): the relay admits every attempt
+/// (inline submission and durable daemon retry alike), so a transient
+/// failure persisted for retry can never leave the IP unaccounted.
 #[derive(Debug, Clone)]
 struct ReservedDeliveryIp {
     candidate: RoutingCandidate,
-    /// `Some` only when `candidate` is still warming and quota was consumed.
-    reservation: Option<WarmupReservation>,
 }
 
-/// RESERVE: consume warmup capacity from the candidate SET atomically,
-/// ordered by utilisation with warming preferred over active. The ROUTE is
-/// built from the returned candidate, so the reservation and the route are
-/// always the SAME IP.
+/// SELECT the dedicated IP for one send: the eligible candidate with the
+/// lowest utilisation, warming preferred over active, read atomically from
+/// the per-IP/day counters. NO capacity is consumed here — the relay's
+/// warmup gate increments when the attempt actually reaches the wire.
+/// The ROUTE is built from the returned candidate.
 ///
 /// Returns `Ok(None)` when every warming candidate is at its canonical daily
-/// cap (and none is active) — the caller defers.
-async fn reserve_warmup_capacity(
+/// cap (and none is active) — the caller defers, as before.
+async fn select_warmup_ip(
     redis: &RedisPool,
-    job: &EmailJob,
     pool: &[RoutingCandidate],
     utc_day: &str,
 ) -> Result<Option<ReservedDeliveryIp>, String> {
     if pool.is_empty() {
         return Ok(None);
     }
-    // Active-only pool: no quota to consume, no Redis dependency. The first
-    // (oldest/graduated) active candidate carries the send.
+    // Active-only pool: no quota to consult. The first (oldest/graduated)
+    // active candidate carries the send.
     if pool.iter().all(|candidate| !candidate.is_warming()) {
-        return Ok(pool.first().cloned().map(|candidate| ReservedDeliveryIp {
-            candidate,
-            reservation: None,
-        }));
+        return Ok(pool
+            .first()
+            .cloned()
+            .map(|candidate| ReservedDeliveryIp { candidate }));
     }
 
     let mut conn = redis.get().await.map_err(|error| error.to_string())?;
-    let script = redis::Script::new(WARMUP_AGGREGATE_RESERVE_LUA);
+    let script = redis::Script::new(WARMUP_SELECT_LUA);
     let mut invocation = script.prepare_invoke();
     for candidate in pool {
         invocation.key(warmup_ip_counter_key(&candidate.ip_address, utc_day));
     }
-    for candidate in pool {
-        invocation.key(warmup_ip_send_marker_key(
-            &candidate.ip_address,
-            utc_day,
-            job,
-        ));
-    }
-    invocation
-        .arg(pool.len() as i64)
-        .arg(WARMUP_COUNTER_TTL_SECS);
+    invocation.arg(pool.len() as i64);
     for candidate in pool {
         invocation.arg(
             candidate
@@ -1269,9 +1221,6 @@ async fn reserve_warmup_capacity(
                 .map(|limit| limit.min(i64::MAX as u64) as i64)
                 .unwrap_or(-1),
         );
-    }
-    for candidate in pool {
-        invocation.arg(if candidate.is_warming() { 1 } else { 0 });
     }
     for candidate in pool {
         invocation.arg(if candidate.is_warming() { 0 } else { 1 });
@@ -1287,53 +1236,14 @@ async fn reserve_warmup_capacity(
     let candidate = pool
         .get(chosen as usize - 1)
         .cloned()
-        .ok_or_else(|| format!("warmup reservation returned out-of-range candidate {chosen}"))?;
-    let reservation = candidate.is_warming().then(|| WarmupReservation {
-        dedicated_ip_id: candidate.dedicated_ip_id.clone(),
-        source_ip: candidate.source_ip,
-        counter_key: warmup_ip_counter_key(&candidate.ip_address, utc_day),
-        marker_key: warmup_ip_send_marker_key(&candidate.ip_address, utc_day, job),
-    });
-    Ok(Some(ReservedDeliveryIp {
-        candidate,
-        reservation,
-    }))
+        .ok_or_else(|| format!("warmup selection returned out-of-range candidate {chosen}"))?;
+    Ok(Some(ReservedDeliveryIp { candidate }))
 }
 
-/// Release-one-slot Lua: delete the send-unit marker and, ONLY when the
-/// marker existed (i.e. this send unit held a reservation), decrement the
-/// per-IP counter. A missing marker means there is nothing to release — the
-/// DECR is skipped so a repeated release can never underflow another
-/// sender's counter.
-const WARMUP_RELEASE_LUA: &str = r#"
-if redis.call('DEL', KEYS[2]) == 1 then
-    local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-    if current ~= nil and current > 0 then
-        redis.call('DECR', KEYS[1])
-    end
-end
-return 1
-"#;
-
-/// Release a warmup reservation when the accepted receipt CONFIRMS the
-/// message left through a different IP than the one reserved (a transport
-/// contract violation). This is an accounting correction, NOT a retry: the
-/// acceptance ledger already records the send as accepted, so the message is
-/// never resubmitted. The Lua script deletes the idempotency marker and
-/// decrements the per-IP counter exactly once.
-async fn release_warmup_reservation(
-    redis: &RedisPool,
-    reservation: &WarmupReservation,
-) -> Result<(), String> {
-    let mut conn = redis.get().await.map_err(|error| error.to_string())?;
-    let _: i32 = redis::Script::new(WARMUP_RELEASE_LUA)
-        .key(&reservation.counter_key)
-        .key(&reservation.marker_key)
-        .invoke_async(&mut *conn)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
+/// The Redis keys and identity of the warmup slot reserved for ONE send unit.
+/// Kept alongside the route so a confirmed source-IP contract violation can
+/// release the exact slot the reservation took (accounting correction only —
+/// never a retry trigger).
 
 impl ReservedDeliveryIp {
     /// The exact route this reservation was made for.
@@ -1383,26 +1293,6 @@ fn route_receipt_contract_note(route: &DeliveryRoute, receipt: &DeliveryReceipt)
                 "route contract violation: transport accepted the send but reported no source IP for {source_ip}"
             )),
         },
-    }
-}
-
-/// Warmup accounting for ONE finished send attempt: whether the reservation
-/// taken for `route` must be RELEASED.
-///
-/// Capacity is CONSUMED only by a receipt that proves the reserved IP
-/// actually carried the message ([`route_receipt_contract_note`] is `None`);
-/// every other outcome — a transport error (no acceptance at all), or an
-/// accepted receipt whose `actual_source_ip` is missing or differs — releases
-/// the reservation. This is an accounting correction, never a retry trigger:
-/// release does not resubmit anything, and the delivery decision was already
-/// made above it.
-pub(crate) fn warmup_reservation_must_be_released(
-    route: &DeliveryRoute,
-    result: &ProcessorResult<DeliveryReceipt>,
-) -> bool {
-    match result {
-        Ok(receipt) => route_receipt_contract_note(route, receipt).is_some(),
-        Err(_) => route.is_dedicated(),
     }
 }
 
@@ -1647,7 +1537,12 @@ impl EmailProcessor {
         // The database pool builds the in-process outbound-MTA transport for
         // dedicated routes: its durable ledger and the worker's exactly-once
         // acceptance ledger share the send_unit identity (migration 212).
-        let transport = create_transport_from_config_with_db(&config, Some(&db)).await?;
+        // P0: the relay owns warmup admission — hand it the Redis pool so
+        // the gate is installed for inline sends and their durable retries.
+        let redis = redis.clone();
+        let transport =
+            create_transport_from_config_with_db_and_redis(&config, Some(&db), Some(&redis))
+                .await?;
         Self::with_transport(db, redis, config, transport).await
     }
 
@@ -2465,13 +2360,12 @@ impl EmailProcessor {
             // Throttling disabled globally: the send stays on the dedicated
             // route (graduated/active identities keep being used), but no
             // quota is consumed. Selection and reservation are separate.
-            pool.first().cloned().map(|candidate| ReservedDeliveryIp {
-                candidate,
-                reservation: None,
-            })
+            pool.first()
+                .cloned()
+                .map(|candidate| ReservedDeliveryIp { candidate })
         } else {
             let today = Utc::now().format("%Y-%m-%d").to_string();
-            match reserve_warmup_capacity(&self.redis, job, &pool, &today).await {
+            match select_warmup_ip(&self.redis, &pool, &today).await {
                 Ok(Some(reserved)) => Some(reserved),
                 Ok(None) => {
                     debug!(
@@ -2495,8 +2389,9 @@ impl EmailProcessor {
             }
         };
 
-        // The route is built from the SAME candidate the reservation bound,
-        // so the quota slot and the network path cannot disagree.
+        // The route is built from the SAME candidate the selection bound,
+        // so the chosen path and the network path cannot disagree. Warmup
+        // CONSUMPTION happens later, at the relay's SMTP-effect boundary.
         let route = match &reserved {
             Some(reserved) => reserved.route(),
             None => DeliveryRoute::SesShared,
@@ -2505,9 +2400,7 @@ impl EmailProcessor {
             job_id = %job.id,
             route = %route,
             route_kind = %transport_kind_for(&route),
-            warmup_reserved = reserved
-                .as_ref()
-                .is_some_and(|reserved| reserved.reservation.is_some()),
+            warmup_selected = reserved.is_some(),
             "dispatch route resolved"
         );
 
@@ -2593,11 +2486,6 @@ impl EmailProcessor {
                          the message is not retried"
                     );
                 }
-                // Accounting correction only: warmup capacity counts only a
-                // receipt that proved the reserved IP carried the message.
-                // The send itself is accepted and stays accepted on the ledger.
-                self.release_unverified_warmup_reservation(&reserved, &route, &send_result)
-                    .await;
                 if let Err(record_error) = record_acceptance_accepted(
                     &self.db,
                     &send_unit,
@@ -2619,15 +2507,6 @@ impl EmailProcessor {
                 }
             }
             Err(error) => {
-                // No verified acceptance was produced, so the reserved
-                // capacity must not count. (For the outbound-MTA path a
-                // mismatched/missing source-IP report arrives HERE as a hard
-                // contract failure; a retry of a merely transient error is
-                // safe because the relay ledger is keyed on the same
-                // send_unit and returns the stored acceptance instead of
-                // delivering again.)
-                self.release_unverified_warmup_reservation(&reserved, &route, &send_result)
-                    .await;
                 if let Err(record_error) =
                     record_acceptance_failed(&self.db, &send_unit, &error.to_string()).await
                 {
@@ -2684,35 +2563,6 @@ impl EmailProcessor {
         };
 
         outcome
-    }
-
-    /// Release the reserved warmup slot when the finished attempt did NOT
-    /// produce a verified acceptance (see
-    /// [`warmup_reservation_must_be_released`]). Accounting correction only:
-    /// nothing is resubmitted here.
-    async fn release_unverified_warmup_reservation(
-        &self,
-        reserved: &Option<ReservedDeliveryIp>,
-        route: &DeliveryRoute,
-        result: &ProcessorResult<DeliveryReceipt>,
-    ) {
-        if !warmup_reservation_must_be_released(route, result) {
-            return;
-        }
-        let Some(reservation) = reserved
-            .as_ref()
-            .and_then(|reserved| reserved.reservation.as_ref())
-        else {
-            return;
-        };
-        if let Err(release_error) = release_warmup_reservation(&self.redis, reservation).await {
-            warn!(
-                ip = %reservation.source_ip,
-                dedicated_ip_id = %reservation.dedicated_ip_id,
-                error = %release_error,
-                "failed to release warmup reservation for an unverified dedicated send"
-            );
-        }
     }
 
     /// F18: the dispatch-time tenant policy decision. Only a CONFIRMED
@@ -6824,39 +6674,16 @@ mod tests {
         );
     }
 
-    /// Fix 3: the admission keys are IP-scoped (the reputation boundary) and
-    /// the send marker is idempotent across retries of one send unit while
-    /// staying distinct across recipients of the same row.
+    /// Fix 3: the selection key is IP-scoped — the reputation boundary. The
+    /// per-send-unit marker moved to the relay's admission gate (keyed by
+    /// send_unit there), proven in the outbound-mta crate.
     #[test]
-    fn warmup_admission_keys_are_ip_scoped_and_per_send_unit() {
-        let today = "2026-09-11";
-        let key = warmup_ip_counter_key("203.0.113.9", today);
+    fn warmup_selection_key_is_ip_scoped() {
+        let key = warmup_ip_counter_key("203.0.113.9", "2026-09-11");
         assert_eq!(key, "apexmail:warmup:ip:203.0.113.9:2026-09-11");
         assert!(
             !key.contains("domain-1"),
             "the domain must not participate in the warmup boundary: {key}"
-        );
-
-        let job = tracking_gate_job();
-        let marker = warmup_ip_send_marker_key("203.0.113.9", today, &job);
-        assert_eq!(
-            marker,
-            "apexmail:warmup:sent:203.0.113.9:2026-09-11:job-1:recipient@example.com"
-        );
-        // A retry (attempt bumps, recipient unchanged) reuses the same
-        // marker — no double-count.
-        let mut retried = job.clone();
-        retried.attempt = 5;
-        assert_eq!(
-            warmup_ip_send_marker_key("203.0.113.9", today, &retried),
-            marker
-        );
-        // A different recipient of the same row is a different send unit.
-        let mut other = job.clone();
-        other.to = "other@example.com".into();
-        assert_ne!(
-            warmup_ip_send_marker_key("203.0.113.9", today, &other),
-            marker
         );
     }
 
@@ -6884,17 +6711,28 @@ mod tests {
             .next()
             .expect("processor source must not begin with a test module");
 
+        // P0 ownership fix: warmup CONSUMPTION moved to the outbound relay's
+        // admission gate at the SMTP-effect boundary. The worker keeps a
+        // single SELECTION entry point (no writes), and no release path may
+        // exist here — a worker-side release is exactly what let a durable
+        // relay retry bypass the IP's daily cap.
         assert_eq!(
-            production
-                .matches("async fn reserve_warmup_capacity(")
-                .count(),
+            production.matches("async fn select_warmup_ip(").count(),
             1,
-            "exactly one warmup-reservation function may exist"
+            "exactly one warmup-selection function may exist"
         );
         assert_eq!(
-            production.matches("reserve_warmup_capacity(").count(),
+            production.matches("select_warmup_ip(").count(),
             2,
-            "one definition + one call: a single warmup-capacity reservation entry point"
+            "one definition + one call: a single warmup-selection entry point"
+        );
+        assert!(
+            !production.contains("release_warmup_reservation"),
+            "the worker must not release warmup capacity — the relay owns accounting"
+        );
+        assert!(
+            !production.contains("WARMUP_RELEASE_LUA"),
+            "no worker-side warmup release script may exist"
         );
         assert_eq!(
             production.matches("fn select_delivery_ip(").count(),
@@ -6985,67 +6823,50 @@ mod tests {
         }
     }
 
-    /// Audit-1 / Fix 3 / P0 behavioral gate (ephemeral redis): with a
-    /// warming IP in the pool the Redis counter (canonical
-    /// `mail_common::warmup` day cap) blocks sends above the cap, admits
-    /// below it, is idempotent per send unit, ignores the retired
-    /// domain-keyed counter, and fails closed when Redis is unavailable.
+    /// P0 ownership fix (ephemeral redis): the worker SELECTS the dedicated
+    /// IP by utilisation but consumes NOTHING — the counter stays untouched
+    /// (the relay's SMTP-effect admission gate owns consumption), an at-cap
+    /// pool selects nothing, the retired domain-keyed counter is ignored,
+    /// and an unavailable store fails closed.
     #[tokio::test]
-    async fn warmup_capacity_blocks_above_the_ip_cap_and_fails_closed() {
+    async fn warmup_selection_reads_the_cap_but_consumes_nothing() {
         let Some(redis) = ephemeral_redis().await else {
             return;
         };
 
-        let job = tracking_gate_job();
         let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
             .expect("candidate pool");
         let day_limit = WarmupSchedule::limit_for_day(3);
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let key = warmup_ip_counter_key("203.0.113.9", &today);
-        let legacy_domain_key = format!("warmup:count:{}:{}", today, job.domain_id);
+        let legacy_domain_key = format!("warmup:count:{}:{}", today, tracking_gate_job().domain_id);
 
-        // Below the cap the reservation takes a slot on the selected IP.
-        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
+        let counter = |key: String| {
+            let redis = redis.clone();
+            async move {
+                let mut conn = redis.get().await.unwrap();
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<i64>>(&mut *conn)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // Below the cap the selection names the warming candidate and the
+        // counter is UNCHANGED (no marker, no increment — the relay admits).
+        let reserved = select_warmup_ip(&redis, &pool, &today)
             .await
             .expect("redis available")
             .expect("below the cap");
         assert_eq!(reserved.candidate.dedicated_ip_id, "dip-1");
-        let reservation = reserved
-            .reservation
-            .as_ref()
-            .expect("a warming candidate consumes quota");
-        assert_eq!(reservation.source_ip.to_string(), "203.0.113.9");
-        assert_eq!(reservation.counter_key, key);
-        assert_eq!(
-            reservation.marker_key,
-            warmup_ip_send_marker_key("203.0.113.9", &today, &job)
-        );
-
-        let counter = |key: String| async {
-            let mut conn = redis.get().await.unwrap();
-            redis::cmd("GET")
-                .arg(key)
-                .query_async::<Option<i64>>(&mut *conn)
-                .await
-                .unwrap()
-        };
-        assert_eq!(counter(key.clone()).await, Some(1));
-
-        // A retry of the SAME send unit is idempotent: admitted without a
-        // second increment (the marker is the guard).
-        let retry = reserve_warmup_capacity(&redis, &job, &pool, &today)
-            .await
-            .expect("redis available")
-            .expect("retry of a reserved unit");
-        assert!(retry.reservation.is_some());
         assert_eq!(
             counter(key.clone()).await,
-            Some(1),
-            "a retry must not double-count against the IP quota"
+            None,
+            "selection must not consume"
         );
 
-        // Fill the counter to the canonical cap: a DIFFERENT send unit is
-        // refused and the counter stays at the cap.
+        // Fill the counter to the canonical cap: selection returns None.
         {
             let mut conn = redis.get().await.unwrap();
             let _: () = redis::cmd("SET")
@@ -7055,16 +6876,13 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut other_recipient = job.clone();
-        other_recipient.to = "other@example.com".into();
         assert!(
-            reserve_warmup_capacity(&redis, &other_recipient, &pool, &today)
+            select_warmup_ip(&redis, &pool, &today)
                 .await
                 .expect("redis available")
                 .is_none(),
-            "a send above the IP's canonical day cap must be refused"
+            "an at-cap warming pool selects nothing — the caller defers"
         );
-        assert_eq!(counter(key.clone()).await, Some(day_limit as i64));
 
         // The RETIRED domain-keyed counter is not authoritative.
         {
@@ -7083,31 +6901,29 @@ mod tests {
                 .unwrap();
         }
         assert!(
-            reserve_warmup_capacity(&redis, &other_recipient, &pool, &today)
+            select_warmup_ip(&redis, &pool, &today)
                 .await
                 .expect("redis available")
                 .is_some(),
-            "the domain-keyed counter must not gate the send"
+            "the domain-keyed counter must not gate selection"
         );
 
-        // Fail closed: an unavailable quota store refuses a warming pool.
+        // Fail closed: an unavailable store refuses to select a warming pool.
         let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap();
         assert!(
-            reserve_warmup_capacity(&dead_redis, &job, &pool, &today)
-                .await
-                .is_err(),
-            "an unavailable quota store must not admit a warming send"
+            select_warmup_ip(&dead_redis, &pool, &today).await.is_err(),
+            "an unavailable quota store must not select a warming send"
         );
     }
 
-    /// P0 aggregate pool (ephemeral redis): two warming IPs at 5/day accept
-    /// TEN concurrent sends — five each, none above its cap — instead of the
-    /// old single-IP selection deferring mail while the second IP had
-    /// capacity.
+    /// P0 aggregate selection (ephemeral redis): with two warming IPs the
+    /// selection prefers the LOWEST-utilised candidate, so a burst routes to
+    /// the idle IP first and an at-cap IP is skipped — spreading without
+    /// consuming (consumption is the relay's, at the effect boundary).
     #[tokio::test]
-    async fn aggregate_pool_spreads_ten_sends_across_two_five_per_day_ips() {
+    async fn aggregate_selection_prefers_the_least_utilised_ip() {
         let Some(redis) = ephemeral_redis().await else {
             return;
         };
@@ -7120,9 +6936,6 @@ mod tests {
             ],
         )
         .expect("candidate pool");
-        // Canonical day-2 cap is 100; this test exercises the AGGREGATE
-        // behaviour with a 5/day cap by constructing the pool directly (the
-        // derivation above is covered by the canonical-schedule tests).
         let pool: Vec<RoutingCandidate> = pool
             .into_iter()
             .map(|mut candidate| {
@@ -7131,67 +6944,53 @@ mod tests {
             })
             .collect();
         let today = now.format("%Y-%m-%d").to_string();
+        let key_a = warmup_ip_counter_key("203.0.113.10", &today);
+        let key_b = warmup_ip_counter_key("203.0.113.11", &today);
 
-        let mut sends = Vec::new();
-        for index in 0..10 {
-            let redis = redis.clone();
-            let pool = pool.clone();
-            let today = today.clone();
-            sends.push(async move {
-                let mut job = tracking_gate_job();
-                job.id = format!("job-{index}");
-                job.to = format!("recipient-{index}@example.com");
-                reserve_warmup_capacity(&redis, &job, &pool, &today).await
-            });
-        }
-        let results = futures::future::join_all(sends).await;
-
-        let chosen: Vec<String> = results
-            .into_iter()
-            .map(|result| {
-                result
-                    .expect("redis available")
-                    .expect("ten sends must fit the aggregate pool")
-                    .candidate
-                    .dedicated_ip_id
-            })
-            .collect();
-        assert_eq!(chosen.len(), 10);
-
-        let counter = |ip: &str| {
-            let key = warmup_ip_counter_key(ip, &today);
+        let set = |key: String, value: i64| {
             let redis = redis.clone();
             async move {
                 let mut conn = redis.get().await.unwrap();
-                redis::cmd("GET")
+                let _: () = redis::cmd("SET")
                     .arg(key)
-                    .query_async::<Option<i64>>(&mut *conn)
+                    .arg(value)
+                    .query_async(&mut *conn)
                     .await
-                    .unwrap()
-                    .unwrap_or(0)
+                    .unwrap();
             }
         };
-        let a = counter("203.0.113.10").await;
-        let b = counter("203.0.113.11").await;
-        assert!(a <= 5 && b <= 5, "no IP may exceed its cap: a={a} b={b}");
-        assert_eq!(a + b, 10, "every admitted send consumed exactly one slot");
-        assert_eq!(
-            chosen.iter().filter(|id| id.as_str() == "dip-a").count() as i64,
-            a,
-            "the route must match the counter of the SAME chosen IP"
-        );
-        assert_eq!(
-            chosen.iter().filter(|id| id.as_str() == "dip-b").count() as i64,
-            b
-        );
+        set(key_a.clone(), 3).await;
+        set(key_b.clone(), 5).await;
+
+        // b is at its cap: the selection must name a (utilisation 3 < 5).
+        let reserved = select_warmup_ip(&redis, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("the idle IP is eligible");
+        assert_eq!(reserved.candidate.dedicated_ip_id, "dip-a");
+
+        // Equal utilisation is deterministic (first candidate in pool order).
+        set(key_b.clone(), 3).await;
+        let reserved = select_warmup_ip(&redis, &pool, &today)
+            .await
+            .expect("redis available")
+            .expect("both IPs eligible");
+        assert_eq!(reserved.candidate.dedicated_ip_id, "dip-a");
+
+        // Both at cap: nothing is selected.
+        set(key_a.clone(), 5).await;
+        set(key_b.clone(), 5).await;
+        assert!(select_warmup_ip(&redis, &pool, &today)
+            .await
+            .expect("redis available")
+            .is_none());
     }
 
     /// P0 graduation: an `active` (graduated) IP is still SELECTED for a
-    /// dedicated route and consumes NO warmup quota — proven by reserving
-    /// from an active-only pool with a dead Redis: no counter is needed.
+    /// dedicated route and needs NO quota store — proven by selecting from
+    /// an active-only pool with a dead Redis.
     #[tokio::test]
     async fn active_ip_routes_dedicated_without_consuming_quota() {
-        let job = tracking_gate_job();
         let pool = select_delivery_ip(
             Utc::now(),
             &[dedicated_ip("dip-graduated", "203.0.113.77", false, 90)],
@@ -7203,19 +7002,14 @@ mod tests {
         let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .unwrap();
-        let reserved = reserve_warmup_capacity(
+        let reserved = select_warmup_ip(
             &dead_redis,
-            &job,
             &pool,
             &Utc::now().format("%Y-%m-%d").to_string(),
         )
         .await
         .expect("an unthrottled pool needs no quota store")
         .expect("a graduated IP is always eligible");
-        assert!(
-            reserved.reservation.is_none(),
-            "a graduated IP must consume no warmup quota"
-        );
         match reserved.route() {
             DeliveryRoute::Dedicated {
                 dedicated_ip_id,
@@ -7229,8 +7023,8 @@ mod tests {
     }
 
     /// P0 aggregate fallback: when every warming candidate is at its cap but
-    /// an active one exists, the send SPILLS to the active IP (with no quota
-    /// consumption) instead of deferring mail that has a valid capacity.
+    /// an active one exists, the send SPILLS to the active IP instead of
+    /// deferring mail that has a valid capacity.
     #[tokio::test]
     async fn exhausted_warming_pool_spills_to_an_active_ip() {
         let Some(redis) = ephemeral_redis().await else {
@@ -7251,26 +7045,21 @@ mod tests {
             }
         }
         let today = now.format("%Y-%m-%d").to_string();
-        // Exhaust the warming IP.
-        let first = tracking_gate_job();
-        let reserved = reserve_warmup_capacity(&redis, &first, &pool, &today)
-            .await
-            .expect("redis available")
-            .expect("first send fits the warming IP");
-        assert_eq!(reserved.candidate.dedicated_ip_id, "dip-warm");
-        assert!(reserved.reservation.is_some());
-
-        let mut second = tracking_gate_job();
-        second.to = "second@example.com".into();
-        let reserved = reserve_warmup_capacity(&redis, &second, &pool, &today)
+        // The warming IP is at its cap.
+        {
+            let mut conn = redis.get().await.unwrap();
+            let _: () = redis::cmd("SET")
+                .arg(warmup_ip_counter_key("203.0.113.30", &today))
+                .arg(1)
+                .query_async(&mut *conn)
+                .await
+                .unwrap();
+        }
+        let reserved = select_warmup_ip(&redis, &pool, &today)
             .await
             .expect("redis available")
             .expect("the active IP must absorb the overflow");
         assert_eq!(reserved.candidate.dedicated_ip_id, "dip-active");
-        assert!(
-            reserved.reservation.is_none(),
-            "the active fallback must not consume warmup quota"
-        );
     }
 
     // ---------------------------------------------------------------------------
@@ -8293,110 +8082,32 @@ mod tests {
             .contains("no source IP"));
     }
 
-    /// Accounting correction (ephemeral redis): a confirmed contract
-    /// violation releases the reserved slot exactly once — never a retry.
-    #[tokio::test]
-    async fn contract_violation_releases_the_warmup_slot_without_resubmitting() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
-        let job = tracking_gate_job();
-        let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
-            .expect("candidate pool");
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
-            .await
-            .expect("redis available")
-            .expect("below the cap");
-        let reservation = reserved.reservation.expect("warming reservation");
-
-        let counter = |key: String| {
-            let redis = redis.clone();
-            async move {
-                let mut conn = redis.get().await.unwrap();
-                redis::cmd("GET")
-                    .arg(key)
-                    .query_async::<Option<i64>>(&mut *conn)
-                    .await
-                    .unwrap()
-            }
-        };
-        let marker = |key: String| {
-            let redis = redis.clone();
-            async move {
-                let mut conn = redis.get().await.unwrap();
-                redis::cmd("GET")
-                    .arg(key)
-                    .query_async::<Option<String>>(&mut *conn)
-                    .await
-                    .unwrap()
-            }
-        };
-        assert_eq!(counter(reservation.counter_key.clone()).await, Some(1));
-        assert_eq!(
-            marker(reservation.marker_key.clone()).await,
-            Some("1".into())
-        );
-
-        release_warmup_reservation(&redis, &reservation)
-            .await
-            .expect("release");
-        assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
-        assert_eq!(marker(reservation.marker_key.clone()).await, None);
-
-        // A repeated release must not underflow the counter.
-        release_warmup_reservation(&redis, &reservation)
-            .await
-            .expect("second release");
-        assert_eq!(counter(reservation.counter_key.clone()).await, Some(0));
-    }
-
-    /// The warmup settlement rule: capacity is CONSUMED only by a receipt
-    /// that proves the reserved IP actually carried the message; every other
-    /// outcome (transport error, mismatched report, missing report) releases
-    /// it. Shared routes have no dedicated reservation to settle.
+    /// P0 ownership fix: the worker no longer holds warmup reservations, so
+    /// a confirmed source-IP contract violation is RECORDED (the
+    /// `apexmail_delivery_route_contract_violation` counter on the dispatch
+    /// path) and never corrected by releasing anything — the relay's
+    /// per-attempt gate already accounted the attempt conservatively. This
+    /// pins the new rule by proving the retired release machinery is gone
+    /// from the production region entirely.
     #[test]
-    fn warmup_settlement_consumes_only_a_verified_dedicated_receipt() {
-        let receipt = |ip: Option<&str>| DeliveryReceipt {
-            transport: TransportType::Smtp,
-            transport_message_id: None,
-            actual_source_ip: ip.map(|value| value.parse().expect("test IP")),
-            recipient_provider: None,
-            provider_source: None,
-        };
-        let dedicated = DeliveryRoute::Dedicated {
-            dedicated_ip_id: "dip-1".into(),
-            source_ip: "203.0.113.9".parse().expect("test IP"),
-        };
-
-        // Verified acceptance: CONSUMED (no release).
-        assert!(!warmup_reservation_must_be_released(
-            &dedicated,
-            &Ok(receipt(Some("203.0.113.9")))
-        ));
-        // Mismatch / missing report: released.
-        assert!(warmup_reservation_must_be_released(
-            &dedicated,
-            &Ok(receipt(Some("198.51.100.7")))
-        ));
-        assert!(warmup_reservation_must_be_released(
-            &dedicated,
-            &Ok(receipt(None))
-        ));
-        // Transport error: released (nothing was verified).
-        assert!(warmup_reservation_must_be_released(
-            &dedicated,
-            &Err(ProcessorError::Transport("relay down".into()))
-        ));
-        // Shared route: there is no dedicated reservation to release.
-        assert!(!warmup_reservation_must_be_released(
-            &DeliveryRoute::SesShared,
-            &Ok(receipt(None))
-        ));
-        assert!(!warmup_reservation_must_be_released(
-            &DeliveryRoute::SesShared,
-            &Err(ProcessorError::Transport("SES down".into()))
-        ));
+    fn worker_has_no_warmup_settlement_path() {
+        let source = include_str!("processor.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("processor source must not begin with a test module");
+        for retired in [
+            "release_warmup_reservation",
+            "WARMUP_RELEASE_LUA",
+            "warmup_reservation_must_be_released",
+            "warmup_ip_send_marker_key",
+        ] {
+            assert!(
+                !production.contains(retired),
+                "the worker must not own warmup settlement (`{retired}` found) — the relay's \
+                 SMTP-effect admission gate owns accounting"
+            );
+        }
     }
 
     /// The prepared message carries EXACTLY the send unit the acceptance
@@ -8435,11 +8146,13 @@ mod tests {
         );
     }
 
-    /// A verified outbound-MTA acceptance CONSUMES the reserved warmup slot:
-    /// reserve → real relay accepts and reports the requested IP → the counter
-    /// and marker stay in place.
+    /// P0 ownership proof (real relay over the fake SMTP server): the worker
+    /// SELECTS the warming IP and submits; the relay's admission gate owns
+    /// consumption, so after an accepted dedicated send the WORKER wrote
+    /// nothing to Redis (this embedded test relay runs without a gate, and
+    /// the production gate's accounting is proven in the outbound-mta crate).
     #[tokio::test]
-    async fn verified_outbound_mta_send_consumes_the_warmup_reservation() {
+    async fn verified_outbound_mta_send_leaves_no_worker_side_warmup_writes() {
         use crate::email::OutboundMtaTransport;
         use outbound_mta::test_support::{
             FakeSmtpConfig, FakeSmtpServer, MemoryLedger, StaticMxResolver,
@@ -8454,11 +8167,10 @@ mod tests {
         let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "127.0.0.1", true, 3)])
             .expect("candidate pool");
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
+        let reserved = select_warmup_ip(&redis, &pool, &today)
             .await
             .expect("redis available")
             .expect("below the cap");
-        let reservation = reserved.reservation.clone().expect("warming reservation");
         let route = reserved.route();
 
         let server = FakeSmtpServer::start(FakeSmtpConfig::default()).await;
@@ -8483,138 +8195,25 @@ mod tests {
             dkim: None,
             verp: None,
         };
-        let result = transport.send(&email, &route).await;
+        let receipt = transport.send(&email, &route).await;
         assert!(
-            result.is_ok(),
-            "the real relay must accept the dedicated send: {result:?}"
+            receipt.is_ok(),
+            "the real relay must accept the dedicated send: {receipt:?}"
         );
         assert_eq!(
-            result.as_ref().expect("receipt").actual_source_ip,
+            receipt.as_ref().expect("receipt").actual_source_ip,
             Some("127.0.0.1".parse().expect("test IP"))
         );
-        assert!(
-            !warmup_reservation_must_be_released(&route, &result),
-            "a verified dedicated acceptance consumes the reservation"
-        );
 
-        // The reservation is still held: counter 1, marker present.
+        // The worker wrote NOTHING: no counter, no marker.
         let mut conn = redis.get().await.expect("redis connection");
         let count: Option<i64> = redis::cmd("GET")
-            .arg(&reservation.counter_key)
+            .arg(warmup_ip_counter_key("127.0.0.1", &today))
             .query_async(&mut *conn)
             .await
             .expect("counter read");
-        assert_eq!(count, Some(1), "the capacity must stay consumed");
-        let marker: Option<String> = redis::cmd("GET")
-            .arg(&reservation.marker_key)
-            .query_async(&mut *conn)
-            .await
-            .expect("marker read");
-        assert_eq!(marker, Some("1".into()));
+        assert_eq!(count, None, "selection must not consume capacity");
         assert_eq!(server.messages().len(), 1);
-    }
-
-    /// An acceptance whose actual IP differs from the reserved one is a hard
-    /// failure AND the reserved capacity is released (never refund-then-retry:
-    /// the failure is hard, and the release is the same accounting correction
-    /// the dispatch path performs).
-    #[tokio::test]
-    async fn mismatched_source_ip_report_releases_the_warmup_reservation() {
-        use crate::email::{OutboundMtaTransport, RelaySubmitter};
-        use outbound_mta::{AcceptanceRecord, RelayError, SubmitRequest};
-        use std::sync::Arc as StdArc;
-
-        struct MismatchRelay {
-            record: AcceptanceRecord,
-        }
-
-        #[async_trait::async_trait]
-        impl RelaySubmitter for MismatchRelay {
-            async fn submit(
-                &self,
-                _request: SubmitRequest,
-            ) -> Result<AcceptanceRecord, RelayError> {
-                Ok(self.record.clone())
-            }
-
-            async fn ready(&self) -> Result<(), String> {
-                Ok(())
-            }
-        }
-
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
-        let job = tracking_gate_job();
-        let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
-            .expect("candidate pool");
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let reserved = reserve_warmup_capacity(&redis, &job, &pool, &today)
-            .await
-            .expect("redis available")
-            .expect("below the cap");
-        let reservation = reserved.reservation.clone().expect("warming reservation");
-        let route = reserved.route();
-
-        let send_unit = send_unit_of(&job);
-        let stub = StdArc::new(MismatchRelay {
-            record: AcceptanceRecord {
-                send_unit: send_unit.clone(),
-                state: "accepted".into(),
-                accepted_at: Utc::now(),
-                attempt: 1,
-                remote_mx: Some("mx.example.com".into()),
-                tls_used: false,
-                requested_source_ip: Some("203.0.113.9".parse().expect("test IP")),
-                actual_source_ip: Some("198.51.100.7".parse().expect("test IP")),
-                recipients: vec![],
-                dsn_send_units: vec![],
-                deferred_retry: None,
-            },
-        });
-        let transport = OutboundMtaTransport::new(stub);
-
-        let email = PreparedEmail {
-            send_unit: send_unit.clone(),
-            from: job.from.clone(),
-            to: job.to.clone(),
-            mime_to: vec![],
-            mime_cc: vec![],
-            reply_to: None,
-            subject: job.subject.clone(),
-            html: None,
-            text: Some("body".into()),
-            headers: vec![],
-            attachments: vec![],
-            dkim: None,
-            verp: None,
-        };
-        let result = transport.send(&email, &route).await;
-        assert!(
-            matches!(result, Err(ProcessorError::SourceBindingUnverified(_))),
-            "a mismatched actual IP must be a hard failure: {result:?}"
-        );
-        let error = result.as_ref().expect_err("error");
-        assert_eq!(classify_send_failure(error), SendFailureClass::Hard);
-        assert!(warmup_reservation_must_be_released(&route, &result));
-
-        // Dispatch-path accounting: release the exact reserved slot.
-        release_warmup_reservation(&redis, &reservation)
-            .await
-            .expect("release");
-        let mut conn = redis.get().await.expect("redis connection");
-        let count: Option<i64> = redis::cmd("GET")
-            .arg(&reservation.counter_key)
-            .query_async(&mut *conn)
-            .await
-            .expect("counter read");
-        assert_eq!(count, Some(0), "the unverified capacity must be released");
-        let marker: Option<String> = redis::cmd("GET")
-            .arg(&reservation.marker_key)
-            .query_async(&mut *conn)
-            .await
-            .expect("marker read");
-        assert_eq!(marker, None);
     }
 
     // ---------------------------------------------------------------------------

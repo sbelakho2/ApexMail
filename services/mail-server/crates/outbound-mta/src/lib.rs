@@ -49,6 +49,7 @@ pub mod retry;
 pub mod smtp;
 pub mod source_ip;
 pub mod tls;
+pub mod warmup;
 
 #[cfg(any(test, feature = "test-support"))]
 mod test_smtp;

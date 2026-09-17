@@ -203,6 +203,28 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "mta-server"]
 
 # =============================================================================
+# Outbound MTA relay daemon
+# =============================================================================
+# The ONLY component that drains `outbound_relay_ledger` durable retries:
+# reclaiming expired delivery leases, claiming due rows and delivering them
+# through the relay (process_due). Without this service, any send that was
+# transiently deferred and persisted by the inline worker submission would
+# sit in the ledger forever — see docs/architecture/delivery-transport.md.
+FROM runtime-base AS outbound-mta
+
+COPY --from=builder /app/target/release/outbound-mta /usr/local/bin/
+
+USER apexmail
+# No SMTP ports: the daemon only DIALS OUT. 8093 is the internal health
+# listener (healthz/readyz over the ledger queue stats).
+EXPOSE 8093
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 8093"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "outbound-mta"]
+
+# =============================================================================
 # IMAP Server
 # =============================================================================
 FROM runtime-base AS imap-server
