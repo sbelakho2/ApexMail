@@ -581,6 +581,108 @@ services:
     logging: *default-logging
 
   # ===========================================================================
+  # WORKER (queue processors: email, replies, webhooks, analytics)
+  # ===========================================================================
+  # The durable email pipeline: claim → admission → transport → acceptance
+  # ledger. Runs the warmup-graduation reconciler and the in-process
+  # outbound-MTA first attempt (the outbound-mta daemon owns retries).
+  worker:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: worker
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "worker"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+      METRICS_PORT: "9093"
+      EMAIL_TRANSPORT_TYPE: ${EMAIL_TRANSPORT_TYPE:-ses}
+      AWS_REGION: ${AWS_REGION:-eu-west-1}
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+    logging: *default-logging
+
+  # ===========================================================================
+  # IMAP SERVER (mailbox access, TLS-only on 993)
+  # ===========================================================================
+  imap-server:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: imap-server
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "imap-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 64M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+    logging: *default-logging
+
+  # ===========================================================================
   # OUTBOUND MTA RELAY DAEMON
   # ===========================================================================
   # The ONLY component that drains the durable outbound queue

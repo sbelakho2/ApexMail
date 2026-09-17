@@ -163,6 +163,7 @@ validate_repo_gates() {
     if command -v python3 >/dev/null 2>&1; then
         ci_check "rust panic paths" python3 tools/check_rust_panic_paths.py
         ci_check "outbound delivery contract" python3 tools/check_outbound_delivery_contract.py
+        ci_check "topology contracts" python3 tools/check_topology_contracts.py
     else
         ci_warn "python3 missing — panic-path guardrails skipped"
     fi
@@ -213,7 +214,8 @@ validate_repo_gates() {
 image_name_guard() {
     _canonical="api-server mta imap-server mailstore worker enterprise tracking-service
                 observability marketing status-server billing-service sales-autopilot
-                compliance analytics-worker pdf-renderer ai-service migrator"
+                compliance analytics-worker pdf-renderer ai-service migrator
+                outbound-mta"
     _third_party="nginx: certbot/certbot: prodrigestivill/postgres-backup-local:
                  postgres: redis: clickhouse/clickhouse-server:"
     _errs=0

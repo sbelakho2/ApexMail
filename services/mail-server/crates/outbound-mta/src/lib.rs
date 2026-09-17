@@ -72,6 +72,7 @@ pub mod test_support {
 use std::net::IpAddr;
 
 pub use relay::Relay;
+pub mod reconcile;
 
 /// The delivery-contract fingerprint (migration 230) as a free function —
 /// `Relay::request_fingerprint` re-exported for callers that hold no Relay.

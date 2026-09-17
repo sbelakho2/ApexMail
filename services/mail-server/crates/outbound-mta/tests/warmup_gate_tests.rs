@@ -712,3 +712,107 @@ mod fingerprint_tests {
         db.close().await;
     }
 }
+
+/// ── The ledger→acceptance reconciler (two-ledger projector) ───────────────
+mod reconcile_tests {
+    use outbound_mta::reconcile::reconcile_acceptances;
+
+    async fn db() -> Option<sqlx::PgPool> {
+        let url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        match migrator::test_support::shared_canonical_db(&url, "apexmail_scratch_base_obm_rec")
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn unit(prefix: &str) -> String {
+        format!("{prefix}:{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// A daemon-accepted send settles its `reserved` acceptance row without
+    /// any worker involvement; already-settled and failed rows are untouched;
+    /// a second pass is a no-op.
+    #[tokio::test]
+    async fn daemon_acceptance_settles_the_reserved_row_exactly_once() {
+        let Some(db) = db().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL");
+            return;
+        };
+        let settled = unit("rec:settled");
+        let already = unit("rec:already");
+        let failed = unit("rec:failed");
+        let still_pending = unit("rec:pending");
+
+        sqlx::query(
+            "INSERT INTO sales_delivery_acceptances (send_unit, tenant_id, state)
+             VALUES ($1, 't_rec', 'reserved'), ($2, 't_rec', 'accepted'),
+                    ($3, 't_rec', 'failed'), ($4, 't_rec', 'reserved')",
+        )
+        .bind(&settled)
+        .bind(&already)
+        .bind(&failed)
+        .bind(&still_pending)
+        .execute(&db)
+        .await
+        .expect("acceptance rows");
+
+        // Relay rows: `settled` accepted, `already` accepted, `failed`
+        // accepted (its acceptance row is terminal-failed → untouched),
+        // `still_pending` still pending (no projection yet).
+        for (unit, state) in [
+            (&settled, "accepted"),
+            (&already, "accepted"),
+            (&failed, "accepted"),
+            (&still_pending, "pending"),
+        ] {
+            sqlx::query(
+                "INSERT INTO outbound_relay_ledger
+                 (send_unit, tenant_id, request_fingerprint, state, envelope_from, recipients,
+                  message, requested_source_ip, attempt, max_attempts, next_attempt_at,
+                  accepted_at, updated_at)
+                 VALUES ($1, 't_rec', NULL, $2, NULL, '[\"r@example.com\"]'::jsonb, '\x66',
+                         NULL, 1, 3, NOW(), NOW(), NOW())",
+            )
+            .bind(unit)
+            .bind(state)
+            .execute(&db)
+            .await
+            .expect("relay row");
+        }
+
+        let reconciled = reconcile_acceptances(&db).await.expect("pass 1");
+        assert_eq!(reconciled.len(), 1, "only the reserved+accepted pair moves");
+        assert_eq!(reconciled[0].send_unit, settled);
+
+        let state = |unit: &str| {
+            let db = db.clone();
+            let unit = unit.to_string();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT state FROM sales_delivery_acceptances WHERE send_unit = $1",
+                )
+                .bind(&unit)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(state(&settled).await, "accepted");
+        assert_eq!(state(&already).await, "accepted");
+        assert_eq!(state(&failed).await, "failed", "a terminal row never flips");
+        assert_eq!(
+            state(&still_pending).await,
+            "reserved",
+            "no relay acceptance yet"
+        );
+
+        // Idempotent: the second pass is a no-op.
+        let again = reconcile_acceptances(&db).await.expect("pass 2");
+        assert!(again.is_empty(), "nothing left to project: {again:?}");
+        db.close().await;
+    }
+}

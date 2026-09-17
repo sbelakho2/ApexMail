@@ -332,6 +332,29 @@ async fn run_worker(
     );
     let heartbeat = apexmail_lib::heartbeat::spawn_service_heartbeat(db.clone(), heartbeat_config);
 
+    // ── Automatic warmup graduation (P1) ──
+    // Idempotent reconciler: warming → active at the canonical 60-day term.
+    // Runs on an hourly cadence; each pass is a no-op unless an IP matured.
+    {
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                match worker_processors::common::graduation::graduate_mature_warmup_ips(&db).await {
+                    Ok(graduated) if !graduated.is_empty() => {
+                        tracing::info!(count = graduated.len(), "warmup graduation reconciler ran")
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!(%error, "warmup graduation reconciler failed")
+                    }
+                }
+            }
+        });
+    }
+
     verp_secret_gate(settings.run_email)?;
 
     let mut handles = vec![];

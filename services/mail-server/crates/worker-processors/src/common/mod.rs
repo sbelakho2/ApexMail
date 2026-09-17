@@ -4,6 +4,7 @@ pub mod backpressure;
 pub mod circuit_breaker;
 pub mod config;
 pub mod error;
+pub mod graduation;
 pub mod pool;
 
 pub use backpressure::{Backpressure, BackpressureConfig};

@@ -113,11 +113,11 @@ pub trait EmailTransport: Send + Sync {
 //     migrations/003_dedicated_ips.sql:43).
 //   * Absent header ⇒ shared-pool/SES routing, no binding.
 //
-// TODO(mta-owner): the receiving component is the outbound relay MTA
-// deployed behind SMTP_HOST. It is NOT implemented in this repository —
-// `crates/mta` contains only the inbound/submission/bounce servers, and no
-// recipient-facing outbound connector exists here. The relay must, before
-// the contract is enforceable end-to-end:
+// IMPLEMENTED (see crates/outbound-mta): the recipient-facing outbound relay
+// exists, is deployed (the `outbound-mta` daemon drains its durable retry
+// ledger), and enforces exactly this contract. The legacy SMTP transport
+// below defers dedicated routes before DATA; the production path is the
+// in-process `OutboundMtaTransport`. The historical contract, now honoured:
 //   1. accept the header ONLY on the authenticated internal submission
 //      listener (never relay a client-supplied header of this name),
 //   2. consume it and STRIP it before the message leaves the trust
@@ -144,10 +144,10 @@ pub const APEXMAIL_ROUTE_HEADER: &str = "X-ApexMail-Route";
 pub const APEXMAIL_ROUTE_VALUE_PREFIX: &str = "v1 dedicated";
 
 /// The reply token the receiving relay uses to report the source IP it
-/// actually bound for a dedicated route. Agreed contract; the relay side is
-/// TODO(mta-owner) (see the module comment above). `SmtpTransport` reports
-/// `actual_source_ip: None` until the reply is parseable, and the processor
-/// treats that as UNVERIFIED — never as success.
+/// actually bound for a dedicated route. IMPLEMENTED by the outbound relay
+/// (`crates/outbound-mta` reports the verified bound IP in its acceptance
+/// record); the legacy `SmtpTransport` still reports `actual_source_ip:
+/// None` and the processor treats that as UNVERIFIED — never as success.
 pub const APEXMAIL_SOURCE_IP_REPLY_HEADER: &str = "X-ApexMail-Source-IP";
 
 /// Render the wire value for a route: `None` for the shared pool, the

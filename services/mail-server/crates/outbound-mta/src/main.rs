@@ -105,6 +105,7 @@ where
 #[derive(Default)]
 struct Counters {
     sweeps: AtomicU64,
+    reconciled: AtomicU64,
     claimed: AtomicU64,
     accepted: AtomicU64,
     retry_scheduled: AtomicU64,
@@ -116,6 +117,7 @@ impl Counters {
     fn snapshot(&self) -> serde_json::Value {
         json!({
             "sweeps": self.sweeps.load(Ordering::Relaxed),
+            "reconciled": self.reconciled.load(Ordering::Relaxed),
             "claimed": self.claimed.load(Ordering::Relaxed),
             "accepted": self.accepted.load(Ordering::Relaxed),
             "retry_scheduled": self.retry_scheduled.load(Ordering::Relaxed),
@@ -226,6 +228,13 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     metric_line(
         &mut body,
         "counter",
+        "apexmail_outbound_mta_reconciled_total",
+        "Daemon acceptances projected onto the worker acceptance ledger.",
+        counter_value("reconciled"),
+    );
+    metric_line(
+        &mut body,
+        "counter",
         "apexmail_outbound_mta_claimed_total",
         "Rows claimed for delivery.",
         counter_value("claimed"),
@@ -288,7 +297,7 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await
         .context("failed to connect to DATABASE_URL")?;
-    let ledger: Arc<dyn RelayLedger> = Arc::new(PgLedger::new(pool));
+    let ledger: Arc<dyn RelayLedger> = Arc::new(PgLedger::new(pool.clone()));
     let resolver = Arc::new(DnsMxResolver::new().context("failed to build the MX resolver")?);
     let relay = Arc::new(Relay::new(ledger.clone(), resolver, config.relay.clone()));
     let counters = Arc::new(Counters::default());
@@ -353,6 +362,27 @@ async fn main() -> Result<()> {
                     Err(error) => {
                         counters.errors.fetch_add(1, Ordering::Relaxed);
                         error!(%error, "outbound queue sweep failed");
+                    }
+                }
+
+                // Ledger→acceptance projection: a send the DAEMON accepted
+                // must not wait for the worker to happen to retry before
+                // the application learns SMTP already accepted it.
+                match outbound_mta::reconcile::reconcile_acceptances(&pool).await {
+                    Ok(reconciled) => {
+                        if !reconciled.is_empty() {
+                            counters
+                                .reconciled
+                                .fetch_add(reconciled.len() as u64, Ordering::Relaxed);
+                            info!(
+                                count = reconciled.len(),
+                                "projected daemon acceptances onto the worker acceptance ledger"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        counters.errors.fetch_add(1, Ordering::Relaxed);
+                        error!(%error, "acceptance reconciliation sweep failed");
                     }
                 }
             }

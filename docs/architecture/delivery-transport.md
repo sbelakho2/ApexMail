@@ -173,17 +173,32 @@ X-ApexMail-Route: v1 dedicated <dedicated_ip_id> <source_ip>
   in the end-of-DATA reply as `X-ApexMail-Source-IP: <ip>`
   (`APEXMAIL_SOURCE_IP_REPLY_HEADER`, `transport.rs:120-125`).
 
-### Known gap: the MTA side is not implemented in this repository
+### The outbound relay MTA (implemented and deployed)
 
-The receiving component is the outbound relay MTA behind `SMTP_HOST`. It is
-**not implemented here** — `crates/mta` contains only the inbound, submission,
-bounce and feedback-loop servers, and no recipient-facing outbound connector
-exists in this tree. The source-IP binding is a documented contract with a
-`TODO(mta-owner)` (`transport.rs:93-108`). Until the relay honours and reports
-it, `SmtpTransport` reports `actual_source_ip: None`
-(`transport.rs:738-756`), and the processor refuses to count the send as
-dedicated. **The dedicated-IP route is therefore not verified end to end in
-production today.**
+The receiving component is the outbound relay MTA: **`crates/outbound-mta`**,
+a real recipient-facing relay with its own durable delivery ledger
+(`outbound_relay_ledger`, migration 212), MX resolution, source-IP binding
+verified BEFORE SMTP transmission (`Relay` drops the connection when the
+kernel-bound address mismatches the requested one), STARTTLS/TLS policy,
+retry classification, DSNs, per-recipient outcomes and post-DATA acceptance
+evidence. Warmup admission happens at the relay's SMTP-effect boundary
+(every attempt on a warming IP is admitted atomically against the canonical
+schedule), and `send_unit` idempotency is payload-aware via the request
+fingerprint (migration 230).
+
+Operationally the relay ships twice:
+
+* **in-process**, called by the worker for the first attempt
+  (`OutboundMtaTransport::from_pool`, installing the warmup gate), and
+* **the `outbound-mta` daemon**, a first-class deployed service (Dockerfile
+  target + dev/prod compose services, `/healthz`, `/readyz`, `/metrics`
+  with the pending-oldest-age SLO gauge) — the ONLY component draining the
+  durable retry queue (`process_due`), reclaiming expired leases and
+  reconciling daemon acceptances onto the worker's acceptance ledger.
+
+The dedicated-IP route is verified end to end: the acceptance record carries
+the requested AND actual source IP, and a mismatch is a hard contract
+failure that never counts as a dedicated send.
 
 ## 4. Route verification and receipts
 
