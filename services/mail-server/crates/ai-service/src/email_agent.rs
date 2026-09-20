@@ -697,16 +697,12 @@ impl EmailAnswerer {
     /// a decline is not a reply and must never consume a customer's cap.
     /// Errors (missing column, outage) fail open with a warning: the
     /// per-tenant governor still bounds LLM spend.
-    async fn sender_reply_count(&self, from_email: &str) -> i64 {
+    async fn sender_reply_count(&self, from_email: &str) -> Result<i64, sqlx::Error> {
         sqlx::query_scalar::<_, i64>(SENDER_REPLY_COUNT_SQL)
             .bind(from_email)
             .bind(REPLY_CAP_WINDOW_DAYS.to_string())
             .fetch_one(&self.pool)
             .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(error = %error, "reply-cap lookup failed — allowing message");
-                0
-            })
     }
 
     /// Number of drafts generated for the tenant over the last 24h (per-tenant
@@ -769,7 +765,28 @@ impl EmailAnswerer {
         }
 
         // ── Loop guard 3: per-sender reply cap ────────────────────────────
-        if self.sender_reply_count(&row.from_email).await >= MAX_REPLIES_PER_SENDER_WINDOW {
+        // FAIL CLOSED: a lookup outage declines to human review instead of
+        // allowing an unbounded auto-reply through a guard that could not be
+        // evaluated (a reply-cap bypass is exactly the runaway-loop this
+        // guard exists to stop).
+        let reply_count = match self.sender_reply_count(&row.from_email).await {
+            Ok(count) => count,
+            Err(error) => {
+                tracing::error!(
+                    msg_id = %row.id,
+                    from = %redact_for_log(&row.from_email),
+                    error = %error,
+                    "reply-cap lookup failed — declining to human review (fail closed)"
+                );
+                return self
+                    .decline(
+                        &row.id,
+                        "[NO DRAFT — reply-cap lookup unavailable; message routed to human review]",
+                    )
+                    .await;
+            }
+        };
+        if reply_count >= MAX_REPLIES_PER_SENDER_WINDOW {
             tracing::warn!(
                 msg_id = %row.id,
                 from = %redact_for_log(&row.from_email),

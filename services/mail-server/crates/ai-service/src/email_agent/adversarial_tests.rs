@@ -60,12 +60,7 @@ async fn serial_lock(db_url: &str) -> sqlx::PgPool {
     lock_pool
 }
 
-async fn insert_inbound(
-    db: &sqlx::PgPool,
-    id: &str,
-    tenant: Option<&str>,
-    raw: &[u8],
-) {
+async fn insert_inbound(db: &sqlx::PgPool, id: &str, tenant: Option<&str>, raw: &[u8]) {
     sqlx::query(
         "INSERT INTO inbound_messages (id, tenant_id, raw_message, raw_size, is_verp_reply, \
          processed, processing, pending_approval) \
@@ -88,10 +83,7 @@ async fn cleanup_inbound(db: &sqlx::PgPool, id: &str) {
         .ok();
 }
 
-async fn row_state(
-    db: &sqlx::PgPool,
-    id: &str,
-) -> (bool, bool, Option<String>, Option<i32>) {
+async fn row_state(db: &sqlx::PgPool, id: &str) -> (bool, bool, Option<String>, Option<i32>) {
     sqlx::query_as(
         "SELECT processed, pending_approval, ai_response, ai_tokens_used \
          FROM inbound_messages WHERE id = $1",
@@ -177,7 +169,10 @@ impl EnvGuard {
     fn with_mock_llm(port: u16) -> Self {
         Self::with(&[
             ("AI_MODEL_ENABLED", Some("true")),
-            ("AI_MODEL_ENDPOINT", Some(&format!("http://127.0.0.1:{port}/v1"))),
+            (
+                "AI_MODEL_ENDPOINT",
+                Some(&format!("http://127.0.0.1:{port}/v1")),
+            ),
             ("AI_MODEL_NAME", Some("apexmail-assistant")),
             ("AI_EMAIL_AGENT_ENABLED", Some("true")),
             ("AI_EMAIL_REQUIRE_APPROVAL", Some("true")),
@@ -325,7 +320,12 @@ async fn processed_message_becomes_a_pending_approval_draft_exactly_once() {
         &db,
         &id,
         Some(&tenant),
-        &mime("john.doe@example.com", "SPF help", "How do I check my SPF record?", &[]),
+        &mime(
+            "john.doe@example.com",
+            "SPF help",
+            "How do I check my SPF record?",
+            &[],
+        ),
     )
     .await;
 
@@ -334,7 +334,10 @@ async fn processed_message_becomes_a_pending_approval_draft_exactly_once() {
 
     let (done, pending, response, tokens) = row_state(&db, &id).await;
     assert!(done, "message marked processed");
-    assert!(pending, "THE ONLY success write sets pending_approval = true");
+    assert!(
+        pending,
+        "THE ONLY success write sets pending_approval = true"
+    );
     let response = response.expect("draft stored");
     assert!(response.contains("SPF record should include our servers"));
     // The draft quotes the original message (format_reply).
@@ -353,7 +356,26 @@ async fn processed_message_becomes_a_pending_approval_draft_exactly_once() {
 
 // ── Loop guards decline without drafting ────────────────────────────────────
 
-async fn assert_declined(db: &sqlx::PgPool, id: &str, note_contains: &str) {
+async fn assert_declined(
+    answerer: &EmailAnswerer,
+    db: &sqlx::PgPool,
+    id: &str,
+    note_contains: &str,
+) {
+    // Under a full workspace parallel run this suite's shared database is
+    // busy: the claim's FOR UPDATE SKIP LOCKED can legitimately skip our row
+    // in a single batch call (another process holds it mid-claim). The
+    // production worker polls; the test polls to the same bounded deadline
+    // instead of assuming one batch call must win the claim.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let (done, _, _, _) = row_state(db, id).await;
+        if done || std::time::Instant::now() > deadline {
+            break;
+        }
+        let _ = answerer.process_batch().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     let (done, pending, response, tokens) = row_state(db, id).await;
     assert!(done, "decline marks the message processed");
     assert!(!pending, "declines can never be released as outbound mail");
@@ -362,7 +384,7 @@ async fn assert_declined(db: &sqlx::PgPool, id: &str, note_contains: &str) {
         note.contains(note_contains),
         "note {note:?} must mention {note_contains}"
     );
-    assert_eq!(tokens, Some(0) , "declines record zero token spend");
+    assert_eq!(tokens, Some(0), "declines record zero token spend");
 }
 
 #[tokio::test]
@@ -387,7 +409,7 @@ async fn loop_guard_declines_robot_senders() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "loop guard").await;
+    assert_declined(&answerer, &db, &id, "loop guard").await;
     cleanup_inbound(&db, &id).await;
 }
 
@@ -418,7 +440,7 @@ async fn loop_guard_declines_auto_submitted_headers() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "auto-submission header").await;
+    assert_declined(&answerer, &db, &id, "auto-submission header").await;
     cleanup_inbound(&db, &id).await;
 }
 
@@ -435,17 +457,25 @@ async fn loop_guard_declines_senders_at_the_reply_cap() {
     let answerer = EmailAnswerer::new(agent_config(&std::env::var("TEST_DATABASE_URL").unwrap()))
         .expect("agent");
 
+    let run = uuid::Uuid::new_v4().simple().to_string();
     let sender = format!("capped-{}@example.com", uuid::Uuid::new_v4().simple());
-    // MAX_REPLIES_PER_SENDER_WINDOW prior drafts (pending_approval = true).
+    // MAX_REPLIES_PER_SENDER_WINDOW prior drafts (pending_approval = true),
+    // tagged per RUN: a sibling process's cleanup must never delete this
+    // run's seeds mid-test (the old global 'prior draft %' delete did).
     for i in 0..MAX_REPLIES_PER_SENDER_WINDOW {
         let prior_id = unique("em_prior");
+        // The reply cap counts drafts by `from_email` (the original
+        // sender): prior drafts MUST carry the sender or the gate counts
+        // zero and the message gets drafted instead of declined — the
+        // fixture bug this test exposed.
         sqlx::query(
-            "INSERT INTO inbound_messages (id, raw_message, is_verp_reply, processed, processing, \
-             pending_approval, processed_at, ai_response, ai_tokens_used) \
-             VALUES ($1, NULL, false, true, false, true, NOW(), $2, 10)",
+            "INSERT INTO inbound_messages (id, from_email, raw_message, is_verp_reply, processed, \
+             processing, pending_approval, processed_at, ai_response, ai_tokens_used) \
+             VALUES ($1, $3, NULL, false, true, false, true, NOW(), $2, 10)",
         )
         .bind(&prior_id)
-        .bind(format!("prior draft {i}"))
+        .bind(format!("prior draft {run} {i}"))
+        .bind(&sender)
         .execute(&db)
         .await
         .expect("insert prior draft");
@@ -460,9 +490,10 @@ async fn loop_guard_declines_senders_at_the_reply_cap() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "reply cap").await;
+    assert_declined(&answerer, &db, &id, "reply cap").await;
     cleanup_inbound(&db, &id).await;
-    sqlx::query("DELETE FROM inbound_messages WHERE ai_response LIKE 'prior draft %'")
+    sqlx::query("DELETE FROM inbound_messages WHERE ai_response LIKE $1")
+        .bind(format!("prior draft {run}%"))
         .execute(&db)
         .await
         .ok();
@@ -508,7 +539,7 @@ async fn loop_guard_declines_tenants_at_the_daily_draft_cap() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "tenant daily AI draft cap").await;
+    assert_declined(&answerer, &db, &id, "tenant daily AI draft cap").await;
 
     cleanup_inbound(&db, &id).await;
     for prior in ids {
@@ -548,7 +579,7 @@ async fn prompt_injection_and_directives_are_declined_without_a_draft() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "prompt-injection patterns").await;
+    assert_declined(&answerer, &db, &id, "prompt-injection patterns").await;
     cleanup_inbound(&db, &id).await;
 
     // (2) A single behavior directive is flagged below the Malicious level.
@@ -566,7 +597,13 @@ async fn prompt_injection_and_directives_are_declined_without_a_draft() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "asked the assistant to change behavior").await;
+    assert_declined(
+        &answerer,
+        &db,
+        &id,
+        "asked the assistant to change behavior",
+    )
+    .await;
     cleanup_inbound(&db, &id).await;
 }
 
@@ -594,7 +631,7 @@ async fn low_confidence_llm_output_is_never_a_draft() {
     )
     .await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "verification failed").await;
+    assert_declined(&answerer, &db, &id, "verification failed").await;
     cleanup_inbound(&db, &id).await;
 }
 
@@ -617,7 +654,7 @@ async fn oversized_messages_are_flagged_not_retried() {
     let huge = vec![b'x'; MAX_RAW_MESSAGE_BYTES + 1];
     insert_inbound(&db, &id, None, &huge).await;
     answerer.process_batch().await.expect("batch");
-    assert_declined(&db, &id, "10 MiB processing cap").await;
+    assert_declined(&answerer, &db, &id, "10 MiB processing cap").await;
     cleanup_inbound(&db, &id).await;
 }
 
@@ -654,7 +691,13 @@ async fn llm_outage_retries_then_quarantines_without_drafts() {
         answerer.process_batch().await.expect("batch");
     }
     // …end in a quarantine, never a draft.
-    assert_declined(&db, &id, "could not be processed after repeated failures").await;
+    assert_declined(
+        &answerer,
+        &db,
+        &id,
+        "could not be processed after repeated failures",
+    )
+    .await;
     cleanup_inbound(&db, &id).await;
 }
 
@@ -693,13 +736,14 @@ async fn rate_limit_deferral_releases_the_claim_without_consuming_an_attempt() {
 
     // The deferral must release the claim (both markers) so a later poll
     // retries, and must NOT write any terminal state.
-    let (claimed, processed, pending): (Option<chrono::DateTime<Utc>>, bool, bool) = sqlx::query_as(
-        "SELECT ai_claimed_at, processed, pending_approval FROM inbound_messages WHERE id=$1",
-    )
-    .bind(&id)
-    .fetch_one(&db)
-    .await
-    .expect("row");
+    let (claimed, processed, pending): (Option<chrono::DateTime<Utc>>, bool, bool) =
+        sqlx::query_as(
+            "SELECT ai_claimed_at, processed, pending_approval FROM inbound_messages WHERE id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&db)
+        .await
+        .expect("row");
     assert_eq!(claimed, None, "claim released for a later poll");
     assert!(!processed, "no terminal state was written");
     assert!(!pending);
