@@ -123,12 +123,22 @@ pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
 // consumers with the same eligibility predicate and different claim
 // semantics — a race. The MTA only populates raw_message (the mirror
 // columns are NULL), so from/subject/body are parsed from the raw MIME.
+//
+// The claim marker itself carries a staleness window: a worker that dies
+// (crash, SIGKILL, deployment) between claiming and finishing leaves
+// `ai_claimed_at` set and the message would otherwise be stranded forever —
+// unclaimable, unprocessed, unquarantinable. A claim older than 15 minutes
+// is re-claimable; the bound far exceeds the worst-case per-batch processing
+// time (10 messages × bounded LLM timeout), so a live worker never sees its
+// fresh claim stolen. Terminal states are still never resurrected:
+// `processed_at IS NULL` remains a hard filter.
 const CLAIM_UNPROCESSED_SQL: &str = r#"
                         WITH candidates AS (
                                 SELECT id
                                 FROM inbound_messages
                                 WHERE processed_at IS NULL
-                                    AND ai_claimed_at IS NULL
+                                    AND (ai_claimed_at IS NULL
+                                         OR ai_claimed_at < NOW() - INTERVAL '15 minutes')
                                     AND raw_message IS NOT NULL
                                 ORDER BY received_at ASC
                                 LIMIT 10
@@ -142,10 +152,10 @@ const CLAIM_UNPROCESSED_SQL: &str = r#"
             "#;
 
 /// Release a claimed-but-unprocessed row back to the poller. The claim query
-/// ([`CLAIM_UNPROCESSED_SQL`]) re-claims rows via `ai_claimed_at IS NULL`, so
-/// releasing must clear BOTH markers: resetting only `processing` (the
-/// reply-handler's column) would leave `ai_claimed_at` set and strand the
-/// message forever — no later poll could ever claim it again.
+/// ([`CLAIM_UNPROCESSED_SQL`]) re-claims rows whose `ai_claimed_at` is NULL
+/// or stale, so releasing must clear the marker: resetting only `processing`
+/// (the reply-handler's column) would leave the message waiting on the
+/// staleness window instead of retrying on the very next poll.
 pub(crate) const RELEASE_CLAIM_SQL: &str = r#"
             UPDATE inbound_messages
             SET processing = false, ai_claimed_at = NULL
@@ -610,9 +620,19 @@ impl EmailAnswerer {
                 continue;
             }
             if let Err(e) = self.process_message(row).await {
-                let mut attempt = self.attempts.entry(row.id.clone()).or_insert(0);
-                *attempt.value_mut() += 1;
-                let attempt_no = *attempt.value();
+                // Bump the attempt counter in a scoped block: the dashmap
+                // entry guard holds the shard's write lock, and the
+                // Quarantine arm below re-enters the same shard via
+                // `attempts.remove`. dashmap's parking_lot RwLock is not
+                // reentrant — the guard lives to the end of the match, so
+                // the lock MUST be released here or the poll task deadlocks
+                // forever the first time a message reaches the quarantine
+                // threshold.
+                let attempt_no = {
+                    let mut attempt = self.attempts.entry(row.id.clone()).or_insert(0);
+                    *attempt.value_mut() += 1;
+                    *attempt.value()
+                };
                 match failure_action(attempt_no) {
                     FailureAction::Retry => {
                         tracing::warn!(
@@ -1262,6 +1282,18 @@ mod tests {
             "candidate query must not filter by message age"
         );
         assert!(CLAIM_UNPROCESSED_SQL.contains("SKIP LOCKED"));
+    }
+
+    #[test]
+    fn claim_query_reclaims_stale_claims_left_by_dead_workers() {
+        // Regression: a worker that died between claiming and finishing left
+        // `ai_claimed_at` set forever — the message became unclaimable,
+        // unprocessed and unquarantinable (observed: SIGTERMed workers
+        // stranded rows in exactly that state). The claim must recover
+        // claims older than the 15-minute staleness bound.
+        assert!(CLAIM_UNPROCESSED_SQL.contains("ai_claimed_at < NOW() - INTERVAL '15 minutes'"));
+        // A fresh claim must stay protected: the NULL branch is still there.
+        assert!(CLAIM_UNPROCESSED_SQL.contains("ai_claimed_at IS NULL"));
     }
 
     #[test]
