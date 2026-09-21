@@ -1106,10 +1106,6 @@ async fn reserve_send_admission(
     Ok(admitted == 1)
 }
 
-/// Fix 3: TTL for per-IP warmup counters/markers. The key embeds the UTC day,
-/// so 48 hours keeps the current day's counter alive while old keys expire.
-const WARMUP_COUNTER_TTL_SECS: u64 = 48 * 60 * 60;
-
 /// Fix 3: daily warmup counter key for one dedicated source IP. The IP — not
 /// the sending domain — is the reputation boundary that warmup protects.
 /// Format preserved verbatim (`apexmail:warmup:ip:{ip_address}:{utc_day}`).
@@ -1244,7 +1240,6 @@ async fn select_warmup_ip(
 /// Kept alongside the route so a confirmed source-IP contract violation can
 /// release the exact slot the reservation took (accounting correction only —
 /// never a retry trigger).
-
 impl ReservedDeliveryIp {
     /// The exact route this reservation was made for.
     fn route(&self) -> DeliveryRoute {
@@ -1858,7 +1853,12 @@ impl EmailProcessor {
         } else {
             visibility_ms as i64
         };
-        let lock_until = Utc::now() + chrono::Duration::milliseconds(visibility_ms_i64);
+        // A misconfigured (absurd) visibility timeout clamps to the last
+        // representable lease instead of panicking the poll loop on the
+        // DateTime overflow — the i64 clamp above only bounds the argument.
+        let lock_until = Utc::now()
+            .checked_add_signed(chrono::Duration::milliseconds(visibility_ms_i64))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
 
         let rows = sqlx::query_as::<_, QueuedEmailRow>(FETCH_JOBS_SQL)
             .bind(lock_until)
@@ -3386,7 +3386,15 @@ impl EmailProcessor {
         // same recovering endpoint).
         let base_retry_secs =
             (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier);
-        let retry_at = Utc::now() + chrono::Duration::seconds(jittered_secs(base_retry_secs));
+        // Same overflow discipline as the visibility lease: an absurd
+        // backoff must clamp the retry stamp, never panic the handler —
+        // and TimeDelta::seconds itself panics past its bounds, so the
+        // construction is fallible too.
+        let retry_in = chrono::TimeDelta::try_seconds(jittered_secs(base_retry_secs))
+            .unwrap_or(chrono::TimeDelta::MAX);
+        let retry_at = Utc::now()
+            .checked_add_signed(retry_in)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
 
         // Requeue only the recipients still owed a delivery (partial-failure
         // duplicate fix). `metadata.pending_recipients` is seeded here if it
@@ -7460,6 +7468,61 @@ mod tests {
 
     // ── F74: reserved namespace at the pre-transport boundary ──────────
 
+    /// Campaign attribution lands in the reserved header namespace from the
+    /// JOB's campaign id; duplicate custom keys are collapsed; attachments
+    /// decode from base64 and skip undecodable entries; a domain row that
+    /// vanished dead-letters the job.
+    #[tokio::test]
+    async fn prepare_email_campaign_headers_duplicates_and_attachments() {
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: false,
+            ..crate::common::TrackingConfig::default()
+        })
+        .await;
+
+        let mut job = tracking_gate_job();
+        job.campaign_id = Some("camp-42".into());
+        job.headers = Some(serde_json::json!({
+            "custom": {
+                "X-Legit": "one",
+                "x-legit": "duplicate — second spelling must be blocked",
+            }
+        }));
+        job.attachments = Some(serde_json::json!([
+            {"filename": "a.txt", "content": "aGVsbG8=", "contentType": "text/plain"},
+            {"filename": "broken.bin", "content": "!!!not-base64!!!", "contentType": "application/octet-stream"}
+        ]));
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain(), &DeliveryRoute::SesShared)
+            .unwrap();
+
+        let header = |name: &str| {
+            prepared
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            header(apexmail_lib::email_headers::HEADER_CAMPAIGN_ID).as_deref(),
+            Some("camp-42"),
+            "the campaign id is carried as a reserved header"
+        );
+        let legit = prepared
+            .headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("X-Legit"))
+            .count();
+        assert_eq!(legit, 1, "duplicate custom keys collapse to one entry");
+        assert_eq!(
+            prepared.attachments.len(),
+            1,
+            "only the decodable attachment survives"
+        );
+        assert_eq!(prepared.attachments[0].filename, "a.txt");
+        assert_eq!(prepared.attachments[0].content, b"hello");
+    }
+
     /// Every spelling of the internal namespace is stripped from caller
     /// custom headers, and the canonical identity headers are generated
     /// from the persisted job context ONLY.
@@ -8783,6 +8846,7 @@ mod acceptance_ledger_db_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn acceptance_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
         match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
             Ok(pool) => pool,
             Err(error) => panic!("{}", error.panic_message()),
@@ -9229,6 +9293,7 @@ mod end_to_end_db_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn e2e_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
         match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
             Ok(pool) => pool,
             Err(error) => panic!("{}", error.panic_message()),
@@ -9443,6 +9508,44 @@ mod end_to_end_db_tests {
     }
 
     // ── success path ───────────────────────────────────────────────────────
+
+    /// A job whose authorized domain row has vanished (deleted/unverified
+    /// after enqueue) is a permanent job error — dead-lettered, never sent.
+    #[tokio::test]
+    async fn vanished_domain_row_is_a_permanent_job_error() {
+        let Some(pool) = e2e_pool("e2e_vanished_domain").await else {
+            return;
+        };
+        let fixture = seed(&pool, "vanished").await;
+        // Delete the domain AFTER the queue row exists (the API authorized it
+        // once; the worker re-checks at dispatch).
+        sqlx::query("DELETE FROM domains WHERE id = $1")
+            .bind(fixture.domain_id)
+            .execute(&pool)
+            .await
+            .expect("delete domain");
+        let transport = ScriptedTransport::new(SendMode::Success);
+        let processor = build_processor(&pool, transport.clone()).await;
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("job");
+
+        let result = processor.process_job(job).await;
+        assert!(result.is_err(), "a vanished domain must fail the job");
+        assert_eq!(transport.calls(), 0, "nothing may be submitted");
+        let (status, _): (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(status, "failed", "permanently rejected rows dead-letter");
+        pool.close().await;
+    }
 
     /// The full success path: claim, route, exactly-once reserve, submit,
     /// record, row transition, events, delivery log, reputation.
@@ -10881,6 +10984,1648 @@ mod end_to_end_db_tests {
             Some("accepted"),
             "the reclaimed row records the acceptance"
         );
+        pool.close().await;
+    }
+}
+
+#[cfg(test)]
+mod orchestration_tests {
+    //! Adversarial coverage for the poll loop's shedding / cooldown /
+    //! shutdown orchestration, the lease-token fences on every durable
+    //! write, the dispatch-time gates' refusal arms, and the visibility-
+    //! lease overflow guard. Uses the same canonical-schema + transport-
+    //! double pattern as `end_to_end_db_tests`.
+
+    use super::*;
+    use crate::common::ProcessorConfig;
+    use sqlx::PgPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    type TestPool = PgPool;
+
+    async fn orch_pool(test_name: &str) -> Option<TestPool> {
+        crate::test_support::install_test_tracing();
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn orch_redis() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    /// Poll every 10 ms (inside the suite's sleep budget) until `pred` holds
+    /// or the deadline elapses. Returns the final predicate value.
+    async fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        loop {
+            if pred() {
+                return true;
+            }
+            if Instant::now().duration_since(start) >= deadline {
+                return pred();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn orch_config(concurrency: usize, poll_ms: u64) -> EmailConfig {
+        let mut config = EmailConfig {
+            base: ProcessorConfig {
+                name: "orch".to_string(),
+                concurrency,
+                poll_interval: Duration::from_millis(poll_ms),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        config
+    }
+
+    struct Fixture {
+        tenant_id: String,
+        domain_id: uuid::Uuid,
+        queue_id: uuid::Uuid,
+        sender: String,
+        recipient: String,
+    }
+
+    /// Tenant + verified domain + one pending single-recipient row.
+    async fn seed(pool: &PgPool, label: &str) -> Fixture {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant_id = format!("orch-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("Orch {label} {suffix}"))
+        .bind(format!("orch-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+
+        let domain_id = uuid::Uuid::new_v4();
+        let domain_name = format!("orch-{suffix}.example");
+        sqlx::query(
+            "INSERT INTO domains \
+                 (id, tenant_id, name, status, verified, dkim_enabled, ses_verified, \
+                  dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'sel', 'pub', 'dkim:v1:test')",
+        )
+        .bind(domain_id)
+        .bind(&tenant_id)
+        .bind(&domain_name)
+        .execute(pool)
+        .await
+        .expect("insert domain");
+
+        let queue_id = uuid::Uuid::new_v4();
+        let sender = format!("sender@{domain_name}");
+        let recipient = "user@example.com".to_string();
+        insert_queue_row(pool, &queue_id, &tenant_id, domain_id, &sender, &recipient).await;
+
+        Fixture {
+            tenant_id,
+            domain_id,
+            queue_id,
+            sender,
+            recipient,
+        }
+    }
+
+    async fn insert_queue_row(
+        pool: &PgPool,
+        queue_id: &uuid::Uuid,
+        tenant_id: &str,
+        domain_id: uuid::Uuid,
+        sender: &str,
+        recipient: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category) \
+             VALUES ($1, $2, ARRAY[$3], 'orch', 'pending', $4, gen_random_uuid(), $5, $3, \
+                     'body', '{}'::jsonb, 0, 'marketing')",
+        )
+        .bind(queue_id)
+        .bind(sender)
+        .bind(recipient)
+        .bind(tenant_id)
+        .bind(domain_id)
+        .execute(pool)
+        .await
+        .expect("insert email_queue row");
+    }
+
+    /// A transport double whose disposition is keyed by recipient: the
+    /// configured address hard-bounces with an address-proving 550 5.1.1,
+    /// everything else succeeds.
+    struct PerRecipientTransport {
+        bounce_recipient: String,
+        calls: AtomicUsize,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl PerRecipientTransport {
+        fn bounce(bounce_recipient: &str) -> Arc<Self> {
+            Arc::new(Self {
+                bounce_recipient: bounce_recipient.to_string(),
+                calls: AtomicUsize::new(0),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn seen(&self) -> Vec<String> {
+            self.seen.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for PerRecipientTransport {
+        fn transport_name(&self) -> &str {
+            "orch-scripted"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            true
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(email.to.clone());
+            if email.to == self.bounce_recipient {
+                return Err(ProcessorError::Smtp {
+                    code: 550,
+                    enhanced: Some("5.1.1".into()),
+                    message: "user unknown".into(),
+                });
+            }
+            Ok(DeliveryReceipt {
+                transport: match route {
+                    DeliveryRoute::SesShared => TransportType::Ses,
+                    DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
+                },
+                transport_message_id: Some(format!("pm-{}", self.calls())),
+                actual_source_ip: route.dedicated_source_ip(),
+                recipient_provider: None,
+                provider_source: None,
+            })
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn build(
+        pool: &PgPool,
+        transport: Arc<dyn EmailTransport>,
+        config: EmailConfig,
+    ) -> Arc<EmailProcessor> {
+        let hybrid = HybridTransport::new(Some(transport), None);
+        Arc::new(
+            EmailProcessor::with_transport(pool.clone(), orch_redis(), config, hybrid)
+                .await
+                .expect("processor"),
+        )
+    }
+
+    async fn queue_status(pool: &PgPool, queue_id: uuid::Uuid) -> String {
+        sqlx::query_scalar("SELECT status FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("queue status")
+    }
+
+    async fn requeue_reason(pool: &PgPool, queue_id: uuid::Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT metadata->>'requeue_reason' FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("requeue reason")
+    }
+
+    // ── 1. Load shedding: a backpressured loop sheds, resumes, and stops ───
+
+    /// SCALE-H-04 orchestration, end to end: with a backlog over the
+    /// threshold the loop finishes the batch it already claimed, then sheds
+    /// (no further fetches while the cooldown is armed); once the backlog is
+    /// drained and the cooldown elapses it resumes and stops promptly on
+    /// shutdown.
+    #[tokio::test]
+    async fn backpressured_loop_sheds_then_resumes_and_stops_promptly() {
+        let Some(pool) = orch_pool("orch_shed").await else {
+            return;
+        };
+        let fixture = seed(&pool, "shed").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(4, 50),
+        )
+        .await;
+
+        // Push the real pending depth over the 10 000 threshold. The first
+        // batch claims 4 rows; 10 005 - 4 = 10 001 > 10 000 keeps the
+        // post-claim observation over the threshold.
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category, priority) \
+             SELECT gen_random_uuid(), $2, ARRAY['bulk@example.com'], 'shed', 'pending', \
+                    $1, gen_random_uuid(), $3, 'bulk@example.com', 'body', '{}'::jsonb, \
+                    0, 'marketing', 0 \
+             FROM generate_series(1, $4::int)",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.sender)
+        .bind(fixture.domain_id)
+        .bind(10_005_i32)
+        .execute(&pool)
+        .await
+        .expect("bulk insert backlog");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+
+        // The loop processes exactly one concurrency-sized batch, then the
+        // real depth observation arms the shed cooldown.
+        assert!(
+            wait_until(Duration::from_secs(10), || transport.calls() == 4).await,
+            "the first batch must be served before shedding arms"
+        );
+        assert!(
+            wait_until(Duration::from_secs(5), || processor
+                .backpressure
+                .is_shedding())
+            .await,
+            "observing a backlog over the threshold must arm load shedding"
+        );
+
+        // Drain the backlog from outside (as upstream consumers would); the
+        // shed loop must NOT fetch anything further while the cooldown is
+        // armed, even though the queue is empty again.
+        sqlx::query("DELETE FROM email_queue WHERE tenant_id = $1 AND status = 'pending'")
+            .bind(&fixture.tenant_id)
+            .execute(&pool)
+            .await
+            .expect("drain backlog");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            transport.calls(),
+            4,
+            "a shedding loop must not claim new work until its cooldown elapses"
+        );
+
+        // Cooldown elapses (default 5 s) → the loop resumes, finds the queue
+        // empty, and parks on the poll interval; stop() must break it via
+        // the shutdown notification.
+        assert!(
+            wait_until(Duration::from_secs(12), || !processor
+                .backpressure
+                .is_shedding())
+            .await,
+            "the shed cooldown must elapse"
+        );
+        processor.stop().await.expect("stop");
+        let (result, elapsed) = {
+            let start = Instant::now();
+            let result = tokio::time::timeout(Duration::from_secs(15), loop_handle)
+                .await
+                .expect("the poll loop must exit after shutdown");
+            (result, start.elapsed())
+        };
+        assert!(result.is_ok(), "start/poll_loop returns cleanly");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "shutdown must break the parked loop promptly, took {elapsed:?}"
+        );
+        assert_eq!(
+            transport.calls(),
+            4,
+            "no further submissions after the drained backlog"
+        );
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        let pending: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM email_queue WHERE status = 'pending'")
+                .fetch_one(&pool)
+                .await
+                .expect("pending count");
+        assert_eq!(pending, 0, "the queue is fully drained");
+        pool.close().await;
+    }
+
+    // ── 2. Error-rate cooldown: the loop waits it out without hot-looping ─
+
+    /// A loop entering its window inside an error-rate cooldown must not
+    /// fetch: the first (and only) submission happens only after the
+    /// cooldown elapses — proving the pause instead of a hot poll.
+    #[tokio::test]
+    async fn error_cooldown_pauses_polling_until_it_elapses() {
+        let Some(pool) = orch_pool("orch_cooldown").await else {
+            return;
+        };
+        let fixture = seed(&pool, "cooldown").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 10),
+        )
+        .await;
+
+        // Arm a short cooldown (production arms 60 s after an error-rate
+        // breach; the mechanism under test is identical). 50 ms keeps the
+        // test inside the suite's sleep budget.
+        let cooldown_ms = 50i64;
+        processor.error_cooldown_until.store(
+            Utc::now().timestamp_millis() + cooldown_ms,
+            Ordering::SeqCst,
+        );
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+
+        assert!(
+            wait_until(Duration::from_secs(5), || transport.calls() >= 1).await,
+            "the loop must resume serving once the cooldown elapses"
+        );
+        let first_send_elapsed = started.elapsed();
+        assert!(
+            first_send_elapsed >= Duration::from_millis(45),
+            "the first fetch must wait out the cooldown (elapsed {first_send_elapsed:?}) — \
+             a hot loop would have fetched immediately"
+        );
+
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        assert_eq!(transport.calls(), 1);
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        pool.close().await;
+    }
+
+    // ── 3. Idle shutdown breaks promptly ──────────────────────────────────
+
+    /// An idle loop parked on a LONG poll interval must break promptly on
+    /// shutdown — the select! arm on the shutdown notification, not the
+    /// 60 s interval, decides the exit latency.
+    #[tokio::test]
+    async fn idle_loop_breaks_promptly_on_shutdown() {
+        let Some(pool) = orch_pool("orch_idle_stop").await else {
+            return;
+        };
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let mut config = orch_config(2, 60_000);
+        config.base.poll_interval = Duration::from_secs(60);
+        let processor = build(&pool, transport.clone() as Arc<dyn EmailTransport>, config).await;
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        // The empty-queue branch overwrites the backlog with 0 just before
+        // the loop parks on the shutdown notification: a non-zero sentinel
+        // makes "the loop has reached the park" observable.
+        processor.backpressure.observe_backlog(7);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        assert!(
+            wait_until(Duration::from_secs(5), || processor.backpressure.backlog()
+                == 0)
+            .await,
+            "the loop must reach the empty-queue park"
+        );
+        // Single-threaded test runtime: hand control to the loop task until
+        // the shutdown waiter is registered, so notify_waiters cannot miss.
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+
+        let start = Instant::now();
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop must exit well before the 60 s poll interval")
+            .expect("clean exit");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "shutdown broke after {:?}, not the 60 s poll interval",
+            start.elapsed()
+        );
+        assert_eq!(transport.calls(), 0, "an empty queue submits nothing");
+        pool.close().await;
+    }
+
+    // ── 4. Full start/stop lifecycle: background sweeps + queue service ───
+
+    /// `start` runs the queue-depth metrics exporter and the stuck-parent /
+    /// stale-reservation reconciliation sweeps alongside the poll loop, and
+    /// `stop` tears everything down.
+    #[tokio::test]
+    async fn start_serves_the_queue_and_runs_the_background_sweeps() {
+        let Some(pool) = orch_pool("orch_start").await else {
+            return;
+        };
+        let fixture = seed(&pool, "start").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.start().await }
+        });
+        assert!(
+            wait_until(Duration::from_secs(10), || transport.calls() >= 1).await,
+            "start must serve the seeded job"
+        );
+        processor.stop().await.expect("stop");
+        let result = tokio::time::timeout(Duration::from_secs(15), handle)
+            .await
+            .expect("start returns after stop")
+            .expect("join");
+        result.expect("start clean");
+
+        assert_eq!(transport.calls(), 1);
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+        assert_ne!(
+            processor.queue_metrics_last_emit_ms.load(Ordering::SeqCst),
+            0,
+            "the queue-depth metrics exporter must have emitted at least once"
+        );
+        pool.close().await;
+    }
+
+    /// An SMTP deployment without DKIM enabled must refuse to start: signed
+    /// mail is a launch precondition, not a per-send concern.
+    #[tokio::test]
+    async fn start_refuses_smtp_transport_without_dkim() {
+        let Some(pool) = orch_pool("orch_smtp_no_dkim").await else {
+            return;
+        };
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let mut config = orch_config(2, 20);
+        config.transport_type = TransportType::Smtp;
+        config.dkim.enabled = false;
+        let processor = build(&pool, transport.clone() as Arc<dyn EmailTransport>, config).await;
+
+        let error = Arc::clone(&processor)
+            .start()
+            .await
+            .expect_err("an unsigned SMTP deployment must not start");
+        assert!(
+            error.to_string().contains("DKIM_ENABLED"),
+            "the refusal must name the missing DKIM configuration, got: {error}"
+        );
+        assert!(
+            !processor.is_running.load(Ordering::SeqCst),
+            "a refused start must not mark the processor running"
+        );
+        assert_eq!(transport.calls(), 0);
+        pool.close().await;
+    }
+
+    /// A transport that cannot verify its credentials fails the start.
+    #[tokio::test]
+    async fn start_fails_when_the_transport_cannot_verify() {
+        struct Unverifiable;
+        #[async_trait::async_trait]
+        impl EmailTransport for Unverifiable {
+            fn transport_name(&self) -> &str {
+                "unverifiable"
+            }
+            fn supports_source_binding(&self) -> bool {
+                false
+            }
+            async fn verify(&self) -> ProcessorResult<()> {
+                Err(ProcessorError::Config("no credentials".into()))
+            }
+            async fn send(
+                &self,
+                _email: &PreparedEmail,
+                _route: &DeliveryRoute,
+            ) -> ProcessorResult<DeliveryReceipt> {
+                unreachable!("an unverifiable transport never submits")
+            }
+            async fn close(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+        }
+
+        let Some(pool) = orch_pool("orch_verify_fail").await else {
+            return;
+        };
+        let processor = build(
+            &pool,
+            Arc::new(Unverifiable) as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+        let error = Arc::clone(&processor)
+            .start()
+            .await
+            .expect_err("verification failure must fail the start")
+            .to_string();
+        assert!(error.contains("no credentials"));
+        assert!(!processor.is_running.load(Ordering::SeqCst));
+        pool.close().await;
+    }
+
+    // ── 5. Database outage: every best-effort surface degrades, none panics
+
+    /// With the pool closed (the DB outage injection), each observability /
+    /// governance surface must degrade to its failure arm without panicking
+    /// and without being mistaken for authoritative data.
+    #[tokio::test]
+    async fn database_outage_degrades_every_best_effort_surface() {
+        let Some(pool) = orch_pool("orch_outage").await else {
+            return;
+        };
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+        let job = EmailJob {
+            id: fixture_queue_id(&pool).await,
+            tenant_id: "t-outage".into(),
+            message_category: "marketing".into(),
+            ..bare_orch_job()
+        };
+
+        pool.close().await;
+
+        // Queue depth metrics: the failure arm must publish the stale
+        // freshness gauge, never panic.
+        processor.record_queue_depth_metrics().await;
+
+        assert!(
+            processor.pending_queue_depth().await.is_err(),
+            "depth probing reports the outage"
+        );
+        assert!(
+            processor.fetch_jobs(1).await.is_err(),
+            "claiming reports the outage"
+        );
+
+        // Suppression checks fail into the REQUEUE sentinel (never into a
+        // positive suppression) — for both the global and the category
+        // dimension.
+        let verdicts = processor
+            .batch_suppression_check(std::slice::from_ref(&job))
+            .await;
+        let key = format!("{}:{}", job.tenant_id, canonical_recipient(&job.to));
+        assert_eq!(
+            verdicts.get(&key).map(String::as_str),
+            Some(SUPPRESSION_CHECK_FAILED),
+            "a failed suppression CHECK must flag for requeue, not suppress"
+        );
+
+        // Tenant policy and consent: a failed lookup DEFERS (fail closed).
+        assert_eq!(
+            processor.tenant_policy(&job.tenant_id).await,
+            TenantPolicy::TemporarilyUnavailable
+        );
+        assert_eq!(
+            processor
+                .dispatch_consent(&job)
+                .await
+                .expect("consent decision"),
+            ConsentDecision::Deferred("consent_check_deferred")
+        );
+
+        // Background sweeps and audit writes: degrade, count, retry later.
+        processor.reconcile_stuck_parents().await;
+        assert!(reclaim_stale_acceptance_reservations(&pool).await.is_err());
+        processor
+            .record_delivery_attempt(&job, true, Some("250 ok"), None)
+            .await;
+        processor
+            .record_sales_feedback(&job, SalesDeliveryEvent::SoftBounce, "ses")
+            .await;
+        assert!(
+            processor.requeue_job(&job, "probe").await.is_err(),
+            "the deferral write reports the outage"
+        );
+
+        pool.close().await;
+    }
+
+    async fn fixture_queue_id(_pool: &PgPool) -> String {
+        uuid::Uuid::new_v4().to_string()
+    }
+
+    fn bare_orch_job() -> EmailJob {
+        EmailJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "t".into(),
+            domain_id: uuid::Uuid::new_v4().to_string(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            subject: "s".into(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// The Redis-unavailable arm of the reputation counter.
+    #[tokio::test]
+    async fn sent_reputation_survives_a_redis_outage() {
+        let Some(pool) = orch_pool("orch_rep_redis").await else {
+            return;
+        };
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let hybrid = HybridTransport::new(Some(transport as Arc<dyn EmailTransport>), None);
+        let processor = Arc::new(
+            EmailProcessor::with_transport(pool.clone(), dead_redis, orch_config(2, 20), hybrid)
+                .await
+                .expect("processor"),
+        );
+        processor
+            .record_sent_reputation("redis-outage.example")
+            .await;
+        pool.close().await;
+    }
+
+    // ── 6. Stale lease tokens fence EVERY durable write ───────────────────
+
+    /// A worker whose lease was lost (the row was re-claimed) must not write
+    /// anything on the new owner's behalf: success, suppression,
+    /// possibly-sent, soft bounce, hard bounce, dead-letter, and requeue are
+    /// ALL fenced on the claim token.
+    #[tokio::test]
+    async fn stale_lease_tokens_fence_every_durable_write() {
+        let Some(pool) = orch_pool("orch_fence").await else {
+            return;
+        };
+        let fixture = seed(&pool, "fence").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let mut job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        assert!(lease_token_of(&job).is_some());
+
+        // The row is recovered and re-claimed by ANOTHER worker: the token
+        // rotates away from this claim.
+        sqlx::query(
+            "UPDATE email_queue SET metadata = jsonb_set(metadata, '{lease_token}', '\"rotated\"') \
+             WHERE id = $1",
+        )
+        .bind(fixture.queue_id)
+        .execute(&pool)
+        .await
+        .expect("rotate lease token");
+
+        let receipt = DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: Some("stale-provider-id".into()),
+            actual_source_ip: None,
+            recipient_provider: None,
+            provider_source: None,
+        };
+        processor
+            .handle_success(&job, &receipt)
+            .await
+            .expect("fenced success");
+        processor
+            .handle_suppressed(&job, "global_suppression:probe")
+            .await
+            .expect("fenced suppression");
+        processor
+            .handle_possibly_sent(&job)
+            .await
+            .expect("fenced possibly-sent");
+        let soft = ProcessorError::Smtp {
+            code: 450,
+            enhanced: Some("4.2.1".into()),
+            message: "mailbox busy".into(),
+        };
+        processor
+            .handle_soft_bounce(&job, &soft, &DeliveryRoute::SesShared)
+            .await
+            .expect("fenced soft bounce");
+        let hard = ProcessorError::Smtp {
+            code: 550,
+            enhanced: Some("5.1.1".into()),
+            message: "user unknown".into(),
+        };
+        processor
+            .handle_hard_bounce(&job, &hard, &DeliveryRoute::SesShared)
+            .await
+            .expect("fenced hard bounce");
+        job.attempt = processor.config.base.max_retries as i32;
+        processor
+            .handle_error(&job, &hard, &DeliveryRoute::SesShared)
+            .await
+            .expect("fenced dead-letter");
+        processor
+            .requeue_job(&job, "fenced_probe")
+            .await
+            .expect("fenced requeue");
+
+        // Nothing may have moved: the row still belongs to the new owner.
+        let (status, attempt, token): (String, i32, Option<String>) = sqlx::query_as(
+            "SELECT status, attempt, metadata->>'lease_token' FROM email_queue WHERE id = $1",
+        )
+        .bind(fixture.queue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(
+            status, "processing",
+            "a fenced worker must not move the row"
+        );
+        assert_eq!(attempt, 0, "a fenced retry must not advance the attempt");
+        assert_eq!(token.as_deref(), Some("rotated"), "the new token is intact");
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await,
+            None,
+            "a fenced requeue must not stamp its reason on the new owner's row"
+        );
+
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE tenant_id = $1 AND recipient = $2",
+        )
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.recipient)
+        .fetch_one(&pool)
+        .await
+        .expect("events");
+        assert_eq!(events, 0, "a fenced worker records no recipient events");
+
+        let suppressed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("suppressions");
+        assert_eq!(suppressed, 0, "a fenced bounce must not suppress");
+
+        let dlq: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_dlq WHERE tenant_id = $1")
+            .bind(&fixture.tenant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("dlq");
+        assert_eq!(dlq, 0, "a fenced dead-letter must not write the DLQ");
+
+        let acceptances: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sales_delivery_acceptances")
+                .fetch_one(&pool)
+                .await
+                .expect("acceptances");
+        assert_eq!(acceptances, 0, "fenced handlers never touch the ledger");
+        pool.close().await;
+    }
+
+    // ── 7. Dispatch-time gate refusal arms ────────────────────────────────
+
+    /// Tenant identity gaps defer at the policy gate: an empty tenant id and
+    /// a missing tenant row are both RESTRICTED (cached for the window), and
+    /// a dispatch on the missing tenant requeues with the gate's reason.
+    #[tokio::test]
+    async fn tenant_identity_gates_refuse_without_sending() {
+        let Some(pool) = orch_pool("orch_tenant_gates").await else {
+            return;
+        };
+        let _fixture = seed(&pool, "tenant").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        assert_eq!(
+            processor.tenant_policy("").await,
+            TenantPolicy::Restricted("tenant_identity_missing".into()),
+            "an empty tenant identity is restricted before any lookup"
+        );
+
+        // Missing tenant row: restricted + cached; the second call takes the
+        // cache arm and must agree.
+        assert_eq!(
+            processor.tenant_policy("ghost-tenant").await,
+            TenantPolicy::Restricted("tenant_missing".into())
+        );
+        assert_eq!(
+            processor.tenant_policy("ghost-tenant").await,
+            TenantPolicy::Restricted("tenant_missing".into()),
+            "the cached restriction must be served identically"
+        );
+
+        // Dispatch level: the ghost tenant's job is requeued, not sent.
+        let job = EmailJob {
+            tenant_id: "ghost-tenant".into(),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("deferral is a success outcome");
+        assert_eq!(transport.calls(), 0, "a restricted tenant never submits");
+        pool.close().await;
+    }
+
+    /// A suspended tenant defers at dispatch with the gate's requeue reason.
+    #[tokio::test]
+    async fn suspended_tenant_requeues_with_the_gate_reason() {
+        let Some(pool) = orch_pool("orch_suspended").await else {
+            return;
+        };
+        let fixture = seed(&pool, "suspended").await;
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+            .bind(&fixture.tenant_id)
+            .execute(&pool)
+            .await
+            .expect("suspend tenant");
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("deferral is a success outcome");
+        assert_eq!(transport.calls(), 0);
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "pending");
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("tenant_suspended")
+        );
+        pool.close().await;
+    }
+
+    /// An empty envelope recipient cannot be consent-checked: dispatch
+    /// defers with the identity reason and never reaches the transport.
+    #[tokio::test]
+    async fn consent_with_a_missing_recipient_identity_defers_dispatch() {
+        let Some(pool) = orch_pool("orch_consent_identity").await else {
+            return;
+        };
+        let fixture = seed(&pool, "consent-id").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let mut job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            ..bare_orch_job()
+        };
+        job.to = "  ".into();
+        assert_eq!(
+            processor.dispatch_consent(&job).await.expect("consent"),
+            ConsentDecision::Deferred("consent_recipient_identity_missing"),
+            "the canonical form of a blank recipient is empty → deferred"
+        );
+
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("deferral is a success outcome");
+        assert_eq!(transport.calls(), 0);
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "pending");
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("consent_recipient_identity_missing")
+        );
+        pool.close().await;
+    }
+
+    /// A shared-pool send on a domain that lost SES verification defers at
+    /// the route-readiness gate — before any ledger or transport touch.
+    #[tokio::test]
+    async fn unverified_shared_domain_defers_at_the_readiness_gate() {
+        let Some(pool) = orch_pool("orch_readiness").await else {
+            return;
+        };
+        let fixture = seed(&pool, "readiness").await;
+        sqlx::query("UPDATE domains SET ses_verified = false WHERE id = $1")
+            .bind(fixture.domain_id)
+            .execute(&pool)
+            .await
+            .expect("unverify domain");
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("deferral is a success outcome");
+        assert_eq!(transport.calls(), 0);
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("domain_ses_not_verified")
+        );
+        pool.close().await;
+    }
+
+    /// Seeds one ACTIVE dedicated IP for the fixture tenant.
+    async fn seed_dedicated_ip(pool: &PgPool, tenant_id: &str) -> String {
+        let id = format!("dip-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, warmup_started_at) \
+             VALUES ($1, $2, '203.0.113.10', 'active', NOW() - INTERVAL '40 days')",
+        )
+        .bind(&id)
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .expect("insert dedicated ip");
+        id
+    }
+
+    fn dkim_enabled_config(concurrency: usize) -> EmailConfig {
+        let mut config = orch_config(concurrency, 20);
+        config.dkim.enabled = true;
+        config.warmup.enabled = true;
+        config
+    }
+
+    /// A dedicated-route job with DKIM disabled defers instead of leaving
+    /// unsigned.
+    #[tokio::test]
+    async fn dedicated_route_with_dkim_disabled_defers() {
+        let Some(pool) = orch_pool("orch_ded_no_dkim").await else {
+            return;
+        };
+        let fixture = seed(&pool, "ded-no-dkim").await;
+        seed_dedicated_ip(&pool, &fixture.tenant_id).await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let mut config = orch_config(2, 20);
+        config.dkim.enabled = false; // default in this suite's configs
+        let processor = build(&pool, transport.clone() as Arc<dyn EmailTransport>, config).await;
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("deferral is a success outcome");
+        assert_eq!(transport.calls(), 0);
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("dedicated_dkim_disabled")
+        );
+        pool.close().await;
+    }
+
+    /// A dedicated-route job on a worker with NO dedicated transport defers
+    /// before any ledger touch (route fails closed).
+    #[tokio::test]
+    async fn dedicated_route_without_a_relay_defers_unconfigured() {
+        let Some(pool) = orch_pool("orch_ded_no_relay").await else {
+            return;
+        };
+        let fixture = seed(&pool, "ded-no-relay").await;
+        seed_dedicated_ip(&pool, &fixture.tenant_id).await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            dkim_enabled_config(2),
+        )
+        .await;
+
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            ..bare_orch_job()
+        };
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("deferral is a success outcome");
+        assert_eq!(transport.calls(), 0);
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("dedicated_transport_unconfigured")
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sales_delivery_acceptances")
+            .fetch_one(&pool)
+            .await
+            .expect("ledger");
+        assert_eq!(count, 0, "the pre-DATA gate runs before the ledger");
+        pool.close().await;
+    }
+
+    /// A relay-style double for dedicated-route dispatches. Reports the
+    /// requested source IP unless told to violate the route contract.
+    struct RelayDouble {
+        violate_contract: bool,
+        calls: AtomicUsize,
+    }
+
+    impl RelayDouble {
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for RelayDouble {
+        fn transport_name(&self) -> &str {
+            "relay-double"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            true
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let requested = route
+                .dedicated_source_ip()
+                .expect("a dedicated route carries its source IP");
+            Ok(DeliveryReceipt {
+                transport: TransportType::Smtp,
+                transport_message_id: Some("relay-accepted-1".into()),
+                actual_source_ip: if self.violate_contract {
+                    Some("198.51.100.7".parse().expect("test IP"))
+                } else {
+                    Some(requested)
+                },
+                recipient_provider: None,
+                provider_source: None,
+            })
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn build_with_relay(
+        pool: &PgPool,
+        relay: Arc<RelayDouble>,
+        config: EmailConfig,
+    ) -> Arc<EmailProcessor> {
+        let hybrid = HybridTransport::new(None, Some(relay as Arc<dyn EmailTransport>));
+        Arc::new(
+            EmailProcessor::with_transport(pool.clone(), orch_redis(), config, hybrid)
+                .await
+                .expect("processor"),
+        )
+    }
+
+    async fn dedicated_fixture_job(pool: &PgPool, label: &str) -> (Fixture, EmailJob) {
+        let fixture = seed(pool, label).await;
+        // A dedicated relay send is DKIM-signed LOCALLY from the domain's
+        // encrypted key, so the fixture provisions a real keypair encrypted
+        // under the test's master key (the sealed envelope the worker
+        // decrypts at send time). CALLERS hold ENV_LOCK + DkimKeyEnv across
+        // the dispatch so the worker can decrypt at send time.
+        let keypair = apexmail_lib::dkim::generate_dkim_keypair().expect("dkim keypair");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(
+            &fixture.tenant_id,
+            &fixture.domain_id.to_string(),
+        );
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(keypair.private_key_pem.as_str(), &aad)
+                .expect("encrypt dkim key");
+        sqlx::query("UPDATE domains SET dkim_public_key = $2, dkim_private_key = $3 WHERE id = $1")
+            .bind(fixture.domain_id)
+            .bind(&keypair.public_key)
+            .bind(&encrypted)
+            .execute(pool)
+            .await
+            .expect("provision domain key");
+        seed_dedicated_ip(pool, &fixture.tenant_id).await;
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            to: fixture.recipient.clone(),
+            ..bare_orch_job()
+        };
+        (fixture, job)
+    }
+
+    /// 32-byte master key (hex) for the DKIM private-key envelope, installed
+    /// for the duration of one test and restored on drop.
+    const DKIM_TEST_MASTER_KEY: &str =
+        "3a1f9c0d7e2b5a4891c6f0d3e7b2a5c4891f6d0e3c7b2a5d4891c6f0e3d7b2a5";
+
+    struct DkimKeyEnv {
+        previous: Option<String>,
+    }
+
+    impl DkimKeyEnv {
+        fn set() -> Self {
+            let var = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
+            let previous = std::env::var(var).ok();
+            std::env::set_var(var, DKIM_TEST_MASTER_KEY);
+            Self { previous }
+        }
+    }
+
+    impl Drop for DkimKeyEnv {
+        fn drop(&mut self) {
+            let var = apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV;
+            match self.previous.take() {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+        }
+    }
+
+    /// With warmup throttling disabled the send still rides the dedicated
+    /// route (selection without consumption) and delivers once.
+    #[tokio::test]
+    async fn warmup_disabled_keeps_the_dedicated_route_without_consuming_quota() {
+        let Some(pool) = orch_pool("orch_ded_warmup_off").await else {
+            return;
+        };
+        // Serialize the env snapshot/install with other env-mutating tests,
+        // then release the LOCK (not the guard): the guard captures the
+        // pre-test value and restores it after the dispatch, while the env
+        // value stays installed for the worker's send-time decryption.
+        let _dkim_key = {
+            let _env_lock = crate::test_support::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            DkimKeyEnv::set()
+        };
+        let (fixture, job) = dedicated_fixture_job(&pool, "warmup-off").await;
+        let relay = Arc::new(RelayDouble {
+            violate_contract: false,
+            calls: AtomicUsize::new(0),
+        });
+        let mut config = dkim_enabled_config(2);
+        config.warmup.enabled = false;
+        let processor = build_with_relay(&pool, relay.clone(), config).await;
+
+        processor.process_job(job.clone()).await.expect("dispatch");
+        assert_eq!(
+            queue_status(&pool, fixture.queue_id).await,
+            "sent",
+            "requeue_reason={:?}",
+            requeue_reason(&pool, fixture.queue_id).await
+        );
+        assert_eq!(relay.calls(), 1);
+        assert!(
+            processor.fetch_jobs(5).await.expect("re-claim").is_empty(),
+            "a delivered row is terminal"
+        );
+        pool.close().await;
+    }
+
+    /// A relay that ACCEPTS but reports the wrong source IP produces a
+    /// recorded contract violation on the ledger — and is NEVER retried.
+    #[tokio::test]
+    async fn accepted_send_with_a_route_contract_violation_is_recorded_not_retried() {
+        let Some(pool) = orch_pool("orch_contract").await else {
+            return;
+        };
+        // Serialize the env snapshot/install with other env-mutating tests,
+        // then release the LOCK (not the guard): the guard captures the
+        // pre-test value and restores it after the dispatch, while the env
+        // value stays installed for the worker's send-time decryption.
+        let _dkim_key = {
+            let _env_lock = crate::test_support::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            DkimKeyEnv::set()
+        };
+        let (fixture, job) = dedicated_fixture_job(&pool, "contract").await;
+        let relay = Arc::new(RelayDouble {
+            violate_contract: true,
+            calls: AtomicUsize::new(0),
+        });
+        let processor = build_with_relay(&pool, relay.clone(), dkim_enabled_config(2)).await;
+
+        processor.process_job(job.clone()).await.expect("dispatch");
+        assert_eq!(relay.calls(), 1, "an accepted send is never resubmitted");
+        assert_eq!(
+            queue_status(&pool, fixture.queue_id).await,
+            "sent",
+            "requeue_reason={:?}",
+            requeue_reason(&pool, fixture.queue_id).await
+        );
+
+        let (state, last_error): (String, Option<String>) = sqlx::query_as(
+            "SELECT state, last_error FROM sales_delivery_acceptances WHERE send_unit = $1",
+        )
+        .bind(send_unit_of(&job))
+        .fetch_one(&pool)
+        .await
+        .expect("ledger row");
+        assert_eq!(state, "accepted");
+        let note = last_error.expect("the contract violation is recorded");
+        assert!(
+            note.contains("route contract violation") && note.contains("203.0.113.10"),
+            "the note names the requested vs reported IP: {note}"
+        );
+        pool.close().await;
+    }
+
+    /// An acceptance-ledger INSERT failure defers the send (exactly-once is
+    /// never bypassed) — the transport must not be touched.
+    #[tokio::test]
+    async fn acceptance_ledger_unavailable_defers_without_submitting() {
+        let Some(pool) = orch_pool("orch_ledger_outage").await else {
+            return;
+        };
+        let fixture = seed(&pool, "ledger-outage").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        // Take the ledger itself out (this suite's DB is per-test): the
+        // reservation INSERT fails, so the send must DEFER with the outage
+        // reason — exactly-once is never bypassed, the transport is never
+        // touched.
+        let mut job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            domain_id: fixture.domain_id.to_string(),
+            from: fixture.sender.clone(),
+            ..bare_orch_job()
+        };
+        sqlx::query("DROP TABLE sales_delivery_acceptances")
+            .execute(&pool)
+            .await
+            .expect("drop ledger");
+        job.message_id = "00000000-0000-0000-0000-000000000001".into();
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("a ledger outage is a deferral, not an error");
+        assert_eq!(
+            transport.calls(),
+            0,
+            "an unreservable send must never reach the transport"
+        );
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "pending");
+        assert_eq!(
+            requeue_reason(&pool, fixture.queue_id).await.as_deref(),
+            Some("acceptance_ledger_unavailable")
+        );
+        pool.close().await;
+    }
+
+    // ── 8. Per-recipient isolation in a multi-recipient row ───────────────
+
+    /// One row, three recipients, a concurrency cap of 2, and the middle
+    /// recipient hard-bouncing: the good recipients deliver, ONLY the proven
+    /// invalid one is suppressed, the row is released back to pending with
+    /// its remainder, and the next claim finishes the last recipient.
+    #[tokio::test]
+    async fn one_bad_recipient_never_blocks_the_others() {
+        let Some(pool) = orch_pool("orch_multi").await else {
+            return;
+        };
+        let fixture = seed(&pool, "multi").await;
+        let a = format!("a-{}@multi.test", &fixture.tenant_id[5..]);
+        let b = format!("b-{}@multi.test", &fixture.tenant_id[5..]);
+        let c = format!("c-{}@multi.test", &fixture.tenant_id[5..]);
+        sqlx::query(
+            "UPDATE email_queue SET to_addresses = ARRAY[$2, $3, $4], \"to\" = $2 WHERE id = $1",
+        )
+        .bind(fixture.queue_id)
+        .bind(&a)
+        .bind(&b)
+        .bind(&c)
+        .execute(&pool)
+        .await
+        .expect("expand envelope");
+
+        let transport = PerRecipientTransport::bounce(&b);
+        // Cap 2: only recipients a and b are admitted on the first claim.
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let first = processor.fetch_jobs(2).await.expect("first claim");
+        assert_eq!(first.len(), 2, "the cap admits exactly two recipients");
+        let processed = first.len();
+        // The same claim identity the loop carries into its release step.
+        let mut seen_ids = std::collections::HashSet::new();
+        let claimed: Vec<(String, Option<String>)> = first
+            .iter()
+            .filter(|job| seen_ids.insert(job.id.clone()))
+            .map(|job| (job.id.clone(), lease_token_of(job).map(str::to_string)))
+            .collect();
+        for job in first {
+            // A hard-bounced recipient's send IS an error outcome by design
+            // (it feeds the error-rate tracker); its durable effects are
+            // asserted below.
+            let _ = processor.process_job(job).await;
+        }
+        assert_eq!(processed, 2);
+        // The poll loop's post-batch step: release rows that still owe
+        // recipients back to 'pending' (F5).
+        processor
+            .release_rows_with_remaining_recipients(&claimed)
+            .await;
+
+        // One success + one hard bounce leave the third recipient owed: the
+        // row must be RELEASED back to pending for the next poll.
+        assert_eq!(
+            queue_status(&pool, fixture.queue_id).await,
+            "pending",
+            "the row is released while a recipient is still owed"
+        );
+        let locked: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT locked_until FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("lease");
+        assert!(locked.is_none(), "the release clears the visibility lease");
+
+        let suppressed: Vec<String> =
+            sqlx::query_scalar("SELECT email FROM suppressions WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_all(&pool)
+                .await
+                .expect("suppressions");
+        assert_eq!(
+            suppressed,
+            vec![b.to_lowercase()],
+            "ONLY the proven-invalid recipient is suppressed"
+        );
+
+        // Second claim: exactly the remainder (c) is expanded and delivered.
+        let second = processor.fetch_jobs(5).await.expect("second claim");
+        assert_eq!(second.len(), 1, "only the remainder is re-expanded");
+        assert_eq!(second[0].to, c);
+        for job in second {
+            processor
+                .process_job(job)
+                .await
+                .expect("the healthy remainder dispatches cleanly");
+        }
+
+        assert_eq!(transport.calls(), 3, "each recipient is submitted once");
+        assert_eq!(transport.seen(), vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
+
+        let events: Vec<String> = sqlx::query_scalar(
+            "SELECT event_type FROM events WHERE tenant_id = $1 ORDER BY event_type",
+        )
+        .bind(&fixture.tenant_id)
+        .fetch_all(&pool)
+        .await
+        .expect("events");
+        assert_eq!(events, vec!["bounced", "sent", "sent"]);
+
+        let again = processor.fetch_jobs(5).await.expect("third claim");
+        assert!(
+            again.is_empty(),
+            "a fully delivered row is never re-claimed"
+        );
+        pool.close().await;
+    }
+
+    // ── 9. Soft bounce at the retry ceiling escalates to the hard path ────
+
+    /// A soft bounce on the LAST allowed attempt escalates to the hard-bounce
+    /// handler: the row terminates as bounced, but a 4xx never suppresses.
+    #[tokio::test]
+    async fn soft_bounce_at_the_retry_ceiling_escalates_without_suppressing() {
+        let Some(pool) = orch_pool("orch_soft_ceiling").await else {
+            return;
+        };
+        let fixture = seed(&pool, "soft-ceiling").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let processor = build(
+            &pool,
+            transport.clone() as Arc<dyn EmailTransport>,
+            orch_config(2, 20),
+        )
+        .await;
+
+        let mut job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("job");
+        job.attempt = processor.config.base.max_retries as i32;
+        let soft = ProcessorError::Smtp {
+            code: 450,
+            enhanced: Some("4.2.1".into()),
+            message: "mailbox busy".into(),
+        };
+        processor
+            .handle_soft_bounce(&job, &soft, &DeliveryRoute::SesShared)
+            .await
+            .expect("escalation");
+
+        assert_eq!(queue_status(&pool, fixture.queue_id).await, "bounced");
+        let suppressed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1")
+                .bind(&fixture.tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("suppressions");
+        assert_eq!(
+            suppressed, 0,
+            "a transient 4xx never proves an address invalid, even at the ceiling"
+        );
+        pool.close().await;
+    }
+
+    // ── 10. The visibility lease overflow guard ───────────────────────────
+
+    /// An absurd (but constructible) visibility timeout must clamp to the
+    /// maximum representable lease instead of overflowing the DateTime
+    /// arithmetic and panicking the poll loop.
+    #[tokio::test]
+    async fn absurd_visibility_timeout_clamps_instead_of_panicking() {
+        let Some(pool) = orch_pool("orch_vis_overflow").await else {
+            return;
+        };
+        seed(&pool, "vis").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let mut config = orch_config(2, 20);
+        // 10^16 seconds ≈ 317 000 years → in milliseconds this overflows
+        // i64::MAX, the exact case the clamp guard exists for.
+        config.base.visibility_timeout = Duration::from_secs(10_000_000_000_000_000);
+        let processor = build(&pool, transport.clone() as Arc<dyn EmailTransport>, config).await;
+        let jobs = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim must clamp the lease, not panic");
+        assert_eq!(jobs.len(), 1);
+        let locked: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT locked_until FROM email_queue WHERE id = $1::uuid")
+                .bind(&jobs[0].id)
+                .fetch_one(&pool)
+                .await
+                .expect("lease");
+        assert!(
+            locked.is_some_and(|until| until > Utc::now()),
+            "the claimed lease must sit far in the future"
+        );
+        pool.close().await;
+    }
+
+    /// An absurd retry delay must clamp the retry_at stamp instead of
+    /// overflowing the DateTime arithmetic inside the soft-bounce handler.
+    #[tokio::test]
+    async fn absurd_retry_delay_clamps_instead_of_panicking() {
+        let Some(pool) = orch_pool("orch_retry_overflow").await else {
+            return;
+        };
+        let fixture = seed(&pool, "retry").await;
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let mut config = orch_config(2, 20);
+        // 9×10^15 s ≈ 285 000 years; doubled by one backoff step this
+        // overflows any representable timestamp.
+        config.base.retry_delay = Duration::from_secs(9_000_000_000_000_000);
+        config.base.max_retries = 3;
+        let processor = build(&pool, transport.clone() as Arc<dyn EmailTransport>, config).await;
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("job");
+        let soft = ProcessorError::Smtp {
+            code: 450,
+            enhanced: Some("4.2.1".into()),
+            message: "mailbox busy".into(),
+        };
+        processor
+            .handle_soft_bounce(&job, &soft, &DeliveryRoute::SesShared)
+            .await
+            .expect("the requeue must clamp the retry stamp, not panic");
+
+        let (status, attempt): (String, i32) =
+            sqlx::query_as("SELECT status, attempt FROM email_queue WHERE id = $1")
+                .bind(fixture.queue_id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(status, "pending", "the soft bounce requeues");
+        assert_eq!(attempt, 1, "the attempt advanced once");
         pool.close().await;
     }
 }

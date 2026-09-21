@@ -27,3 +27,6 @@ pub mod tools;
 pub mod training;
 pub mod types;
 pub mod verifier;
+
+#[cfg(test)]
+pub(crate) mod test_support;

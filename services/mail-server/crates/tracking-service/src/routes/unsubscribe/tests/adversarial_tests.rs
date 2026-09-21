@@ -455,10 +455,16 @@ async fn preferences_center_round_trips_consent_and_validates_hostile_payloads()
     // (3) Category updates persist through the batch upsert.
     let resp = srv
         .post(&format!("/p/{ptok}"))
-        .form(&[("category_marketing", "false"), ("category_product", "true")])
+        .form(&[
+            ("category_marketing", "false"),
+            ("category_product", "true"),
+        ])
         .await;
     assert_eq!(resp.status_code().as_u16(), 303);
-    assert_eq!(pref_value(&db, &tenant, email, "marketing").await, Some(false));
+    assert_eq!(
+        pref_value(&db, &tenant, email, "marketing").await,
+        Some(false)
+    );
     assert_eq!(pref_value(&db, &tenant, email, "product").await, Some(true));
 
     // (3b) Re-posting flips only the submitted categories (upsert).
@@ -467,7 +473,10 @@ async fn preferences_center_round_trips_consent_and_validates_hostile_payloads()
         .form(&[("category_marketing", "true")])
         .await;
     assert_eq!(resp.status_code().as_u16(), 303);
-    assert_eq!(pref_value(&db, &tenant, email, "marketing").await, Some(true));
+    assert_eq!(
+        pref_value(&db, &tenant, email, "marketing").await,
+        Some(true)
+    );
     assert_eq!(pref_value(&db, &tenant, email, "product").await, Some(true));
 
     // (4) Hostile payloads are refused: unknown categories and over-cap
@@ -649,16 +658,18 @@ async fn webhook_fanout_with_no_subscribers_is_a_noop() {
     };
     let tenant = unique("tn_nowh");
     // queue_unsub_webhook with zero subscribers returns Ok without writing.
-    let state = state_with_db(db.clone(), test_support::live_redis_state(&[]).await.unwrap().1);
+    let state = state_with_db(
+        db.clone(),
+        test_support::live_redis_state(&[]).await.unwrap().1,
+    );
     queue_unsub_webhook(&state, &tenant, "user@example.com", "one-click")
         .await
         .expect("no subscribers → ok");
-    let queued: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM webhook_queue WHERE tenant_id=$1")
-            .bind(&tenant)
-            .fetch_one(&db)
-            .await
-            .expect("count");
+    let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhook_queue WHERE tenant_id=$1")
+        .bind(&tenant)
+        .fetch_one(&db)
+        .await
+        .expect("count");
     assert_eq!(queued, 0);
 }
 

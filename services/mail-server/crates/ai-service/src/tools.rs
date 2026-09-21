@@ -1169,4 +1169,586 @@ mod tests {
             "endpoint carries the derived window"
         );
     }
+
+    // ── RBAC surface: every role arm of the permission matrix ─────────────
+
+    #[test]
+    fn role_parsing_covers_every_arm() {
+        assert_eq!(Role::parse_role("OWNER"), Role::Owner);
+        assert_eq!(Role::parse_role("admin"), Role::Admin);
+        assert_eq!(Role::parse_role("Developer"), Role::Developer);
+        // Everything else — including hostile junk — lands at Viewer.
+        assert_eq!(Role::parse_role("owner; drop table"), Role::Viewer);
+        assert_eq!(Role::parse_role(""), Role::Viewer);
+        assert_eq!(Role::parse_role("ROOT"), Role::Viewer);
+
+        assert_eq!(Role::from_plan("Enterprise"), Role::Owner);
+        assert_eq!(Role::from_plan("scale"), Role::Admin);
+        assert_eq!(Role::from_plan("growth"), Role::Developer);
+        assert_eq!(Role::from_plan("pro"), Role::Viewer);
+        assert_eq!(Role::from_plan("starter"), Role::Viewer);
+        assert_eq!(Role::from_plan("free"), Role::Viewer);
+        assert_eq!(Role::from_plan("enterprise-deluxe"), Role::Viewer);
+    }
+
+    /// The matrix must be explicit per tool: pricing/DNS/support readable by
+    /// all, audit by admin+, billing by owner only, sensitive by admin+,
+    /// and unknown tools owner-only (least privilege by default).
+    #[test]
+    fn permission_matrix_grants_by_role_tier() {
+        let all_roles = [Role::Owner, Role::Admin, Role::Developer, Role::Viewer];
+        for tool in [
+            "calculate_overage",
+            "calculate_payg",
+            "get_price_diff",
+            "compare_plans",
+            "get_plan_details",
+            "get_dns_record",
+            "get_warmup_schedule",
+            "get_blocklist_status",
+            "map_provider_events",
+            "get_compliance_info",
+            "get_deliverability_recovery_plan",
+            "get_ab_test_guidance",
+            "get_sto_info",
+            "get_retry_guidance",
+            "get_dmarc_analysis",
+            "get_bounce_classification",
+            "get_webhook_setup",
+        ] {
+            for role in &all_roles {
+                assert!(
+                    role_can_execute(role, tool),
+                    "{role:?} must be able to call {tool}"
+                );
+            }
+        }
+        for tool in [
+            "generate_incident_timeline",
+            "get_audit_log",
+            "get_security_events",
+        ] {
+            assert!(role_can_execute(&Role::Owner, tool));
+            assert!(role_can_execute(&Role::Admin, tool));
+            assert!(!role_can_execute(&Role::Developer, tool));
+            assert!(!role_can_execute(&Role::Viewer, tool));
+        }
+        for tool in [
+            "get_billing_history",
+            "get_send_history",
+            "get_api_key_usage",
+        ] {
+            assert!(role_can_execute(&Role::Owner, tool));
+            assert!(
+                !role_can_execute(&Role::Admin, tool),
+                "billing is owner-only"
+            );
+        }
+        for tool in [
+            "get_suppression_count",
+            "get_contact_count",
+            "get_deliverability_report",
+            "get_domain_verification_status",
+            "generate_compliance_report",
+            "get_ip_warmup_status",
+        ] {
+            assert!(role_can_execute(&Role::Owner, tool));
+            assert!(role_can_execute(&Role::Admin, tool));
+            assert!(!role_can_execute(&Role::Developer, tool));
+        }
+        // Unknown tools default to owner-only.
+        assert!(role_can_execute(&Role::Owner, "brand_new_tool"));
+        assert!(!role_can_execute(&Role::Admin, "brand_new_tool"));
+    }
+
+    #[test]
+    fn rbac_denial_names_the_required_roles() {
+        let call = ToolCall {
+            tool: "get_audit_log".into(),
+            params: serde_json::json!({}),
+            tenant_id: Some("t1".into()),
+            role: None,
+        };
+        let r = execute_tool(&call, "t1", &Role::Viewer);
+        let error = r["error"].as_str().unwrap();
+        assert!(error.contains("Viewer"));
+        assert!(error.contains("get_audit_log"));
+        assert!(
+            error.contains("Owner"),
+            "required roles are listed: {error}"
+        );
+    }
+
+    /// Tenant isolation: both identities must be present and equal, and the
+    /// guard applies exactly to the tenant-scoped tool set.
+    #[test]
+    fn tenant_guard_requires_matching_nonempty_identities() {
+        let isolated = |tool: &str| ToolCall {
+            tool: tool.into(),
+            params: serde_json::json!({}),
+            tenant_id: Some("tenant-a".into()),
+            role: None,
+        };
+        // Empty caller identity is rejected even for a matching tool tenant.
+        let r = execute_tool(&isolated("get_audit_log"), "", &Role::Owner);
+        assert!(r["error"].as_str().unwrap().contains("tenant_id required"));
+        // Empty tool tenant (no assertion at all) is rejected.
+        let mut anonymous = isolated("get_audit_log");
+        anonymous.tenant_id = None;
+        let r = execute_tool(&anonymous, "tenant-a", &Role::Owner);
+        assert!(r["error"].as_str().unwrap().contains("tenant_id required"));
+        // Mismatch is rejected.
+        let r = execute_tool(&isolated("get_api_key_usage"), "tenant-b", &Role::Owner);
+        assert_eq!(
+            r["error"].as_str().unwrap(),
+            "tenant_id required and must match caller"
+        );
+        assert_eq!(r["required"], "tenant-b");
+        assert_eq!(r["provided"], "tenant-a");
+
+        // Global tools skip isolation entirely.
+        let global = ToolCall {
+            tool: "get_warmup_schedule".into(),
+            params: serde_json::json!({"ip_count": 2}),
+            tenant_id: None,
+            role: None,
+        };
+        let r = execute_tool(&global, "", &Role::Viewer);
+        assert!(r.get("error").is_none(), "global tool needs no tenant: {r}");
+    }
+
+    /// Parameter validation runs AFTER the identity guards and rejects
+    /// out-of-bounds and injection-shaped arguments before execution.
+    #[test]
+    fn parameter_validation_runs_before_execution() {
+        let huge = ToolCall {
+            tool: "calculate_overage".into(),
+            params: serde_json::json!({"plan":"pro","emails_sent": -5}),
+            tenant_id: Some("t1".into()),
+            role: None,
+        };
+        let r = execute_tool(&huge, "t1", &Role::Viewer);
+        let error = r["error"].as_str().unwrap();
+        assert!(
+            error.contains("parameter validation failed") && error.contains("out of valid range"),
+            "{error}"
+        );
+
+        let dns_bad_type = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"example.com","type":"TXT"}),
+            tenant_id: Some("t1".into()),
+            role: None,
+        };
+        let r = execute_tool(&dns_bad_type, "t1", &Role::Viewer);
+        let error = r["error"].as_str().unwrap();
+        assert!(
+            error.contains("invalid DNS record type"),
+            "bad DNS type caught by validation: {error}"
+        );
+
+        let dns_bad_domain = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"example.com@evil.test","type":"dkim"}),
+            tenant_id: Some("t1".into()),
+            role: None,
+        };
+        let r = execute_tool(&dns_bad_domain, "t1", &Role::Viewer);
+        assert!(r["error"].as_str().unwrap().contains("suspicious domain"));
+    }
+
+    /// Unknown tools: owners fall through to the explicit unknown-tool error
+    /// (never a panic), everyone else is stopped by RBAC first.
+    #[test]
+    fn unknown_tools_error_without_executing_anything() {
+        let call = ToolCall {
+            tool: "rm_rf_slash".into(),
+            params: serde_json::json!({}),
+            tenant_id: None,
+            role: None,
+        };
+        let r = execute_tool(&call, "t1", &Role::Owner);
+        assert_eq!(r["error"].as_str().unwrap(), "unknown tool: rm_rf_slash");
+        let r = execute_tool(&call, "t1", &Role::Developer);
+        assert!(r["error"].as_str().unwrap().contains("cannot execute"));
+    }
+
+    /// The authoritative DNS executor: delegation for non-DNS tools, RBAC,
+    /// tenant binding, argument validation, and honest failures when no
+    /// authoritative source is configured.
+    #[tokio::test]
+    async fn authoritative_executor_guards_every_arm() {
+        // Note: get_dns_record is all-role in the permission matrix, so the
+        // executor's RBAC arm cannot fire through any Role — verified in
+        // permission_matrix_grants_by_role_tier. Viewers stop at the tenant
+        // binding instead.
+        let caller = TrustedToolCaller {
+            tenant_id: "tenant-auth".into(),
+            role: Role::Viewer,
+        };
+        // Non-DNS tools delegate to the deterministic executor unchanged.
+        let pricing = ToolCall {
+            tool: "calculate_overage".into(),
+            params: serde_json::json!({"plan":"pro","emails_sent":160000}),
+            tenant_id: None,
+            role: None,
+        };
+        let r = execute_tool_with_authoritative_data(&pricing, &caller, None).await;
+        assert_eq!(r["total"], 69.0);
+
+        // A viewer passes the DNS RBAC gate but still cannot assert another
+        // tenant: identity binding is independent of role.
+        let dns = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"example.com","type":"dkim"}),
+            tenant_id: Some("tenant-elsewhere".into()),
+            role: None,
+        };
+        let r = execute_tool_with_authoritative_data(&dns, &caller, None).await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("must match authenticated caller"));
+        let dns = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"example.com","type":"dkim"}),
+            tenant_id: Some("tenant-auth".into()),
+            role: None,
+        };
+
+        // Tenant binding: a model-asserted foreign tenant is rejected.
+        let admin_caller = TrustedToolCaller {
+            tenant_id: "tenant-auth".into(),
+            role: Role::Admin,
+        };
+        let mut foreign = dns.clone_value();
+        foreign.tenant_id = Some("tenant-other".into());
+        let r = execute_tool_with_authoritative_data(&foreign, &admin_caller, None).await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("must match authenticated caller"));
+        // Missing tenant assertion too.
+        let mut anonymous = dns.clone_value();
+        anonymous.tenant_id = None;
+        let r = execute_tool_with_authoritative_data(&anonymous, &admin_caller, None).await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("must match authenticated caller"));
+
+        // Missing domain argument.
+        let no_domain = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"type":"dkim"}),
+            tenant_id: Some("tenant-auth".into()),
+            role: None,
+        };
+        let r = execute_tool_with_authoritative_data(&no_domain, &admin_caller, None).await;
+        assert_eq!(r["error"].as_str().unwrap(), "domain is required");
+
+        // No authoritative source configured: refuse rather than invent.
+        let with_domain = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"example.com","type":"dkim"}),
+            tenant_id: Some("tenant-auth".into()),
+            role: None,
+        };
+        let r = execute_tool_with_authoritative_data(&with_domain, &admin_caller, None).await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("authoritative domain data is not configured"));
+
+        // Invalid parameters are caught before any lookup.
+        let bad_params = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain":"example.com","type":"mx"}),
+            tenant_id: Some("tenant-auth".into()),
+            role: None,
+        };
+        let r = execute_tool_with_authoritative_data(&bad_params, &admin_caller, None).await;
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("parameter validation failed"));
+    }
+
+    impl ToolCall {
+        fn clone_value(&self) -> ToolCall {
+            ToolCall {
+                tool: self.tool.clone(),
+                params: self.params.clone(),
+                tenant_id: self.tenant_id.clone(),
+                role: self.role.clone(),
+            }
+        }
+    }
+
+    /// Against the canonical database, the executor returns the tenant's own
+    /// authoritative records for owned domains — and refuses domains the
+    /// tenant does not own (no guessing domain names across tenants).
+    #[tokio::test]
+    async fn authoritative_dns_reads_owned_domains_only() {
+        let Some(_lock) = crate::test_support::serial_lock("domain-dns-serial").await else {
+            return;
+        };
+        let Some(url) = crate::test_support::test_db_url() else {
+            return;
+        };
+        let Some(db) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        let tenant = crate::test_support::unique("dns_t");
+        // Domain names are globally unique; sweep any row a previously
+        // interrupted run left behind before inserting this run's fixture.
+        sqlx::query("DELETE FROM domains WHERE name LIKE 'dns-tool-%'")
+            .execute(&db)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE name = 'dns-tool test tenant'")
+            .execute(&db)
+            .await
+            .ok();
+        let domain = format!(
+            "dns-tool-{}.example.com",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind("dns-tool test tenant")
+            .execute(&db)
+            .await
+            .expect("insert test tenant");
+        sqlx::query(
+            "INSERT INTO domains (tenant_id, name, status, dkim_selector, dkim_public_key, \
+             dkim_private_key, dkim_enabled) VALUES ($1, $2, 'verified', 'am-sel', 'PUBKEY1', \
+             'PRIVKEY1', true)",
+        )
+        .bind(&tenant)
+        .bind(&domain)
+        .execute(&db)
+        .await
+        .expect("insert test domain");
+
+        let store = DomainDnsStore::new(&url, "eu-central-1", None).expect("store");
+        let caller = TrustedToolCaller {
+            tenant_id: tenant.clone(),
+            role: Role::Admin,
+        };
+        let call = ToolCall {
+            tool: "get_dns_record".into(),
+            params: serde_json::json!({"domain": domain.to_uppercase() + ".", "type":"dkim"}),
+            tenant_id: Some(tenant.clone()),
+            role: None,
+        };
+
+        // Owned domain (case/normalization-tolerant) → real records.
+        let records = execute_tool_with_authoritative_data(&call, &caller, Some(&store)).await;
+        assert!(
+            records.get("error").is_none(),
+            "owned domain must resolve: {records}"
+        );
+        assert_eq!(records["domain"], domain);
+        let list = records["records"].as_array().unwrap();
+        assert!(list
+            .iter()
+            .any(|r| r["hostname"] == format!("am-sel._domainkey.{domain}")
+                && r["value"].as_str().unwrap().contains("p=PUBKEY1")));
+        assert!(
+            records["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| { !r["value"].as_str().unwrap_or_default().contains("PRIVKEY1") }),
+            "private key material must never leave the store"
+        );
+
+        // A domain the tenant does NOT own is not found — even though it
+        // exists for another tenant namespace.
+        let mut stranger = call.clone_value();
+        stranger.params = serde_json::json!({"domain":"not-ours.example.com","type":"dkim"});
+        let r = execute_tool_with_authoritative_data(&stranger, &caller, Some(&store)).await;
+        assert!(r["error"].as_str().unwrap().contains("domain not found"));
+
+        sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .ok();
+    }
+
+    // ── Deterministic tool edge arms ──────────────────────────────────────
+
+    #[test]
+    fn thousands_formatting_groups_digits() {
+        assert_eq!(fmt_number(0), "0");
+        assert_eq!(fmt_number(999), "999");
+        assert_eq!(fmt_number(1000), "1,000");
+        assert_eq!(fmt_number(1234567), "1,234,567");
+        assert_eq!(fmt_number(-1234), "-1,234");
+    }
+
+    #[test]
+    fn overage_unknown_plan_is_an_error_not_a_zero() {
+        let r = calculate_overage(&serde_json::json!({"plan":"diamond","emails_sent":10}));
+        assert_eq!(r["error"], "unknown plan: diamond");
+        // Within-limit totals carry no overage.
+        let r = calculate_overage(&serde_json::json!({"plan":"free","emails_sent":100}));
+        assert_eq!(r["over"], 0);
+        assert_eq!(r["within_limit"], true);
+        // Missing params degrade to the free-tier defaults.
+        let r = calculate_overage(&serde_json::json!({}));
+        assert_eq!(r["plan"], "starter");
+        assert_eq!(r["sent"], 0);
+    }
+
+    #[test]
+    fn plan_comparisons_reject_unknown_plans_and_cover_all_known() {
+        let r = compare_plans(&serde_json::json!({"plan_a":"pro","plan_b":"nope"}));
+        assert_eq!(r["error"], "unknown plan: pro or nope");
+        // Same plan: zero diff, no sign confusion.
+        let r = compare_plans(&serde_json::json!({"plan_a":"pro","plan_b":"pro"}));
+        assert_eq!(r["price_diff"], 0);
+        assert_eq!(r["label"], "Same price");
+
+        let r = get_price_diff(&serde_json::json!({"plan_a":"x","plan_b":"y"}));
+        assert_eq!(r["error"], "unknown plan: x or y");
+
+        for plan in ["free", "starter", "pro", "growth", "scale", "enterprise"] {
+            let d = get_plan_details(&serde_json::json!({"plan": plan}));
+            assert!(d.get("error").is_none(), "{plan} must have details");
+            assert_eq!(d["price"].as_i64().map(|p| p >= 0), Some(true));
+        }
+        let r = get_plan_details(&serde_json::json!({"plan":"ultra"}));
+        assert_eq!(r["error"], "unknown plan: ultra");
+        // Missing param defaults to starter rather than erroring.
+        let r = get_plan_details(&serde_json::json!({}));
+        assert!(r.get("error").is_none());
+    }
+
+    #[test]
+    fn provider_event_maps_cover_every_arm() {
+        for (provider, native_event) in [
+            ("sendgrid", "processed"),
+            ("mailgun", "accepted"),
+            ("mailchimp", "send"),
+        ] {
+            let r = map_provider_events(&serde_json::json!({"from_provider": provider}));
+            assert_eq!(
+                r["event_mapping"][native_event], "queued",
+                "{provider} must map its ingest event"
+            );
+        }
+        let r = map_provider_events(&serde_json::json!({"from_provider":"bruteforce"}));
+        assert_eq!(r["event_mapping"]["error"], "unknown provider: bruteforce");
+    }
+
+    #[test]
+    fn compliance_topics_cover_every_arm() {
+        for topic in [
+            "gdpr_breach_notification",
+            "soc2_incident",
+            "gdpr_dsar",
+            "data_residency",
+        ] {
+            let r = get_compliance_info(&serde_json::json!({"topic": topic}));
+            assert!(r.get("error").is_none(), "{topic} must resolve");
+        }
+        let r = get_compliance_info(&serde_json::json!({"topic":"hipaa_certification"}));
+        assert!(
+            r["error"].as_str().unwrap().contains("unknown topic"),
+            "unpublished claims must not resolve"
+        );
+    }
+
+    #[test]
+    fn incident_timeline_handles_zero_exposure() {
+        let r = generate_incident_timeline(&serde_json::json!({"key_id":"k","exposure_hours":0}));
+        // The legal-assessment timeframe degrades to the 2-hour default.
+        let steps = r["recommended_timeline"].as_array().unwrap();
+        assert_eq!(steps[3]["timeframe"], "< 2 hours");
+    }
+
+    #[test]
+    fn recovery_plan_severity_arms() {
+        let critical = get_deliverability_recovery_plan(
+            &serde_json::json!({"current_volume":100000,"spam_rate":0.5,"plan":"free"}),
+        );
+        assert_eq!(critical["severity"], "critical");
+        let warning = get_deliverability_recovery_plan(
+            &serde_json::json!({"current_volume":100000,"spam_rate":0.2,"plan":"free"}),
+        );
+        assert_eq!(warning["severity"], "warning");
+        let normal = get_deliverability_recovery_plan(
+            &serde_json::json!({"current_volume":100000,"spam_rate":0.05,"plan":"free"}),
+        );
+        assert_eq!(normal["severity"], "normal");
+    }
+
+    #[test]
+    fn ab_test_duration_arms() {
+        assert_eq!(
+            get_ab_test_guidance(&serde_json::json!({"list_size":200000,"variants":2}))
+                ["recommended_duration_days"],
+            2
+        );
+        assert_eq!(
+            get_ab_test_guidance(&serde_json::json!({"list_size":50000,"variants":2}))
+                ["recommended_duration_days"],
+            4
+        );
+        assert_eq!(
+            get_ab_test_guidance(&serde_json::json!({"list_size":100,"variants":2}))
+                ["recommended_duration_days"],
+            7
+        );
+    }
+
+    #[test]
+    fn retry_guidance_covers_every_provider_arm() {
+        let sendgrid = get_retry_guidance(&serde_json::json!({"from_provider":"sendgrid"}));
+        assert!(sendgrid["guidance"]["from"]
+            .as_str()
+            .unwrap()
+            .contains("SendGrid"));
+        let mailgun = get_retry_guidance(&serde_json::json!({"from_provider":"mailgun"}));
+        assert!(mailgun["guidance"]["from"]
+            .as_str()
+            .unwrap()
+            .contains("Mailgun"));
+        let generic = get_retry_guidance(&serde_json::json!({"from_provider":"acme"}));
+        assert!(
+            generic["guidance"].get("generic").is_some(),
+            "unknown providers get generic advice"
+        );
+    }
+
+    #[test]
+    fn bounce_classification_unknown_codes_get_rfc_pointers() {
+        let r = get_bounce_classification(&serde_json::json!({"bounce_code":"999-9.9.99"}));
+        assert_eq!(r["type"], "unknown");
+        assert!(r["action"].as_str().unwrap().contains("RFC"));
+        // Substring matching still classifies embedded codes.
+        let r = get_bounce_classification(
+            &serde_json::json!({"bounce_code":"550-5.1.1 (bad mailbox)"}),
+        );
+        assert_eq!(r["label"], "Invalid recipient");
+        assert_eq!(r["type"], "Permanent");
+    }
+
+    #[test]
+    fn webhook_setup_defaults_to_no_requested_events() {
+        let r = get_webhook_setup(&serde_json::json!({}));
+        assert_eq!(r["requested"].as_array().unwrap().len(), 0);
+        assert_eq!(r["available_events"].as_array().unwrap().len(), 10);
+        // Non-string entries are dropped, not trusted.
+        let r = get_webhook_setup(&serde_json::json!({"event_types":["sent", 42, null]}));
+        assert_eq!(r["requested"].as_array().unwrap().len(), 1);
+    }
 }

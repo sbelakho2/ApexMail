@@ -152,5 +152,4 @@ async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr,
 }
 
 #[cfg(test)]
-
 mod adversarial_tests;

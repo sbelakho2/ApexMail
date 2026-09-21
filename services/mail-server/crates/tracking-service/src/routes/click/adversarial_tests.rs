@@ -130,14 +130,7 @@ fn state(db: sqlx::PgPool, redis: deadpool_redis::Pool, redis_url: &str) -> AppS
         clickhouse::Client::default(),
         Duration::from_millis(100),
     ));
-    AppState::new(
-        codec(),
-        db,
-        redis,
-        processor,
-        BotDetector::new(),
-        cfg,
-    )
+    AppState::new(codec(), db, redis, processor, BotDetector::new(), cfg)
 }
 
 fn lazy_dead_db() -> sqlx::PgPool {
@@ -199,7 +192,11 @@ async fn seed_redis_domain(redis: &deadpool_redis::Pool, tenant: &str, domain: &
         .expect("seed redis domain verdict");
 }
 
-async fn redis_domain_verdict(redis: &deadpool_redis::Pool, tenant: &str, domain: &str) -> Option<String> {
+async fn redis_domain_verdict(
+    redis: &deadpool_redis::Pool,
+    tenant: &str,
+    domain: &str,
+) -> Option<String> {
     let mut conn = redis.get().await.expect("redis conn");
     redis::cmd("GET")
         .arg(format!("redirect_domain:{tenant}:{domain}"))
@@ -277,7 +274,10 @@ fn match_domain_pattern_is_case_insensitive_and_wildcard_scoped() {
     // …but never a domain merely ENDING with the same text…
     assert!(!match_domain_pattern("evilwild.example", "*.wild.example"));
     // …nor a longer suffix that contains the pattern mid-string.
-    assert!(!match_domain_pattern("sub.wild.example.evil.com", "*.wild.example"));
+    assert!(!match_domain_pattern(
+        "sub.wild.example.evil.com",
+        "*.wild.example"
+    ));
     // Exact pattern matches only itself.
     assert!(match_domain_pattern("example.com", "example.com"));
     assert!(!match_domain_pattern("example.com", "notexample.com"));
@@ -413,7 +413,11 @@ async fn bot_click_still_redirects_but_records_nothing() {
 
     // The fallback host is pre-authorized by config, so the redirect works
     // with a dead DB — isolating the bot check.
-    let token = click_token(&tenant, &message, Some("https://fallback.test.example/landing"));
+    let token = click_token(
+        &tenant,
+        &message,
+        Some("https://fallback.test.example/landing"),
+    );
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -422,7 +426,10 @@ async fn bot_click_still_redirects_but_records_nothing() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/landing");
+    assert_eq!(
+        location_of(resp).await,
+        "https://fallback.test.example/landing"
+    );
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
@@ -475,7 +482,11 @@ async fn per_link_url_cache_failure_does_not_break_the_redirect() {
             .expect("seed string key");
     }
 
-    let token = click_token(&tenant, &message, Some("https://fallback.test.example/link"));
+    let token = click_token(
+        &tenant,
+        &message,
+        Some("https://fallback.test.example/link"),
+    );
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -484,7 +495,10 @@ async fn per_link_url_cache_failure_does_not_break_the_redirect() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/link");
+    assert_eq!(
+        location_of(resp).await,
+        "https://fallback.test.example/link"
+    );
     assert!(
         wait_wal_entry(&redis, &message).await,
         "click recorded despite the link-cache failure"
@@ -631,7 +645,11 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
     //     no event, and the verdict is cached as "0".
     let stranger = unique("tn_stranger");
     let message = unique("msg");
-    let token = click_token(&stranger, &message, Some("https://stranger-owned.example/x"));
+    let token = click_token(
+        &stranger,
+        &message,
+        Some("https://stranger-owned.example/x"),
+    );
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -652,7 +670,11 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
     // (3) The moka tier now answers for the stranger's domain: the second
     //     click hits the in-process cache (still denied, still no event).
     let message = unique("msg");
-    let token = click_token(&stranger, &message, Some("https://stranger-owned.example/y"));
+    let token = click_token(
+        &stranger,
+        &message,
+        Some("https://stranger-owned.example/y"),
+    );
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -694,7 +716,11 @@ async fn database_is_the_authority_on_cache_miss_and_caches_the_verdict() {
 
     // (5) The bare apex is NOT covered by the wildcard.
     let message = unique("msg");
-    let token = click_token(&wildcard_tenant, &message, Some("https://wild.example/offer"));
+    let token = click_token(
+        &wildcard_tenant,
+        &message,
+        Some("https://wild.example/offer"),
+    );
     let resp = handle_click(
         State(state.clone()),
         addr(),
@@ -720,7 +746,11 @@ async fn fallback_host_is_authorized_without_any_database() {
     let state = state(lazy_dead_db(), redis.clone(), &redis_url);
     let tenant = unique("tn_fb");
     let message = unique("msg");
-    let token = click_token(&tenant, &message, Some("https://fallback.test.example/deep"));
+    let token = click_token(
+        &tenant,
+        &message,
+        Some("https://fallback.test.example/deep"),
+    );
     let resp = handle_click(
         State(state),
         addr(),
@@ -729,7 +759,10 @@ async fn fallback_host_is_authorized_without_any_database() {
         Query(ClickQuery { r: None }),
     )
     .await;
-    assert_eq!(location_of(resp).await, "https://fallback.test.example/deep");
+    assert_eq!(
+        location_of(resp).await,
+        "https://fallback.test.example/deep"
+    );
     assert!(
         wait_wal_entry(&redis, &message).await,
         "fallback-host click is a legitimate recorded click"

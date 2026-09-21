@@ -490,3 +490,29 @@ mod tests {
         assert_eq!(escaped[0].email, "jane@example.com");
     }
 }
+
+#[cfg(test)]
+mod display_name_batch {
+    //! `Name <addr>` splitting refuses degenerate and injection shapes.
+
+    use super::*;
+
+    #[test]
+    fn split_display_name_refuses_degenerate_inputs() {
+        // Bare address: nothing to split.
+        assert_eq!(split_display_name("r@example.com"), None);
+        // Angles in the wrong order / not terminated.
+        assert_eq!(split_display_name("Name > r@example.com <"), None);
+        assert_eq!(split_display_name("Name <r@example.com"), None);
+        // CRLF injection in the name or the address is refused.
+        assert_eq!(
+            split_display_name("Name\r\nBcc: victim@example.com <r@example.com>"),
+            None
+        );
+        assert_eq!(split_display_name("Name <r@example.com\r\nBcc: x>"), None);
+        // The well-formed case splits.
+        let (name, addr) = split_display_name("Doe, Jane <jane@example.com>").expect("splits");
+        assert_eq!(name, "Doe, Jane");
+        assert_eq!(addr, "<jane@example.com>");
+    }
+}

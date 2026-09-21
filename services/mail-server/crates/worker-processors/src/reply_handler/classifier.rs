@@ -991,3 +991,21 @@ mod legacy_heuristic_tests {
         assert!(!outcome.result.reasoning.is_empty());
     }
 }
+
+#[cfg(test)]
+mod confidence_batch {
+    //! The quick-scan confidence ladder: no matches score the floor.
+
+    use super::*;
+
+    #[test]
+    fn classify_with_no_matching_patterns_scores_the_confidence_floor() {
+        let result = classify("zzzz qqqq", "completely unmatched neutral prose");
+        assert_eq!(result.classification, ReplyClassification::Unknown);
+        assert!(
+            (result.confidence - 0.3).abs() < f64::EPSILON,
+            "zero pattern matches must score the 0.3 floor, got {}",
+            result.confidence
+        );
+    }
+}

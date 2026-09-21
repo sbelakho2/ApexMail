@@ -1110,3 +1110,158 @@ mod coverage_arms {
         });
     }
 }
+
+#[cfg(test)]
+mod adversarial_batch {
+    //! Pixel/link rewrite adversarial arms: raw-text `<script>`/`<style>`
+    //! `</body>` decoys, the backward-scan walk, and raw-scan href edge
+    //! cases (dangling `href=`, unterminated quotes, unmatched values).
+
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+    use chrono::Utc;
+    use zeroize::Zeroizing;
+
+    const SECRET: &str = "adversarial-tracking-secret-32-bytes!";
+
+    fn tracking_config() -> TrackingConfig {
+        TrackingConfig {
+            enabled: true,
+            base_url: "https://t.example".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
+            secret_key: Some(Zeroizing::new(SECRET.to_string())),
+        }
+    }
+
+    fn job() -> EmailJob {
+        EmailJob {
+            id: "tj".into(),
+            message_id: "tm".into(),
+            tenant_id: "tt".into(),
+            domain_id: "td".into(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            subject: "s".into(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// The pixel must not be injected before a `</body>` that lives inside a
+    /// `<script>` raw-text element: the scan skips it and falls back to
+    /// appending at the very end.
+    #[test]
+    fn pixel_skips_the_body_candidate_inside_a_script() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let html = r#"<html><body>Hi<script>document.write("</body>");</script></body>"#;
+        let out = add_tracking_pixel(html, &job(), &tracking_config());
+        let pixel_at = out.find(r#"<img src="#);
+        let decoy_at = out.find(r#"document.write("</body>")"#);
+        let real_body_end = out.rfind("</body>").expect("real body close");
+        let _ = real_body_end;
+        match (pixel_at, decoy_at) {
+            (Some(pixel), Some(decoy)) => assert!(
+                pixel > decoy,
+                "the pixel must land AFTER the in-script decoy, not inside it"
+            ),
+            _ => panic!("expected both the pixel and the decoy in the output"),
+        }
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+    }
+
+    /// Same contract for `<style>` raw-text decoys.
+    #[test]
+    fn pixel_skips_the_body_candidate_inside_a_style() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let html = r#"<html><body>Hi<style>div::after{content:"</body>"}</style></body>"#;
+        let out = add_tracking_pixel(html, &job(), &tracking_config());
+        let pixel_at = out.find(r#"<img src="#);
+        let style_at = out.find(r#"content:"</body>""#);
+        match (pixel_at, style_at) {
+            (Some(pixel), Some(decoy)) => assert!(
+                pixel > decoy,
+                "the pixel must land AFTER the in-style decoy"
+            ),
+            _ => panic!("expected both the pixel and the decoy in the output"),
+        }
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+    }
+
+    /// Multiple in-raw-text decoys: the scan walks backwards through ALL of
+    /// them and only ever injects before a genuine `</body>` — or appends.
+    #[test]
+    fn pixel_walks_back_through_every_raw_text_decoy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let html = r#"<html><body>A<script>a("</body></body>")</script>B</body>"#;
+        let out = add_tracking_pixel(html, &job(), &tracking_config());
+        // The two decoys live INSIDE the script; the pixel must never land
+        // between them (which would terminate the script element early).
+        let script = out
+            .find("<script>")
+            .and_then(|s| out.find("</script>").map(|e| (s, e)))
+            .expect("script present");
+        let pixel_at = out.find(r#"<img src="#).expect("pixel present");
+        assert!(
+            pixel_at < script.0 || pixel_at > script.1,
+            "the pixel must not be injected inside the script element"
+        );
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+    }
+
+    /// The raw `href=` scan is resilient to malformed neighbours: a dangling
+    /// `href=` at the end of the document and an unterminated quote are left
+    /// untouched while the genuine anchor is still rewritten.
+    #[test]
+    fn rewrite_survives_a_dangling_href_and_an_unterminated_quote() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let config = tracking_config();
+        let html =
+            r#"<a href="https://x.test/a">go</a> and <a href="https://x.test/a>broken</a>href="#;
+        let out = rewrite_links(html, &job(), &config);
+        // The well-formed anchor is rewritten.
+        assert!(
+            out.contains(r#"href="https://t.example/c/"#),
+            "the valid anchor must be rewritten: {out}"
+        );
+        // The unterminated quote is left exactly as it was.
+        assert!(
+            out.contains(r#"<a href="https://x.test/a>broken</a>"#),
+            "an unterminated quote must be left untouched: {out}"
+        );
+        // The trailing `href=` marker survives verbatim.
+        assert!(
+            out.ends_with("href="),
+            "a dangling href= must survive: {out}"
+        );
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+    }
+
+    /// Values absent from the document never produce a replacement: the raw
+    /// scan returns the input byte-for-byte.
+    #[test]
+    fn rewrite_href_spans_is_identity_when_nothing_matches() {
+        let mut tracked = HashMap::new();
+        tracked.insert(
+            "https://nowhere.test/x".to_string(),
+            "https://t.example/c/z".to_string(),
+        );
+        let html = r#"<a href="https://x.test/a">go</a>"#;
+        assert_eq!(rewrite_href_spans(html, &tracked), html);
+    }
+}

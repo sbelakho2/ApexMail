@@ -351,7 +351,6 @@ fn match_domain_pattern(domain: &str, pattern: &str) -> bool {
 }
 
 #[cfg(test)]
-
 mod adversarial_tests;
 
 /// Return a redirect response with a locked-down CSP and the exact status code

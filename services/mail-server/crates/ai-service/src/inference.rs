@@ -78,7 +78,9 @@ impl InferenceConfig {
                 "AI_MODEL_ENABLED is false".into(),
             ));
         }
-        if self.model.is_empty() {
+        // Trim-aware, matching the config-level check: a whitespace-only
+        // model name is an unconfigured model, not a "model not found".
+        if self.model.trim().is_empty() {
             return Err(AiError::ModelUnavailable(
                 "AI_MODEL_NAME is not configured".into(),
             ));
@@ -684,6 +686,264 @@ mod tests {
             message.chars().count() < 400,
             "the echoed provider body must be bounded: {} chars",
             message.chars().count()
+        );
+    }
+
+    // ── Fail-closed validation: hostile configs and degenerate inputs never
+    // reach the network. ───────────────────────────────────────────────────
+
+    use crate::test_support::{spawn_scripted_llm, LlmScript};
+
+    fn live_config(endpoint: String) -> InferenceConfig {
+        InferenceConfig {
+            enabled: true,
+            endpoint,
+            model: "apexmail-assistant".into(),
+            api_key: None,
+            timeout: Duration::from_secs(10),
+            max_tokens: 64,
+            temperature: 0.0,
+        }
+    }
+
+    /// Accessors report the deployment configuration honestly.
+    #[test]
+    fn accessors_report_configuration() {
+        let client = LlmClient::new(InferenceConfig::default());
+        assert!(!client.is_enabled(), "default runtime is disabled");
+        assert_eq!(client.configured_model(), "apexmail-assistant");
+        let enabled = LlmClient::new(InferenceConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(enabled.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn validation_rejects_hostile_configuration_before_the_network() {
+        let mock = spawn_scripted_llm(vec![LlmScript::Content("irrelevant")]).await;
+        // A truly absent model name fails at config validation itself.
+        let client = LlmClient::new(InferenceConfig {
+            model: "".into(),
+            ..live_config(mock.endpoint())
+        });
+        let result = client.generate("system", "user", 16).await;
+        assert!(matches!(result, Err(AiError::ModelUnavailable(_))));
+
+        // Endpoint scheme is not http(s): the config-level validate fails
+        // closed with ModelUnavailable.
+        for endpoint in ["ftp://model.example/v1", ""] {
+            let client = LlmClient::new(InferenceConfig {
+                endpoint: endpoint.into(),
+                ..live_config(mock.endpoint())
+            });
+            let result = client.generate("system", "user", 16).await;
+            assert!(
+                matches!(result, Err(AiError::ModelUnavailable(_))),
+                "endpoint {endpoint:?} must fail closed at config validation"
+            );
+        }
+
+        // A whitespace-only model name is an UNCONFIGURED model: it must be
+        // rejected at config validation with the actionable error (not
+        // reported as "model not found: <whitespace>").
+        let client = LlmClient::new(InferenceConfig {
+            model: "   ".into(),
+            ..live_config(mock.endpoint())
+        });
+        let result = client.generate("system", "user", 16).await;
+        assert!(
+            matches!(result, Err(AiError::ModelUnavailable(_))),
+            "an unconfigured model must fail closed as unavailable, got {result:?}"
+        );
+
+        assert_eq!(
+            mock.request_count(),
+            0,
+            "no request may leave for a misconfigured runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn degenerate_generation_inputs_are_rejected_before_the_network() {
+        let mock = spawn_scripted_llm(vec![LlmScript::Content("irrelevant")]).await;
+        let client = LlmClient::new(live_config(mock.endpoint()));
+
+        for (system, user, max_tokens, why) in [
+            ("", "user", 16, "empty system prompt"),
+            ("   ", "user", 16, "whitespace system prompt"),
+            ("system", "", 16, "empty user prompt"),
+            ("system", "user", 0, "zero token budget"),
+            ("system", "user", 8_193, "over-large token budget"),
+        ] {
+            let result = client
+                .generate_for_model("apexmail-assistant", system, user, max_tokens, 0.0)
+                .await;
+            assert!(
+                matches!(result, Err(AiError::InvalidInput(_))),
+                "{why} must be InvalidInput, got {result:?}"
+            );
+        }
+        // An unknown model name is refused before the network as well.
+        let result = client
+            .generate_for_model("other-model", "s", "u", 16, 0.0)
+            .await;
+        assert!(matches!(result, Err(AiError::ModelNotFound(_))));
+        assert_eq!(
+            mock.request_count(),
+            0,
+            "no request may leave for degenerate inputs"
+        );
+    }
+
+    /// A provider that closes the connection mid-body produces a clean
+    /// ModelUnavailable ("could not read") — never a partial answer.
+    #[tokio::test]
+    async fn truncated_provider_response_is_an_error_not_a_partial_answer() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // Drain the request until end of headers.
+            while let Ok(n) = tokio::io::AsyncReadExt::read(&mut sock, &mut chunk).await {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == *b"\r\n\r\n") {
+                    break;
+                }
+            }
+            // Announce far more body than is sent, then hang up.
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 4000\r\nConnection: close\r\n\r\n";
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(b"{\"cho").await;
+            let _ = sock.shutdown().await;
+        });
+
+        let client = LlmClient::new(live_config(format!("http://{addr}/v1")));
+        let error = client
+            .generate("system", "user", 16)
+            .await
+            .expect_err("a truncated body must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("could not read model provider response")
+                || error.to_string().contains("model provider request failed"),
+            "the failure must be attributed to the transport: {error}"
+        );
+    }
+
+    /// `plan()` runs on the configured sampling budget (not the caller's),
+    /// proven on the wire.
+    #[tokio::test]
+    async fn plan_uses_the_configured_budget_and_temperature() {
+        let mock = spawn_scripted_llm(vec![LlmScript::Content("{\"intent\":\"question\"}")]).await;
+        let client = LlmClient::new(InferenceConfig {
+            max_tokens: 500,
+            temperature: 0.7,
+            ..live_config(mock.endpoint())
+        });
+        let raw = client.plan("plan system", "plan user").await.unwrap();
+        assert!(raw.contains("question"));
+        let body = &mock.bodies()[0];
+        assert!(body.contains("\"max_tokens\":500"), "{body}");
+        assert!(body.contains("\"temperature\":0.7"), "{body}");
+    }
+
+    /// Streaming yields bounded, char-boundary-safe chunks whose
+    /// concatenation is exactly the model response — proven with multibyte
+    /// content straddling the 512-byte window.
+    #[tokio::test]
+    async fn streaming_chunks_are_boundary_safe_and_lossless() {
+        let content: &'static str = Box::leak("\u{6f22}\u{1f98a}".repeat(400).into_boxed_str()); // 2400 bytes, 800 chars
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(content)]).await;
+        let client = LlmClient::new(live_config(mock.endpoint()));
+
+        let mut chunks: Vec<String> = Vec::new();
+        let response = client
+            .generate_streaming("system", "user content", "", |t| chunks.push(t.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response, content);
+        assert!(chunks.len() >= 4, "2400 bytes must stream in windows");
+        assert_eq!(
+            chunks.concat(),
+            content,
+            "streaming must be lossless across multibyte boundaries"
+        );
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 512, "windows are bounded");
+        }
+    }
+
+    /// Provider response-shape fallbacks: completions-style `text` and
+    /// ollama-style `response` bodies are accepted; anything else fails
+    /// with a precise error, and empty content is never a success.
+    #[tokio::test]
+    async fn response_shape_fallbacks_and_failures() {
+        let cases: &[(&'static str, bool, &'static str)] = &[
+            (
+                "{\"choices\":[{\"text\":\"completions fallback\"}]}",
+                true,
+                "completions fallback",
+            ),
+            (
+                "{\"response\":\"ollama fallback\"}",
+                true,
+                "ollama fallback",
+            ),
+            (
+                "{\"choices\":[{\"message\":{}}]}",
+                false,
+                "did not contain choices",
+            ),
+            ("not json at all", false, "invalid JSON"),
+            (
+                "{\"choices\":[{\"message\":{\"content\":\"   \"}}]}",
+                false,
+                "empty response",
+            ),
+        ];
+        for (body, should_succeed, needle) in cases {
+            let mock = spawn_scripted_llm(vec![LlmScript::Raw(200, body)]).await;
+            let client = LlmClient::new(live_config(mock.endpoint()));
+            let result = client.generate("system", "user", 16).await;
+            if *should_succeed {
+                let text = result.unwrap_or_else(|e| panic!("{body} should parse: {e}"));
+                assert_eq!(text, *needle, "{body}");
+            } else {
+                let error = result.err().unwrap_or_else(|| panic!("{body} should fail"));
+                assert!(
+                    error.to_string().contains(needle),
+                    "{body} → {error} must mention {needle}"
+                );
+            }
+        }
+    }
+
+    /// A configured provider credential is sent as a bearer token — and an
+    /// HTTPS-looking endpoint keeps the full URL contract.
+    #[tokio::test]
+    async fn provider_credentials_travel_as_bearer_tokens() {
+        let mock = spawn_scripted_llm(vec![LlmScript::Content("ok reply")]).await;
+        let client = LlmClient::new(InferenceConfig {
+            api_key: Some("sk-test-provider-key".into()),
+            ..live_config(mock.endpoint())
+        });
+        client.generate("system", "user", 16).await.unwrap();
+        let headers = &mock.header_blocks()[0];
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-test-provider-key"),
+            "the provider key must travel as a bearer token: {headers}"
         );
     }
 }

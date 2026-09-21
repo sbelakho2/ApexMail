@@ -1040,6 +1040,7 @@ mod adversarial_tests {
     }
 
     async fn test_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
         match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
             Ok(pool) => pool,
             Err(error) => panic!("{}", error.panic_message()),
@@ -2594,17 +2595,374 @@ mod adversarial_tests {
         );
         processor.is_running.store(true, Ordering::SeqCst);
         processor.active_jobs.fetch_add(2, Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        // Spawn FIRST so the loop genuinely iterates through its arms.
+        let p = processor.clone();
+        let handle = tokio::spawn(async move { p.poll_loop().await });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         processor.active_jobs.fetch_sub(2, Ordering::SeqCst);
         processor.is_running.store(false, Ordering::SeqCst);
         processor.shutdown_notify.notify_waiters();
-        let p = processor.clone();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::spawn(async move { p.poll_loop().await }),
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits after capacity drain")
+            .expect("join ok");
+    }
+
+    // ── batch 3: Retry-After, resolution gaps, fenced completions, outage ──
+
+    fn orch_config() -> WebhookConfig {
+        WebhookConfig {
+            request_timeout: Duration::from_millis(300),
+            base: crate::common::ProcessorConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// A 429 with a numeric Retry-After defers the row by exactly that many
+    /// seconds — not by the endpoint's own backoff multiplier.
+    #[tokio::test]
+    async fn retry_after_seconds_header_sets_the_retry_delay() {
+        let Some(pool) = test_pool("wh_retry_after_secs").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let stub = spawn_stub(vec![
+            StubResponse::new(429, "slow down").with_header("Retry-After", "2")
+        ]);
+        let url = format!("http://{}/hook", stub.addr);
+        let webhook_id = insert_webhook(&pool, &tenant, &url, true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"k": 1}),
+            1,
+            "tok-ra",
+            ClaimOffsets::default(),
         )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("tok-ra".to_string()),
+            ..job_for(&webhook_id, &tenant, &url)
+        };
+        let processor = processor(pool.clone(), orch_config());
+
+        // Deliver to the stub through the REAL delivery path (pinned to the
+        // local stub's address, which the SSRF validator would otherwise
+        // rightly refuse as loopback).
+        let result = processor
+            .deliver_webhook(&job, r#"{"k":1}"#, &ip_target(&stub))
+            .await;
+        assert!(!result.success);
+        assert_eq!(
+            result.retry_after_ms,
+            Some(2000),
+            "a numeric Retry-After: 2 must become a 2000ms delay"
+        );
+
+        // The failure handling must schedule exactly that delay.
+        processor
+            .handle_failure(&job, result)
+            .await
+            .expect("retry scheduled");
+        let scheduled_in: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (scheduled_at - NOW()))::float8 FROM webhook_queue WHERE id = $1",
+        )
+        .bind(&row)
+        .fetch_one(&pool)
         .await
-        .expect("loop exits after capacity drain")
-        .expect("join ok");
+        .expect("rescheduled row");
+        assert!(
+            (1.0..=4.0).contains(&scheduled_in),
+            "Retry-After: 2 must schedule ~2s out (got {scheduled_in}s), not the endpoint backoff"
+        );
+        pool.close().await;
+    }
+
+    /// A 503 whose Retry-After is an HTTP-date is parsed into a delay.
+    #[tokio::test]
+    async fn retry_after_http_date_is_parsed_into_a_delay() {
+        let Some(pool) = test_pool("wh_retry_after_date").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let retry_at = Utc::now() + chrono::Duration::seconds(90);
+        let stub = spawn_stub(vec![StubResponse::new(503, "unavailable").with_header(
+            "Retry-After",
+            &retry_at.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+        )]);
+        let url = format!("http://{}/hook", stub.addr);
+        let webhook_id = insert_webhook(&pool, &tenant, &url, true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"k": 2}),
+            1,
+            "tok-ra-date",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("tok-ra-date".to_string()),
+            ..job_for(&webhook_id, &tenant, &url)
+        };
+        let processor = processor(pool.clone(), orch_config());
+
+        let result = processor
+            .deliver_webhook(&job, r#"{"k":2}"#, &ip_target(&stub))
+            .await;
+        let delay_ms = result
+            .retry_after_ms
+            .expect("the HTTP-date Retry-After must be parsed");
+        assert!(
+            (60_000..=120_000).contains(&delay_ms),
+            "a date 90s out must parse to ~90s (got {delay_ms}ms)"
+        );
+
+        processor
+            .handle_failure(&job, result)
+            .await
+            .expect("retry scheduled");
+        let scheduled_in: f64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM (scheduled_at - NOW()))::float8 FROM webhook_queue WHERE id = $1",
+        )
+        .bind(&row)
+        .fetch_one(&pool)
+        .await
+        .expect("rescheduled row");
+        assert!(
+            (60.0..=120.0).contains(&scheduled_in),
+            "the parsed HTTP-date must become the retry delay (got {scheduled_in}s)"
+        );
+        pool.close().await;
+    }
+
+    /// A hostname that cannot resolve at all is a retryable refusal: the
+    /// row is rescheduled, never recorded as delivered.
+    #[tokio::test]
+    async fn unresolvable_hostname_is_a_retryable_refusal() {
+        let Some(pool) = test_pool("wh_unresolvable").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let webhook_id =
+            insert_webhook(&pool, &tenant, "https://blackhole.invalid/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"k": 3}),
+            0,
+            "tok-unresolvable",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("tok-unresolvable".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://blackhole.invalid/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("a delivery refusal is not a processor error");
+        let successes = delivery_rows(&pool, &webhook_id).await;
+        assert_eq!(successes, 0, "no delivery record without a target");
+        let (status, attempt): (String, i32) =
+            sqlx::query_as("SELECT status, attempt FROM webhook_queue WHERE id = $1")
+                .bind(&row)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(status, "pending", "the refusal is retryable");
+        assert_eq!(attempt, 1, "the retry consumes one attempt");
+        pool.close().await;
+    }
+
+    /// A dead-letter on a LOST claim records nothing (no delivery row, no
+    /// queue delete): the new owner owns the row.
+    #[tokio::test]
+    async fn dead_letter_with_a_stale_claim_token_records_nothing() {
+        let Some(pool) = test_pool("wh_dlq_stale").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.3/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"k": 4}),
+            3,
+            "other-owner-token",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            // The claim has rotated away from this worker.
+            claim_token: Some("stale-token".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://240.0.0.3/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+        let result =
+            WebhookDeliveryResult::failure(Some(500), 5, "HTTP 500".to_string(), None, None);
+        processor
+            .dead_letter(&job, &result, "HTTP 500")
+            .await
+            .expect("fenced dead-letter is a no-op, not an error");
+        assert_eq!(
+            delivery_rows(&pool, &webhook_id).await,
+            0,
+            "a fenced-out worker must not record the delivery"
+        );
+        assert!(
+            queue_state(&pool, &row).await.is_some(),
+            "the row stays for its real owner"
+        );
+        pool.close().await;
+    }
+
+    /// A flush that cannot open its transaction puts the pending successes
+    /// BACK into the buffer — nothing is dropped.
+    #[tokio::test]
+    async fn failed_flush_transaction_requeues_pending_successes() {
+        let Some(pool) = test_pool("wh_flush_requeue").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.4/hook", true).await;
+        let job = job_for(&webhook_id, &tenant, "https://240.0.0.4/hook");
+        let processor = processor(pool.clone(), orch_config());
+
+        processor
+            .handle_success(&job, WebhookDeliveryResult::success(200, 3, None))
+            .await
+            .expect("queue the success");
+        pool.close().await;
+
+        processor.flush_pending_successes().await;
+        let pending = processor
+            .pending_successes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(
+            pending, 1,
+            "a failed flush must restore the pending successes"
+        );
+    }
+
+    /// With Redis down (budget check fails) AND the claim lost, the
+    /// fallthrough reschedule is fenced out and the failure is a no-op.
+    #[tokio::test]
+    async fn budget_check_failure_reschedule_is_fenced_on_the_claim() {
+        let Some(pool) = test_pool("wh_budget_fence").await else {
+            return;
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.5/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"k": 5}),
+            0,
+            "real-owner-token",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("stale-token".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://240.0.0.5/hook")
+        };
+        let processor = WebhookProcessor::new(pool.clone(), dead_redis_pool(), orch_config())
+            .expect("processor");
+
+        processor
+            .handle_failure(
+                &job,
+                WebhookDeliveryResult::failure(None, 1, "network".to_string(), None, None),
+            )
+            .await
+            .expect("fenced fallthrough is a no-op, not an error");
+        // The row still belongs to its real owner, untouched.
+        let (status, attempt): (String, i32) =
+            sqlx::query_as("SELECT status, attempt FROM webhook_queue WHERE id = $1")
+                .bind(&row)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(status, "pending");
+        assert_eq!(attempt, 0, "a fenced worker must not consume an attempt");
+        pool.close().await;
+    }
+
+    /// The full start/stop lifecycle: the loop claims the row and works the
+    /// unroutable endpoint (retrying), and stop breaks the loop cleanly.
+    #[tokio::test]
+    async fn start_cycle_works_the_queue_and_stop_breaks_promptly() {
+        let Some(pool) = test_pool("wh_start_stop").await else {
+            return;
+        };
+        crate::test_support::install_test_tracing();
+        let tenant = unique_tenant();
+        // Public (passes SSRF) but unroutable: fails fast, retried forever —
+        // the loop is genuinely working the whole time.
+        let url = "https://240.0.0.6:9/hook".to_string();
+        let webhook_id = insert_webhook(&pool, &tenant, &url, true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"evt": 1}),
+            0,
+            "tok-start-stop",
+            ClaimOffsets::default(),
+        )
+        .await;
+
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(pool.clone(), redis_pool(), orch_config()).expect("processor"),
+        );
+        let handle = {
+            let processor = std::sync::Arc::clone(&processor);
+            tokio::spawn(async move { processor.start().await })
+        };
+        // Wait for the loop to claim and fail the row at least once.
+        let mut worked = false;
+        for _ in 0..250 {
+            let attempt: Option<i32> =
+                sqlx::query_scalar("SELECT attempt FROM webhook_queue WHERE id = $1")
+                    .bind(&row)
+                    .fetch_one(&pool)
+                    .await
+                    .ok();
+            if attempt.is_some_and(|a| a >= 1) {
+                worked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("start returns after stop")
+            .expect("join")
+            .expect("start clean");
+        assert!(
+            worked,
+            "the start cycle must have claimed and retried the row"
+        );
+        pool.close().await;
     }
 }

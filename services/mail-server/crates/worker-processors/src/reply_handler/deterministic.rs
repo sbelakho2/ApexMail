@@ -1206,3 +1206,33 @@ mod coverage_arms {
         assert!(extract_return_date("no dates here").is_none());
     }
 }
+
+#[cfg(test)]
+mod month_and_pattern_batch {
+    //! Month-name coverage for the OOO date parser, including the
+    //! unreachable-on-invalid guard the parser relies on.
+
+    use super::*;
+
+    #[test]
+    fn month_number_maps_all_twelve_names_and_refuses_garbage() {
+        for (name, expected) in [
+            ("january", 1),
+            ("february", 2),
+            ("march", 3),
+            ("april", 4),
+            ("may", 5),
+            ("june", 6),
+            ("july", 7),
+            ("august", 8),
+            ("september", 9),
+            ("october", 10),
+            ("november", 11),
+            ("december", 12),
+        ] {
+            assert_eq!(month_number(name), Some(expected), "{name}");
+        }
+        assert_eq!(month_number("januari"), None, "near-miss refused");
+        assert_eq!(month_number(""), None);
+    }
+}

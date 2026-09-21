@@ -30,13 +30,16 @@ pub struct ReconciledAcceptance {
 /// Returns the reconciled units (possibly empty). A ledger/acceptance store
 /// error is returned to the caller — the reconciler never masks an outage.
 pub async fn reconcile_acceptances(db: &PgPool) -> Result<Vec<ReconciledAcceptance>, String> {
-    let rows: Vec<(
+    /// One projected `reserved` acceptance row: (send_unit, tenant_id,
+    /// transport_message_id, requested_source_ip, reserved_at).
+    type ProjectedReservation = (
         String,
         String,
         Option<String>,
         Option<String>,
         DateTime<Utc>,
-    )> = sqlx::query_as(
+    );
+    let rows: Vec<ProjectedReservation> = sqlx::query_as(
         r#"
         UPDATE sales_delivery_acceptances a
         SET state = 'accepted',
@@ -71,8 +74,6 @@ pub async fn reconcile_acceptances(db: &PgPool) -> Result<Vec<ReconciledAcceptan
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// The projection SQL is structurally the worker's contract: only
     /// `reserved` rows move, and only when the relay row is `accepted`.
     #[test]

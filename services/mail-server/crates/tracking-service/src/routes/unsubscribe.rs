@@ -1634,12 +1634,11 @@ mod tests {
         assert!(validate_category_preferences(&at_cap, &valid_set(), 50).is_ok());
     }
 
-#[test]
-fn category_prefs_empty_submission_is_ok() {
-    assert!(validate_category_preferences(&[], &valid_set(), 50).is_ok());
-}
+    #[test]
+    fn category_prefs_empty_submission_is_ok() {
+        assert!(validate_category_preferences(&[], &valid_set(), 50).is_ok());
+    }
 
     #[cfg(test)]
-    
     mod adversarial_tests;
 }

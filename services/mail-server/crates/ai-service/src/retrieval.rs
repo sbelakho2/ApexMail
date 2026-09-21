@@ -248,14 +248,12 @@ pub async fn current_version(pool: &PgPool) -> String {
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
+    // `char_indices` only ever yields char-boundary offsets, so the cut is
+    // boundary-safe by construction (the previous manual walk-back loop was
+    // provably dead code). The None arm is the already-short passthrough.
+    match s.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &s[..end]),
+        None => s.to_string(),
     }
 }
 
@@ -298,5 +296,265 @@ mod tests {
         std::fs::write(tmp.join("sub/b.md"), "# B\nworld").unwrap();
         assert_ne!(v1, docs_version(&tmp), "changes when docs change");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Hostile corpus and query edges ────────────────────────────────────
+
+    #[tokio::test]
+    async fn docs_dir_honors_the_env_override() {
+        let _serial = crate::test_support::ENV_SERIAL.lock().await;
+        let guard = crate::test_support::EnvGuard::with(&[("AI_DOCS_DIR", Some("/tmp/ai-docs-x"))]);
+        assert_eq!(docs_dir(), PathBuf::from("/tmp/ai-docs-x"));
+        drop(guard);
+        // Unset falls back to the repo-relative default.
+        let guard = crate::test_support::EnvGuard::with(&[("AI_DOCS_DIR", None)]);
+        assert_eq!(docs_dir(), PathBuf::from("./docs"));
+        drop(guard);
+    }
+
+    #[test]
+    fn collect_markdown_skips_missing_dirs_and_foreign_extensions() {
+        assert!(collect_markdown(Path::new("/nonexistent/ai-docs")).is_empty());
+        let dir = std::env::temp_dir().join(format!("ai-md-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(dir.join("nested")).unwrap();
+        std::fs::write(dir.join("a.md"), b"x").unwrap();
+        std::fs::write(dir.join("b.MD"), b"x").unwrap(); // case-sensitive: not markdown
+        std::fs::write(dir.join("c.txt"), b"x").unwrap();
+        std::fs::write(dir.join("nested").join("d.md"), b"x").unwrap();
+        let mut found = collect_markdown(&dir);
+        assert_eq!(found.len(), 2, "only lowercase .md recurses: {found:?}");
+        found.sort();
+        assert!(found[0].ends_with("a.md"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Chunking must never split a UTF-8 sequence and never wedge on
+    /// degenerate input: empty text, exact-cap text, and multibyte corpora
+    /// whose character boundaries deliberately miss the byte cap.
+    #[test]
+    fn chunk_text_survives_multibyte_and_degenerate_input() {
+        assert!(chunk_text("").is_empty());
+        assert_eq!(chunk_text("short doc"), vec!["short doc"]);
+        // Exactly the cap: one chunk, no overlap loop.
+        let exact = "w".repeat(CHUNK_CHARS);
+        assert_eq!(chunk_text(&exact), vec![exact.as_str()]);
+
+        // Emoji are 4 bytes: byte-cap arithmetic lands mid-character.
+        let emoji = "\u{1f98a}".repeat(1000); // 4000 bytes
+        let chunks = chunk_text(&emoji);
+        assert!(!chunks.is_empty());
+        for c in &chunks {
+            assert!(!c.is_empty());
+            // Slicing already proves char-boundary safety (it would panic).
+            assert!(c.chars().all(|ch| ch == '\u{1f98a}'));
+        }
+        // CJK are 3 bytes with no paragraph breaks anywhere.
+        let cjk = "\u{6f22}".repeat(2000);
+        let chunks = chunk_text(&cjk);
+        assert!(chunks.len() >= 2);
+        for c in &chunks {
+            assert!(c.chars().all(|ch| ch == '\u{6f22}'));
+        }
+
+        // A paragraph break sits exactly at the half-cap boundary: the
+        // preference filter requires strictly MORE than half, so the break
+        // must not be taken (content is not lost by a bad cut).
+        let mut text = "p".repeat(CHUNK_CHARS / 2);
+        text.push_str("\n\n");
+        text.push_str(&"q".repeat(CHUNK_CHARS * 2));
+        let chunks = chunk_text(&text);
+        assert!(!chunks.is_empty());
+        assert!(chunks[0].contains("qq"), "cut must not swallow content");
+    }
+
+    /// A paragraph cut SHORTER than the cap makes the next window start at
+    /// `CHUNK_CHARS - CHUNK_OVERLAP`, which lands mid-character for 4-byte
+    /// emoji (the paragraph break shifts the char alignment): the
+    /// start-advance loop must repair it without panicking.
+    #[test]
+    fn chunk_start_advance_repairs_multibyte_boundaries() {
+        let text = "\u{1f98a}".repeat(300) + "\n\n" + &"\u{1f98a}".repeat(1000);
+        let chunks = chunk_text(&text);
+        assert!(chunks.len() >= 2);
+        for c in &chunks {
+            assert!(c.chars().all(|ch| ch == '\u{1f98a}'));
+            assert!(!c.is_empty());
+        }
+    }
+
+    /// A broken docs database degrades to "no passages" (the canonical
+    /// facts still answer) — search never panics on query failure.
+    #[tokio::test]
+    async fn search_degrades_to_empty_on_database_failure() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(1))
+            .connect_lazy("postgresql://apexmail:not-a-real-password@127.0.0.1:1/no-such-db")
+            .unwrap();
+        let hits = search(&pool, "warmup guidance", "someversion").await;
+        assert!(hits.is_empty(), "failures must degrade to no passages");
+    }
+
+    #[test]
+    fn truncate_chars_bounds_length_and_respects_boundaries() {
+        assert_eq!(truncate_chars("short", 700), "short");
+        let exactly = "x".repeat(700);
+        assert_eq!(truncate_chars(&exactly, 700), exactly);
+        let long = "y".repeat(701);
+        let cut = truncate_chars(&long, 700);
+        assert_eq!(cut.chars().count(), 701, "700 kept chars plus the ellipsis");
+        assert!(cut.ends_with('\u{2026}'));
+
+        // Multibyte content cuts at a char boundary with no panic.
+        let cjk: String = "\u{6f22}".repeat(800);
+        let cut = truncate_chars(&cjk, 700);
+        assert_eq!(cut.chars().count(), 701);
+        assert!(cut.ends_with('\u{2026}'));
+    }
+
+    /// Full reindex → current_version → search → tenant-scope → rotation
+    /// flow against the canonical database. Serialized by an advisory lock:
+    /// reindex prunes every docs_version except its own, so concurrent tests
+    /// would delete each other's corpus.
+    #[tokio::test]
+    async fn reindex_search_and_tenant_scoping_are_version_and_scope_exact() {
+        let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            return; // no test database configured
+        };
+        let Some(pool) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        // Own the table for the whole scenario.
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("ai-reindex-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(
+            dir.join("pricing.md"),
+            "# Pricing Guide\n\nWarmup guidance: start with engaged recipients \
+             and monitor spam complaints.\n\nPAYG tiers apply per email.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("guide.fr.md"),
+            "# Guide fran\u{e7}ais\n\nConseils de d\u{e9}livrabilit\u{e9} pour les campagnes.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("sub").join("nested.md"),
+            "# Nested\n\nDeep doc content.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("only-blank.md"), "\n\n   \n\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not markdown").unwrap();
+        // Invalid UTF-8: the file is skipped, reindex does not fail.
+        std::fs::write(dir.join("broken.md"), b"\xff\xfe invalid utf8").unwrap();
+
+        let count = reindex(&pool, &dir).await.unwrap();
+        assert_eq!(
+            count, 3,
+            "blank chunks, .txt and invalid-UTF-8 files are skipped"
+        );
+
+        let version = docs_version(&dir);
+        assert_eq!(current_version(&pool).await, version);
+
+        // ── search returns scoped, bounded, scored passages ──────────────
+        let hits = search(&pool, "warmup guidance", &version).await;
+        assert!(!hits.is_empty(), "FTS must match indexed text");
+        for hit in &hits {
+            assert!(hit.path.starts_with("pricing") || hit.path.starts_with("sub/"));
+            assert!(hit.score > 0.0);
+            assert!(hit.snippet.chars().count() <= 701);
+        }
+
+        // Empty and whitespace-only queries never reach the database.
+        assert!(search(&pool, "", &version).await.is_empty());
+        assert!(search(&pool, "   ", &version).await.is_empty());
+
+        // A hostile SQL payload is data, not code: plainto_tsquery
+        // neutralizes it and the table survives.
+        let injection = "'; DROP TABLE ai_docs_chunks; --";
+        let _ = search(&pool, injection, &version).await;
+        let still_there: i64 = sqlx::query_scalar("SELECT count(*) FROM ai_docs_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(still_there >= 3, "table must survive a hostile query");
+
+        // Unknown version: nothing to search.
+        assert!(search(&pool, "warmup guidance", "0000000000000000")
+            .await
+            .is_empty());
+
+        // ── tenant scoping: another scope's rows are unreachable ─────────
+        sqlx::query(
+            "INSERT INTO ai_docs_chunks (tenant_scope, docs_version, path, title, locale, chunk_index, content) \
+             VALUES ('tenant-other', $1, 'secret.md', 'Secret', 'en', 0, \
+                     'warmup guidance for the other tenant only')",
+        )
+        .bind(&version)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let scoped = search(&pool, "warmup guidance", &version).await;
+        assert!(
+            !scoped.iter().any(|c| c.path == "secret.md"),
+            "search is fixed to the public scope, got {:?}",
+            scoped.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
+
+        // ── idempotent reindex: upsert, no duplicates ────────────────────
+        let again = reindex(&pool, &dir).await.unwrap();
+        assert_eq!(again, count);
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ai_docs_chunks WHERE docs_version = $1")
+                .bind(&version)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            count as i64 + 1,
+            "the injected foreign-scope row must remain"
+        );
+        sqlx::query("DELETE FROM ai_docs_chunks WHERE tenant_scope = 'tenant-other'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // ── version rotation: superseded versions are pruned ─────────────
+        std::fs::write(
+            dir.join("pricing.md"),
+            "# Pricing Guide v2\n\nUpdated warmup guidance.\n",
+        )
+        .unwrap();
+        let new_version = docs_version(&dir);
+        assert_ne!(version, new_version);
+        let new_count = reindex(&pool, &dir).await.unwrap();
+        assert_eq!(current_version(&pool).await, new_version);
+        let old_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ai_docs_chunks WHERE docs_version = $1")
+                .bind(&version)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(old_rows, 0, "superseded versions are pruned");
+        assert_eq!(new_count, 3);
+
+        // A missing directory is an honest error, not an empty success.
+        let error = reindex(&pool, Path::new("/nonexistent/ai-docs"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("docs dir not found"));
+
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&pool)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

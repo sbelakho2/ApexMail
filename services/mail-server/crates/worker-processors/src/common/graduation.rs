@@ -99,8 +99,6 @@ pub async fn graduate_mature_warmup_ips(db: &PgPool) -> Result<Vec<String>, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// The reconciler targets exactly the canonical term and only `warming`.
     #[test]
     fn graduation_sql_pins_term_and_state() {

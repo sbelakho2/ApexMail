@@ -997,7 +997,7 @@ impl From<ResolvedEnrollmentRow> for ResolvedEnrollment {
 
 /// What the transactional lock actually did, for the persisted
 /// `actual_action` and for tests.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LockOutcome {
     pub enrollment_id: Option<Uuid>,
     pub cancelled_actions: u64,
@@ -3300,19 +3300,19 @@ mod tests {
         };
         let handler = std::sync::Arc::new(ReplyHandler::new(pool.clone(), loop_config()));
         handler.is_running.store(true, Ordering::SeqCst);
-        // Let the loop enter the empty-queue select, then signal shutdown.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Spawn FIRST so the loop genuinely runs its iterations, then signal
+        // shutdown while it is parked (or polling) — a spawn-after-shutdown
+        // ordering would exit at the gate without executing any arm.
+        let h = handler.clone();
+        let handle = tokio::spawn(async move { h.poll_loop().await });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         // Mirror stop(): clear the flag AND wake parked waiters.
         handler.is_running.store(false, Ordering::SeqCst);
         handler.shutdown_notify.notify_waiters();
-        let h = handler.clone();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::spawn(async move { h.poll_loop().await }),
-        )
-        .await
-        .expect("loop exits on shutdown")
-        .expect("join ok");
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits on shutdown")
+            .expect("join ok");
         pool.close().await;
     }
 
@@ -3322,17 +3322,16 @@ mod tests {
     async fn poll_loop_survives_fetch_errors_until_shutdown() {
         let handler = std::sync::Arc::new(ReplyHandler::new(dead_pool(), loop_config()));
         handler.is_running.store(true, Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let h = handler.clone();
+        let handle = tokio::spawn(async move { h.poll_loop().await });
+        // Several poll cycles run into the fetch-error arm before shutdown.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         handler.is_running.store(false, Ordering::SeqCst);
         handler.shutdown_notify.notify_waiters();
-        let h = handler.clone();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::spawn(async move { h.poll_loop().await }),
-        )
-        .await
-        .expect("loop exits after error-arm polls")
-        .expect("join ok");
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits after error-arm polls")
+            .expect("join ok");
     }
 
     /// Zero available capacity parks the loop for the 100ms tick instead of
@@ -3341,21 +3340,20 @@ mod tests {
     async fn poll_loop_parks_when_capacity_is_exhausted() {
         let handler = std::sync::Arc::new(ReplyHandler::new(dead_pool(), loop_config()));
         handler.is_running.store(true, Ordering::SeqCst);
-        // Fill the capacity counter.
+        // Fill the capacity counter BEFORE the loop starts so its first
+        // iteration takes the parking arm.
         handler.active_jobs.fetch_add(2, Ordering::SeqCst);
-        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let h = handler.clone();
+        let handle = tokio::spawn(async move { h.poll_loop().await });
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         // Drain and shut down.
         handler.active_jobs.fetch_sub(2, Ordering::SeqCst);
         handler.is_running.store(false, Ordering::SeqCst);
         handler.shutdown_notify.notify_waiters();
-        let h = handler.clone();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::spawn(async move { h.poll_loop().await }),
-        )
-        .await
-        .expect("loop exits after capacity drain")
-        .expect("join ok");
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits after capacity drain")
+            .expect("join ok");
     }
 
     #[tokio::test]
@@ -3363,4 +3361,503 @@ mod tests {
         let handler = ReplyHandler::new(dead_pool(), loop_config());
         assert!(!handler.classifier_name().is_empty());
     }
+}
+
+#[cfg(test)]
+mod orchestration_and_actions {
+    //! Adversarial coverage for the reply handler's orchestration and the
+    //! legacy action arms: a LIVE start/stop cycle serving a real message,
+    //! the analytics-handoff failure path (claim reset → retry), the
+    //! enrollment-resolution refusals, the transactional-lock exit arms, and
+    //! every `execute_action` disposition.
+
+    use super::*;
+    use crate::common::ProcessorConfig as BaseConfig;
+    use sqlx::PgPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The canonical fresh-database gate with the tracing install bolted on.
+    async fn fresh_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn orch_config() -> ReplyHandlerConfig {
+        ReplyHandlerConfig {
+            base: BaseConfig {
+                name: "reply-orch".into(),
+                concurrency: 2,
+                poll_interval: std::time::Duration::from_millis(20),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn neutral_message(tenant: Option<&str>, from: &str) -> InboundMessage {
+        InboundMessage {
+            id: format!("orch-{}", uuid::Uuid::new_v4()),
+            tenant_id: tenant.map(str::to_string),
+            lead_id: None,
+            from_email: from.to_string(),
+            to_email: "sales@apex.example".to_string(),
+            subject: "Re: nothing".to_string(),
+            body_text: Some("plain body".to_string()),
+            body_html: None,
+            headers: None,
+            message_id_header: None,
+            received_at: Utc::now(),
+            processed_at: None,
+            classification: None,
+        }
+    }
+
+    fn action_result(action: ActionType, parameters: serde_json::Value) -> ClassificationResult {
+        ClassificationResult {
+            classification: ReplyClassification::Interested,
+            confidence: 0.9,
+            sub_type: None,
+            extracted_data: ExtractedData::default(),
+            suggested_action: SuggestedAction {
+                action,
+                parameters,
+                auto_execute: true,
+                priority: Urgency::Medium,
+            },
+            reasoning: "orchestrated".to_string(),
+        }
+    }
+
+    /// The full start/stop lifecycle: `start` runs the poll loop, the loop
+    /// claims and processes a seeded reply end-to-end, and `stop` breaks the
+    /// loop promptly.
+    #[tokio::test]
+    async fn start_processes_a_reply_and_stop_breaks_the_loop() {
+        let Some(pool) = fresh_pool("reply_orch_lifecycle").await else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("ro-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'RO', $2, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("ro-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("tenant");
+        let from = format!("sender-{suffix}@example.com");
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, from_email, to_email, subject, body_text, headers, received_at) \
+             VALUES ($1, $2, $3, 'sales@apex.example', 'Re: hi', 'we should talk', \
+                     '{}'::jsonb, NOW() - INTERVAL '1 minute')",
+        )
+        .bind(format!("orch-{suffix}"))
+        .bind(&tenant)
+        .bind(&from)
+        .execute(&pool)
+        .await
+        .expect("inbound");
+
+        let handler = std::sync::Arc::new(ReplyHandler::with_classifier(
+            pool.clone(),
+            orch_config(),
+            std::sync::Arc::new(ScriptedClassifierShared {
+                disposition: ReplyDisposition::Positive,
+                confidence: 0.9,
+                fail: false,
+                calls: AtomicUsize::new(0),
+            }),
+        ));
+
+        let handle = tokio::spawn({
+            let handler = std::sync::Arc::clone(&handler);
+            async move { handler.start().await }
+        });
+        // The loop claims and processes the reply: processed_at is stamped.
+        let msg_id = format!("orch-{suffix}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut processed = false;
+        while std::time::Instant::now() < deadline {
+            let done: Option<Option<chrono::DateTime<Utc>>> =
+                sqlx::query_scalar("SELECT processed_at FROM inbound_messages WHERE id = $1")
+                    .bind(&msg_id)
+                    .fetch_one(&pool)
+                    .await
+                    .ok();
+            if done.flatten().is_some() {
+                processed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(processed, "the loop must process the seeded reply");
+
+        handler.stop().await.expect("stop");
+        tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("start returns after stop")
+            .expect("join")
+            .expect("start clean");
+
+        let classifications: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sales_reply_classifications WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("classifications");
+        assert!(classifications >= 1, "the classification is persisted");
+        pool.close().await;
+    }
+
+    /// A shared scripted classifier (same shape as the live tests') that can
+    /// be constructed from this module.
+    struct ScriptedClassifierShared {
+        disposition: ReplyDisposition,
+        confidence: f64,
+        fail: bool,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ReplyClassifier for ScriptedClassifierShared {
+        async fn classify(
+            &self,
+            _input: &ReplyInput,
+        ) -> Result<super::super::types::AiClassification, ClassifyError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(ClassifyError::Transport("scripted outage".to_string()));
+            }
+            Ok(super::super::types::AiClassification {
+                disposition: self.disposition,
+                confidence: self.confidence,
+                reasoning: "orchestration classification".to_string(),
+                model_version: Some("orch-v1".to_string()),
+                prompt_version: Some("test".to_string()),
+                evidence: vec![Evidence::new("token", "orch", "test")],
+            })
+        }
+        fn name(&self) -> &'static str {
+            "orch-scripted"
+        }
+    }
+
+    /// A message whose reply-analytics handoff cannot persist (the
+    /// canonical `reply_events.recipient` is VARCHAR(255); the mutated
+    /// envelope sender is longer) must FAIL the whole message — never be
+    /// marked processed — and `reset_claim` must hand it straight back to
+    /// the next poll.
+    #[tokio::test]
+    async fn analytics_handoff_failure_fails_the_message_and_releases_the_claim() {
+        let Some(pool) = fresh_pool("reply_orch_handoff").await else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("ro-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'RO', $2, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("ro-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("tenant");
+        let msg_id = format!("orch-{suffix}");
+        let from = format!("sender-{suffix}@example.com");
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, from_email, to_email, subject, body_text, headers, received_at) \
+             VALUES ($1, $2, $3, 'sales@apex.example', 'Re: hi', 'body', '{}', NOW())",
+        )
+        .bind(&msg_id)
+        .bind(&tenant)
+        .bind(&from)
+        .execute(&pool)
+        .await
+        .expect("inbound");
+
+        let handler = ReplyHandler::with_classifier(
+            pool.clone(),
+            orch_config(),
+            std::sync::Arc::new(ScriptedClassifierShared {
+                disposition: ReplyDisposition::Positive,
+                confidence: 0.9,
+                fail: false,
+                calls: AtomicUsize::new(0),
+            }),
+        );
+
+        // Claim the message, then corrupt the in-memory envelope identity
+        // past the analytics column's bound: only the handoff INSERT can
+        // fail — every earlier surface (classification, lock, persist) is
+        // intact.
+        let mut msg = handler
+            .fetch_messages(10)
+            .await
+            .expect("claim")
+            .into_iter()
+            .find(|m| m.id == msg_id)
+            .expect("claimed message");
+        msg.from_email = format!("{}@example.com", "x".repeat(300));
+
+        let result = handler.process_message(msg).await;
+        assert!(
+            result.is_err(),
+            "the handoff failure must fail the message (retryable), not pass silently"
+        );
+
+        // The claim reset is the loop's retry contract: the failed message
+        // is immediately claimable again.
+        handler.reset_claim(&msg_id).await.expect("reset claim");
+        let (processed, processing): (
+            Option<chrono::DateTime<Utc>>,
+            Option<chrono::DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT processed_at, processing_at FROM inbound_messages WHERE id = $1",
+        )
+        .bind(&msg_id)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert!(processed.is_none(), "a failed message is never processed");
+        assert!(processing.is_none(), "the claim is released for retry");
+        pool.close().await;
+    }
+
+    /// Enrollment resolution refuses messages that cannot be linked: no
+    /// tenant identity, or no parsable recipient candidate.
+    #[tokio::test]
+    async fn enrollment_resolution_refuses_unlinkable_messages() {
+        let handler = ReplyHandler::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgresql://127.0.0.1:1/none")
+                .expect("lazy pool"),
+            orch_config(),
+        );
+
+        let anonymous = neutral_message(None, "prospect@example.com");
+        assert!(
+            handler
+                .resolve_enrollment(&anonymous)
+                .await
+                .expect("resolve")
+                .is_none(),
+            "no tenant → no enrollment resolution"
+        );
+
+        let unparseable = neutral_message(Some("t-orch"), "not-an-address");
+        assert!(
+            handler
+                .resolve_enrollment(&unparseable)
+                .await
+                .expect("resolve")
+                .is_none(),
+            "no parsable recipient → nothing to resolve"
+        );
+    }
+
+    /// The transactional lock has two clean exits: a message without a
+    /// tenant (nothing to lock) and an enrollment that vanished between
+    /// resolution and the lock (rollback, default outcome).
+    #[tokio::test]
+    async fn lock_enrollment_exits_cleanly_without_a_lockable_row() {
+        let Some(pool) = fresh_pool("reply_orch_lock").await else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("ro-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'RO', $2, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("ro-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("tenant");
+
+        let handler = ReplyHandler::new(pool.clone(), orch_config());
+        let decision = policy::decide(
+            policy::PolicyInput::new(ReplyDisposition::NotInterested, 0.95),
+            Utc::now(),
+        );
+
+        // No tenant on the message → default outcome, no transaction.
+        let anonymous = neutral_message(None, "prospect@example.com");
+        let resolved = ResolvedEnrollment {
+            enrollment_id: uuid::Uuid::new_v4(),
+            contact_id: uuid::Uuid::new_v4(),
+            contact_point_id: None,
+            account_id: None,
+            state: "active".to_string(),
+        };
+        let outcome = handler
+            .lock_enrollment(&anonymous, &decision, &resolved)
+            .await
+            .expect("lock");
+        assert_eq!(outcome, LockOutcome::default());
+
+        // The enrollment vanished (never existed): the UPDATE affects zero
+        // rows → rollback + default outcome, never a partial write.
+        let with_tenant = neutral_message(Some(&tenant), "prospect@example.com");
+        let outcome = handler
+            .lock_enrollment(&with_tenant, &decision, &resolved)
+            .await
+            .expect("lock");
+        assert_eq!(outcome, LockOutcome::default());
+        pool.close().await;
+    }
+
+    /// Every legacy action disposition executes and reports its action
+    /// string; suppression/unsubscription persist their rows; a message
+    /// without a tenant skips instead of writing; unmatched actions report
+    /// nothing.
+    #[tokio::test]
+    async fn execute_action_covers_every_legacy_action() {
+        let Some(pool) = fresh_pool("reply_orch_actions").await else {
+            return;
+        };
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("ro-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'RO', $2, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("ro-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("tenant");
+        let from = format!("sender-{suffix}@example.com");
+        let with_tenant = neutral_message(Some(&tenant), &from);
+        let anonymous = neutral_message(None, &from);
+
+        let handler = ReplyHandler::new(pool.clone(), orch_config());
+
+        // Snooze reports its duration.
+        let snoozed = handler
+            .execute_action(
+                &with_tenant,
+                &action_result(ActionType::Snooze, serde_json::json!({"duration_days": 3})),
+            )
+            .await
+            .expect("snooze");
+        assert_eq!(snoozed.as_deref(), Some("snoozed_for_3_days"));
+
+        // Suppress persists (reason from parameters, defaulting applied).
+        let suppressed = handler
+            .execute_action(
+                &with_tenant,
+                &action_result(ActionType::Suppress, serde_json::json!({})),
+            )
+            .await
+            .expect("suppress");
+        assert_eq!(suppressed.as_deref(), Some("suppressed"));
+        let reason: String = sqlx::query_scalar(
+            "SELECT reason FROM suppressions WHERE tenant_id = $1 AND email = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&from)
+        .fetch_one(&pool)
+        .await
+        .expect("suppression row");
+        assert_eq!(reason, "not_interested");
+
+        // Suppress without a tenant skips instead of writing.
+        let skipped = handler
+            .execute_action(
+                &anonymous,
+                &action_result(ActionType::Suppress, serde_json::json!({})),
+            )
+            .await
+            .expect("suppress skip");
+        assert_eq!(skipped.as_deref(), Some("skipped_no_tenant"));
+
+        // Unsubscribe upserts the suppression with the unsubscribe reason.
+        let unsubscribed = handler
+            .execute_action(
+                &with_tenant,
+                &action_result(ActionType::Unsubscribe, serde_json::json!({})),
+            )
+            .await
+            .expect("unsubscribe");
+        assert_eq!(unsubscribed.as_deref(), Some("unsubscribed"));
+        let reason: String = sqlx::query_scalar(
+            "SELECT reason FROM suppressions WHERE tenant_id = $1 AND email = lower($2)",
+        )
+        .bind(&tenant)
+        .bind(&from)
+        .fetch_one(&pool)
+        .await
+        .expect("suppression row");
+        assert_eq!(reason, "unsubscribe");
+
+        // Unsubscribe without a tenant skips.
+        let skipped = handler
+            .execute_action(
+                &anonymous,
+                &action_result(ActionType::Unsubscribe, serde_json::json!({})),
+            )
+            .await
+            .expect("unsubscribe skip");
+        assert_eq!(skipped.as_deref(), Some("skipped_no_tenant"));
+
+        // The remaining dispositions report without writes.
+        for (action, expected) in [
+            (ActionType::FlagSales, Some("flagged_for_sales")),
+            (ActionType::Escalate, Some("escalated")),
+            (ActionType::Ignore, Some("ignored")),
+            (ActionType::ScheduleDemo, None),
+            (ActionType::AutoReply, None),
+        ] {
+            let got = handler
+                .execute_action(&with_tenant, &action_result(action, serde_json::json!({})))
+                .await
+                .expect("action");
+            assert_eq!(got.as_deref(), expected, "action {action:?}");
+        }
+
+        pool.close().await;
+    }
+
+    /// The candidate list is lowercase, deduped, whitespace-free, bounded
+    /// (From + DSN + at most 16 header entries), and prefers the sender.
+    #[test]
+    fn reply_candidates_are_canonical_bounded_and_deduped() {
+        let mut msg = neutral_message(Some("t"), "PROSPECT@Example.com");
+        // 20 header entries with duplicates and garbage — only 16 pass.
+        let many: Vec<String> = (0..20).map(|i| format!("r{i}@x.test")).collect();
+        let mut joined = many.join(", ");
+        joined.push_str(", , not an address, PROSPECT@example.com");
+        msg.headers = Some(serde_json::json!({ "X-Failed-Recipients": joined }));
+
+        let candidates = reply_recipient_candidates(&msg);
+        assert_eq!(candidates[0], "prospect@example.com", "sender first");
+        assert!(
+            candidates.iter().all(|c| !c.contains(char::is_whitespace)),
+            "whitespace entries are dropped"
+        );
+        assert!(
+            candidates.len() <= 1 + 16,
+            "header candidates are bounded at 16 (got {})",
+            candidates.len()
+        );
+        let unique: std::collections::HashSet<&String> = candidates.iter().collect();
+        assert_eq!(unique.len(), candidates.len(), "no duplicates");
+        assert!(
+            !candidates.iter().any(|c| c.contains(' ')),
+            "garbage is filtered"
+        );
+    }
+
+    use crate::reply_handler::types::{
+        ExtractedData, ReplyClassification, SuggestedAction, Urgency,
+    };
+    use crate::reply_handler::{types::Evidence, ActionType, ClassificationResult, ClassifyError};
+    use async_trait::async_trait;
 }

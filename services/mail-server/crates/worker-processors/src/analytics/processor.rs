@@ -930,6 +930,7 @@ mod adversarial_db_tests {
 
     use super::*;
     use crate::analytics::types::AnalyticsEvent;
+    use chrono::DateTime;
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -955,6 +956,7 @@ mod adversarial_db_tests {
     }
 
     async fn test_pool(test_name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
         match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
             Ok(pool) => pool,
             Err(error) => panic!("{}", error.panic_message()),
@@ -1621,17 +1623,16 @@ mod adversarial_db_tests {
             test_config(),
         ));
         processor.is_running.store(true, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Spawn FIRST so the loop genuinely iterates, then shut it down.
+        let p = processor.clone();
+        let handle = tokio::spawn(async move { p.poll_loop().await });
+        tokio::time::sleep(Duration::from_millis(120)).await;
         processor.is_running.store(false, Ordering::SeqCst);
         processor.shutdown_notify.notify_waiters();
-        let p = processor.clone();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::spawn(async move { p.poll_loop().await }),
-        )
-        .await
-        .expect("loop exits on shutdown")
-        .expect("join ok");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits on shutdown")
+            .expect("join ok");
         pool.close().await;
     }
 
@@ -1645,21 +1646,120 @@ mod adversarial_db_tests {
             test_config(),
         ));
         processor.is_running.store(true, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        let p = processor.clone();
+        let handle = tokio::spawn(async move { p.poll_loop().await });
+        // Several poll cycles run into the error arm before shutdown.
+        tokio::time::sleep(Duration::from_millis(120)).await;
         processor.is_running.store(false, Ordering::SeqCst);
         processor.shutdown_notify.notify_waiters();
-        let p = processor.clone();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::spawn(async move { p.poll_loop().await }),
-        )
-        .await
-        .expect("loop exits after error polls")
-        .expect("join ok");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits after error polls")
+            .expect("join ok");
     }
 
     /// `update_aggregation` truncates an event to the top of its hour (the
     /// aggregation period key): a normal event lands on hour boundaries.
+    /// A failing final flush during `stop` is reported, not propagated; the
+    /// stop then waits out in-flight work before returning.
+    #[tokio::test]
+    async fn stop_reports_a_failing_final_flush_and_waits_for_active_jobs() {
+        let Some(pool) = test_pool("adv_stop_flush_fail").await else {
+            return;
+        };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        // Simulate in-flight work and a database that just went away.
+        processor.active_jobs.store(1, Ordering::SeqCst);
+        pool.close().await;
+        processor.stop().await.expect("stop never fails");
+        assert_eq!(processor.active_jobs.load(Ordering::SeqCst), 1);
+    }
+
+    /// The flush loop's error arm: a flush that cannot reach the database is
+    /// logged and the loop keeps ticking until shutdown (buffers retained).
+    #[tokio::test]
+    async fn flush_loop_survives_database_outage_until_shutdown() {
+        let Some(pool) = test_pool("adv_flush_loop_outage").await else {
+            return;
+        };
+        let mut config = test_config();
+        config.base.flush_interval = Duration::from_millis(10);
+        let processor =
+            std::sync::Arc::new(AnalyticsProcessor::new(pool.clone(), redis_pool(), config));
+        pool.close().await;
+
+        // Fill the buffer past the minimum flush batch so every tick flushes.
+        for i in 0..4 {
+            processor
+                .event_buffer
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event(&format!("outage-{i}"), "t-outage", "sent"));
+        }
+        *processor
+            .oldest_buffered_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        processor.is_running.store(true, Ordering::SeqCst);
+        let p = std::sync::Arc::clone(&processor);
+        let handle = tokio::spawn(async move { p.flush_loop().await });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        processor.is_running.store(false, Ordering::SeqCst);
+        processor.shutdown_notify.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("flush loop exits")
+            .expect("join ok");
+
+        // The events were never written — they must still be buffered.
+        assert_eq!(
+            processor
+                .event_buffer
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            4,
+            "failed flushes retain the buffer for retry"
+        );
+    }
+
+    /// An event whose timestamp cannot canonically map to an hour (the
+    /// datetime is outside the representable hour grid) falls back to a
+    /// truncated period instead of panicking or being dropped.
+    #[tokio::test]
+    async fn update_aggregation_falls_back_for_uncanonical_hours() {
+        let Some(pool) = test_pool("adv_hour_fallback").await else {
+            return;
+        };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        let event = AnalyticsEvent {
+            id: Uuid::new_v4().to_string(),
+            tenant_id: "t-fallback".into(),
+            event_type: "opened".into(),
+            message_id: None,
+            domain_id: None,
+            campaign_id: None,
+            recipient: Some("r@x.test".into()),
+            metadata: None,
+            timestamp: DateTime::<Utc>::MIN_UTC,
+        };
+        processor.update_aggregation(&event);
+        let bucket = processor
+            .aggregation_buffer
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .next()
+            .expect("one bucket")
+            .clone();
+        assert_eq!(bucket.opened, 1, "the event is counted");
+        assert_eq!(
+            bucket.period_start, event.timestamp,
+            "an unrepresentable hour falls back to the raw timestamp"
+        );
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn update_aggregation_buckets_the_event_to_its_hour() {
         let Some(pool) = test_pool("adv_hour_bucket").await else {

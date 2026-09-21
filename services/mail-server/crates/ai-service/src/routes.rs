@@ -283,11 +283,6 @@ async fn optimize_time_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<OptimizeTimeRequest>,
 ) -> Response {
-    if request.engagement_data.is_empty() {
-        return api_error(AiError::InvalidInput(
-            "engagement_data must not be empty".into(),
-        ));
-    }
     if request.engagement_data.len() > 10_000 {
         return api_error(AiError::InvalidInput(
             "engagement_data must contain at most 10000 entries".into(),
@@ -301,16 +296,21 @@ async fn optimize_time_handler(
         ));
     }
 
-    match state.sto.find_optimal_time(&request.engagement_data) {
-        Some(slot) => ApiResponse::ok(serde_json::json!({
-            "slot": slot,
-            "method": "highest_supplied_engagement_score",
-        }))
-        .into_response(),
-        None => api_error(AiError::InvalidInput(
-            "engagement_data must not be empty".into(),
-        )),
-    }
+    // `find_optimal_time` returns None exactly for empty input, so the None
+    // arm IS the empty-input rejection — one source of truth, no dead arm.
+    let slot = match state.sto.find_optimal_time(&request.engagement_data) {
+        Some(slot) => slot,
+        None => {
+            return api_error(AiError::InvalidInput(
+                "engagement_data must not be empty".into(),
+            ));
+        }
+    };
+    ApiResponse::ok(serde_json::json!({
+        "slot": slot,
+        "method": "highest_supplied_engagement_score",
+    }))
+    .into_response()
 }
 
 async fn content_score_handler(
@@ -1043,5 +1043,930 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ── Deterministic-route validation arms ───────────────────────────────
+
+    use crate::test_support::{spawn_scripted_llm, EnvGuard, LlmScript, ENV_SERIAL};
+
+    async fn app_with(config: AiConfig, service_token: &str) -> Router {
+        let state = Arc::new(
+            AppState::from_config(config, service_token.into())
+                .await
+                .expect("valid configuration"),
+        );
+        build_router(state)
+    }
+
+    async fn status_of(app: &Router, request: Request<Body>) -> StatusCode {
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+
+    fn json_request_with_headers(
+        uri: &str,
+        body: serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> Request<Body> {
+        let mut builder = Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("content-type", "application/json");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        builder
+            .body(Body::from(
+                serde_json::to_vec(&body).expect("serialize request"),
+            ))
+            .expect("build request")
+    }
+
+    /// Every argument-validation arm on the deterministic routes rejects
+    /// with 400; structured mismatches reject with 422; unknown models 404.
+    #[tokio::test]
+    async fn deterministic_routes_reject_hostile_arguments() {
+        let app = app().await;
+        let auth = |body| authenticated_json_request("/suggest", body);
+
+        // /suggest: empty topic, oversize topic, count bounds.
+        assert_eq!(
+            status_of(&app, auth(serde_json::json!({"topic":"   "}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(&app, auth(serde_json::json!({"topic":"x".repeat(241)}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(&app, auth(serde_json::json!({"topic":"x","count":0}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(&app, auth(serde_json::json!({"topic":"x","count":6}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        // deny_unknown_fields: unknown keys never silently pass.
+        assert_eq!(
+            status_of(&app, auth(serde_json::json!({"topic":"x","evil":"1"}))).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // /content/score: a valid subject scores with the heuristic method.
+        let good = authenticated_json_request(
+            "/content/score",
+            serde_json::json!({"subject":"Your weekly digest is ready"}),
+        );
+        let response = app.clone().oneshot(good).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"]["method"], "deterministic_subject_heuristic");
+
+        // /content/score: empty and oversize subjects.
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request("/content/score", serde_json::json!({"subject":" "}))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/content/score",
+                    serde_json::json!({"subject":"x".repeat(241)})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // /optimize-time: empty data, out-of-range hour/day/score, and a
+        // valid request (the empty rejection now lives in the None arm).
+        let opt = |body| authenticated_json_request("/optimize-time", body);
+        assert_eq!(
+            status_of(&app, opt(serde_json::json!({"engagement_data": []}))).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                opt(serde_json::json!({"engagement_data": [[24, 0, 0.5]]}))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                opt(serde_json::json!({"engagement_data": [[0, 7, 0.5]]}))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                opt(serde_json::json!({"engagement_data": [[0, 0, 1.5]]}))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                opt(serde_json::json!({"engagement_data": [[9, 2, 0.9], [20, 3, 0.4]]}))
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        // /evaluate: mismatched vectors are rejected, not silently zipped.
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/evaluate",
+                    serde_json::json!({"predictions":[true],"labels":[]})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // /predict: degenerate model ids and null inputs.
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/predict",
+                    serde_json::json!({"model_id":" ","input":{}})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/predict",
+                    serde_json::json!({"model_id":"m".repeat(129),"input":{}})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/predict",
+                    serde_json::json!({"model_id":"apexmail-assistant","input":null})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // /train: only the configured model is trainable.
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/train",
+                    serde_json::json!({"model_id":"other-model","epochs":1})
+                )
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        // Job lookups for unknown ids are 404.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri("/training/jobs/no-such-job")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        // /models with auth lists the configured model; disabled runtimes
+        // carry the setup warning.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/models")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["runtime_enabled"], false);
+        assert!(body["data"]["warning"]
+            .as_str()
+            .unwrap()
+            .contains("AI_MODEL_ENABLED"));
+    }
+
+    /// An enabled runtime lists the configured model as Ready with no
+    /// warning; a disabled one lists Deprecated with the setup hint.
+    #[tokio::test]
+    async fn models_route_reflects_runtime_state() {
+        let mock = spawn_scripted_llm(vec![LlmScript::Content("unused")]).await;
+        let app = app_with(
+            AiConfig {
+                model_enabled: true,
+                model_endpoint: mock.endpoint(),
+                ..AiConfig::default()
+            },
+            "test-key",
+        )
+        .await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/models")
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["data"]["runtime_enabled"], true);
+        assert!(body["data"]["warning"].is_null(), "no warning when enabled");
+        assert_eq!(body["data"]["models"][0]["status"], "ready");
+    }
+
+    /// A present-but-blank tenant header is tenant-LESS: it falls back to
+    /// the control-plane bucket instead of minting an empty identity.
+    #[tokio::test]
+    async fn blank_tenant_header_falls_back_to_the_control_plane_bucket() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-apexmail-tenant-id", "   ".parse().unwrap());
+        assert_eq!(
+            tenant_rate_key_from_headers(&headers).unwrap(),
+            CONTROL_PLANE_RATE_KEY
+        );
+    }
+
+    /// Oversized bodies are rejected by the frame before any handler runs.
+    #[tokio::test]
+    async fn oversize_request_bodies_are_rejected() {
+        let app = app().await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/suggest")
+                    .method("POST")
+                    .header("x-api-key", "test-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(vec![b'x'; 64 * 1024 + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Auth middleware arms: bearer tokens are accepted, wrong credentials
+    /// and token-less deployments are not.
+    #[tokio::test]
+    async fn service_authentication_accepts_only_the_configured_credential() {
+        let app = app().await;
+        // Bearer form of the right token authenticates.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri("/models")
+                    .header("authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::OK
+        );
+        // Wrong bearer.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri("/models")
+                    .header("authorization", "Bearer wrong-key")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Wrong x-api-key.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri("/models")
+                    .header("x-api-key", "wrong-key")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A deployment without a configured token authenticates nobody.
+        let open = app_with(AiConfig::default(), "").await;
+        assert_eq!(
+            status_of(
+                &open,
+                Request::builder()
+                    .uri("/models")
+                    .header("x-api-key", "anything")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // /health stays public even then.
+        assert_eq!(
+            status_of(
+                &open,
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_route_rejects_empty_identities_and_messages() {
+        let app = app().await;
+        let chat = |body| authenticated_json_request("/chat", body);
+        assert_eq!(
+            status_of(
+                &app,
+                chat(
+                    serde_json::json!({"tenant_id":"t","user_id":"u","message":"   ","history":[]})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                chat(
+                    serde_json::json!({"tenant_id":"  ","user_id":"u","message":"hi","history":[]})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                chat(serde_json::json!({"tenant_id":"t","user_id":"","message":"hi","history":[]}))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// The chat rate limit is the same configured governor, enforced before
+    /// the message is even parsed.
+    #[tokio::test]
+    async fn chat_route_enforces_the_configured_rate_limit() {
+        let config = AiConfig {
+            inference_rate_limit: 1,
+            ..AiConfig::default()
+        };
+        let app = app_with(config, "test-key").await;
+        let chat = |body| authenticated_json_request("/chat", body);
+        let ok = serde_json::json!({"tenant_id":"t1","user_id":"u1","message":"What does the Pro plan cost?","history":[]});
+        assert_eq!(status_of(&app, chat(ok.clone())).await, StatusCode::OK);
+        assert_eq!(
+            status_of(&app, chat(ok)).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    /// A chat against an unreachable runtime surfaces as 503 — never as a
+    /// fabricated answer.
+    #[tokio::test]
+    async fn chat_route_with_dead_runtime_is_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // nothing listens there anymore
+        let config = AiConfig {
+            model_enabled: true,
+            model_endpoint: format!("http://127.0.0.1:{port}/v1"),
+            model_timeout_secs: 2,
+            ..AiConfig::default()
+        };
+        let app = app_with(config, "test-key").await;
+        let response = app
+            .oneshot(authenticated_json_request(
+                "/chat",
+                serde_json::json!({"tenant_id":"t1","user_id":"u1","message":"What does the Pro plan cost?","history":[]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// With a runtime answering, /chat delivers the verified answer and
+    /// persists the tenant-scoped audit rows.
+    #[tokio::test]
+    async fn chat_route_delivers_answer_and_persists_audit() {
+        let Some(_lock) = crate::test_support::serial_lock("chat-audit-serial").await else {
+            return;
+        };
+        let Some(url) = crate::test_support::test_db_url() else {
+            return;
+        };
+        let Some(db) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        let mock = spawn_scripted_llm(vec![LlmScript::Content(
+            "The Pro plan costs \u{20ac}65 per month with 150,000 emails included.",
+        )])
+        .await;
+        let config = AiConfig {
+            model_enabled: true,
+            model_endpoint: mock.endpoint(),
+            model_timeout_secs: 10,
+            database_url: url,
+            ..AiConfig::default()
+        };
+        let app = app_with(config, "test-key").await;
+        let tenant = crate::test_support::unique("chat_r");
+
+        let response = app.clone()
+            .oneshot(json_request_with_headers(
+                "/chat",
+                serde_json::json!({"tenant_id": tenant, "user_id":"u1","message":"What does the Pro plan cost?","history":[]}),
+                &[("x-api-key", "test-key"), ("x-apexmail-tenant-id", &tenant)],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["answer"].as_str().unwrap().contains("\u{20ac}65"));
+        assert_eq!(body["passed_verification"], true);
+
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM ai_chat_messages WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(rows, 2, "user and assistant audit rows persisted");
+
+        // ── /admin/chat/history reads them back, tenant-scoped ───────────
+        let app = app_with(
+            AiConfig {
+                database_url: crate::test_support::test_db_url().unwrap_or_default(),
+                ..AiConfig::default()
+            },
+            "test-key",
+        )
+        .await;
+        let response = app
+            .clone()
+            .oneshot(authenticated_json_request(
+                "/admin/chat/history",
+                serde_json::json!({"tenant_id": tenant, "limit": 10000}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let history: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let messages = history["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().any(|m| m["role"] == "assistant"));
+        assert!(messages.iter().all(|m| m["user_id"] == "u1"));
+
+        // History without a tenant_id is a 400.
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request("/admin/chat/history", serde_json::json!({"limit": 5}))
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        sqlx::query("DELETE FROM ai_chat_messages WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn admin_routes_fail_closed_without_a_docs_database() {
+        let app = app().await; // no database_url configured
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request("/admin/reindex", serde_json::json!({}))
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/admin/chat/history",
+                    serde_json::json!({"tenant_id":"t"})
+                )
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// /admin/reindex rebuilds the index from AI_DOCS_DIR and reports the
+    /// version; a missing docs dir is a 500, not a silent success.
+    #[tokio::test]
+    async fn reindex_route_reports_counts_and_fails_on_missing_dir() {
+        let _serial = ENV_SERIAL.lock().await;
+        let Some(_lock) = crate::test_support::serial_lock("docs-index-serial").await else {
+            return;
+        };
+        let Some(url) = crate::test_support::test_db_url() else {
+            return;
+        };
+        let Some(db) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("ai-route-docs-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("guide.md"),
+            "# Guide\n\nHow do I warm up my IP safely and gradually.\n",
+        )
+        .unwrap();
+        let _docs_dir_guard =
+            EnvGuard::with(&[("AI_DOCS_DIR", Some(dir.display().to_string().as_str()))]);
+
+        let app = app_with(
+            AiConfig {
+                database_url: url.clone(),
+                ..AiConfig::default()
+            },
+            "test-key",
+        )
+        .await;
+
+        let response = app
+            .oneshot(authenticated_json_request(
+                "/admin/reindex",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["indexed_chunks"], 1);
+        assert_eq!(body["docs_version"].as_str().unwrap().len(), 16);
+
+        // A missing directory is an internal error with the reason.
+        let _missing_dir_guard = EnvGuard::with(&[("AI_DOCS_DIR", Some("/nonexistent/ai-docs"))]);
+        let app = app_with(
+            AiConfig {
+                database_url: url,
+                ..AiConfig::default()
+            },
+            "test-key",
+        )
+        .await;
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request("/admin/reindex", serde_json::json!({}))
+            )
+            .await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        drop(_missing_dir_guard);
+        drop(_docs_dir_guard);
+        drop(_lock);
+
+        sqlx::query("DELETE FROM ai_docs_chunks")
+            .execute(&db)
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// /domains/dns-records with an authoritative store: tenant header is
+    /// mandatory, owned domains resolve, unknown domains 404.
+    #[tokio::test]
+    async fn domain_dns_route_scopes_to_the_forwarded_tenant() {
+        let Some(_lock) = crate::test_support::serial_lock("domain-dns-serial").await else {
+            return;
+        };
+        let Some(url) = crate::test_support::test_db_url() else {
+            return;
+        };
+        let Some(db) = crate::test_support::shared_pool().await else {
+            return;
+        };
+        let tenant = crate::test_support::unique("dns_r");
+        // Domain names are globally unique; make the fixture name run-unique
+        // and sweep any row a previously interrupted run left behind.
+        let domain = format!(
+            "dns-route-{}.example.com",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        sqlx::query("DELETE FROM domains WHERE name LIKE 'dns-route-%'")
+            .execute(&db)
+            .await
+            .ok();
+        sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, $2)")
+            .bind(&tenant)
+            .bind("route dns test tenant")
+            .execute(&db)
+            .await
+            .expect("insert tenant");
+        sqlx::query(
+            "INSERT INTO domains (tenant_id, name, status, dkim_selector, dkim_public_key, \
+             dkim_private_key, dkim_enabled) VALUES ($1, $2, 'verified', 'am-sel', 'PUBKEY1', \
+             'PRIVKEY1', true)",
+        )
+        .bind(&tenant)
+        .bind(&domain)
+        .execute(&db)
+        .await
+        .expect("insert domain");
+
+        let app = app_with(
+            AiConfig {
+                database_url: url,
+                ..AiConfig::default()
+            },
+            "test-key",
+        )
+        .await;
+
+        // Missing tenant header is a 400.
+        assert_eq!(
+            status_of(
+                &app,
+                authenticated_json_request(
+                    "/domains/dns-records",
+                    serde_json::json!({"domain":"dns-route.example.com"})
+                )
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // Owned domain resolves with authoritative records.
+        let response = app
+            .clone()
+            .oneshot(json_request_with_headers(
+                "/domains/dns-records",
+                serde_json::json!({"domain": domain.to_uppercase() + "."}),
+                &[("x-api-key", "test-key"), ("x-apexmail-tenant-id", &tenant)],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["data"]["domain"], domain,
+            "normalization matches case and dot"
+        );
+        assert!(
+            body["data"]["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["hostname"] == format!("am-sel._domainkey.{domain}")),
+            "the selector record must be present: {body}"
+        );
+
+        // A domain the tenant does not own is 404 — never another
+        // tenant's records.
+        assert_eq!(
+            status_of(
+                &app,
+                json_request_with_headers(
+                    "/domains/dns-records",
+                    serde_json::json!({"domain":"someone-elses.example.com"}),
+                    &[("x-api-key", "test-key"), ("x-apexmail-tenant-id", &tenant)]
+                )
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
+
+        sqlx::query("DELETE FROM domains WHERE tenant_id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await
+            .ok();
+    }
+
+    /// /train with a configured runner starts a real governed job and the
+    /// job route reads it back.
+    #[tokio::test]
+    async fn train_route_starts_a_governed_job_readable_by_id() {
+        let scratch =
+            std::env::temp_dir().join(format!("ai-routes-train-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(&scratch).unwrap();
+        let config = AiConfig {
+            training_runner: "/bin/echo".into(),
+            checkpoint_path: scratch.display().to_string(),
+            ..AiConfig::default()
+        };
+        let app = app_with(config, "test-key").await;
+
+        let response = app
+            .clone()
+            .oneshot(authenticated_json_request(
+                "/train",
+                serde_json::json!({"model_id":"apexmail-assistant","epochs":2}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let job_id = body["data"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        assert_eq!(body["data"]["job"]["status"], "running");
+        assert!(
+            body["data"]["promotion"]
+                .as_str()
+                .unwrap()
+                .contains("does not promote"),
+            "completion is not promotion"
+        );
+
+        // The job is readable while it runs or after the runner exits.
+        assert_eq!(
+            status_of(
+                &app,
+                Request::builder()
+                    .uri(format!("/training/jobs/{job_id}"))
+                    .header("x-api-key", "test-key")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await,
+            StatusCode::OK
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A live runtime turns /predict into a real prediction response.
+    #[tokio::test]
+    async fn predict_with_live_runtime_returns_the_prediction() {
+        let mock = spawn_scripted_llm(vec![LlmScript::Content("computed answer")]).await;
+        let config = AiConfig {
+            model_enabled: true,
+            model_endpoint: mock.endpoint(),
+            model_timeout_secs: 10,
+            ..AiConfig::default()
+        };
+        let app = app_with(config, "test-key").await;
+        let response = app
+            .oneshot(authenticated_json_request(
+                "/predict",
+                serde_json::json!({"model_id":"apexmail-assistant","input":{"prompt":"Hello"}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["output"]["text"], "computed answer");
+        assert_eq!(body["data"]["model_id"], "apexmail-assistant");
+    }
+
+    /// A malformed tenant header on /chat is a 400 before any rate bucket or
+    /// model call — opaque bytes can never masquerade as tenant-less calls.
+    #[tokio::test]
+    async fn chat_route_rejects_malformed_tenant_headers() {
+        let app = app().await;
+        let mut request = authenticated_json_request(
+            "/chat",
+            serde_json::json!({"tenant_id":"t1","user_id":"u1","message":"hi","history":[]}),
+        );
+        request
+            .headers_mut()
+            .insert("x-apexmail-tenant-id", "bad tenant!".parse().unwrap());
+        assert_eq!(status_of(&app, request).await, StatusCode::BAD_REQUEST);
+    }
+
+    /// An unreachable docs database degrades AppState to pool-less operation
+    /// with a warning: grounded chat then fails closed, health degrades
+    /// honestly, and the service still starts.
+    #[tokio::test]
+    async fn docs_pool_failure_degrades_the_service_without_panicking() {
+        let config = AiConfig {
+            database_url: "postgresql://apexmail:not-a-real-password@127.0.0.1:1/no-such-db".into(),
+            ..AiConfig::default()
+        };
+        let state = AppState::from_config(config, "test-key".into())
+            .await
+            .expect("state builds even when the docs database is down");
+        assert!(
+            state.docs_pool.is_none(),
+            "a failed docs pool must degrade to None"
+        );
+        assert!(state.domain_dns.is_some(), "the DNS store connects lazily");
+    }
+
+    /// The oversize-data guard is directly exercisable at the handler (HTTP
+    /// bodies are already capped at 64 KiB by the frame, which cannot carry
+    /// 10,001 entries — the guard defends the handler, not the wire).
+    #[tokio::test]
+    async fn optimize_time_handler_rejects_more_than_ten_thousand_entries() {
+        let state = Arc::new(
+            AppState::from_config(AiConfig::default(), "test-key".into())
+                .await
+                .expect("valid configuration"),
+        );
+        let request = OptimizeTimeRequest {
+            engagement_data: vec![(9, 2, 0.5); 10_001],
+        };
+        let response = optimize_time_handler(State(state.clone()), Json(request)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// State can be built from the deployment environment.
+    #[tokio::test]
+    async fn state_builds_from_environment() {
+        let _serial = ENV_SERIAL.lock().await;
+        let scratch = std::env::temp_dir().join(format!("ai-routes-env-{}", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
+        std::fs::create_dir_all(&scratch).unwrap();
+        let checkpoint = scratch.display().to_string();
+        let _guard = EnvGuard::with(&[
+            ("AI_MODEL_ENABLED", None),
+            ("INTERNAL_SERVICE_TOKEN", Some("env-token")),
+            ("AI_CHECKPOINT_PATH", Some(checkpoint.as_str())),
+        ]);
+        let state = default_app_state().await.expect("state from env");
+        assert_eq!(state.service_token, "env-token");
+        assert!(!state.model_enabled);
+        std::fs::remove_dir_all(&scratch).ok();
     }
 }

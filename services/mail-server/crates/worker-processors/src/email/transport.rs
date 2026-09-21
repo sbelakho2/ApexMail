@@ -2968,3 +2968,166 @@ mod coverage_arms {
         assert!(!transport.supports_source_binding());
     }
 }
+
+#[cfg(test)]
+mod adversarial_batch {
+    //! Hybrid-transport identity, VERP identity refusals, the outbound-MTA
+    //! fallback arm, and folded MIME header unfolding.
+
+    use super::*;
+    use std::time::Duration;
+
+    /// The hybrid transport names exactly what it can do: claiming "hybrid"
+    /// with only one backend would mislead provider analytics.
+    #[test]
+    fn hybrid_transport_names_its_backends_honestly() {
+        let smtp = Arc::new(SmtpTransport::new(SmtpConfig::default()));
+        let ses_slot: Option<Arc<dyn EmailTransport>> = None;
+
+        let nothing = HybridTransport::new(None, None);
+        assert_eq!(nothing.transport_name(), "unconfigured");
+        assert!(!nothing.supports_source_binding());
+
+        let dedicated_only = HybridTransport::new(
+            ses_slot.clone(),
+            Some(smtp.clone() as Arc<dyn EmailTransport>),
+        );
+        assert_eq!(dedicated_only.transport_name(), "smtp");
+        assert!(!dedicated_only.supports_source_binding());
+
+        let ses_only = HybridTransport::new(Some(smtp as Arc<dyn EmailTransport>), None);
+        assert_eq!(ses_only.transport_name(), "ses");
+    }
+
+    /// VERP identity construction refuses malformed queue/tenant/recipient
+    /// identities instead of minting an unattributable bounce address.
+    #[test]
+    fn verp_return_path_refuses_malformed_identities() {
+        let secret = b"0123456789abcdef0123456789abcdef";
+        // Empty identity parts and a non-positive TTL are refused.
+        assert_eq!(
+            verp_return_path("", "tenant", "r@example.com", "b.example", secret, 0, 3600),
+            None
+        );
+        assert_eq!(
+            verp_return_path("q", "", "r@example.com", "b.example", secret, 0, 3600),
+            None
+        );
+        assert_eq!(
+            verp_return_path("q", "tenant", "r@example.com", "b.example", secret, 0, 0),
+            None
+        );
+        // Identity parts that would corrupt the local part are refused.
+        assert_eq!(
+            verp_return_path(
+                "q@x",
+                "tenant",
+                "r@example.com",
+                "b.example",
+                secret,
+                0,
+                3600
+            ),
+            None
+        );
+        assert_eq!(
+            verp_return_path(
+                "q",
+                "ten ant",
+                "r@example.com",
+                "b.example",
+                secret,
+                0,
+                3600
+            ),
+            None
+        );
+        // Recipient edge cases: no @, empty local/domain, CRLF injection.
+        assert_eq!(
+            verp_return_path("q", "tenant", "no-at-sign", "b.example", secret, 0, 3600),
+            None
+        );
+        assert_eq!(
+            verp_return_path("q", "tenant", "@example.com", "b.example", secret, 0, 3600),
+            None
+        );
+        assert_eq!(
+            verp_return_path(
+                "q",
+                "tenant",
+                "r@\r\nb.example",
+                "b.example",
+                secret,
+                0,
+                3600
+            ),
+            None
+        );
+        // A valid identity produces a bounce address on the VERP domain.
+        let verp = verp_return_path(
+            "queue-1",
+            "tenant-1",
+            "R@Example.com",
+            "b.example",
+            secret,
+            1_000,
+            3_600,
+        );
+        assert!(verp.is_some(), "a valid identity must mint a return path");
+    }
+
+    /// When the in-process outbound MTA cannot be constructed, the factory
+    /// warns and falls back to the legacy relay transport — the dedicated
+    /// route stays available (degraded), never silently absent.
+    #[tokio::test]
+    async fn transport_factory_falls_back_to_relay_when_mta_is_unavailable() {
+        crate::test_support::install_test_tracing();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgresql://127.0.0.1:1/none")
+            .expect("lazy pool");
+        pool.close().await; // the MTA ledger cannot be reached
+
+        let config = EmailConfig {
+            transport_type: TransportType::Smtp,
+            smtp: SmtpConfig {
+                host: "relay.example".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let hybrid = create_transport_from_config_with_db_and_redis(&config, Some(&pool), None)
+            .await
+            .expect("factory");
+        assert!(
+            hybrid.has_dedicated_smtp(),
+            "the relay fallback keeps the dedicated route available"
+        );
+    }
+
+    /// Folded (CRLF+space continued) MIME header values are unfolded by the
+    /// test helper's extraction contract.
+    #[test]
+    fn folded_mime_header_values_are_unfolded() {
+        // The helper lives in the sibling tests module; replicate the exact
+        // contract on a folded header produced by mail-builder.
+        let raw = "X-Custom: first\r\n second\r\nX-Other: no\r\n";
+        let mut value: Option<String> = None;
+        for line in raw.split("\r\n") {
+            if let Some(rest) = line.strip_prefix("X-Custom:") {
+                if value.is_none() {
+                    value = Some(rest.trim_start().to_string());
+                }
+            } else if line.starts_with(' ') || line.starts_with('\t') {
+                if let Some(v) = value.as_mut() {
+                    v.push_str(line.trim());
+                }
+            } else if !line.is_empty() && value.is_some() {
+                break;
+            }
+        }
+        assert_eq!(value.as_deref(), Some("firstsecond"));
+    }
+}

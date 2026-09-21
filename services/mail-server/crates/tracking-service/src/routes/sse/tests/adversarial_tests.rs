@@ -513,9 +513,19 @@ async fn stream_delivers_connected_then_applies_both_filters_exactly() {
     assert!(subscribed, "the stream must subscribe before delivering");
 
     // (1) wrong type → filtered out.
-    publish(&pool, &channel, r#"{"type":"clicked","messageId":"msg_ok"}"#).await;
+    publish(
+        &pool,
+        &channel,
+        r#"{"type":"clicked","messageId":"msg_ok"}"#,
+    )
+    .await;
     // (2) right type, wrong message → filtered out.
-    publish(&pool, &channel, r#"{"type":"opened","messageId":"msg_other"}"#).await;
+    publish(
+        &pool,
+        &channel,
+        r#"{"type":"opened","messageId":"msg_other"}"#,
+    )
+    .await;
     // (3) both match → delivered under the event's type name.
     publish(
         &pool,
@@ -530,7 +540,11 @@ async fn stream_delivers_connected_then_applies_both_filters_exactly() {
     let mut got_open = None;
     let mut got_raw = None;
     for _ in 0..100 {
-        let Some(frame) = tokio::time::timeout(Duration::from_millis(250), rx.recv()).await.ok().flatten() else {
+        let Some(frame) = tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .ok()
+            .flatten()
+        else {
             break;
         };
         if got_open.is_none() && frame.contains("event: opened") && frame.contains("msg_ok") {
@@ -558,4 +572,3 @@ async fn stream_delivers_connected_then_applies_both_filters_exactly() {
     );
     redis_del(&pool, &key).await;
 }
-

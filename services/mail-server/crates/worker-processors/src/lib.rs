@@ -59,4 +59,28 @@ pub(crate) mod test_support {
             .ok()?;
         Some(pool)
     }
+
+    /// Install a process-wide tracing subscriber for tests (idempotent).
+    ///
+    /// Without a subscriber the `tracing` macros short-circuit before their
+    /// formatting regions run, so every `warn!`/`info!`/`error!`/`debug!`
+    /// arm inside a production code path reports as never-executed even when
+    /// the path itself is exercised. Installing a DEBUG-level subscriber
+    /// makes those arms genuinely run (and count) while keeping `TRACE`
+    /// noise (sqlx statement logs) filtered. Tests that exercise log-bearing
+    /// paths call this first; `call_once` makes repeats a no-op, and the
+    /// `Err` from a lost race with another thread's first install is
+    /// intentionally ignored.
+    pub(crate) fn install_test_tracing() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            use tracing_subscriber::EnvFilter;
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_new("debug").unwrap_or_else(|_| EnvFilter::new("debug")),
+                )
+                .with_test_writer()
+                .try_init();
+        });
+    }
 }

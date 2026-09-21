@@ -406,6 +406,23 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         }
     }
 
+    // NAT64: 64:ff9b::/96 (RFC 6052 well-known prefix) and the RFC 8215
+    // local-use variant embed a literal IPv4 address in the last 32 bits.
+    // A dual-stack NAT64 gateway would translate the "public-looking" IPv6
+    // literal straight to that IPv4 — so an embedded private address must
+    // be refused exactly like the IPv4 itself.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        let embedded_ipv4 = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            (segments[6] & 0xff) as u8,
+            (segments[7] >> 8) as u8,
+            (segments[7] & 0xff) as u8,
+        );
+        if is_private_ipv4(&embedded_ipv4) {
+            return true;
+        }
+    }
+
     // IPv4-mapped addresses:check the embedded IPv4
     if let Some(ipv4) = ip.to_ipv4_mapped() {
         return is_private_ipv4(&ipv4);
@@ -782,5 +799,32 @@ mod adversarial_tests {
             .verify_resolution_freshness(&fresh)
             .await
             .expect("fresh resolutions are not re-resolved");
+    }
+}
+
+#[cfg(test)]
+mod ipv6_embedded_batch {
+    //! Deprecated and transitional IPv6 ranges that EMBED an IPv4 address
+    //! must be classified by that embedded address, not by the fact that
+    //! the outer IPv6 looks "public".
+
+    use super::*;
+
+    #[test]
+    fn ipv4_compatible_and_nat64_embedded_privates_are_refused() {
+        // Deprecated IPv4-compatible ::/96 carrying a private IPv4.
+        assert!(is_private_ip(&"::10.0.0.1".parse::<IpAddr>().expect("v6")));
+        assert!(is_private_ip(
+            &"::192.168.1.5".parse::<IpAddr>().expect("v6")
+        ));
+        // NAT64 64:ff9b::/96 carrying a private IPv4.
+        assert!(is_private_ip(
+            &"64:ff9b::10.0.0.1".parse::<IpAddr>().expect("v6")
+        ));
+        // The same ranges carrying PUBLIC IPv4 are not private...
+        assert!(!is_private_ip(&"::8.8.8.8".parse::<IpAddr>().expect("v6")));
+        assert!(!is_private_ip(
+            &"64:ff9b::8.8.4.4".parse::<IpAddr>().expect("v6")
+        ));
     }
 }
