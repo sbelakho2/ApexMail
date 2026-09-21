@@ -1799,7 +1799,11 @@ pub mod test_support {
                 return;
             }
             let probe = probe_name("drop_force");
-            let role = format!("migrator_blocker_{:04}", counter());
+            // Roles are cluster-global and outlive databases: suffix the
+            // PID so a leftover role from a killed run can never collide
+            // with this run's CREATE ROLE (nextest restarts counters per
+            // process).
+            let role = format!("migrator_blocker_{}_{:04}", std::process::id(), counter());
             sqlx::query(&format!(r#"CREATE ROLE "{role}" LOGIN"#))
                 .execute(&admin)
                 .await
@@ -1847,7 +1851,11 @@ pub mod test_support {
                 eprintln!("skipping: TEST_DATABASE_ADMIN_URL not set");
                 return;
             };
-            let role = format!("migrator_probe_role_{:04}", counter());
+            let role = format!(
+                "migrator_probe_role_{}_{:04}",
+                std::process::id(),
+                counter()
+            );
             let probe = probe_name("drop_noforce");
             sqlx::query(&format!(r#"CREATE ROLE "{role}" LOGIN"#))
                 .execute(&admin)
