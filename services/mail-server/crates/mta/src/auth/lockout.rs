@@ -598,6 +598,10 @@ mod tests {
                 anyhow::bail!("store down")
             }
         }
+        // reset() must also survive a failing durable store (the in-process
+        // counters are cleared; the store errors are only logged).
+        let tracker = AuthFailTracker::with_store(std::sync::Arc::new(BrokenStore));
+        tracker.reset(ip(12), "broken@example.com").await;
         let tracker = AuthFailTracker::with_store(std::sync::Arc::new(BrokenStore));
         for _ in 0..MAX_AUTH_FAILURES_PER_ACCOUNT {
             tracker.record_failure(ip(12), "dave@example.com").await;
@@ -612,8 +616,8 @@ mod tests {
         // `redis-server` locally it proves the Redis code path end-to-end.
         // F6: no ambient 6379 default — the variable must name the Redis
         // under test explicitly; unset means skip.
-        let Ok(url) = std::env::var("REDIS_TEST_URL") else {
-            eprintln!("skipping: REDIS_TEST_URL not set");
+        let Ok(url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping: TEST_REDIS_URL not set");
             return;
         };
         let pool = match deadpool_redis::Config::from_url(&url)
@@ -651,5 +655,24 @@ mod tests {
     #[test]
     fn normalize_account_lowercases() {
         assert_eq!(normalize_account("Alice@Example.COM"), "alice@example.com");
+    }
+    #[test]
+    fn default_constructors_match_new() {
+        // The Default impls must behave like new(): an empty tracker that
+        // locks nothing and a store that holds nothing.
+        let tracker = AuthFailTracker::default();
+        let ip: IpAddr = "192.0.2.50".parse().unwrap();
+        assert!(!futures_now(tracker.is_locked(ip, "default@example.com")));
+        let _store = SharedMemoryFailStore::default();
+    }
+
+    /// Block on a future with a fresh single-thread runtime (helper for
+    /// sync-context asserts about async state).
+    fn futures_now<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
     }
 }

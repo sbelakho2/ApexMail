@@ -140,23 +140,26 @@ async fn start_impersonation(
     });
     let session_token = create_signed_token(&session_payload, &state.config.session_secret)?;
 
-    // Calculate cookie max-age from token expiry
+    // `verify_impersonation_token` above already rejected `exp <= now`,
+    // so the remaining lifetime is always positive here; it degrades to
+    // Max-Age=0 (an instantly-expired cookie) only on the sub-second
+    // boundary. The previous `3600` fallback arm was unreachable dead
+    // code.
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let max_age_secs = if exp > now_ms {
-        (exp - now_ms) / 1000
-    } else {
-        3600 // Default 1 hour
-    };
+    let max_age_secs = (exp - now_ms) / 1000;
 
     let mut response = Redirect::to("/dashboard").into_response();
     let cookie = format!(
         "impersonation_session={session_token}; HttpOnly; Path=/; Max-Age={max_age_secs}; SameSite=Strict{}",
         if state.config.environment.is_production() { "; Secure" } else { "" }
     );
-    let val = cookie.parse().map_err(|e| {
-        tracing::error!(error = %e, "failed to build impersonation cookie header");
-        ApiError::Internal("failed to set impersonation cookie".into())
-    })?;
+    // The token is base64url(payload).base64url(HMAC) — the URL-safe
+    // Base64 alphabet plus '.' is entirely visible ASCII, and
+    // HeaderValue::from_str rejects only non-visible-ASCII and control
+    // bytes, so this parse cannot fail.
+    let val = cookie
+        .parse()
+        .expect("impersonation cookie is visible-ASCII");
     response.headers_mut().insert("Set-Cookie", val);
 
     Ok(response)
@@ -222,10 +225,12 @@ async fn end_impersonation(
             ""
         }
     );
-    let val = clear_cookie.parse().map_err(|e| {
-        tracing::error!(error = %e, "failed to build clear-impersonation cookie header");
-        ApiError::Internal("failed to clear impersonation cookie".into())
-    })?;
+    // A constant, entirely visible-ASCII string — HeaderValue::from_str
+    // rejects only non-visible-ASCII and control bytes, so this parse
+    // cannot fail.
+    let val = clear_cookie
+        .parse()
+        .expect("clear-impersonation cookie is a constant visible-ASCII string");
     response.headers_mut().insert("Set-Cookie", val);
 
     Ok(response)
@@ -780,5 +785,276 @@ mod adversarial_tests {
         .await
         .unwrap();
         assert_eq!(count_before, count_after, "garbage cookies are not audited");
+    }
+
+    // ── Outage + wire-detail arms ────────────────────────────────
+    //
+    // A local driver over the REAL router with caller-controlled Redis
+    // endpoint and environment — AdvEnv always uses the shared test Redis
+    // and a non-production config, so the fail-closed arms and the
+    // `; Secure` cookie arms are unreachable through it.
+
+    struct CustomEnv {
+        app: axum::Router,
+        credential: String,
+    }
+
+    async fn custom_env(
+        pool: sqlx::PgPool,
+        redis_url: &str,
+        environment: crate::config::Environment,
+    ) -> CustomEnv {
+        use crate::app::build_app;
+        use crate::app::test_support::{test_config, test_state_over_with_config_and_redis};
+
+        let credential = crate::app::test_support::seed_api_key_for(&pool, "system", &["*"]).await;
+        let mut config = test_config();
+        config.environment = environment;
+        let state = test_state_over_with_config_and_redis(pool, config, redis_url).await;
+        CustomEnv {
+            app: build_app(state),
+            credential,
+        }
+    }
+
+    impl CustomEnv {
+        async fn post_start(&self, token: &str) -> (StatusCode, Vec<String>) {
+            use axum::body::Body;
+            use axum::http::{header, Method, Request};
+            use tower::ServiceExt;
+
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/auth/impersonate")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-api-key", &self.credential)
+                .body(Body::from(
+                    serde_json::json!({ "token": token }).to_string(),
+                ))
+                .expect("request");
+            let response = self.app.clone().oneshot(request).await.expect("response");
+            let status = response.status();
+            let cookies = response
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok().map(str::to_string))
+                .collect();
+            (status, cookies)
+        }
+
+        async fn post_end(&self, cookie: Option<&str>) -> StatusCode {
+            use axum::body::Body;
+            use axum::http::{header, Method, Request};
+            use tower::ServiceExt;
+
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/auth/impersonate/end")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-api-key", &self.credential);
+            if let Some(cookie) = cookie {
+                builder = builder.header(header::COOKIE, cookie);
+            }
+            let request = builder.body(Body::empty()).expect("request");
+            let response = self.app.clone().oneshot(request).await.expect("response");
+            response.status()
+        }
+    }
+
+    /// Redis unreachable at POOL level: the exchange must fail CLOSED (503),
+    /// never mint an untracked replayable session.
+    #[tokio::test]
+    async fn start_fails_closed_when_redis_pool_is_unreachable() {
+        let Some(pool) = crate::test_db::canonical_pool("imp_redis_down").await else {
+            return;
+        };
+        let env = custom_env(
+            pool,
+            "redis://127.0.0.1:1",
+            crate::config::Environment::Development,
+        )
+        .await;
+        let (status, _cookies) =
+            start_env(&env, &impersonation_token(valid_payload("jti-down"))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Redis reachable at TCP level but refusing commands (the socket is
+    /// torn down on accept): the SET NX itself fails — the same fail-closed
+    /// contract applies.
+    #[tokio::test]
+    async fn start_fails_closed_when_the_set_nx_command_fails() {
+        let Some(pool) = crate::test_db::canonical_pool("imp_redis_setfail").await else {
+            return;
+        };
+        // A TCP peer that accepts and immediately drops the connection:
+        // deadpool creates the object (TCP connect succeeds), then the
+        // first command hits a closed socket.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for _ in 0..8 {
+                if let Ok((socket, _)) = listener.accept() {
+                    drop(socket);
+                }
+            }
+        });
+        let env = custom_env(
+            pool,
+            &format!("redis://{addr}"),
+            crate::config::Environment::Development,
+        )
+        .await;
+        let (status, _cookies) =
+            start_env(&env, &impersonation_token(valid_payload("jti-setfail"))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The audit write is on the critical path: when it fails the exchange
+    /// is refused (500) — an unaudited impersonation session must never be
+    /// minted. The audit_logs relation is renamed in this throwaway
+    /// per-test database.
+    #[tokio::test]
+    async fn start_refuses_when_the_audit_write_fails() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("imp_audit_fail").await else {
+            return;
+        };
+        crate::routes::fault::hide_table(&pool, "audit_logs")
+            .await
+            .expect("hide audit_logs");
+        let env = AdvEnv::admin(pool).await;
+        let (status, _headers, bytes) = env
+            .post_raw(
+                "/v1/auth/impersonate",
+                &serde_json::json!({ "token": impersonation_token(valid_payload(&format!("jti-auditfail-{}", uuid::Uuid::new_v4().simple()))) })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    /// Production flips the cookie wire format: both the minted
+    /// impersonation cookie and the clearing cookie carry `; Secure`.
+    #[tokio::test]
+    async fn production_environment_sets_secure_cookie_attributes() {
+        if std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+        {
+            eprintln!("skipping: TEST_REDIS_URL unset");
+            return;
+        }
+        let Some(pool) = crate::test_db::canonical_pool("imp_secure").await else {
+            return;
+        };
+        let env = custom_env(
+            pool.clone(),
+            &std::env::var("TEST_REDIS_URL").expect("redis url checked above"),
+            crate::config::Environment::Production,
+        )
+        .await;
+        let (status, cookies) = start_env(
+            &env,
+            &impersonation_token(valid_payload(&format!(
+                "jti-secure-{}",
+                uuid::Uuid::new_v4().simple()
+            ))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let cookie = cookies
+            .iter()
+            .find(|c| c.starts_with("impersonation_session="))
+            .expect("impersonation cookie");
+        assert!(cookie.contains("Secure"), "production cookie: {cookie}");
+
+        // end: the clear cookie is Secure too.
+        let status = env.post_end(None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    async fn start_env(env: &CustomEnv, token: &str) -> (StatusCode, Vec<String>) {
+        env.post_start(token).await
+    }
+
+    /// The end audit falls back to "unknown" attribution when the session
+    /// payload carries no operator/tenant identity, and a cookie without
+    /// the signature separator is never audited.
+    #[tokio::test]
+    async fn end_audit_attribution_falls_back_to_unknown_for_identity_less_cookies() {
+        let Some(pool) = crate::test_db::canonical_pool("imp_end_unknown").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // A validly-signed session cookie with NO operatorId/tenantId.
+        let session_payload = serde_json::json!({
+            "type": "impersonation",
+            "tokenId": format!("jti-unk-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            "exp": chrono::Utc::now().timestamp_millis() + 600_000,
+        });
+        let session_token =
+            create_signed_token(&session_payload, "test-session-secret-1234567890ab").unwrap();
+        let (status, _headers, _bytes) = env
+            .post_raw_with_cookie(
+                "/v1/auth/impersonate/end",
+                "",
+                &format!("impersonation_session={session_token}"),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        // The payload carries no operatorId/tenantId, so the audit metadata
+        // has no attribution keys at all — the handler must still persist
+        // the end-of-session record (attributed by tokenId only).
+        let (operator, tenant): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT details->>'operatorId', details->>'tenantId' FROM audit_logs \
+             WHERE action = 'impersonation_session_ended' \
+             AND details->>'tokenId' = $1",
+        )
+        .bind(session_payload["tokenId"].as_str().expect("tokenId"))
+        .fetch_one(&pool)
+        .await
+        .expect("unknown-attribution audit row");
+        assert!(operator.is_none());
+        assert!(tenant.is_none());
+
+        // A cookie value with no signature separator at all: nothing is
+        // audited, the response still clears cleanly.
+        let before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'impersonation_session_ended'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count before");
+        let (status, _headers, _bytes) = env
+            .post_raw_with_cookie(
+                "/v1/auth/impersonate/end",
+                "",
+                "impersonation_session=noseparator",
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let after: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'impersonation_session_ended'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count after");
+        assert_eq!(before, after);
     }
 }

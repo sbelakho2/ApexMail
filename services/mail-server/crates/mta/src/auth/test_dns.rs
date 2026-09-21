@@ -37,6 +37,11 @@ pub(crate) enum DnsAnswer {
 pub(crate) struct MockDns {
     pub resolver: TokioResolver,
     task: tokio::task::JoinHandle<()>,
+    /// Loopback UDP port the mock answers on. Consumers whose DNS stack
+    /// cannot reuse `resolver` (e.g. mail-auth's own bundled hickory
+    /// resolver, a different crate version) build their own resolver
+    /// pointed at this port.
+    pub port: u16,
 }
 
 impl MockDns {
@@ -80,6 +85,9 @@ impl MockDns {
         opts.timeout = std::time::Duration::from_millis(500);
         opts.try_tcp_on_error = false;
         opts.cache_size = 0;
+        // Same hosts-file guard as [`resolver_at`]: loopback PTRs must reach
+        // the mock, never /etc/hosts.
+        opts.use_hosts_file = trust_dns_resolver::config::ResolveHosts::Never;
         let resolver = trust_dns_resolver::Resolver::builder_with_config(
             config,
             TokioRuntimeProvider::default(),
@@ -87,12 +95,46 @@ impl MockDns {
         .with_options(opts)
         .build()
         .expect("resolver against mock dns");
-        Self { resolver, task }
+        Self {
+            resolver,
+            task,
+            port,
+        }
     }
 
     pub fn stop(self) {
         self.task.abort();
     }
+}
+
+/// A workspace resolver pointed at an already-running mock's port — for
+/// consumers that construct their resolver independently (the inbound
+/// server's EmailAuthenticator injection seam).
+pub(crate) fn resolver_at(port: u16) -> TokioResolver {
+    let mut nameserver = NameServerConfig::udp(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    if let Some(connection) = nameserver.connections.first_mut() {
+        connection.port = port;
+    }
+    let config =
+        trust_dns_resolver::config::ResolverConfig::from_parts(None, vec![], vec![nameserver]);
+    let mut opts = trust_dns_resolver::config::ResolverOpts::default();
+    opts.attempts = 1;
+    opts.timeout = std::time::Duration::from_millis(500);
+    opts.try_tcp_on_error = false;
+    opts.cache_size = 0;
+    let mut resolver = trust_dns_resolver::Resolver::builder_with_config(
+        config,
+        trust_dns_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .with_options(opts)
+    .build()
+    .expect("resolver pointed at the mock port");
+    // /etc/hosts maps 127.0.0.1 to "localhost": without this, reverse
+    // lookups of loopback IPs are answered from the hosts file and never
+    // reach the mock (the ResolveHosts option alone does not cover PTR
+    // lookups in hickory 0.26).
+    resolver.set_hosts(std::sync::Arc::new(trust_dns_resolver::Hosts::default()));
+    resolver
 }
 
 /// Build the wire response for one incoming query per the rule table.
@@ -163,4 +205,23 @@ fn answer(query_bytes: &[u8], rules: &HashMap<&'static str, DnsAnswer>) -> Messa
         response.metadata.response_code = ResponseCode::FormErr;
     }
     response
+}
+
+#[cfg(test)]
+mod temp_diag {
+    use super::*;
+
+    #[tokio::test]
+    async fn temp_dead_port_lookup() {
+        let start = std::time::Instant::now();
+        let resolver = resolver_at(1);
+        let out = resolver
+            .reverse_lookup(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)))
+            .await;
+        eprintln!(
+            "DBG elapsed={:?} out={:?}",
+            start.elapsed(),
+            out.map_err(|e| e.to_string())
+        );
+    }
 }

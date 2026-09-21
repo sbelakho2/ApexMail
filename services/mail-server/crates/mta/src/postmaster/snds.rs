@@ -44,9 +44,12 @@ impl SndsClient {
     /// Pull the SNDS CSV and parse into records.  An empty body is a valid
     /// "no traffic this period" response.
     pub async fn fetch(&self) -> Result<Vec<SndsRecord>, String> {
+        // The endpoint is overridable so tests (and self-hosted probes) can
+        // point the poll at a loopback server instead of the real SNDS host.
+        let data_url = std::env::var("SNDS_DATA_URL").unwrap_or(SNDS_DATA_URL.to_string());
         let resp = self
             .http
-            .get(SNDS_DATA_URL)
+            .get(data_url)
             .query(&[("key", self.creds.access_key.as_str())])
             .send()
             .await

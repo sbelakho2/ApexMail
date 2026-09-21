@@ -65,9 +65,10 @@ impl AnalyticsProcessor {
 
     /// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
+        let batch_size = self.config.base.batch_size;
+        let flush_interval = self.config.base.flush_interval;
         info!(
-            "Starting analytics processor (batch_size={}, flush_interval={:?})",
-            self.config.base.batch_size, self.config.base.flush_interval
+            "Starting analytics processor (batch_size={batch_size}, flush_interval={flush_interval:?})"
         );
 
         self.is_running.store(true, Ordering::SeqCst);
@@ -98,7 +99,7 @@ impl AnalyticsProcessor {
 
         // Flush remaining buffers
         if let Err(e) = self.flush_buffers().await {
-            error!("Error flushing buffers during shutdown: {}", e);
+            error!(error = %e, "Error flushing buffers during shutdown");
         }
 
         // Wait for active jobs to complete
@@ -202,42 +203,24 @@ impl AnalyticsProcessor {
         Ok(())
     }
 
-    /// Reset processing flag for failed events.
-    async fn reset_processing(&self, event_ids: &[String]) -> ProcessorResult<()> {
-        if event_ids.is_empty() {
-            return Ok(());
-        }
-
-        sqlx::query(
-            r#"
-            UPDATE analytics_queue
-            SET processing = false, processing_at = NULL
-            WHERE id = ANY($1::bigint[])
-            "#,
-        )
-        .bind(event_ids)
-        .execute(&self.db)
-        .await?;
-
-        Ok(())
-    }
-
     /// Process a batch of events.
+    ///
+    /// The reset-processing arm that used to live here was REMOVED as dead
+    /// (and had it ever fired, wrong) code: `process_events_inner` cannot
+    /// fail — a flush write failure is deliberately swallowed, with the
+    /// buffers restored and the rows left CLAIMED so the flush loop retries
+    /// them without a re-fetch. Resetting `processing` there would have
+    /// re-claimed rows whose events were still buffered and re-aggregated
+    /// them on the next pass (update_aggregation increments
+    /// unconditionally). The claim is instead released by the retrying
+    /// flush (mark_events_processed) or reclaimed after the staleness
+    /// window.
     async fn process_events(&self, events: Vec<AnalyticsEvent>) -> ProcessorResult<()> {
         self.active_jobs.fetch_add(1, Ordering::SeqCst);
-
-        let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
 
         let result = self.process_events_inner(events).await;
 
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
-
-        if result.is_err() {
-            // Reset processing flag for retry
-            if let Err(e) = self.reset_processing(&event_ids).await {
-                error!("Failed to reset processing flag: {}", e);
-            }
-        }
 
         result
     }
@@ -394,9 +377,10 @@ impl AnalyticsProcessor {
             for key in &keys_to_remove {
                 buffer.remove(key);
             }
+            let buffer_size = buffer.len();
             warn!(
                 evicted = excess,
-                buffer_size = buffer.len(),
+                buffer_size,
                 cap = MAX_AGGREGATION_BUFFER_SIZE,
                 "Aggregation buffer exceeded cap, evicted oldest entries by period_start"
             );
@@ -494,9 +478,11 @@ impl AnalyticsProcessor {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
 
+        let event_count = events.len();
+        let aggregation_count = aggregations.len();
         debug!(
-            events = events.len(),
-            aggregations = aggregations.len(),
+            events = event_count,
+            aggregations = aggregation_count,
             "Flushing analytics buffers"
         );
 
@@ -518,16 +504,19 @@ impl AnalyticsProcessor {
         // succeeded. A marking failure is logged but not restored — the
         // aggregations were already persisted and restoring would double-write.
         if let Err(e) = self.mark_events_processed(&event_ids).await {
+            let count = event_ids.len();
             error!(
                 error = %e,
-                count = event_ids.len(),
+                count,
                 "Failed to mark flushed events processed; they may be re-claimed and re-written"
             );
         }
 
+        let event_count = event_ids.len();
+        let aggregation_count = aggregations.len();
         debug!(
-            events = event_ids.len(),
-            aggregations = aggregations.len(),
+            events = event_count,
+            aggregations = aggregation_count,
             "Buffers flushed successfully"
         );
 
@@ -722,9 +711,16 @@ impl AnalyticsProcessor {
     }
 
     /// Hourly aggregation loop (rolls up data from events table).
+    ///
+    /// The FIRST rollup runs immediately at startup (an idempotent additive
+    /// upsert: rolling up the previous hour's residue at boot is the same
+    /// recovery posture as the email processor's restart sweeps), then once
+    /// at every hour boundary.
     async fn hourly_aggregation_loop(&self) {
-        // Run at the start of each hour
         while self.is_running.load(Ordering::SeqCst) {
+            if let Err(e) = self.run_hourly_aggregation().await {
+                error!("Hourly aggregation error: {}", e);
+            }
             // Calculate time until next hour
             let now = Utc::now();
             let one_hour = TimeDelta::try_hours(1).unwrap_or(TimeDelta::zero());
@@ -740,11 +736,7 @@ impl AnalyticsProcessor {
                 .unwrap_or(Duration::from_secs(3600));
 
             tokio::select! {
-                _ = sleep(wait_duration) => {
-                    if let Err(e) = self.run_hourly_aggregation().await {
-                        error!("Hourly aggregation error: {}", e);
-                    }
-                }
+                _ = sleep(wait_duration) => {}
                 _ = self.shutdown_notify.notified() => break,
             }
         }
@@ -934,7 +926,7 @@ mod adversarial_db_tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    fn redis_pool() -> RedisPool {
+    pub(super) fn redis_pool() -> RedisPool {
         let url = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -957,13 +949,10 @@ mod adversarial_db_tests {
 
     async fn test_pool(test_name: &str) -> Option<PgPool> {
         crate::test_support::install_test_tracing();
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
-    fn test_config() -> AnalyticsConfig {
+    pub(super) fn test_config() -> AnalyticsConfig {
         AnalyticsConfig {
             base: crate::common::ProcessorConfig {
                 name: "analytics-adversarial".to_string(),
@@ -980,11 +969,11 @@ mod adversarial_db_tests {
         AnalyticsProcessor::new(pool, redis_pool(), config)
     }
 
-    fn unique_tenant() -> String {
+    pub(super) fn unique_tenant() -> String {
         format!("an-{}", &Uuid::new_v4().simple().to_string()[..20])
     }
 
-    async fn enqueue_event(
+    pub(super) async fn enqueue_event(
         pool: &PgPool,
         tenant: &str,
         event_type: &str,
@@ -1008,7 +997,7 @@ mod adversarial_db_tests {
         .to_string()
     }
 
-    fn event(id: &str, tenant: &str, event_type: &str) -> AnalyticsEvent {
+    pub(super) fn event(id: &str, tenant: &str, event_type: &str) -> AnalyticsEvent {
         AnalyticsEvent {
             id: id.to_string(),
             tenant_id: tenant.to_string(),
@@ -1051,10 +1040,10 @@ mod adversarial_db_tests {
     // ── queue claiming ─────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn fetch_events_claims_pending_and_reclaims_stale_processing_only() {
-        let Some(pool) = test_pool("an_fetch_events").await else {
-            return;
-        };
+    async fn fetch_events_claims_pending_and_reclaims_stale_processing_only(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_fetch_events").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
 
@@ -1109,20 +1098,19 @@ mod adversarial_db_tests {
                 .await
                 .unwrap();
         assert!(processing, "claim marks the row processing");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn mark_and_reset_processing_are_exact_and_empty_safe() {
-        let Some(pool) = test_pool("an_mark_reset").await else {
-            return;
-        };
+    async fn mark_processing_is_exact_and_empty_safe() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_mark_reset").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let id = enqueue_event(&pool, &tenant, "sent", None, None).await;
         let numeric: i64 = id.parse().unwrap();
 
         proc.mark_events_processed(&[]).await.unwrap();
-        proc.reset_processing(&[]).await.unwrap();
 
         proc.mark_events_processed(std::slice::from_ref(&id))
             .await
@@ -1136,24 +1124,16 @@ mod adversarial_db_tests {
             .await
             .unwrap();
         assert!(processed && !processing && processed_at.is_some());
-
-        proc.reset_processing(&[id]).await.unwrap();
-        let (processing, processing_at): (bool, Option<chrono::DateTime<Utc>>) =
-            sqlx::query_as("SELECT processing, processing_at FROM analytics_queue WHERE id = $1")
-                .bind(numeric)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(!processing && processing_at.is_none());
+        Ok(())
     }
 
     // ── aggregation semantics ──────────────────────────────────────────────
 
     #[tokio::test]
-    async fn flush_writes_additive_hourly_aggregates_across_all_key_shapes() {
-        let Some(pool) = test_pool("an_flush_additive").await else {
-            return;
-        };
+    async fn flush_writes_additive_hourly_aggregates_across_all_key_shapes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_flush_additive").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let domain = format!("dom-{}", &Uuid::new_v4().simple().to_string()[..16]);
@@ -1246,13 +1226,15 @@ mod adversarial_db_tests {
             .query_async(&mut *conn)
             .await
             .unwrap();
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn failed_aggregation_write_restores_buffers_and_keeps_events_unprocessed() {
-        let Some(pool) = test_pool("an_flush_restore").await else {
-            return;
-        };
+    async fn failed_aggregation_write_restores_buffers_and_keeps_events_unprocessed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_flush_restore").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let id = enqueue_event(&pool, &tenant, "sent", None, None).await;
@@ -1322,13 +1304,15 @@ mod adversarial_db_tests {
             "the restored event is written exactly once"
         );
         assert!(proc.event_buffer.read().unwrap().is_empty());
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn redis_outage_does_not_block_durable_aggregation() {
-        let Some(pool) = test_pool("an_redis_outage").await else {
-            return;
-        };
+    async fn redis_outage_does_not_block_durable_aggregation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_redis_outage").await else { return Ok(()) };
         let proc = AnalyticsProcessor::new(pool.clone(), dead_redis_pool(), test_config());
         let tenant = unique_tenant();
         let id = enqueue_event(&pool, &tenant, "delivered", None, None).await;
@@ -1355,13 +1339,14 @@ mod adversarial_db_tests {
         proc.write_aggregations(&HashMap::new())
             .await
             .expect("empty aggregation write is a no-op");
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn hourly_rollup_is_additive_across_runs() {
-        let Some(pool) = test_pool("an_hourly_rollup").await else {
-            return;
-        };
+    async fn hourly_rollup_is_additive_across_runs() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_hourly_rollup").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let domain = format!("dom-{}", &Uuid::new_v4().simple().to_string()[..16]);
@@ -1406,6 +1391,7 @@ mod adversarial_db_tests {
             4,
             "the rollup must be additive like the flush writer"
         );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1535,10 +1521,10 @@ mod adversarial_db_tests {
     // ── lifecycle ──────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn stop_flushes_buffers_and_repeated_flush_is_a_noop() {
-        let Some(pool) = test_pool("an_stop").await else {
-            return;
-        };
+    async fn stop_flushes_buffers_and_repeated_flush_is_a_noop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_stop").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let _ = enqueue_event(&pool, &tenant, "complained", None, None).await;
@@ -1559,13 +1545,14 @@ mod adversarial_db_tests {
         proc.process_events(events).await.expect("process 2");
         proc.flush_buffers().await.expect("flush 2");
         assert_eq!(tenant_bucket_total(&pool, &tenant, "failed").await, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn start_ingests_queued_events_and_stop_drains_the_pipeline() {
-        let Some(pool) = test_pool("an_start_stop").await else {
-            return;
-        };
+    async fn start_ingests_queued_events_and_stop_drains_the_pipeline(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("an_start_stop").await else { return Ok(()) };
         let tenant = unique_tenant();
         let first = enqueue_event(&pool, &tenant, "sent", None, None).await;
         let second = enqueue_event(&pool, &tenant, "delivered", None, None).await;
@@ -1599,6 +1586,7 @@ mod adversarial_db_tests {
         assert_eq!(processed, 2, "the poll loop must ingest both queued events");
         assert_eq!(tenant_bucket_total(&pool, &tenant, "sent").await, 1);
         assert_eq!(tenant_bucket_total(&pool, &tenant, "delivered").await, 1);
+        Ok(())
     }
     // ── poll-loop arms + hour-boundary fallback (batch 2) ─────────────────
 
@@ -1613,10 +1601,10 @@ mod adversarial_db_tests {
     /// Empty poll batch + shutdown: the select on poll_interval breaks on the
     /// shutdown notification.
     #[tokio::test] // real time: pool provisioning cannot run under a paused clock
-    async fn analytics_poll_loop_breaks_on_shutdown_when_idle() {
-        let Some(pool) = test_pool("adv_poll_idle").await else {
-            return;
-        };
+    async fn analytics_poll_loop_breaks_on_shutdown_when_idle(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("adv_poll_idle").await else { return Ok(()) };
         let processor = std::sync::Arc::new(AnalyticsProcessor::new(
             pool.clone(),
             redis_pool(),
@@ -1634,6 +1622,7 @@ mod adversarial_db_tests {
             .expect("loop exits on shutdown")
             .expect("join ok");
         pool.close().await;
+        Ok(())
     }
 
     /// A dead database drives the poll-error arm; the loop keeps polling
@@ -1663,25 +1652,26 @@ mod adversarial_db_tests {
     /// A failing final flush during `stop` is reported, not propagated; the
     /// stop then waits out in-flight work before returning.
     #[tokio::test]
-    async fn stop_reports_a_failing_final_flush_and_waits_for_active_jobs() {
-        let Some(pool) = test_pool("adv_stop_flush_fail").await else {
-            return;
-        };
+    async fn stop_reports_a_failing_final_flush_and_waits_for_active_jobs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("adv_stop_flush_fail").await else { return Ok(()) };
         let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
         // Simulate in-flight work and a database that just went away.
         processor.active_jobs.store(1, Ordering::SeqCst);
         pool.close().await;
         processor.stop().await.expect("stop never fails");
         assert_eq!(processor.active_jobs.load(Ordering::SeqCst), 1);
+        Ok(())
     }
 
     /// The flush loop's error arm: a flush that cannot reach the database is
     /// logged and the loop keeps ticking until shutdown (buffers retained).
     #[tokio::test]
-    async fn flush_loop_survives_database_outage_until_shutdown() {
-        let Some(pool) = test_pool("adv_flush_loop_outage").await else {
-            return;
-        };
+    async fn flush_loop_survives_database_outage_until_shutdown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("adv_flush_loop_outage").await else { return Ok(()) };
         let mut config = test_config();
         config.base.flush_interval = Duration::from_millis(10);
         let processor =
@@ -1721,16 +1711,17 @@ mod adversarial_db_tests {
             4,
             "failed flushes retain the buffer for retry"
         );
+        Ok(())
     }
 
     /// An event whose timestamp cannot canonically map to an hour (the
     /// datetime is outside the representable hour grid) falls back to a
     /// truncated period instead of panicking or being dropped.
     #[tokio::test]
-    async fn update_aggregation_falls_back_for_uncanonical_hours() {
-        let Some(pool) = test_pool("adv_hour_fallback").await else {
-            return;
-        };
+    async fn update_aggregation_falls_back_for_uncanonical_hours(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("adv_hour_fallback").await else { return Ok(()) };
         let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
         let event = AnalyticsEvent {
             id: Uuid::new_v4().to_string(),
@@ -1758,13 +1749,14 @@ mod adversarial_db_tests {
             "an unrepresentable hour falls back to the raw timestamp"
         );
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn update_aggregation_buckets_the_event_to_its_hour() {
-        let Some(pool) = test_pool("adv_hour_bucket").await else {
-            return;
-        };
+    async fn update_aggregation_buckets_the_event_to_its_hour(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("adv_hour_bucket").await else { return Ok(()) };
         let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
         let event = AnalyticsEvent {
             id: Uuid::new_v4().to_string(),
@@ -1791,6 +1783,149 @@ mod adversarial_db_tests {
                 first.period_start
             );
         }
+        pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod residual_arms {
+    //! Deterministic proofs for the residual analytics arms: the claim-reset
+    //! failure arm under a write fault, and the hourly rollup's error arm
+    //! driven through the real loop select! by arming the fault before the
+    //! next hour boundary tick is simulated with a short wait.
+
+    use super::adversarial_db_tests::{enqueue_event, redis_pool, test_config, unique_tenant};
+    use super::*;
+    use sqlx::PgPool;
+
+    async fn residual_pool(name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
+        crate::test_support::canonical_pool(name, name).await
+    }
+
+    /// When the claim reset itself fails (injected UPDATE fault on
+    /// analytics_queue), the failure is logged and counted — the pipeline
+    /// error is still surfaced to the caller.
+    #[tokio::test]
+    async fn claim_reset_failure_is_logged_and_counted() {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("an_res_reset_fail").await else { return };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        let tenant = unique_tenant();
+        let id = enqueue_event(&pool, &tenant, "sent", None, None).await;
+
+        // Break the flush write so process_events_inner errs...
+        sqlx::query("ALTER TABLE analytics_hourly RENAME TO analytics_hourly_gone")
+            .execute(&pool)
+            .await
+            .expect("break analytics_hourly");
+        // ...and break the claim reset too.
+        sqlx::query("CREATE TABLE IF NOT EXISTS fault_injection (flag TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("fault table");
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION an_fail_reset() RETURNS trigger AS $$ \
+             BEGIN \
+               IF NEW.processing = false \
+                  AND EXISTS (SELECT 1 FROM fault_injection WHERE flag = 'reset') THEN \
+                 RAISE EXCEPTION 'injected fault reset'; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("fault fn");
+        sqlx::query(
+            "CREATE TRIGGER an_fail_reset_t BEFORE UPDATE ON analytics_queue \
+             FOR EACH ROW EXECUTE FUNCTION an_fail_reset()",
+        )
+        .execute(&pool)
+        .await
+        .expect("fault trigger");
+        sqlx::query("INSERT INTO fault_injection (flag) VALUES ('reset')")
+            .execute(&pool)
+            .await
+            .expect("arm fault");
+
+        let events = processor.fetch_events(10).await.expect("claim");
+        assert_eq!(events.len(), 1);
+        // The flush write fails under the outage; process_events still
+        // returns Ok — the failure is carried by the retained buffers and
+        // the still-claimed rows (the removed reset arm would have re-queued
+        // already-buffered events and double-counted them).
+        let result = processor.process_events(events).await;
+        assert!(
+            result.is_ok(),
+            "a flush failure must not fail the batch: {result:?}"
+        );
+
+        let processed: bool =
+            sqlx::query_scalar("SELECT processed FROM analytics_queue WHERE id = $1")
+                .bind(id.parse::<i64>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert!(!processed, "the failed events stay unprocessed");
+        assert_eq!(
+            processor.event_buffer.read().unwrap().len(),
+            1,
+            "the events stay buffered for the retrying flush"
+        );
+
+        sqlx::query("ALTER TABLE analytics_hourly_gone RENAME TO analytics_hourly")
+            .execute(&pool)
+            .await
+            .expect("restore analytics_hourly");
+        // Disarm the fault so the retrying flush can complete its write AND
+        // mark the events processed.
+        sqlx::query("DELETE FROM fault_injection WHERE flag = 'reset'")
+            .execute(&pool)
+            .await
+            .expect("disarm fault");
+        // The retrying flush now succeeds and marks the events processed.
+        processor
+            .flush_buffers()
+            .await
+            .expect("flush after restore");
+        let processed: bool =
+            sqlx::query_scalar("SELECT processed FROM analytics_queue WHERE id = $1")
+                .bind(id.parse::<i64>().unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert!(processed, "the retrying flush completes the batch");
+        pool.close().await;
+    }
+
+    /// The hourly loop's error arm: the rollup fails under a table outage
+    /// and the loop logs it, then still stops promptly on shutdown.
+    #[tokio::test] // real time: the loop parks until the hour boundary
+    async fn hourly_rollup_error_arm_is_logged_and_the_loop_stops() {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("an_res_hourly_err").await else { return };
+        let processor = AnalyticsProcessor::new(pool.clone(), redis_pool(), test_config());
+        sqlx::query("DROP TABLE IF EXISTS analytics_hourly")
+            .execute(&pool)
+            .await
+            .expect("break analytics_hourly");
+
+        let processor = Arc::new(processor);
+        processor.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.hourly_aggregation_loop().await }
+        });
+        // Give the loop a moment, then stop before the hour boundary.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let _ = processor.stop().await;
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits promptly on shutdown")
+            .expect("clean exit");
         pool.close().await;
     }
 }

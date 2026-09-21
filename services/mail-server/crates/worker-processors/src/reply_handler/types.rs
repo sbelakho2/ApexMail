@@ -669,11 +669,11 @@ mod vocabulary_tests {
                 disposition,
                 ReplyDisposition::OutOfOffice | ReplyDisposition::BounceSoft
             );
+            let name = disposition.as_str();
             assert_eq!(
                 disposition.stops_normal_sequence(),
                 expected,
-                "stops_normal_sequence({})",
-                disposition.as_str()
+                "stops_normal_sequence({name})"
             );
         }
         for disposition in ReplyDisposition::ALL {
@@ -684,11 +684,11 @@ mod vocabulary_tests {
                     | ReplyDisposition::BounceHard
                     | ReplyDisposition::NotInterested
             );
+            let name = disposition.as_str();
             assert_eq!(
                 disposition.is_permanent_suppression(),
                 expected,
-                "is_permanent_suppression({})",
-                disposition.as_str()
+                "is_permanent_suppression({name})"
             );
         }
         for disposition in ReplyDisposition::ALL {
@@ -698,11 +698,11 @@ mod vocabulary_tests {
                     | ReplyDisposition::Complaint
                     | ReplyDisposition::BounceHard
             );
+            let name = disposition.as_str();
             assert_eq!(
                 disposition.requires_unsubscribe_upsert(),
                 expected,
-                "requires_unsubscribe_upsert({})",
-                disposition.as_str()
+                "requires_unsubscribe_upsert({name})"
             );
         }
     }

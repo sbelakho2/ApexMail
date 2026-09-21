@@ -173,25 +173,15 @@ static QUICK_PATTERNS: LazyLock<Option<AhoCorasick>> = LazyLock::new(|| {
         "stop emailing",
         "opt out",
     ];
-    match AhoCorasick::new(patterns) {
-        Ok(ac) => Some(ac),
-        Err(e) => {
-            warn!(error = %e, "Invalid Aho-Corasick patterns; disabling quick scan");
-            None
-        }
-    }
+    // The patterns are compile-time constants; construction cannot fail.
+    Some(AhoCorasick::new(patterns).expect("invalid quick-scan patterns"))
 });
 
 fn compile_regexes(patterns: &[&str]) -> Vec<Regex> {
+    // The patterns are compile-time constants; construction cannot fail.
     patterns
         .iter()
-        .filter_map(|pattern| match Regex::new(pattern) {
-            Ok(regex) => Some(regex),
-            Err(e) => {
-                warn!(pattern = %pattern, error = %e, "Invalid regex pattern");
-                None
-            }
-        })
+        .map(|pattern| Regex::new(pattern).expect("invalid classification regex"))
         .collect()
 }
 
@@ -369,8 +359,9 @@ fn legacy_heuristic_classify(subject: &str, body: &str) -> ClassificationResult 
             .chars()
             .take(MAX_CLASSIFIER_INPUT_BYTES / 2)
             .collect();
+        let input_len = combined.len();
         warn!(
-            input_len = combined.len(),
+            input_len,
             max = MAX_CLASSIFIER_INPUT_BYTES,
             "Classifier input truncated for ReDoS protection"
         );

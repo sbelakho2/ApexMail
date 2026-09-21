@@ -216,6 +216,36 @@ impl EmailAuthenticator {
         })
     }
 
+    /// Test-only constructor that injects BOTH resolvers: `resolver` drives
+    /// the SPF/DKIM evaluation (mail-auth wire path) and `dns_resolver` the
+    /// DMARC TXT lookups. Unit tests point both at the shared loopback
+    /// [`crate::auth::test_dns::MockDns`] so the full authenticate() pipeline
+    /// runs against real resolver wire traffic without touching the network.
+    #[cfg(test)]
+    pub(crate) fn with_injected_resolvers(
+        config: EmailAuthConfig,
+        hostname: String,
+        resolver: Resolver,
+        dns_resolver: TokioResolver,
+    ) -> Self {
+        let spf_cache = Cache::builder()
+            .max_capacity(config.spf_cache_max_entries)
+            .time_to_live(Duration::from_secs(300))
+            .build();
+        let dmarc_cache = Cache::builder()
+            .max_capacity(5_000)
+            .time_to_live(Duration::from_secs(300))
+            .build();
+        Self {
+            resolver,
+            dns_resolver,
+            config,
+            hostname,
+            spf_cache,
+            dmarc_cache,
+        }
+    }
+
     /// Authenticate an inbound email. Runs SPF + DKIM concurrently, then DMARC.
     pub async fn authenticate(
         &self,

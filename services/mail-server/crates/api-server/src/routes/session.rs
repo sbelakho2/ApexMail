@@ -784,5 +784,389 @@ mod tests {
             assert_eq!(body["session_type"], "user");
             assert!(body["user"]["id"].as_str() == Some(user.as_str()));
         }
+
+        // ─── Impersonation-cookie introspection + e2e bypass ────────────
+
+        /// Restore the process-global E2E env vars to their pre-test state.
+        fn restore_e2e_env(snapshot: &(Option<String>, Option<String>)) {
+            match &snapshot.0 {
+                Some(v) => std::env::set_var("E2E_TEST_MODE", v),
+                None => std::env::remove_var("E2E_TEST_MODE"),
+            }
+            match &snapshot.1 {
+                Some(v) => std::env::set_var("E2E_BYPASS_KEY", v),
+                None => std::env::remove_var("E2E_BYPASS_KEY"),
+            }
+        }
+
+        /// E2E bypass: debug builds in non-production environments accept a
+        /// matching `x-e2e-bypass-key` header as a synthetic "e2e" session —
+        /// and a WRONG key falls through to an unauthenticated report.
+        /// `std::env` is process-global; under `cargo nextest` every test runs
+        /// in its own process, and under plain `cargo test` the two E2E vars
+        /// are read only by this endpoint, so the guarded mutation is
+        /// serialized with any sibling introspection tests via this mutex.
+        #[test]
+        fn e2e_bypass_admits_the_matching_key_and_refuses_a_wrong_one() {
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            // The env guard is held in sync scope only (never across an
+            // await); the async body runs on a manually driven runtime.
+            let _guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(e2e_bypass_body());
+        }
+
+        async fn e2e_bypass_body() {
+            // Snapshot + restore so sibling tests in the same process observe
+            // the un-set default.
+            let snapshot = (
+                std::env::var("E2E_TEST_MODE").ok(),
+                std::env::var("E2E_BYPASS_KEY").ok(),
+            );
+
+            let Some((app, _db, _config)) = introspection_app("intro_e2e_bypass").await else {
+                restore_e2e_env(&snapshot);
+                return;
+            };
+
+            std::env::set_var("E2E_TEST_MODE", "true");
+            std::env::set_var("E2E_BYPASS_KEY", "e2e-secret-value");
+
+            async fn raw_get(app: &axum::Router, bypass_key: Option<&str>) -> serde_json::Value {
+                let mut request = axum::http::Request::get("/");
+                if let Some(key) = bypass_key {
+                    request = request.header("x-e2e-bypass-key", key);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .expect("dispatch");
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice(&body).expect("json")
+            }
+
+            let body = raw_get(&app, Some("e2e-secret-value")).await;
+            assert_eq!(body["authenticated"], true, "{body}");
+            assert_eq!(body["session_type"], "e2e");
+
+            // A wrong key is not a session.
+            let body = raw_get(&app, Some("wrong-key")).await;
+            assert_eq!(body["authenticated"], false, "{body}");
+            // No header at all likewise.
+            let body = raw_get(&app, None).await;
+            assert_eq!(body["authenticated"], false, "{body}");
+
+            restore_e2e_env(&snapshot);
+        }
+
+        /// A correctly-signed impersonation cookie that survives FULL server
+        /// revalidation (jti tombstone in Redis + active operator row) is
+        /// reported as an authenticated impersonation session.
+        #[tokio::test]
+        async fn impersonation_cookie_revalidates_to_an_authenticated_report() {
+            let Some((app, db, _config)) = introspection_app("intro_imp_ok").await else {
+                return;
+            };
+            let (tenant, user_id) = seed_active_user(&db).await;
+
+            // Mint the impersonation session exactly as routes/impersonate.rs
+            // does, and plant the jti tombstone its exchange writes.
+            let jti = format!("jti-intro-{}", uuid::Uuid::new_v4().simple());
+            let payload = serde_json::json!({
+                "type": "impersonation",
+                "tenantId": tenant,
+                "operatorId": user_id,
+                "operatorName": "Operator Olive",
+                "tokenId": jti,
+                "exp": chrono::Utc::now().timestamp_millis() + 600_000,
+            });
+            let token = {
+                use base64::Engine;
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&payload).unwrap());
+                let mut mac = Hmac::<Sha256>::new_from_slice(
+                    crate::app::test_support::test_config()
+                        .session_secret
+                        .as_bytes(),
+                )
+                .unwrap();
+                mac.update(payload_b64.as_bytes());
+                let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(mac.finalize().into_bytes());
+                format!("{payload_b64}.{sig_b64}")
+            };
+            let redis_url = std::env::var("TEST_REDIS_URL").expect("introspection_app checks it");
+            let redis = deadpool_redis::Config::from_url(&redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .unwrap();
+            let mut conn = redis.get().await.unwrap();
+            let set: Result<(), _> = deadpool_redis::redis::cmd("SET")
+                .arg(format!("apexmail:impersonation_used:{jti}"))
+                .arg("1")
+                .arg("EX")
+                .arg(600)
+                .query_async(&mut *conn)
+                .await;
+            set.expect("plant tombstone");
+
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get("/")
+                        .header("cookie", format!("impersonation_session={token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("dispatch");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["authenticated"], true, "{body}");
+            assert_eq!(body["session_type"], "impersonation");
+            assert_eq!(body["impersonation"]["operator_id"], user_id);
+            assert_eq!(body["impersonation"]["operator_name"], "Operator Olive");
+            assert_eq!(body["impersonation"]["tenant_id"], tenant);
+        }
+
+        /// The revalidator's refusal arms, driven directly against real
+        /// Redis/Postgres state: over-cap lifetime, missing tokenId, missing
+        /// operator, absent tombstone, and a deactivated or deleted operator.
+        #[tokio::test]
+        async fn revalidation_refuses_tampered_stale_and_orphaned_sessions() {
+            let Some(pool) = crate::test_db::canonical_pool("intro_reval_refusals").await else {
+                return;
+            };
+            let state = crate::app::test_support::test_state_over(pool.clone()).await;
+            let (_tenant, user_id) = seed_active_user(&pool).await;
+
+            let payload_with = |overrides: serde_json::Value| -> SessionPayload {
+                let mut base = serde_json::json!({
+                    "type": "impersonation",
+                    "tenantId": "ten_x",
+                    "operatorId": user_id,
+                    "operatorName": "Op",
+                    "tokenId": "reval-jti-missing-tombstone",
+                    "exp": chrono::Utc::now().timestamp_millis() + 600_000,
+                });
+                let merged = match (base.as_object_mut(), overrides.as_object()) {
+                    (Some(base), Some(overrides)) => {
+                        for (k, v) in overrides {
+                            if v.is_null() {
+                                base.remove(k);
+                            } else {
+                                base.insert(k.clone(), v.clone());
+                            }
+                        }
+                        serde_json::Value::Object(base.clone())
+                    }
+                    _ => unreachable!("object payloads"),
+                };
+                serde_json::from_value(merged).expect("payload shape")
+            };
+
+            // Missing expiry can never reach the revalidator through the HTTP
+            // surface (verify_session_token rejects it first), but the
+            // defensive arm is proven here.
+            let missing_exp = payload_with(serde_json::json!({ "exp": null }));
+            assert_eq!(
+                revalidate_impersonation_session(&state, &missing_exp).await,
+                Err("impersonation session missing expiry".into())
+            );
+
+            // A session promising more than the 1-hour absolute cap.
+            let over_cap = payload_with(serde_json::json!({
+                "exp": chrono::Utc::now().timestamp_millis() + 2 * 3_600_000
+            }));
+            assert_eq!(
+                revalidate_impersonation_session(&state, &over_cap).await,
+                Err("impersonation session exceeds the maximum lifetime".into())
+            );
+
+            // Missing tokenId.
+            let no_jti = payload_with(serde_json::json!({ "tokenId": null }));
+            assert_eq!(
+                revalidate_impersonation_session(&state, &no_jti).await,
+                Err("impersonation session missing token ID".into())
+            );
+
+            // Tombstone never planted: the session is no longer active.
+            let no_tombstone = payload_with(serde_json::json!({
+                "tokenId": format!("reval-no-tombstone-{}", uuid::Uuid::new_v4().simple())
+            }));
+            assert_eq!(
+                revalidate_impersonation_session(&state, &no_tombstone).await,
+                Err("impersonation session is no longer active".into())
+            );
+
+            // Missing operator identity.
+            let no_operator = payload_with(serde_json::json!({ "operatorId": null }));
+            // Needs a live tombstone to reach the operator check.
+            plant_tombstone(&state, no_operator.token_id.as_deref().expect("tokenId")).await;
+            assert_eq!(
+                revalidate_impersonation_session(&state, &no_operator).await,
+                Err("impersonation session missing operator".into())
+            );
+
+            // Deleted operator row (id resolves to nothing).
+            let deleted_operator = payload_with(serde_json::json!({
+                "operatorId": format!("{}-deleted", user_id),
+                "tokenId": format!("reval-deleted-op-{}", uuid::Uuid::new_v4().simple())
+            }));
+            plant_tombstone(
+                &state,
+                deleted_operator.token_id.as_deref().expect("tokenId"),
+            )
+            .await;
+            assert_eq!(
+                revalidate_impersonation_session(&state, &deleted_operator).await,
+                Err("impersonation operator is no longer active".into())
+            );
+
+            // Deactivated operator row.
+            let deactivated = format!("deactivated-{}", uuid::Uuid::new_v4().simple());
+            sqlx::query(
+            "INSERT INTO tenants (id, name, slug, status) VALUES ($1, 'Reval Deactivated', $2, 'active')",
+        )
+        .bind(format!("rvl{}", &deactivated[..20]))
+        .bind(format!("rvl-{deactivated}"))
+        .execute(&pool)
+        .await
+        .expect("seed deactivated tenant");
+            sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1::uuid, $2, $3, 'Deactivated Op', 'x', 'admin', 'suspended', true)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(format!("rvl{}", &deactivated[..20]))
+        .bind(format!("{deactivated}@example.com"))
+        .execute(&pool)
+        .await
+        .expect("seed deactivated operator");
+            let deactivated_session = payload_with(serde_json::json!({
+                "operatorId": deactivated,
+                "tokenId": format!("reval-suspended-op-{}", uuid::Uuid::new_v4().simple())
+            }));
+            plant_tombstone(
+                &state,
+                deactivated_session.token_id.as_deref().expect("tokenId"),
+            )
+            .await;
+            assert_eq!(
+                revalidate_impersonation_session(&state, &deactivated_session).await,
+                Err("impersonation operator is no longer active".into())
+            );
+
+            // ACTIVE operator + live tombstone: the only acceptance path.
+            let happy = payload_with(serde_json::json!({
+                "operatorId": user_id,
+                "tokenId": format!("reval-happy-{}", uuid::Uuid::new_v4().simple())
+            }));
+            plant_tombstone(&state, happy.token_id.as_deref().expect("tokenId")).await;
+            assert_eq!(
+                revalidate_impersonation_session(&state, &happy).await,
+                Ok(())
+            );
+        }
+
+        async fn plant_tombstone(state: &crate::state::AppState, jti: &str) {
+            let mut conn = state.redis.get().await.expect("redis");
+            let _: Result<(), _> = deadpool_redis::redis::cmd("SET")
+                .arg(format!("apexmail:impersonation_used:{jti}"))
+                .arg("1")
+                .arg("EX")
+                .arg(600)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        /// Redis unreachable during revalidation must fail CLOSED with the
+        /// could-not-revalidate reason — never as an authenticated report.
+        #[tokio::test]
+        async fn revalidation_fails_closed_when_redis_is_unreachable() {
+            let Some(pool) = crate::test_db::canonical_pool("intro_reval_dead_redis").await else {
+                return;
+            };
+            let state = crate::app::test_support::test_state_over_with_config_and_redis(
+                pool,
+                crate::app::test_support::test_config(),
+                "redis://127.0.0.1:1",
+            )
+            .await;
+            let payload = serde_json::from_value::<SessionPayload>(serde_json::json!({
+                "type": "impersonation",
+                "tenantId": "ten_x",
+                "operatorId": "op_x",
+                "tokenId": "dead-redis-jti",
+                "exp": chrono::Utc::now().timestamp_millis() + 600_000,
+            }))
+            .expect("payload");
+            assert_eq!(
+                revalidate_impersonation_session(&state, &payload).await,
+                Err("impersonation session could not be revalidated".into())
+            );
+        }
+
+        /// The introspection surface reports a VALID JWT for a deleted or
+        /// suspended user as unauthenticated with a reason (never 500, never
+        /// authenticated), and accepts the same token via the Bearer header.
+        #[tokio::test]
+        async fn introspection_reports_inactive_users_and_accepts_bearer_tokens() {
+            let Some((app, db, config)) = introspection_app("intro_inactive").await else {
+                return;
+            };
+            let (tenant, user_id) = seed_active_user(&db).await;
+
+            // Active user via the Authorization: Bearer header (not cookie).
+            let token = mint_session_jwt(
+                &config,
+                &tenant,
+                &user_id,
+                chrono::Utc::now().timestamp(),
+                3600,
+            );
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get("/")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("dispatch");
+            let body: serde_json::Value = serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["authenticated"], true, "{body}");
+
+            // Delete the user: the same token now reports an inactive account.
+            sqlx::query("DELETE FROM users WHERE id = $1::uuid")
+                .bind(&user_id)
+                .execute(&db)
+                .await
+                .expect("delete user");
+            let body = introspect(&app, &token).await;
+            assert_eq!(body["authenticated"], false, "{body}");
+            assert_eq!(body["reason"], "user account is no longer active", "{body}");
+        }
     }
 }

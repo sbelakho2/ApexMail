@@ -547,3 +547,224 @@ mod approval_db_tests {
         pool.close().await;
     }
 }
+
+/// HTTP-surface coverage for the human-approval routes against the
+/// canonical schema and the real system-sender machinery.
+#[cfg(test)]
+mod approval_http_tests {
+    use crate::app::test_support::adv::AdvEnv;
+    use crate::routes::system_sender::{SYSTEM_DOMAIN, SYSTEM_DOMAIN_ID, SYSTEM_TENANT_ID};
+
+    /// Seed the system sender domain exactly as the signup fixture does:
+    /// real DKIM material, encrypted under the test key. The caller holds
+    /// `crate::test_db::DKIM_ENV_MUTEX` for the process-global env var.
+    async fn seed_system_sender(db: &sqlx::PgPool) {
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair()
+            .expect("test DKIM keypair generation must not fail");
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(SYSTEM_TENANT_ID, SYSTEM_DOMAIN_ID);
+        let encrypted =
+            apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                .expect("test DKIM private key encryption must not fail");
+        let public_key =
+            apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+                .expect("test DKIM public key derivation must not fail");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                  dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+               SET status = 'verified', verified = true, ses_verified = true,
+                   dkim_enabled = true, dkim_selector = 'testsel',
+                   dkim_public_key = EXCLUDED.dkim_public_key,
+                   dkim_private_key = EXCLUDED.dkim_private_key",
+        )
+        .bind(uuid::Uuid::parse_str(SYSTEM_DOMAIN_ID).expect("system domain id"))
+        .bind(SYSTEM_TENANT_ID)
+        .bind(SYSTEM_DOMAIN)
+        .bind(&public_key)
+        .bind(&encrypted)
+        .execute(db)
+        .await
+        .expect("seed system sender");
+    }
+
+    async fn seed_pending_draft(db: &sqlx::PgPool, id: &str, tenant: &str, from_email: &str) {
+        sqlx::query(
+            "INSERT INTO inbound_messages
+                 (id, tenant_id, from_email, subject, ai_response, pending_approval,
+                  is_verp_reply, received_at)
+             VALUES ($1, $2, $3, 'Re: invoice', 'please approve', true, false, NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(from_email)
+        .execute(db)
+        .await
+        .expect("seed draft");
+    }
+
+    fn draft_id() -> String {
+        format!("inb_{}", &uuid::Uuid::new_v4().simple().to_string()[..22])
+    }
+
+    /// The DKIM env var is process-global: under nextest each test owns a
+    /// process; under `cargo test` the DKIM mutex serialises the users.
+    #[test]
+    fn approval_http_surface_end_to_end() {
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let Some(pool) = crate::test_db::canonical_pool("ai_draft_http").await else {
+                return;
+            };
+            seed_system_sender(&pool).await;
+            let env = AdvEnv::admin(pool.clone()).await;
+
+            // Empty list.
+            let (status, body) = env.get("/v1/admin/ai/drafts").await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["count"], 0, "{body}");
+
+            // A routable pending draft and one that cannot be routed.
+            let id = draft_id();
+            seed_pending_draft(
+                &pool,
+                &id,
+                "ten_probe_0000000000000000",
+                "buyer@corp.example",
+            )
+            .await;
+            let broken = draft_id();
+            seed_pending_draft(&pool, &broken, "", "").await;
+
+            let (status, body) = env.get("/v1/admin/ai/drafts").await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert!(
+                body["count"].as_i64().unwrap_or(0) >= 2,
+                "both pending drafts listed: {body}"
+            );
+
+            // Approving the unroutable draft is a validation error and the
+            // draft stays pending (the claim rolled back).
+            let (status, body) = env
+                .post(&format!("/v1/admin/ai/drafts/{broken}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+            let pending: bool =
+                sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                    .bind(&broken)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("broken draft");
+            assert!(pending, "the unroutable draft stays pending");
+
+            // Approving the healthy draft queues the reply.
+            let (status, body) = env
+                .post(
+                    &format!("/v1/admin/ai/drafts/{id}/approve"),
+                    r#"{"note":"looks good"}"#,
+                )
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["approved"], true, "{body}");
+            let queued: (bool, bool) = sqlx::query_as(
+                "SELECT pending_approval = false, processed_at IS NOT NULL \
+                 FROM inbound_messages WHERE id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("approved draft");
+            assert_eq!(queued, (true, true));
+            let reply: Option<(String,)> =
+                sqlx::query_as("SELECT subject FROM messages WHERE tenant_id = $1 LIMIT 1")
+                    .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("queued message");
+            assert!(reply.is_some(), "a system message row was queued");
+
+            // Approving again is a 404 (the claim is consumed).
+            let (status, _body) = env
+                .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+            // Unknown ids are 404s.
+            let (status, _body) = env.post("/v1/admin/ai/drafts/inb_nope/approve", "{}").await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+            let (status, _body) = env.post("/v1/admin/ai/drafts/inb_nope/reject", "{}").await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+            // Reject consumes the remaining pending draft.
+            let (status, body) = env
+                .post(
+                    &format!("/v1/admin/ai/drafts/{broken}/reject"),
+                    r#"{"note":"nope"}"#,
+                )
+                .await;
+            assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+            assert_eq!(body["rejected"], true);
+            let (status, _body) = env
+                .post(&format!("/v1/admin/ai/drafts/{broken}/reject"), "{}")
+                .await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+            // Customers are refused outright.
+            let (customer, _t) = AdvEnv::tenant(pool.clone(), &["*"]).await;
+            let (status, _body) = customer.get("/v1/admin/ai/drafts").await;
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+
+            pool.close().await;
+        });
+    }
+
+    /// When the system sender cannot be proven ready the enqueue fails and
+    /// the approval rolls back: the draft stays pending and recoverable,
+    /// and the route answers 500 (an operator-visible failure), not 200.
+    #[tokio::test]
+    async fn approve_fails_closed_when_the_reply_cannot_be_queued() {
+        let Some(pool) = crate::test_db::canonical_pool("ai_draft_no_sender").await else {
+            return;
+        };
+        // NOTE: no seed_system_sender — the readiness lookup fails.
+        let env = AdvEnv::admin(pool.clone()).await;
+        let id = draft_id();
+        seed_pending_draft(
+            &pool,
+            &id,
+            "ten_probe_0000000000000000",
+            "buyer@corp.example",
+        )
+        .await;
+
+        let (status, body) = env
+            .post(&format!("/v1/admin/ai/drafts/{id}/approve"), "{}")
+            .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{body}"
+        );
+
+        // The claim rolled back — the draft is still pending.
+        let pending: bool =
+            sqlx::query_scalar("SELECT pending_approval FROM inbound_messages WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("draft row");
+        assert!(pending, "a failed enqueue must not consume the draft");
+        pool.close().await;
+    }
+}

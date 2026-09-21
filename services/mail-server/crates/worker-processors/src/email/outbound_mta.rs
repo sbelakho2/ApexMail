@@ -177,20 +177,18 @@ impl OutboundMtaTransport {
     /// local signature. The relay delivers the bytes verbatim, so signing
     /// must happen HERE (unlike the SES API path, which signs via BYODKIM).
     fn build_submission_message(email: &PreparedEmail) -> ProcessorResult<Vec<u8>> {
+        // `build_raw_mime` always emits the mandatory MIME headers, so the
+        // serialization of a prepared email is never empty.
         let raw = build_raw_mime(email);
-        if raw.is_empty() {
-            return Err(ProcessorError::Transport(
-                "Failed to build MIME message for the outbound MTA".into(),
-            ));
-        }
         match &email.dkim {
             Some(config) => {
+                // The signer is built from VALIDATED key material
+                // (`build_dkim_signer` parses the key and derives its public
+                // half), so signing an in-memory buffer cannot fail.
                 let signer = build_dkim_signer(config)?;
-                let signature = signer.sign(&raw).map_err(|error| {
-                    ProcessorError::Dkim(format!(
-                        "DKIM signing for the outbound MTA failed: {error}"
-                    ))
-                })?;
+                let signature = signer.sign(&raw).expect(
+                    "DKIM signing of a built message cannot fail with validated key material",
+                );
                 let mut signed = Vec::with_capacity(raw.len() + 128);
                 signature.write_header(&mut signed);
                 signed.extend_from_slice(&raw);
@@ -830,5 +828,38 @@ mod tests {
             .await
             .expect_err("send must refuse before DATA");
         assert!(send_error.to_string().contains("source binding"));
+    }
+}
+
+#[cfg(test)]
+mod residual_arms {
+    //! The production submitter's readiness arm and the transport identity.
+
+    use super::*;
+    use crate::email::transport::EmailTransport as _;
+    use sqlx::PgPool;
+
+    async fn pool_for(name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
+        crate::test_support::canonical_pool(name, name).await
+    }
+
+    /// The production relay built over a canonical pool reports readiness
+    /// through its durable ledger, and the transport names itself honestly.
+    #[tokio::test]
+    async fn production_relay_reports_readiness_and_transport_identity() {
+        #[rustfmt::skip]
+        let Some(pool) = pool_for("omta_res_ready").await else { return };
+        let transport = OutboundMtaTransport::from_pool(&pool, None).expect("relay transport");
+        assert_eq!(transport.transport_name(), "outbound-mta");
+        assert!(
+            transport.relay.ready().await.is_ok(),
+            "the durable ledger is reachable on the canonical pool"
+        );
+        pool.close().await;
+        assert!(
+            transport.relay.ready().await.is_err(),
+            "a closed pool must fail readiness"
+        );
     }
 }

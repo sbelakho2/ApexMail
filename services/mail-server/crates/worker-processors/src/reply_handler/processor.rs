@@ -285,11 +285,9 @@ impl ReplyHandler {
     /// migration fails its first query loudly instead of silently repairing
     /// the schema with privileges the service role does not need.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
-        info!(
-            concurrency = self.config.base.concurrency,
-            classifier = self.classifier.name(),
-            "Starting reply handler"
-        );
+        let concurrency = self.config.base.concurrency;
+        let classifier = self.classifier.name();
+        info!(concurrency, classifier, "Starting reply handler");
 
         self.is_running.store(true, Ordering::SeqCst);
         self.poll_loop().await;
@@ -404,9 +402,10 @@ impl ReplyHandler {
         self.active_jobs.fetch_sub(1, Ordering::SeqCst);
 
         let duration = start.elapsed();
+        let duration_ms = duration.as_millis();
         debug!(
             msg_id = %msg.id,
-            duration_ms = duration.as_millis(),
+            duration_ms,
             "Message processed"
         );
 
@@ -653,12 +652,14 @@ impl ReplyHandler {
 
         tx.commit().await?;
 
+        let disposition = decision.disposition.as_str();
+        let state = decision.enrollment_state.as_str();
         info!(
             msg_id = %msg.id,
             enrollment = %resolved.enrollment_id,
             previous_state = %resolved.state,
-            disposition = decision.disposition.as_str(),
-            state = decision.enrollment_state.as_str(),
+            disposition,
+            state,
             cancelled_actions = outcome.cancelled_actions,
             cancelled_steps = outcome.cancelled_step_executions,
             unsubscribed = outcome.unsubscribed,
@@ -681,11 +682,14 @@ impl ReplyHandler {
             Utc::now(),
         );
 
+        let disposition = decision.disposition.as_str();
+        let observed = decision.observed_disposition.as_str();
+        let classifier = outcome.classifier.as_str();
         debug!(
             msg_id = %msg.id,
-            disposition = decision.disposition.as_str(),
-            observed = decision.observed_disposition.as_str(),
-            classifier = outcome.classifier.as_str(),
+            disposition,
+            observed,
+            classifier,
             confidence = decision.confidence,
             evidence = ?outcome.evidence,
             "Classified reply"
@@ -1475,14 +1479,8 @@ mod tests {
     // TEST_DATABASE_URL via the canonical migrator fixture.
     #[tokio::test]
     async fn inbound_reply_ingests_exactly_one_analytics_event_under_retry() {
-        let pool = match migrator::test_support::fresh_canonical_pool("worker_f67", "reply_handoff")
-            .await
-        {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        };
-        let Some(pool) = pool else {
-            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        let Some(pool) = crate::test_support::canonical_pool("worker_f67", "reply_handoff").await
+        else {
             return;
         };
 
@@ -1642,15 +1640,9 @@ mod tests {
     /// `TEST_DATABASE_URL`, like the F67 handoff test above).
     #[tokio::test]
     async fn reply_identity_resolves_canonically_without_the_lead_bridge() {
-        let pool =
-            match migrator::test_support::fresh_canonical_pool("worker_item17", "reply_canonical")
-                .await
-            {
-                Ok(pool) => pool,
-                Err(error) => panic!("{}", error.panic_message()),
-            };
-        let Some(pool) = pool else {
-            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        let Some(pool) =
+            crate::test_support::canonical_pool("worker_item17", "reply_canonical").await
+        else {
             return;
         };
 
@@ -1838,14 +1830,8 @@ mod tests {
     /// update lands" contract now that the handler writes no lead row.
     #[tokio::test]
     async fn reply_lock_is_visible_through_the_derived_lead_view() {
-        let pool = match migrator::test_support::fresh_canonical_pool("worker_item17", "reply_view")
-            .await
-        {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        };
-        let Some(pool) = pool else {
-            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+        let Some(pool) = crate::test_support::canonical_pool("worker_item17", "reply_view").await
+        else {
             return;
         };
 
@@ -2004,38 +1990,15 @@ mod tests {
     }
 
     // =======================================================================
-    // Live-database tests (§20/§21 adversarial set). Ignored by default;
-    // run with `TEST_DATABASE_URL=… cargo test -p worker-processors --lib
-    // -- --ignored`. The base URL defaults to the local Postgres when the
-    // variable is unset; an unreachable default soft-skips, a configured but
-    // broken URL fails (repo F01 convention).
+    // Live-database tests (§20/§21 adversarial set). Provisioning goes
+    // through the crate-wide `canonical_pool` gate: `TEST_DATABASE_URL`
+    // unset soft-skips, configured-but-broken FAILS (repo F01 convention —
+    // the former local-Postgres default + unreachable-default soft-skip was
+    // a second, divergent provisioning convention).
     // =======================================================================
 
-    fn live_base_url() -> (String, bool) {
-        match std::env::var("TEST_DATABASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-        {
-            Some(url) => (url, false),
-            None => (
-                "postgresql://apexmail:apexmail@localhost:5432/apexmail".to_string(),
-                true,
-            ),
-        }
-    }
-
     async fn live_pool(test_name: &str) -> Option<PgPool> {
-        let (base, defaulted) = live_base_url();
-        let db_name = format!("apexmail_worker_{test_name}");
-        match migrator::test_support::fresh_canonical_db(&base, &db_name).await {
-            Ok(Some(pool)) => Some(pool),
-            Ok(None) => None,
-            Err(error) if defaulted && matches!(error.stage(), "admin-connect" | "db-connect") => {
-                eprintln!("skipping {test_name}: local PostgreSQL at {base} unreachable ({error})");
-                None
-            }
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool("reply_live", test_name).await
     }
 
     /// A scripted AI classifier: lets a live test force one disposition
@@ -2321,10 +2284,10 @@ mod tests {
     /// the committed `has_human_reply` flag is set, so the next scheduled
     /// touch cannot race out.
     #[tokio::test]
-    async fn live_reply_racing_a_queued_send_is_cancelled() {
-        let Some(pool) = live_pool("reply_race").await else {
-            return;
-        };
+    async fn live_reply_racing_a_queued_send_is_cancelled() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_race").await else { return Ok(()) };
         let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
         let fixture = seed_live_fixture(&pool, &tenant).await;
         seed_inbound(
@@ -2421,14 +2384,15 @@ mod tests {
         assert_eq!(rows, 1, "exact repeats collapse to one audit row");
 
         pool.close().await;
+        Ok(())
     }
 
     /// Table-driven live test for every disposition's durable effects.
     #[tokio::test]
-    async fn live_disposition_effects_match_the_policy_table() {
-        let Some(pool) = live_pool("reply_effects").await else {
-            return;
-        };
+    async fn live_disposition_effects_match_the_policy_table(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_effects").await else { return Ok(()) };
 
         // (disposition, confidence, expected state, expect unsubscribe,
         //  expect contact-point invalidation, expect complaint outcome)
@@ -2663,15 +2627,16 @@ mod tests {
         }
 
         pool.close().await;
+        Ok(())
     }
 
     /// §10 idempotency + the operator-correction helper: an exact repeat is
     /// one row; a changed action is a first-class `operator` correction row.
     #[tokio::test]
-    async fn live_repeat_classification_and_operator_correction_are_first_class() {
-        let Some(pool) = live_pool("reply_correction").await else {
-            return;
-        };
+    async fn live_repeat_classification_and_operator_correction_are_first_class(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_correction").await else { return Ok(()) };
         let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
         let fixture = seed_live_fixture(&pool, &tenant).await;
         let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -2809,15 +2774,16 @@ mod tests {
         assert!(corrected.2.unwrap_or_default().contains("unsubscribe"));
 
         pool.close().await;
+
+        Ok(())
     }
 
     /// §8/§6/§4 live: deterministic DSN and OOO paths through the real
     /// processor (headers win, OOO does not cancel, hard bounce invalidates).
     #[tokio::test]
-    async fn live_deterministic_dsn_and_ooo_paths() {
-        let Some(pool) = live_pool("reply_deterministic").await else {
-            return;
-        };
+    async fn live_deterministic_dsn_and_ooo_paths() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("reply_deterministic").await else { return Ok(()) };
 
         // Hard bounce: DSN body + 5xx status.
         let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -2931,6 +2897,7 @@ mod tests {
         assert_eq!(unsubscribes, 0);
 
         pool.close().await;
+        Ok(())
     }
 
     // =======================================================================
@@ -2941,10 +2908,10 @@ mod tests {
     // =======================================================================
 
     #[tokio::test]
-    async fn live_unsubscribe_reply_suppresses_and_replay_is_a_noop() {
-        let Some(pool) = live_pool("adv_reply_unsubscribe").await else {
-            return;
-        };
+    async fn live_unsubscribe_reply_suppresses_and_replay_is_a_noop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("adv_reply_unsubscribe").await else { return Ok(()) };
         let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
         let fixture = seed_live_fixture(&pool, &tenant).await;
         let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -3030,13 +2997,14 @@ mod tests {
         assert_eq!(unsubscribes, 1, "replays must not double-unsubscribe");
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn live_low_confidence_reply_pauses_without_suppressing() {
-        let Some(pool) = live_pool("adv_reply_low_conf").await else {
-            return;
-        };
+    async fn live_low_confidence_reply_pauses_without_suppressing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("adv_reply_low_conf").await else { return Ok(()) };
         let tenant = format!("ten{}", &Uuid::new_v4().simple().to_string()[..20]);
         let fixture = seed_live_fixture(&pool, &tenant).await;
         let msg_id = format!("inb{}", &Uuid::new_v4().simple().to_string()[..20]);
@@ -3087,16 +3055,17 @@ mod tests {
         assert!(!suppressed);
 
         pool.close().await;
+        Ok(())
     }
 
     /// Table-driven live set for the remaining dispositions: each row's
     /// durable effects (sequence state, unsubscribe upsert, contact-point
     /// invalidation, cancellation/OOO reschedule) must match the policy.
     #[tokio::test]
-    async fn live_remaining_disposition_effects_match_the_policy() {
-        let Some(pool) = live_pool("adv_reply_effects").await else {
-            return;
-        };
+    async fn live_remaining_disposition_effects_match_the_policy(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = live_pool("adv_reply_effects").await else { return Ok(()) };
         // (disposition, confidence, state, unsubscribe, invalidate, complaint)
         let cases = [
             (
@@ -3256,6 +3225,7 @@ mod tests {
             }
         }
         pool.close().await;
+        Ok(())
     }
     // ── poll-loop arms (batch 2) ───────────────────────────────────────────
 
@@ -3285,18 +3255,10 @@ mod tests {
     /// the shutdown notification (never a busy spin).
     #[tokio::test] // real time: pool provisioning cannot run under a paused clock
     async fn poll_loop_breaks_on_shutdown_when_queue_is_empty() {
-        let pool = match migrator::test_support::fresh_canonical_pool(
-            "worker_reply_loop",
-            "reply_loop_empty",
-        )
-        .await
-        {
-            Ok(Some(pool)) => pool,
-            Ok(None) => {
-                eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
-                return;
-            }
-            Err(error) => panic!("{}", error.panic_message()),
+        let Some(pool) =
+            crate::test_support::canonical_pool("worker_reply_loop", "reply_loop_empty").await
+        else {
+            return;
         };
         let handler = std::sync::Arc::new(ReplyHandler::new(pool.clone(), loop_config()));
         handler.is_running.store(true, Ordering::SeqCst);
@@ -3379,10 +3341,7 @@ mod orchestration_and_actions {
     /// The canonical fresh-database gate with the tracing install bolted on.
     async fn fresh_pool(test_name: &str) -> Option<PgPool> {
         crate::test_support::install_test_tracing();
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
     fn orch_config() -> ReplyHandlerConfig {
@@ -3435,10 +3394,10 @@ mod orchestration_and_actions {
     /// claims and processes a seeded reply end-to-end, and `stop` breaks the
     /// loop promptly.
     #[tokio::test]
-    async fn start_processes_a_reply_and_stop_breaks_the_loop() {
-        let Some(pool) = fresh_pool("reply_orch_lifecycle").await else {
-            return;
-        };
+    async fn start_processes_a_reply_and_stop_breaks_the_loop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = fresh_pool("reply_orch_lifecycle").await else { return Ok(()) };
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
         let tenant = format!("ro-{suffix}");
         sqlx::query(
@@ -3513,6 +3472,7 @@ mod orchestration_and_actions {
         .expect("classifications");
         assert!(classifications >= 1, "the classification is persisted");
         pool.close().await;
+        Ok(())
     }
 
     /// A shared scripted classifier (same shape as the live tests') that can
@@ -3554,10 +3514,10 @@ mod orchestration_and_actions {
     /// marked processed — and `reset_claim` must hand it straight back to
     /// the next poll.
     #[tokio::test]
-    async fn analytics_handoff_failure_fails_the_message_and_releases_the_claim() {
-        let Some(pool) = fresh_pool("reply_orch_handoff").await else {
-            return;
-        };
+    async fn analytics_handoff_failure_fails_the_message_and_releases_the_claim(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = fresh_pool("reply_orch_handoff").await else { return Ok(()) };
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
         let tenant = format!("ro-{suffix}");
         sqlx::query(
@@ -3628,6 +3588,7 @@ mod orchestration_and_actions {
         assert!(processed.is_none(), "a failed message is never processed");
         assert!(processing.is_none(), "the claim is released for retry");
         pool.close().await;
+        Ok(())
     }
 
     /// Enrollment resolution refuses messages that cannot be linked: no
@@ -3667,10 +3628,10 @@ mod orchestration_and_actions {
     /// tenant (nothing to lock) and an enrollment that vanished between
     /// resolution and the lock (rollback, default outcome).
     #[tokio::test]
-    async fn lock_enrollment_exits_cleanly_without_a_lockable_row() {
-        let Some(pool) = fresh_pool("reply_orch_lock").await else {
-            return;
-        };
+    async fn lock_enrollment_exits_cleanly_without_a_lockable_row(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = fresh_pool("reply_orch_lock").await else { return Ok(()) };
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
         let tenant = format!("ro-{suffix}");
         sqlx::query(
@@ -3712,6 +3673,7 @@ mod orchestration_and_actions {
             .expect("lock");
         assert_eq!(outcome, LockOutcome::default());
         pool.close().await;
+        Ok(())
     }
 
     /// Every legacy action disposition executes and reports its action
@@ -3719,10 +3681,9 @@ mod orchestration_and_actions {
     /// without a tenant skips instead of writing; unmatched actions report
     /// nothing.
     #[tokio::test]
-    async fn execute_action_covers_every_legacy_action() {
-        let Some(pool) = fresh_pool("reply_orch_actions").await else {
-            return;
-        };
+    async fn execute_action_covers_every_legacy_action() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = fresh_pool("reply_orch_actions").await else { return Ok(()) };
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
         let tenant = format!("ro-{suffix}");
         sqlx::query(
@@ -3823,6 +3784,7 @@ mod orchestration_and_actions {
         }
 
         pool.close().await;
+        Ok(())
     }
 
     /// The candidate list is lowercase, deduped, whitespace-free, bounded
@@ -3860,4 +3822,201 @@ mod orchestration_and_actions {
     };
     use crate::reply_handler::{types::Evidence, ActionType, ClassificationResult, ClassifyError};
     use async_trait::async_trait;
+}
+
+#[cfg(test)]
+mod residual_arms {
+    //! Deterministic proofs for the residual poll-loop and legacy-action
+    //! arms: the zero-capacity park, the per-message processing-error arm
+    //! (with claim release), and the config-gated legacy auto-suppress path.
+
+    use super::*;
+    use crate::common::ProcessorConfig as BaseConfig;
+    use crate::reply_handler::AiClassification;
+    use crate::reply_handler::ClassifyError;
+    use crate::reply_handler::ReplyClassifier;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    async fn residual_pool(name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
+        crate::test_support::canonical_pool(name, name).await
+    }
+
+    async fn tenant_and_message(pool: &PgPool, label: &str) -> (String, String) {
+        let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
+        let tenant = format!("ra-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("Residual arm {label} {suffix}"))
+        .bind(format!("ra-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        let msg_id = format!("ra-inb-{suffix}");
+        sqlx::query(
+            "INSERT INTO inbound_messages \
+                 (id, tenant_id, from_email, to_email, subject, body_text, headers, \
+                  message_id_header, received_at) \
+             VALUES ($1, $2, 'replier@example.com', 'sales@apex.example', 'Re: x', \
+                     'zqxwjv unpredictable gibberish for the ai layer', \
+                     '{\"message-id\": \"<ra-repl@example.com>\"}'::jsonb, \
+                     '<ra-repl@example.com>', NOW() - INTERVAL '1 minute')",
+        )
+        .bind(&msg_id)
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .expect("insert inbound message");
+        (tenant, msg_id)
+    }
+
+    /// Zero concurrency: the loop cannot take slots, parks, and stops
+    /// promptly on shutdown.
+    #[tokio::test] // real time: the loop parks for real
+    async fn reply_loop_parks_at_zero_concurrency_then_stops() {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("ra_zero_concurrency").await else { return };
+        let config = ReplyHandlerConfig {
+            base: BaseConfig {
+                name: "ra-zero".into(),
+                concurrency: 0,
+                poll_interval: std::time::Duration::from_millis(20),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handler = std::sync::Arc::new(ReplyHandler::new(pool.clone(), config));
+        handler.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let handler = Arc::clone(&handler);
+            async move { handler.poll_loop().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        handler.is_running.store(false, Ordering::SeqCst);
+        handler.shutdown_notify.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits promptly")
+            .expect("clean exit");
+        pool.close().await;
+    }
+
+    /// A message whose processing fails (classifier outage) hits the loop's
+    /// per-message error arm AND releases the claim, so the row returns to
+    /// the retryable pool instead of waiting out the staleness window.
+    #[tokio::test] // real time: the loop polls for real
+    async fn reply_loop_releases_claims_when_processing_fails(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("ra_process_fail").await else { return Ok(()) };
+        let (tenant, msg_id) = tenant_and_message(&pool, "process-fail").await;
+        let _ = tenant;
+        let handler = std::sync::Arc::new(ReplyHandler::new(
+            pool.clone(),
+            ReplyHandlerConfig::default(),
+        ));
+        // The classification write fails (injected INSERT fault): the
+        // per-message processing errors and the loop must release the claim.
+        // The trigger machinery lives in `test_support` so this file keeps
+        // its DML-only source contract.
+        crate::test_support::install_fault_trigger(
+            &pool,
+            "classify",
+            "sales_reply_classifications",
+            "INSERT",
+        )
+        .await;
+        crate::test_support::set_fault(&pool, "classify", true).await;
+
+        handler.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let handler = Arc::clone(&handler);
+            async move { handler.poll_loop().await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        handler.is_running.store(false, Ordering::SeqCst);
+        handler.shutdown_notify.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        // The failed claim was released: the row is retryable immediately.
+        let processed: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT processed_at FROM inbound_messages WHERE id = $1")
+                .bind(&msg_id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(processed, None, "a failed message stays unprocessed");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// With auto-execution enabled, a high-confidence unsubscribe rides the
+    /// config-gated legacy action path: the recipient is suppressed through
+    /// `execute_action` and the action is recorded on the classification.
+    #[tokio::test]
+    async fn legacy_auto_suppress_executes_through_the_gate() {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("ra_legacy_suppress").await else { return };
+        let (tenant, _msg_id) = tenant_and_message(&pool, "legacy-suppress").await;
+        let config = ReplyHandlerConfig {
+            auto_suppress: true,
+            auto_suppress_confidence_threshold: 0.5,
+            ..Default::default()
+        };
+        let handler =
+            ReplyHandler::with_classifier(pool.clone(), config, Arc::new(ScriptedUnsubClassifier));
+        let messages = handler.fetch_messages(10).await.expect("fetch");
+        assert_eq!(messages.len(), 1);
+        let msg = messages.into_iter().next().unwrap();
+        handler
+            .process_message(msg)
+            .await
+            .expect("process with legacy action");
+
+        let suppressed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM suppressions \
+             WHERE tenant_id = $1 AND email = 'replier@example.com'",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("suppression count");
+        assert_eq!(suppressed, 1, "the legacy auto-suppress must run");
+        let action: Option<String> = sqlx::query_scalar(
+            "SELECT action_taken FROM inbound_messages \
+             WHERE tenant_id = $1 ORDER BY received_at DESC LIMIT 1",
+        )
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("message record");
+        assert!(action.is_some(), "the action must be recorded: {action:?}");
+        pool.close().await;
+    }
+
+    /// A scripted high-confidence unsubscribe classifier.
+    struct ScriptedUnsubClassifier;
+
+    #[async_trait::async_trait]
+    impl ReplyClassifier for ScriptedUnsubClassifier {
+        async fn classify(&self, _message: &ReplyInput) -> Result<AiClassification, ClassifyError> {
+            Ok(AiClassification {
+                disposition: ReplyDisposition::Unsubscribe,
+                confidence: 0.99,
+                reasoning: "scripted unsubscribe".to_string(),
+                model_version: Some("scripted-v1".to_string()),
+                prompt_version: Some("test".to_string()),
+                evidence: vec![Evidence::new("token", "unsubscribe", "test")],
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "scripted-unsub"
+        }
+    }
 }

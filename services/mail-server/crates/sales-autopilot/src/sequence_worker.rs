@@ -4436,4 +4436,186 @@ mod tests {
             "the fallback is recorded: {rationale}"
         );
     }
+
+    // ── pure planner helpers: every branch exercised directly ─────────────
+
+    fn fresh_score(ev: f64) -> OpportunityScore {
+        OpportunityScore {
+            expected_value_eur: ev,
+            ..OpportunityScore::default()
+        }
+    }
+
+    #[test]
+    fn score_source_covers_fresh_stored_and_unavailable() {
+        // Open pipeline ⇒ fresh, regardless of any stored score.
+        let facts = PlannerFacts {
+            open_pipeline_eur: 100.0,
+            ..PlannerFacts::default()
+        };
+        let stored = fresh_score(5.0);
+        assert!(matches!(
+            resolve_score_source(&facts, Some(&stored)),
+            ScoreSource::Fresh
+        ));
+        // No pipeline + a stored score ⇒ stored.
+        let no_pipeline = PlannerFacts::default();
+        assert!(matches!(
+            resolve_score_source(&no_pipeline, Some(&stored)),
+            ScoreSource::Stored
+        ));
+        // No pipeline + nothing stored ⇒ unavailable.
+        assert!(matches!(
+            resolve_score_source(&no_pipeline, None),
+            ScoreSource::Unavailable
+        ));
+
+        // effective_ev: fresh/unavailable read the fresh score; stored reads
+        // the stored projection.
+        let fresh = fresh_score(9.0);
+        let stored = fresh_score(3.0);
+        assert_eq!(effective_ev(&fresh, Some(&stored), ScoreSource::Fresh), 9.0);
+        assert_eq!(effective_ev(&fresh, None, ScoreSource::Unavailable), 9.0);
+        assert_eq!(
+            effective_ev(&fresh, Some(&stored), ScoreSource::Stored),
+            3.0
+        );
+        // Defensive default: a Stored source with no stored projection falls
+        // back to the fresh value.
+        assert_eq!(effective_ev(&fresh, None, ScoreSource::Stored), 9.0);
+    }
+
+    #[test]
+    fn json_fact_rendering_covers_every_value_shape() {
+        assert_eq!(json_fact_to_string(&serde_json::json!("plain")), "plain");
+        assert_eq!(
+            json_fact_to_string(&serde_json::json!(["a", "b", 3])),
+            "a, b"
+        );
+        assert_eq!(json_fact_to_string(&serde_json::Value::Null), "");
+        assert_eq!(json_fact_to_string(&serde_json::json!(42)), "42");
+        assert_eq!(
+            json_fact_to_string(&serde_json::json!({"k": 1})),
+            "{\"k\":1}"
+        );
+    }
+
+    #[test]
+    fn truncate_chars_never_splits_graphemes_or_panics() {
+        assert_eq!(truncate_chars("short", 10), "short");
+        assert_eq!(truncate_chars("abcdef", 3), "abc");
+        // Multi-byte characters are truncated per char, never mid-byte.
+        assert_eq!(truncate_chars("äöüß", 2), "äö");
+        let emoji = "🦀🦀🦀";
+        assert_eq!(truncate_chars(emoji, 1), "🦀");
+    }
+
+    #[test]
+    fn claims_gate_rejects_every_unverified_statement_class() {
+        let kb = SalesKnowledgeBase::canonical();
+        let value_prop = kb
+            .external_copy_facts()
+            .first()
+            .map(|f| f.claim.clone())
+            .expect("the canonical base has external-copy facts");
+        let allowed_evidence = Uuid::new_v4();
+
+        use crate::personalization::{MessageStrategy, ObservedFact, ProofPoint, RenderedStrategy};
+        let strategy = |observed: Option<ObservedFact>,
+                        proof: Option<ProofPoint>,
+                        value_prop: String|
+         -> MessageStrategy {
+            MessageStrategy {
+                observed_fact: observed,
+                problem_hypothesis: "problem".into(),
+                value_prop,
+                proof_point: proof,
+                offer: "offer".into(),
+                cta: "cta".into(),
+                tone: crate::personalization::Tone::Consultative,
+                language: "en".into(),
+            }
+        };
+        let rendered = RenderedStrategy {
+            observed_fact: None,
+            problem_value: String::new(),
+            proof_point: None,
+            cta: String::new(),
+            subject: "subject".into(),
+            body: String::new(),
+            tone: crate::personalization::Tone::Consultative,
+            language: "en".into(),
+            omitted: Vec::new(),
+        };
+
+        let facts = PlannerFacts {
+            evidence_ids: vec![allowed_evidence],
+            ..PlannerFacts::default()
+        };
+
+        // 1. An observed fact citing evidence OUTSIDE the live set.
+        let rejected = claims_gate(
+            &strategy(
+                Some(ObservedFact {
+                    statement: "s".into(),
+                    evidence_id: Uuid::new_v4(),
+                    confidence: 0.9,
+                }),
+                None,
+                value_prop.clone(),
+            ),
+            &rendered,
+            &facts,
+            &kb,
+        );
+        assert!(
+            rejected
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not in the allowed live evidence set"),
+            "{rejected:?}"
+        );
+
+        // 2. A proof point backed by NEITHER evidence NOR a knowledge fact.
+        let rejected = claims_gate(
+            &strategy(
+                None,
+                Some(ProofPoint {
+                    statement: "p".into(),
+                    evidence_id: Some(Uuid::new_v4()),
+                    knowledge_fact_id: Some("KB-DOES-NOT-EXIST".into()),
+                }),
+                value_prop.clone(),
+            ),
+            &rendered,
+            &facts,
+            &kb,
+        );
+        assert!(
+            rejected
+                .as_deref()
+                .unwrap_or_default()
+                .contains("neither evidence-backed"),
+            "{rejected:?}"
+        );
+
+        // 3. A value proposition that is not a verified external-copy fact.
+        let rejected = claims_gate(
+            &strategy(None, None, "we guarantee infinite emails".into()),
+            &rendered,
+            &facts,
+            &kb,
+        );
+        assert!(
+            rejected
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a verified external-copy knowledge fact"),
+            "{rejected:?}"
+        );
+
+        // 4. An admissible strategy passes the gate.
+        let ok = claims_gate(&strategy(None, None, value_prop), &rendered, &facts, &kb);
+        assert!(ok.is_none(), "{ok:?}");
+    }
 }

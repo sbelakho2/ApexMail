@@ -1418,4 +1418,192 @@ mod run_tests {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         assert!(init_tracing("info").is_none());
     }
+    // ── signal handling, health-bind failure, alarms, registry, postmaster ─
+
+    /// wait_for_shutdown_signal must complete when the process receives
+    /// SIGTERM (the deploy's `docker stop` path).
+    #[tokio::test]
+    async fn wait_for_shutdown_signal_completes_on_sigterm() {
+        let wait = tokio::spawn(async { wait_for_shutdown_signal().await });
+        // Give the handler a moment to install, then deliver a real SIGTERM
+        // to THIS process (no external tooling beyond /bin/kill).
+        let pid = std::process::id().to_string();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .expect("kill must run");
+        assert!(status.success(), "SIGTERM delivery must succeed");
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .expect("the signal future must complete")
+            .expect("no panic");
+    }
+
+    /// A health port that is already taken: the bind failure is logged and
+    /// the task exits without taking the process down.
+    #[tokio::test]
+    async fn a_health_port_bind_failure_is_logged_not_fatal() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let Some(db_url) = skip_if_no_db() else {
+            return;
+        };
+        let ports = ports();
+        // Occupy the health port BEFORE run_ starts.
+        let _blocker = std::net::TcpListener::bind(("127.0.0.1", ports.health)).unwrap();
+        let config = base_config(&db_url, &ports);
+        let task = tokio::spawn(run_(config, tokio::time::sleep(Duration::from_millis(50))));
+        let result = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("run_ must return after shutdown")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The FBL provider registry loads rows from the canonical table during
+    /// startup, and the postmaster poller resolves secrets from the env and
+    /// polls the (loopback-mocked) SNDS endpoint in its first tick.
+    #[tokio::test]
+    async fn run_loads_the_fbl_registry_and_polls_postmaster_credentials() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let Some(db_url) = skip_if_no_db() else {
+            return;
+        };
+        // A loopback SNDS stand-in: one canned CSV response.
+        let csv_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let csv_addr = csv_listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = csv_listener.accept() {
+                use std::io::{Read, Write};
+                let mut stream = stream;
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = "192.0.2.9,2026-09-20,2026-09-20,5,4,3,Green,0,0,h,sf,raw\r\n";
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+
+        let previous_snds = std::env::var("SNDS_DATA_URL").ok();
+        std::env::set_var("SNDS_DATA_URL", format!("http://{csv_addr}/data.aspx"));
+        const SECRET_REF: &str = "MTA_RUN_TEST_SNDS_KEY";
+        std::env::set_var(SECRET_REF, "run-test-access-key");
+
+        // A FRESH canonical database: the startup path needs the
+        // fbl_provider_registry and postmaster_credentials tables, which only
+        // the full migration chain provides.
+        let (server_part, db_part) = db_url.rsplit_once('/').expect("URL db segment");
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let fresh_name = format!("{db_only}_binfra");
+        let fresh = migrator::test_support::fresh_canonical_db_direct(
+            &format!("{server_part}/{db_only}"),
+            &fresh_name,
+        )
+        .await
+        .expect("provisioning must succeed")
+        .expect("TEST_DATABASE_URL is configured");
+        fresh.close().await;
+        let fresh_url = format!("{server_part}/{fresh_name}");
+
+        let ports = ports();
+        let mut config = base_config(&fresh_url, &ports);
+        config.feedback.enabled = true;
+
+        // Provision the schema bits the startup path reads: one FBL provider
+        // row and one enabled postmaster credential.
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(20))
+            .connect_lazy(&fresh_url);
+        let pool = admin.expect("db pool");
+        sqlx::query(
+            "INSERT INTO fbl_provider_registry
+                 (provider, display_name, rdns_patterns, source_networks, validation_method, enabled)
+             VALUES ('run-test-provider', 'Run Test', ARRAY['fbl.test']::text[],
+                     ARRAY['127.0.0.0/8']::text[], 'rdns_fcrcdns', true)
+             ON CONFLICT (provider) DO UPDATE SET enabled = true",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert provider");
+        sqlx::query(
+            "INSERT INTO postmaster_credentials (id, provider, label, secret_ref, enabled)
+             VALUES ('run-test-snds', 'microsoft', 'Run Test SNDS', $1, true)",
+        )
+        .bind(SECRET_REF)
+        .execute(&pool)
+        .await
+        .expect("insert credential");
+
+        let task = tokio::spawn(run_(config, tokio::time::sleep(Duration::from_millis(500))));
+        let result = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("run_ must return after shutdown")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+
+        // The secret must have been resolved via the env fallback and the
+        // SNDS row ingested through the loopback stand-in.
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM postmaster_snds_reputation")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(rows >= 1, "the SNDS row must be ingested");
+        match previous_snds {
+            Some(v) => std::env::set_var("SNDS_DATA_URL", v),
+            None => std::env::remove_var("SNDS_DATA_URL"),
+        }
+        std::env::remove_var(SECRET_REF);
+    }
+
+    /// A TLS certificate inside the 30-day alarm window trips the expiry
+    /// alarm path during startup.
+    #[tokio::test]
+    async fn run_alarms_on_a_short_lived_tls_certificate() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let Some(db_url) = skip_if_no_db() else {
+            return;
+        };
+        // A self-signed certificate that expires TODAY: days_remaining = 0,
+        // which is inside every alarm threshold (and the error band).
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        // Valid for one day starting yesterday: days_remaining = 0 today,
+        // inside every alarm threshold (and the error band).
+        use chrono::Datelike as _;
+        let today = chrono::Utc::now().date_naive();
+        let yesterday = today.pred_opt().unwrap_or(today);
+        params.not_before = rcgen::date_time_ymd(
+            yesterday.year(),
+            yesterday.month() as u8,
+            yesterday.day() as u8,
+        );
+        params.not_after =
+            rcgen::date_time_ymd(today.year(), today.month() as u8, today.day() as u8);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+        let ports = ports();
+        let mut config = base_config(&db_url, &ports);
+        config.inbound.enabled = true;
+        config.inbound.tls.enabled = true;
+        config.inbound.tls.cert_path = Some(cert_path.display().to_string());
+        config.inbound.tls.key_path = Some(key_path.display().to_string());
+
+        let task = tokio::spawn(run_(config, tokio::time::sleep(Duration::from_millis(200))));
+        let result = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("run_ must return after shutdown")
+            .expect("no panic");
+        assert!(result.is_ok(), "{result:?}");
+    }
 }

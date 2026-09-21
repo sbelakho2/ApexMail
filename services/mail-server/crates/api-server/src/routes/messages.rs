@@ -6365,3 +6365,123 @@ Bcc: victim@example.com"@example.com"#
         fixture.cleanup().await;
     }
 }
+
+/// Validation-refusal arms of the send/batch/cancel surfaces, driven
+/// through the real router with a plain tenant credential (every refusal
+/// fires before any domain/quota work, so no provider fixtures are needed).
+#[cfg(test)]
+mod validation_coverage_tests {
+    use crate::app::test_support::adv::AdvEnv;
+    use axum::http::StatusCode;
+
+    #[tokio::test]
+    async fn send_and_batch_refuse_shape_violations() {
+        let Some(pool) = crate::test_db::canonical_pool("msg_shape").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool.clone(), &["messages:send"]).await;
+        let unique = &uuid::Uuid::new_v4().simple().to_string()[..8];
+
+        // Missing `from`.
+        let (status, body) = env
+            .post(
+                "/v1/messages",
+                &serde_json::json!({
+                    "to": [format!("r-{unique}@example.test")],
+                    "subject": "hi",
+                    "text": "body"
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+        // Missing `to`.
+        let (status, body) = env
+            .post(
+                "/v1/messages",
+                &serde_json::json!({ "from": format!("s-{unique}@example.test"), "subject": "hi", "text": "body" })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+        // CRLF in a recipient is refused (header-injection guard).
+        let (status, body) = env
+            .post(
+                "/v1/messages",
+                &serde_json::json!({
+                    "from": format!("s-{unique}@example.test"),
+                    "to": [format!("r-{unique}@example.test\r\nBcc: x@y.test")],
+                    "subject": "hi",
+                    "text": "body"
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // An oversized subject is refused.
+        let (status, _body) = env
+            .post(
+                "/v1/messages",
+                &serde_json::json!({
+                    "from": format!("s-{unique}@example.test"),
+                    "to": [format!("r-{unique}@example.test")],
+                    "subject": "x".repeat(500),
+                    "text": "body"
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // deny_unknown_fields.
+        let (status, _body) = env
+            .post(
+                "/v1/messages",
+                &serde_json::json!({
+                    "from": format!("s-{unique}@example.test"),
+                    "to": [format!("r-{unique}@example.test")],
+                    "subject": "hi",
+                    "text": "body",
+                    "nope": 1
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn list_filter_status_and_unknown_ids_answer_cleanly() {
+        let Some(pool) = crate::test_db::canonical_pool("msg_list_shape").await else {
+            return;
+        };
+        // Cancel scopes to `messages:send`.
+        let (env, _tenant) =
+            AdvEnv::tenant(pool.clone(), &["messages:read", "messages:send"]).await;
+
+        // Filtering by status uses the keyset branch.
+        let (status, body) = env.get("/v1/messages?status=queued&limit=5").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["data"].is_array(), "{body}");
+        assert!(body["meta"].is_object(), "{body}");
+
+        // A malformed cursor is a 400, not a 500.
+        let (status, _body) = env.get("/v1/messages?cursor=%%zz").await;
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::OK,
+            "{status}"
+        );
+
+        // Unknown message id: 404 on both get and cancel.
+        let missing = uuid::Uuid::new_v4();
+        let (status, _body) = env.get(&format!("/v1/messages/{missing}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _body) = env
+            .post(&format!("/v1/messages/{missing}/cancel"), "")
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}

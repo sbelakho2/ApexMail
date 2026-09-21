@@ -1249,4 +1249,231 @@ mod adversarial_tests {
             );
         }
     }
+
+    // ── Allocation route + provider compensation ────────────────────
+
+    use crate::routes::dedicated_ips::calculate_reputation_score;
+
+    /// Seed a plan with the `dedicated_ip` feature and move the tenant onto
+    /// it, plus one verified domain (the rDNS hostname source).
+    async fn grant_dedicated_ip_entitlement(pool: &sqlx::PgPool, tenant: &str) {
+        let plan_name = format!(
+            "dip-plan-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let mut features =
+            serde_json::to_value(billing_service::types::PlanFeatures::default()).unwrap();
+        features["dedicated_ip"] = serde_json::json!(true);
+        features["dedicated_ip_count"] = serde_json::json!(1);
+        sqlx::query(
+            "INSERT INTO plans (id, name, display_name, features, is_active)
+             VALUES (LEFT(REPLACE(gen_random_uuid()::text, '-', ''), 26), $1, $1, $2, true)",
+        )
+        .bind(&plan_name)
+        .bind(features)
+        .execute(pool)
+        .await
+        .expect("seed plan");
+        sqlx::query("UPDATE tenants SET plan = $2 WHERE id = $1")
+            .bind(tenant)
+            .bind(&plan_name)
+            .execute(pool)
+            .await
+            .expect("upgrade tenant plan");
+        sqlx::query(
+            "INSERT INTO domains (id, tenant_id, name, verified, created_at, updated_at)
+             VALUES (gen_random_uuid(), $1, $2, true, NOW(), NOW())",
+        )
+        .bind(tenant)
+        .bind(format!("{}.example.test", uuid::Uuid::new_v4().simple()))
+        .execute(pool)
+        .await
+        .expect("seed verified domain");
+    }
+
+    /// A mock Hetzner wire that records every call: create, assign, rDNS
+    /// set, and the delete that provider-side compensation performs when
+    /// rDNS cannot be verified.
+    async fn start_recording_mock_hetzner(
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hetzner");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let create = std::sync::Arc::clone(&calls);
+        let assign = std::sync::Arc::clone(&calls);
+        let rdns = std::sync::Arc::clone(&calls);
+        let delete = std::sync::Arc::clone(&calls);
+        let app = axum::Router::new()
+            .route(
+                "/floating_ips",
+                axum::routing::post(move || {
+                    let calls = std::sync::Arc::clone(&create);
+                    async move {
+                        calls.lock().unwrap().push("create".into());
+                        axum::Json(serde_json::json!({
+                            "floating_ip": { "id": 5001, "ip": "203.0.113.150" }
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/floating_ips/:id/actions/assign",
+                axum::routing::post(move |axum::extract::Path(id): axum::extract::Path<i64>| {
+                    let calls = std::sync::Arc::clone(&assign);
+                    async move {
+                        calls.lock().unwrap().push(format!("assign {id}"));
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/floating_ips/:id/actions/change_dns_ptr",
+                axum::routing::post(move |axum::extract::Path(id): axum::extract::Path<i64>| {
+                    let calls = std::sync::Arc::clone(&rdns);
+                    async move {
+                        calls.lock().unwrap().push(format!("rdns {id}"));
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/floating_ips/:id",
+                axum::routing::delete(move |axum::extract::Path(id): axum::extract::Path<i64>| {
+                    let calls = std::sync::Arc::clone(&delete);
+                    async move {
+                        calls.lock().unwrap().push(format!("delete {id}"));
+                        axum::http::StatusCode::OK
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        base_url
+    }
+
+    /// The allocation route through the full provider wire: create →
+    /// attach → PTR set, and then — because this suite never resolves real
+    /// DNS — the PTR verification fails and the provider compensates by
+    /// releasing the floating IP. The route must map that to a 503, never
+    /// leak a 500, and the tenant must end with NO occupying IP row.
+    #[tokio::test]
+    async fn allocate_maps_unverifiable_rdns_to_503_and_compensates() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_alloc_compensate").await else {
+            return;
+        };
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_url = start_recording_mock_hetzner(std::sync::Arc::clone(&calls)).await;
+        let (env, tenant) =
+            AdvEnv::tenant_with_ip_provider(pool.clone(), &["dedicated_ips:write"], &base_url)
+                .await;
+        grant_dedicated_ip_entitlement(&pool, &tenant).await;
+
+        let (status, body) = env.post("/v1/dedicated-ips", r#"{"region":"fsn1"}"#).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.to_string().contains("reverse DNS"),
+            "the rDNS reason is surfaced: {body}"
+        );
+
+        let recorded = calls.lock().unwrap().join(",");
+        assert!(recorded.contains("create"), "recorded: {recorded}");
+        assert!(recorded.contains("assign 5001"), "recorded: {recorded}");
+        assert!(recorded.contains("rdns 5001"), "recorded: {recorded}");
+        assert!(
+            recorded.contains("delete 5001"),
+            "compensation deleted the floating IP: {recorded}"
+        );
+
+        // The failed provisioning leaves at most a terminal bookkeeping row
+        // (cleanup_failed/retired) — never an occupying one.
+        let statuses: Vec<(String,)> =
+            sqlx::query_as("SELECT status FROM dedicated_ips WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_all(&pool)
+                .await
+                .expect("rows");
+        for (status,) in &statuses {
+            assert!(
+                matches!(status.as_str(), "cleanup_failed" | "retired" | "failed"),
+                "terminal-only statuses expected, found {status}"
+            );
+        }
+    }
+
+    /// Warmup start succeeds from an rDNS-verified row and returns the
+    /// derived completion estimate.
+    #[tokio::test]
+    async fn warmup_starts_from_an_rdns_verified_row() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_warmup_ok").await else {
+            return;
+        };
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_url = start_recording_mock_hetzner(std::sync::Arc::clone(&calls)).await;
+        let (env, tenant) =
+            AdvEnv::tenant_with_ip_provider(pool.clone(), &["dedicated_ips:write"], &base_url)
+                .await;
+        let id = seed_dedicated_ip(&pool, &tenant, "203.0.113.97", "rdns_ready", 0.0).await;
+        sqlx::query(
+            "UPDATE dedicated_ips SET rdns_verified_at = NOW(), rdns_hostname = $2 WHERE id = $1",
+        )
+        .bind(id.to_string())
+        .bind("mail.example.test")
+        .execute(&pool)
+        .await
+        .expect("mark rdns verified");
+
+        let (status, body) = env
+            .post(&format!("/v1/dedicated-ips/{id}/warmup"), "{}")
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["warmupStatus"], "warming");
+        assert!(body["estimatedCompletion"].as_str().is_some());
+
+        let row_status: (String, f64) = sqlx::query_as(
+            "SELECT status, warmup_progress FROM dedicated_ips WHERE id = $1 AND tenant_id = $2",
+        )
+        .bind(id.to_string())
+        .bind(&tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("row");
+        assert_eq!(row_status.0, "warming");
+    }
+
+    /// The reputation formula: bounce/complaint rates above the tolerance
+    /// and a blocklist hit each subtract; a spotless IP keeps 100.0; the
+    /// score floors at 0.
+    #[test]
+    fn reputation_score_penalises_rate_and_blocklist_excesses() {
+        assert_eq!(calculate_reputation_score(0, 0, 0, false), 100.0);
+        assert_eq!(calculate_reputation_score(-5, -5, -5, false), 100.0);
+
+        // 5% bounce rate: 3 points over the 2% tolerance, ×10×0.3 = 9.
+        assert!((calculate_reputation_score(100, 5, 0, false) - 91.0).abs() < 1e-9);
+        // 0.5% complaint rate: 0.4 points over 0.1%, ×100×0.4 = 16.
+        assert!((calculate_reputation_score(1000, 0, 5, false) - 84.0).abs() < 1e-9);
+        // Blocklisted: flat 30.
+        assert_eq!(calculate_reputation_score(100, 0, 0, true), 70.0);
+        // Catastrophic rates clamp at zero, never negative.
+        assert_eq!(calculate_reputation_score(10, 10, 10, true), 0.0);
+    }
+
+    /// `build_allocation_summary` reports no allocation for a tenant that
+    /// has vanished (defensive NULL arm — reachable only across a
+    /// concurrent tenant deletion).
+    #[tokio::test]
+    async fn allocation_summary_for_a_missing_tenant_is_none() {
+        let Some(pool) = crate::test_db::canonical_pool("dip_alloc_missing_tenant").await else {
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool).await;
+        let allocation =
+            crate::routes::dedicated_ips::build_allocation_summary(&state, "no-such-tenant")
+                .await
+                .expect("summary query succeeds");
+        assert!(allocation.is_none());
+    }
 }

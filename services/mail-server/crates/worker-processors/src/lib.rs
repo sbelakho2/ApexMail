@@ -60,6 +60,110 @@ pub(crate) mod test_support {
         Some(pool)
     }
 
+    /// THE one provisioning gate for every DB-backed test in this crate:
+    /// per-test canonical databases (`migrator::test_support::
+    /// fresh_canonical_pool`). `TEST_DATABASE_URL` unset/blank soft-skips
+    /// (returns `None` — callers early-return through their one-line
+    /// `let ... else { return }` guard); a configured-but-broken server is
+    /// `Err` and PANICS (audit F01: infrastructure failure must fail the
+    /// suite, never silently skip it).
+    pub(crate) async fn canonical_pool(test_name: &str, db_suffix: &str) -> Option<sqlx::PgPool> {
+        let pool = migrator::test_support::fresh_canonical_pool(test_name, db_suffix).await;
+        unwrap_provisioned(pool, test_name)
+    }
+
+    /// The shared gate's Err arm: a CONFIGURED provisioning failure panics —
+    /// it must fail the suite, never degrade into a silent skip. A public
+    /// seam so the probe test can pin the contract without mutating
+    /// `TEST_DATABASE_URL` or reaching for a dead server.
+    pub(crate) fn unwrap_provisioned(
+        pool: Result<Option<sqlx::PgPool>, migrator::test_support::ProvisionError>,
+        label: &str,
+    ) -> Option<sqlx::PgPool> {
+        match pool {
+            Ok(pool) => pool,
+            Err(error) => panic!(
+                "canonical test-database provisioning failed for {label}: {}",
+                error.panic_message()
+            ),
+        }
+    }
+
+    /// Deterministic per-statement fault injection for the DB-backed suites:
+    /// a flag table plus a BEFORE <event> trigger on `table` whose function
+    /// raises while the flag row exists. Handlers span several statements, so
+    /// flipping the flag between them targets the Nth statement of a handler.
+    pub(crate) async fn install_fault_trigger(
+        pool: &sqlx::PgPool,
+        flag: &str,
+        table: &str,
+        event: &str,
+    ) {
+        sqlx::query("CREATE TABLE IF NOT EXISTS fault_injection (flag TEXT PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .expect("fault table");
+        let ret = if event == "DELETE" { "OLD" } else { "NEW" };
+        let fname = format!("wpf_{flag}_{event}");
+        let tname = format!("wpt_{flag}_{event}");
+        let create_fn = format!(
+            "CREATE OR REPLACE FUNCTION {fname}() RETURNS trigger AS $$ \
+             BEGIN \
+               IF EXISTS (SELECT 1 FROM fault_injection WHERE flag = '{flag}') THEN \
+                 RAISE EXCEPTION 'injected fault {flag}'; \
+               END IF; \
+               RETURN {ret}; \
+             END; \
+             $$ LANGUAGE plpgsql"
+        );
+        sqlx::query(&create_fn)
+            .execute(pool)
+            .await
+            .expect("fault fn");
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {tname} ON {table}"))
+            .execute(pool)
+            .await
+            .expect("drop old fault trigger");
+        sqlx::query(&format!(
+            "CREATE TRIGGER {tname} BEFORE {event} ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {fname}()"
+        ))
+        .execute(pool)
+        .await
+        .expect("fault trigger");
+    }
+
+    /// Arm / disarm a fault flag previously installed with
+    /// [`install_fault_trigger`].
+    pub(crate) async fn set_fault(pool: &sqlx::PgPool, flag: &str, on: bool) {
+        if on {
+            sqlx::query("INSERT INTO fault_injection (flag) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(flag)
+                .execute(pool)
+                .await
+                .expect("arm fault");
+        } else {
+            sqlx::query("DELETE FROM fault_injection WHERE flag = $1")
+                .bind(flag)
+                .execute(pool)
+                .await
+                .expect("disarm fault");
+        }
+    }
+
+    /// Pins the gate's fail-hard contract: a CONFIGURED provisioning failure
+    /// (constructed here — the panic arm is the behaviour under test) must
+    /// PANIC, never degrade into a silent skip (audit F01).
+    #[test]
+    #[should_panic(expected = "canonical test-database provisioning failed")]
+    fn configured_provisioning_failure_fails_the_suite() {
+        let injected = migrator::test_support::ProvisionError::new(
+            "admin-connect",
+            "injected probe failure — behaviour under test, not infrastructure",
+        );
+        let _ = unwrap_provisioned(Err(injected), "gate_probe");
+    }
+
     /// Install a process-wide tracing subscriber for tests (idempotent).
     ///
     /// Without a subscriber the `tracing` macros short-circuit before their

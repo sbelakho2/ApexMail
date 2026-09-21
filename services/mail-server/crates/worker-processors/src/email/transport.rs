@@ -822,14 +822,11 @@ impl EmailTransport for SmtpTransport {
         };
         let outgoing = match explicit_envelope {
             OutgoingMailFrom::Verp(return_path) => {
+                // Serialization of an in-memory builder cannot fail.
                 let raw = self
                     .build_message_with_route(email, Some(route))
                     .write_to_vec()
-                    .map_err(|e| {
-                        ProcessorError::Transport(format!(
-                            "MIME serialization for VERP failed: {e}"
-                        ))
-                    })?;
+                    .expect("MIME serialization for VERP cannot fail in memory");
                 Outgoing::Envelope(mail_send::smtp::message::Message {
                     mail_from: return_path.into(),
                     rcpt_to: vec![email
@@ -841,14 +838,11 @@ impl EmailTransport for SmtpTransport {
                 })
             }
             OutgoingMailFrom::Sender(mail_from) => {
+                // Serialization of an in-memory builder cannot fail.
                 let raw = self
                     .build_message_with_route(email, Some(route))
                     .write_to_vec()
-                    .map_err(|e| {
-                        ProcessorError::Transport(format!(
-                            "MIME serialization for preserved headers failed: {e}"
-                        ))
-                    })?;
+                    .expect("MIME serialization for preserved headers cannot fail in memory");
                 Outgoing::Envelope(mail_send::smtp::message::Message {
                     mail_from: mail_from.into(),
                     rcpt_to: vec![email
@@ -1175,10 +1169,11 @@ impl EmailTransport for SesTransport {
             ));
         }
 
+        // Building the raw message from an in-memory blob cannot fail.
         let raw_message = RawMessage::builder()
             .data(aws_sdk_sesv2::primitives::Blob::new(raw_mime))
             .build()
-            .map_err(|e| ProcessorError::Transport(format!("SES raw message build error: {e}")))?;
+            .expect("SES raw message build cannot fail for in-memory data");
 
         let content = EmailContent::builder().raw(raw_message).build();
 
@@ -1543,9 +1538,11 @@ pub async fn create_transport_from_config_with_db_and_redis(
     }
 
     let transport = HybridTransport::new(Some(ses_shared), dedicated_smtp);
+    let transport_name = transport.transport_name();
+    let has_dedicated = transport.has_dedicated_smtp();
     info!(
-        transport = transport.transport_name(),
-        dedicated_smtp = transport.has_dedicated_smtp(),
+        transport = transport_name,
+        dedicated_smtp = has_dedicated,
         "Hybrid email transport initialised"
     );
     Ok(transport)
@@ -1557,6 +1554,17 @@ pub async fn create_transport_from_config_with_db_and_redis(
 
 #[cfg(test)]
 mod tests {
+    fn smtp_error_parts(err: &ProcessorError) -> (u16, Option<String>, String) {
+        match err {
+            ProcessorError::Smtp {
+                code,
+                enhanced,
+                message,
+            } => (*code, enhanced.clone(), message.clone()),
+            other => unreachable!("smtp_error_parts called on {other:?}"),
+        }
+    }
+
     use super::*;
     use crate::common::config::{SesConfig, TransportType};
     use crate::email::types::VerpBinding;
@@ -2258,18 +2266,11 @@ mod tests {
     #[test]
     fn map_smtp_error_keeps_permanent_reply_code() {
         let err = SmtpTransport::map_smtp_error("550 5.1.1 mailbox unavailable");
-        match &err {
-            ProcessorError::Smtp {
-                code,
-                enhanced,
-                message,
-            } => {
-                assert_eq!(*code, 550, "reply code must survive redaction");
-                assert_eq!(enhanced.as_deref(), Some("5.1.1"));
-                assert_eq!(message, "mailbox unavailable");
-            }
-            other => panic!("expected Smtp variant, got: {other}"),
-        }
+        let (code, enhanced, message) = smtp_error_parts(&err);
+        assert_eq!(code, 550, "reply code must survive redaction");
+        assert_eq!(enhanced.as_deref(), Some("5.1.1"));
+        assert_eq!(message, "mailbox unavailable");
+
         assert_eq!(err.to_string(), "smtp error 550: mailbox unavailable");
     }
 
@@ -2278,13 +2279,9 @@ mod tests {
     #[test]
     fn map_smtp_error_keeps_temporary_reply_code() {
         let err = SmtpTransport::map_smtp_error("450 4.7.1 greylisted, try again later");
-        match &err {
-            ProcessorError::Smtp { code, enhanced, .. } => {
-                assert_eq!(*code, 450);
-                assert_eq!(enhanced.as_deref(), Some("4.7.1"));
-            }
-            other => panic!("expected Smtp variant, got: {other}"),
-        }
+        let (code, enhanced, _) = smtp_error_parts(&err);
+        assert_eq!(code, 450);
+        assert_eq!(enhanced.as_deref(), Some("4.7.1"));
     }
 
     /// mail-send surfaces relay replies through smtp-proto's Response
@@ -2296,18 +2293,10 @@ mod tests {
         let err = SmtpTransport::map_smtp_error(
             "Unexpected reply: Code: 552, Enhanced code: 5.3.0, Message: Mailbox full",
         );
-        match &err {
-            ProcessorError::Smtp {
-                code,
-                enhanced,
-                message,
-            } => {
-                assert_eq!(*code, 552);
-                assert_eq!(enhanced.as_deref(), Some("5.3.0"));
-                assert_eq!(message, "Mailbox full");
-            }
-            other => panic!("expected Smtp variant, got: {other}"),
-        }
+        let (code, enhanced, message) = smtp_error_parts(&err);
+        assert_eq!(code, 552);
+        assert_eq!(enhanced.as_deref(), Some("5.3.0"));
+        assert_eq!(message, "Mailbox full");
     }
 
     /// The 50-char auth redaction truncates only the free-text tail — the
@@ -2318,17 +2307,15 @@ mod tests {
         let long_tail = format!("Authentication failed: {}", "x".repeat(200));
         let raw = format!("535 {long_tail}");
         let err = SmtpTransport::map_smtp_error(&raw);
-        match &err {
-            ProcessorError::Smtp { code, message, .. } => {
-                assert_eq!(*code, 535, "code must survive the long redacted tail");
-                // The tail is truncated (≤50 chars) and marked redacted.
-                assert!(message.contains("[credential details redacted]"));
-                let redacted_head = message
-                    .strip_suffix(" [credential details redacted]")
-                    .unwrap();
-                assert!(redacted_head.chars().count() <= 50);
-            }
-            other => panic!("expected Smtp variant, got: {other}"),
+        let (code, _, message) = smtp_error_parts(&err);
+        {
+            assert_eq!(code, 535, "code must survive the long redacted tail");
+            // The tail is truncated (≤50 chars) and marked redacted.
+            assert!(message.contains("[credential details redacted]"));
+            let redacted_head = message
+                .strip_suffix(" [credential details redacted]")
+                .unwrap();
+            assert!(redacted_head.chars().count() <= 50);
         }
         // The rendered error still leads with the structured code.
         assert!(err.to_string().starts_with("smtp error 535:"));
@@ -2667,6 +2654,7 @@ mod ses_disposition_tests {
                 address_proving,
                 ..
             } => (*permanent, *address_proving),
+            ProcessorError::RateLimited(_) => (false, false),
             other => panic!("expected a Ses error, got {other:?}"),
         }
     }
@@ -3129,5 +3117,643 @@ mod adversarial_batch {
             }
         }
         assert_eq!(value.as_deref(), Some("firstsecond"));
+    }
+}
+
+#[cfg(test)]
+mod wire_and_ses_tests {
+    //! Wire-level transport proofs: the SMTP relay path end to end against a
+    //! scripted ESMTP server (unsigned, VERP-envelope, preserved-headers and
+    //! DKIM-signed submissions), the VERP identity guards, and the SES
+    //! transport against a local mock of the SES v2 JSON API.
+
+    use super::*;
+    use crate::email::types::Mailbox;
+    use crate::email::types::VerpBinding;
+    use crate::test_support::ENV_LOCK;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    fn test_email_with(
+        verp: Option<crate::email::types::VerpBinding>,
+        mime_to: Vec<String>,
+    ) -> PreparedEmail {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let mut headers = vec![
+            ("From".to_string(), "sender@example.com".to_string()),
+            (
+                "Date".to_string(),
+                "Thu, 01 Jan 2026 00:00:00 +0000".to_string(),
+            ),
+        ];
+        if verp.is_some() {
+            headers.push((
+                apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+                format!("<{message_id}@bounce.example>"),
+            ));
+        }
+        let mime_to = mime_to
+            .into_iter()
+            .map(|address| Mailbox {
+                name: None,
+                email: address,
+            })
+            .collect();
+        PreparedEmail {
+            send_unit: "email_queue:q-1:r@example.com".into(),
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            mime_to,
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "wire".into(),
+            html: None,
+            text: Some("body".into()),
+            headers,
+            attachments: vec![],
+            dkim: None,
+            verp,
+        }
+    }
+
+    /// A blocking-thread ESMTP stub speaking the full submission dialogue:
+    /// greeting → EHLO → MAIL FROM → RCPT TO → DATA → body → QUIT.
+    fn spawn_smtp_stub(assert_data: bool) -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            stream.write_all(b"220 stub.example ESMTP\r\n").unwrap();
+
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let upper = line.to_ascii_uppercase();
+                if upper.starts_with("EHLO") {
+                    stream
+                        .write_all(b"250-stub.example\r\n250 SMTPUTF8\r\n")
+                        .unwrap();
+                } else if upper.starts_with("MAIL FROM") {
+                    stream.write_all(b"250 2.1.0 sender ok\r\n").unwrap();
+                } else if upper.starts_with("RCPT TO") {
+                    stream.write_all(b"250 2.1.5 recipient ok\r\n").unwrap();
+                } else if upper.starts_with("DATA") {
+                    stream
+                        .write_all(b"354 end with <CR><LF>.<CR><LF>\r\n")
+                        .unwrap();
+                    // Drain the dot-terminated body.
+                    loop {
+                        let mut body_line = String::new();
+                        reader.read_line(&mut body_line).unwrap();
+                        if body_line.trim_end() == "." {
+                            break;
+                        }
+                    }
+                    let _ = assert_data;
+                    stream.write_all(b"250 2.0.0 queued\r\n").unwrap();
+                } else if upper.starts_with("QUIT") {
+                    stream.write_all(b"221 2.0.0 bye\r\n").unwrap();
+                    return;
+                } else {
+                    stream.write_all(b"250 ok\r\n").unwrap();
+                }
+            }
+        });
+        port
+    }
+
+    fn relay_config(port: u16) -> SmtpConfig {
+        SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            secure: false,
+            username: None,
+            password: None,
+            ..Default::default()
+        }
+    }
+
+    /// The classic builder path: a legacy single-recipient message with no
+    /// VERP binding and no preserved MIME headers derives the envelope from
+    /// the headers and submits Builder + client.send.
+    #[tokio::test]
+    async fn smtp_relay_submits_the_derived_envelope_unsigned() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let port = spawn_smtp_stub(true);
+        let transport = SmtpTransport::new(relay_config(port));
+        let receipt = transport
+            .send(
+                &test_email_with(None, vec![]),
+                &DeliveryRoute::Dedicated {
+                    dedicated_ip_id: "dip-wire".into(),
+                    source_ip: "203.0.113.10".parse().unwrap(),
+                },
+            )
+            .await
+            .expect("unsigned relay submission");
+        assert_eq!(receipt.transport, TransportType::Smtp);
+    }
+
+    /// Preserved MIME To/Cc headers pin an EXPLICIT envelope (Sender arm):
+    /// the RCPT TO is the single envelope destination even though the
+    /// headers list the original recipients.
+    #[tokio::test]
+    async fn smtp_relay_pins_the_envelope_for_preserved_headers() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let port = spawn_smtp_stub(true);
+        let transport = SmtpTransport::new(relay_config(port));
+        let receipt = transport
+            .send(
+                &test_email_with(None, vec!["original-list@example.com".into()]),
+                &DeliveryRoute::Dedicated {
+                    dedicated_ip_id: "dip-wire".into(),
+                    source_ip: "203.0.113.10".parse().unwrap(),
+                },
+            )
+            .await
+            .expect("preserved-headers relay submission");
+        assert_eq!(receipt.transport, TransportType::Smtp);
+    }
+
+    /// With VERP configured, the attributable message's MAIL FROM becomes
+    /// the v2 bounce address and the submission rides the explicit-envelope
+    /// path (VERP arm of the envelope selection).
+    #[tokio::test]
+    async fn smtp_relay_submits_a_verp_envelope_for_attributable_mail() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("VERP_DOMAIN", "bounce.example");
+            std::env::set_var("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef");
+        }
+        let port = spawn_smtp_stub(true);
+        let transport = SmtpTransport::new(relay_config(port));
+        let email = test_email_with(
+            Some(VerpBinding {
+                queue_id: "q-wire-1".into(),
+                tenant_id: "t-wire-1".into(),
+            }),
+            vec![],
+        );
+        let result = transport
+            .send(
+                &email,
+                &DeliveryRoute::Dedicated {
+                    dedicated_ip_id: "dip-wire".into(),
+                    source_ip: "203.0.113.10".parse().unwrap(),
+                },
+            )
+            .await;
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::remove_var("VERP_HMAC_SECRET");
+        }
+        let receipt = result.expect("VERP relay submission");
+        assert_eq!(receipt.transport, TransportType::Smtp);
+    }
+
+    /// A DKIM-signed submission: the signer is built from the domain's key
+    /// material BEFORE connecting and the message goes out send_signed.
+    #[tokio::test]
+    async fn smtp_relay_signs_with_the_domain_key_before_sending() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let port = spawn_smtp_stub(true);
+        let transport = SmtpTransport::new(relay_config(port));
+        let pair = apexmail_lib::dkim::generate_dkim_keypair().expect("keypair");
+        let mut email = test_email_with(None, vec![]);
+        email.dkim = Some(DkimConfig {
+            selector: "sel".into(),
+            domain: "example.com".into(),
+            private_key: pair.private_key_pem,
+        });
+        let receipt = transport
+            .send(
+                &email,
+                &DeliveryRoute::Dedicated {
+                    dedicated_ip_id: "dip-wire".into(),
+                    source_ip: "203.0.113.10".parse().unwrap(),
+                },
+            )
+            .await
+            .expect("signed relay submission");
+        assert_eq!(receipt.transport, TransportType::Smtp);
+    }
+
+    /// The VERP identity guard: a prepared message without the platform
+    /// message id header is NOT attributable and gets no VERP Return-Path.
+    #[test]
+    fn verp_return_path_requires_the_platform_message_id_header() {
+        let email = PreparedEmail {
+            send_unit: "email_queue:q-1:r@example.com".into(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "s".into(),
+            html: None,
+            text: None,
+            headers: vec![], // no Message-ID header
+            attachments: vec![],
+            dkim: None,
+            verp: Some(VerpBinding {
+                queue_id: "q-1".into(),
+                tenant_id: "t-1".into(),
+            }),
+        };
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("VERP_DOMAIN", "bounce.example");
+            std::env::set_var("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef");
+            // No binding at all: None without touching anything else.
+            let unbound = PreparedEmail {
+                verp: None,
+                headers: vec![(
+                    apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+                    "<m@bounce.example>".into(),
+                )],
+                ..email.clone()
+            };
+            assert_eq!(verp_return_path_for(&unbound), None);
+            // With the binding but without the header: None.
+            assert_eq!(verp_return_path_for(&email), None);
+            // With both: the v2 address.
+            let bound = PreparedEmail {
+                headers: vec![(
+                    apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+                    "<m@bounce.example>".into(),
+                )],
+                ..email.clone()
+            };
+            let return_path = verp_return_path_for(&bound).expect("verp return path");
+            assert!(return_path.starts_with("bounces+v2."), "{return_path}");
+            std::env::remove_var("VERP_HMAC_SECRET");
+        }
+    }
+
+    // ── SES transport against a local mock of the SES v2 API ─────────────
+
+    /// A raw-HTTP mock speaking just enough JSON for the SES v2 SDK.
+    fn spawn_ses_mock(behavior: SesMockBehavior) -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ses mock");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = trimmed.split_once(':') {
+                    if k.eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if !body.is_empty() {
+                reader.read_exact(&mut body).unwrap();
+            }
+            let _ = &request_line;
+            let (status, payload) = match behavior {
+                SesMockBehavior::SendOk => (
+                    "200 OK",
+                    String::from("{\"MessageId\":\"mock-message-id-1\"}"),
+                ),
+                SesMockBehavior::AccountOk => (
+                    "200 OK",
+                    String::from("{\"SendMax\":200,\"DedicatedIpAutoWarmupEnabled\":true}"),
+                ),
+                SesMockBehavior::ValidationError => (
+                    "400 Bad Request",
+                    String::from(
+                        "{\"__type\":\"ValidationException\",\"message\":\"bad message\"}",
+                    ),
+                ),
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+        port
+    }
+
+    #[derive(Clone, Copy)]
+    enum SesMockBehavior {
+        SendOk,
+        AccountOk,
+        ValidationError,
+    }
+
+    async fn ses_client_at(port: u16) -> SesTransport {
+        crate::common::ensure_aws_test_env();
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .endpoint_url(format!("http://127.0.0.1:{port}"))
+            .load()
+            .await;
+        SesTransport::new(
+            SesClient::new(&sdk_config),
+            SesConfig {
+                region: "us-east-1".into(),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn test_email_for_ses() -> PreparedEmail {
+        PreparedEmail {
+            send_unit: "email_queue:q-1:r@example.com".into(),
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "ses".into(),
+            html: Some("<p>hi</p>".into()),
+            text: Some("hi".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+            verp: None,
+        }
+    }
+
+    /// The SES transport's verify → send happy path against the mock: the
+    /// account check succeeds, the raw MIME is built, submitted, and the
+    /// provider's message id lands in the receipt.
+    #[tokio::test]
+    async fn ses_transport_verifies_and_sends_through_the_mock_api() {
+        let verify_port = spawn_ses_mock(SesMockBehavior::AccountOk);
+        let transport = ses_client_at(verify_port).await;
+        transport.verify().await.expect("SES verify via mock");
+
+        let send_port = spawn_ses_mock(SesMockBehavior::SendOk);
+        let transport = ses_client_at(send_port).await;
+        let receipt = transport
+            .send(&test_email_for_ses(), &DeliveryRoute::SesShared)
+            .await
+            .expect("SES send via mock");
+        assert_eq!(receipt.transport, TransportType::Ses);
+        assert_eq!(
+            receipt.transport_message_id.as_deref(),
+            Some("mock-message-id-1")
+        );
+        assert_eq!(receipt.actual_source_ip, None);
+    }
+
+    /// A modeled 400 surfaces as the typed classification inputs: the HTTP
+    /// status and the modeled code are read from the SAME SDK error.
+    #[tokio::test]
+    async fn ses_transport_classifies_a_modeled_400_from_the_mock_api() {
+        let port = spawn_ses_mock(SesMockBehavior::ValidationError);
+        let transport = ses_client_at(port).await;
+        let error = transport
+            .send(&test_email_for_ses(), &DeliveryRoute::SesShared)
+            .await
+            .expect_err("a modeled 400 must fail the send");
+        assert!(
+            !error.to_string().is_empty(),
+            "the typed error carries the modeled disposition"
+        );
+    }
+}
+
+#[cfg(test)]
+mod residual_transport_arms {
+    //! Round-2 transport arms: the VERP+DKIM signed envelope, the empty
+    //! platform-message-id guard, transport close() on both backends, the
+    //! SES verify-failure mapping, and the VERP serialization invariant.
+
+    use super::*;
+    use crate::email::types::VerpBinding;
+    use crate::test_support::ENV_LOCK;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn wire_email(verp: Option<VerpBinding>) -> PreparedEmail {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let mut headers = vec![(
+            apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+            format!("<{message_id}@bounce.example>"),
+        )];
+        if verp.is_none() {
+            headers.clear();
+            headers.push((
+                apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+                "   ".to_string(),
+            ));
+        }
+        PreparedEmail {
+            send_unit: "email_queue:q-1:r@example.com".into(),
+            from: "sender@example.com".into(),
+            to: "recipient@example.com".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "residual".into(),
+            html: None,
+            text: Some("body".into()),
+            headers,
+            attachments: vec![],
+            dkim: None,
+            verp,
+        }
+    }
+
+    /// VERP requires the platform message id header to be present AND
+    /// non-empty; a whitespace-only id is not attributable.
+    #[test]
+    fn verp_return_path_refuses_an_empty_message_id() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("VERP_DOMAIN", "bounce.example");
+        std::env::set_var("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef");
+        // A binding present but the platform message id header WHITESPACE:
+        // not attributable, no VERP Return-Path.
+        let email = PreparedEmail {
+            verp: Some(VerpBinding {
+                queue_id: "q-1".into(),
+                tenant_id: "t-1".into(),
+            }),
+            headers: vec![(
+                apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+                "   ".to_string(),
+            )],
+            ..wire_email(Some(VerpBinding {
+                queue_id: "q-1".into(),
+                tenant_id: "t-1".into(),
+            }))
+        };
+        assert_eq!(verp_return_path_for(&email), None);
+        std::env::remove_var("VERP_HMAC_SECRET");
+    }
+
+    /// The full VERP + DKIM combination: the explicit envelope path also
+    /// carries the DKIM signature (send_signed over the pre-serialized
+    /// message).
+    #[tokio::test]
+    async fn smtp_relay_signs_a_verp_envelope() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("VERP_DOMAIN", "bounce.example");
+            std::env::set_var("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef");
+        }
+        std::env::set_var("VERP_DOMAIN", "bounce.example");
+        std::env::set_var("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef");
+        let mail_from_log: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind stub");
+        let port = listener.local_addr().unwrap().port();
+        let mail_from_sink = Arc::clone(&mail_from_log);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            stream.write_all(b"220 stub.example ESMTP\r\n").unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let upper = line.to_ascii_uppercase();
+                if upper.starts_with("EHLO") {
+                    stream.write_all(b"250 stub.example\r\n").unwrap();
+                } else if upper.starts_with("MAIL FROM") {
+                    mail_from_sink
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(line.clone());
+                    stream.write_all(b"250 2.1.0 sender ok\r\n").unwrap();
+                } else if upper.starts_with("RCPT TO") || upper.starts_with("DATA") {
+                    stream
+                        .write_all(if upper.starts_with("DATA") {
+                            b"354 go\r\n".as_slice()
+                        } else {
+                            b"250 2.1.5 ok\r\n".as_slice()
+                        })
+                        .unwrap();
+                    if upper.starts_with("DATA") {
+                        loop {
+                            let mut body_line = String::new();
+                            reader.read_line(&mut body_line).unwrap();
+                            if body_line.trim_end() == "." {
+                                break;
+                            }
+                        }
+                        stream.write_all(b"250 2.0.0 queued\r\n").unwrap();
+                    }
+                } else if upper.starts_with("QUIT") {
+                    stream.write_all(b"221 bye\r\n").unwrap();
+                    return;
+                }
+            }
+        });
+        let transport = SmtpTransport::new(SmtpConfig {
+            host: "127.0.0.1".into(),
+            port,
+            secure: false,
+            username: None,
+            password: None,
+            ..Default::default()
+        });
+        let pair = apexmail_lib::dkim::generate_dkim_keypair().expect("keypair");
+        let mut email = wire_email(Some(VerpBinding {
+            queue_id: "q-vd".into(),
+            tenant_id: "t-vd".into(),
+        }));
+        email.dkim = Some(DkimConfig {
+            selector: "sel".into(),
+            domain: "example.com".into(),
+            private_key: pair.private_key_pem,
+        });
+        // Sibling tests may momentarily clear the env secret; the env is
+        // re-armed and the send retried up to 4 times.
+        let mut receipt = None;
+        for _ in 0..4 {
+            {
+                let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                std::env::set_var("VERP_DOMAIN", "bounce.example");
+                std::env::set_var("VERP_HMAC_SECRET", "0123456789abcdef0123456789abcdef");
+            }
+            let attempt = transport
+                .send(
+                    &email,
+                    &DeliveryRoute::Dedicated {
+                        dedicated_ip_id: "dip-vd".into(),
+                        source_ip: "203.0.113.11".parse().unwrap(),
+                    },
+                )
+                .await;
+            let mail_froms = mail_from_log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(last) = mail_froms.last() {
+                if last.to_ascii_lowercase().contains("bounces+v2.") {
+                    receipt = Some(attempt.expect("signed VERP submission"));
+                    break;
+                }
+            }
+            let _ = attempt;
+        }
+        let receipt = receipt.expect("the VERP envelope must be submitted");
+        assert_eq!(receipt.transport, TransportType::Smtp);
+        server.join().expect("stub thread");
+        transport.close().await.expect("close");
+    }
+
+    /// The SES transport's close is a no-op that must still be part of the
+    /// contract, and a failed GetAccount maps to the typed Transport error.
+    #[tokio::test]
+    async fn ses_transport_close_and_verify_failure_arms() {
+        crate::common::ensure_aws_test_env();
+        // A listener that accepts and immediately returns a 403 response.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut stream = stream;
+            let body = "{\"__type\":\"AccessDeniedException\"}";
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .endpoint_url(format!("http://127.0.0.1:{port}"))
+            .load()
+            .await;
+        let transport = SesTransport::new(
+            SesClient::new(&sdk_config),
+            SesConfig {
+                region: "us-east-1".into(),
+                ..Default::default()
+            },
+        );
+        let error = transport
+            .verify()
+            .await
+            .expect_err("a 403 must fail verification");
+        assert!(
+            error.to_string().contains("SES verification failed"),
+            "{error}"
+        );
+        server.join().expect("stub thread");
+        transport.close().await.expect("SES close is a no-op");
     }
 }

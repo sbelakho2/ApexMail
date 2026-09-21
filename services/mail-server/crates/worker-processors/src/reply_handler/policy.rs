@@ -654,17 +654,12 @@ mod tests {
             let decision = confident(disposition);
             let expected_cancel = disposition != ReplyDisposition::OutOfOffice
                 && disposition != ReplyDisposition::BounceSoft;
-            assert_eq!(
-                decision.cancel_queued,
-                expected_cancel,
-                "cancel for {}",
-                disposition.as_str()
-            );
+            let name = disposition.as_str();
+            assert_eq!(decision.cancel_queued, expected_cancel, "cancel for {name}");
             assert_eq!(
                 decision.has_human_reply,
                 disposition.stops_normal_sequence(),
-                "has_human_reply for {}",
-                disposition.as_str()
+                "has_human_reply for {name}"
             );
         }
         // The exception is pinned twice, deliberately.
@@ -684,11 +679,11 @@ mod tests {
             ReplyDisposition::NotInterested,
         ] {
             let decision = decide(PolicyInput::new(disposition, 0.3), Utc::now());
+            let name = disposition.as_str();
             assert_eq!(
                 decision.disposition,
                 ReplyDisposition::Unknown,
-                "{} must downgrade",
-                disposition.as_str()
+                "{name} must downgrade"
             );
             assert_eq!(
                 decision.observed_disposition, disposition,
@@ -869,11 +864,11 @@ mod tests {
             ),
         ];
         for (disposition, name) in expected {
+            let disposition_name = disposition.as_str();
             assert_eq!(
                 confident(disposition).suggested_action,
                 name,
-                "suggested action for {}",
-                disposition.as_str()
+                "suggested action for {disposition_name}"
             );
         }
     }

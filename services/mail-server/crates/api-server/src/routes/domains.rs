@@ -3366,3 +3366,74 @@ mod adversarial_handler_tests {
         assert!(matches!(error, ApiError::ServiceUnavailable(_)));
     }
 }
+
+/// Conflict and not-found arms of the domain lifecycle.
+#[cfg(test)]
+mod conflict_coverage_tests {
+    use crate::app::test_support::adv::AdvEnv;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn duplicate_claims_and_missing_domains_answer_cleanly() {
+        // Domain creation provisions DKIM material, which needs the
+        // process-global encryption key env var — hold the shared mutex
+        // and drive the async body on a local runtime (web.rs convention).
+        let _dkim_guard = crate::test_db::DKIM_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+        let Some(pool) = crate::test_db::canonical_pool("dom_conflict").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool.clone(), &["domains:write", "domains:read"]).await;
+        let name = format!("{}.example.test", uuid::Uuid::new_v4().simple());
+
+        // Without the DKIM encryption key in the environment, creation is
+        // refused with an explicit 503 (provisioning arm).
+        let stored_key = std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+        std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV);
+        let (status, body) = env
+            .post("/v1/domains", &serde_json::json!({ "name": format!("nok.{}.test", uuid::Uuid::new_v4().simple()) }).to_string())
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        if let Some(key) = stored_key {
+            std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, key);
+        } else {
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+            );
+        }
+
+        // First claim succeeds.
+        let (status, body) = env
+            .post("/v1/domains", &serde_json::json!({ "name": name }).to_string())
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["id"]
+            .as_str()
+            .or_else(|| body["data"]["id"].as_str())
+            .expect("domain id")
+            .to_string();
+
+        // The identical claim is a 409 (unique-violation arm).
+        let (status, body) = env
+            .post("/v1/domains", &serde_json::json!({ "name": name }).to_string())
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Deleting an unknown domain id is a 404.
+        let missing = uuid::Uuid::new_v4();
+        let (status, _body) = env.delete(&format!("/v1/domains/{missing}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The real domain deletes cleanly.
+        let (status, _body) = env.delete(&format!("/v1/domains/{id}")).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        });
+    }
+}

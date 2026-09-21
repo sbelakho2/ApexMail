@@ -330,11 +330,10 @@ async fn bulk_suppress(
         duplicates += valid_entries.len() - to_insert.len();
 
         let now = Utc::now();
+        // `chunks(SUPPRESSION_BULK_CHUNK_SIZE)` never yields an empty
+        // slice (slice::chunks is defined over non-empty subslices), so a
+        // guard here would be dead code.
         for chunk in to_insert.chunks(SUPPRESSION_BULK_CHUNK_SIZE) {
-            if chunk.is_empty() {
-                continue;
-            }
-
             let mut query = String::from(
                 "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) VALUES ",
             );
@@ -756,16 +755,12 @@ mod adversarial_tests {
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert!(
-            body["error"]["message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("10000")
-                || body["error"]["message"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("10,000")
-        );
+        // The handler formats the cap without a thousands separator, so the
+        // message always carries the plain "10000" form.
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("10000"));
 
         // deny_unknown_fields.
         let (status, _body) = env
@@ -791,5 +786,52 @@ mod adversarial_tests {
         let (write_only, _t2) = AdvEnv::tenant(pool, &["suppressions:write"]).await;
         let (status, body) = write_only.get("/v1/suppressions").await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    /// A chunked bulk INSERT that fails at the database must NOT be
+    /// misreported as created rows: the handler logs the chunk failure and
+    /// answers with `created: 0` instead of a 500 (the entries are simply
+    /// not suppressed). The fault trigger raises on the FIRST write to the
+    /// table, which inside this request is exactly the bulk chunk INSERT —
+    /// the earlier existence SELECT fires no triggers.
+    #[tokio::test]
+    async fn bulk_suppress_chunk_failure_is_logged_not_counted_as_created() {
+        let Some(pool) = crate::test_db::canonical_pool("supp_bulk_fault").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool.clone(), &["suppressions:write"]).await;
+
+        crate::routes::fault::arm_write_fault(&pool, "suppressions", "supp_bulk", 0)
+            .await
+            .expect("arm bulk-insert fault trigger");
+
+        let unique = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let (status, body) = env
+            .post(
+                "/v1/suppressions/bulk",
+                &serde_json::json!({
+                    "entries": [
+                        { "email": format!("f1-{unique}@example.com"), "reason": "bounce" },
+                        { "email": format!("f2-{unique}@example.com"), "reason": "complaint" }
+                    ]
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["created"], 0, "the failed chunk inserted nothing");
+        assert_eq!(body["duplicates"], 0);
+        assert_eq!(body["invalid"], 0);
+
+        // And indeed nothing was written.
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM suppressions \
+             WHERE reason = 'bulk' AND source = 'bulk' AND tenant_id = $1",
+        )
+        .bind(&_tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count suppressions");
+        assert_eq!(stored, 0);
     }
 }

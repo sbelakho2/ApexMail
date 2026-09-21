@@ -114,12 +114,7 @@ mod db_tests {
     use super::*;
 
     async fn db() -> Option<sqlx::PgPool> {
-        match migrator::test_support::fresh_canonical_pool("warmup_graduation", "wp_graduation")
-            .await
-        {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool("warmup_graduation", "wp_graduation").await
     }
 
     async fn seed_ip(db: &sqlx::PgPool, id: &str, days: i64, status: &str) {
@@ -147,11 +142,9 @@ mod db_tests {
     /// Day-60 IPs graduate exactly once, with an audit row; day-59 and
     /// already-active rows are untouched; the second pass is a no-op.
     #[tokio::test]
-    async fn graduation_is_exact_idempotent_and_audited() {
-        let Some(db) = db().await else {
-            eprintln!("skipping: set TEST_DATABASE_URL");
-            return;
-        };
+    async fn graduation_is_exact_idempotent_and_audited() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(db) = db().await else { return Ok(()) };
         seed_ip(&db, "grad-mature", 61, "warming").await;
         seed_ip(&db, "grad-young", 59, "warming").await;
         seed_ip(&db, "grad-active", 90, "active").await;
@@ -197,5 +190,6 @@ mod db_tests {
         .unwrap();
         assert_eq!(audit, 1, "no duplicate audit rows on the second pass");
         db.close().await;
+        Ok(())
     }
 }

@@ -58,16 +58,16 @@ mod handoff_outage_tests {
     /// analytics handoff: the loop must keep resetting claims (messages stay
     /// retryable, nothing is marked processed) and still stop cleanly.
     #[tokio::test]
-    async fn loop_keeps_resetting_claims_while_the_analytics_store_is_down() {
+    async fn loop_keeps_resetting_claims_while_the_analytics_store_is_down(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         crate::test_support::install_test_tracing();
-        let Some(pool) = migrator::test_support::fresh_canonical_pool(
+        #[rustfmt::skip]
+        let Some(pool) = crate::test_support::canonical_pool(
             "reply_handoff_outage",
             "reply_handoff_outage",
         )
         .await
-        .expect("provision") else {
-            return;
-        };
+        else { return Ok(()) };
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..12];
         let tenant = format!("rho-{suffix}");
         sqlx::query(
@@ -139,5 +139,6 @@ mod handoff_outage_tests {
             "the loop must reset the claim so the next poll retries"
         );
         pool.close().await;
+        Ok(())
     }
 }

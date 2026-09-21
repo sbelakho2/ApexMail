@@ -45,6 +45,10 @@ pub mod kiwicaptcha;
 // Real-time SSE stream token issuance
 pub mod stream_tokens;
 
+// Test-only database-level fault injection helpers shared by route tests.
+#[cfg(test)]
+pub(crate) mod fault;
+
 #[cfg(test)]
 mod tests {
     use std::fs;

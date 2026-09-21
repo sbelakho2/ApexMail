@@ -1376,8 +1376,9 @@ fn expand_rows_within_cap(rows: Vec<QueuedEmailRow>, cap: usize) -> Vec<EmailJob
         let expanded = queued_row_to_jobs(row);
         let remaining = cap - jobs.len();
         if expanded.len() > remaining {
+            let claimed_recipients = expanded.len();
             warn!(
-                claimed_recipients = expanded.len(),
+                claimed_recipients,
                 admitted_recipients = remaining,
                 "multi-recipient row exceeds available concurrency slots — excess \
                  recipients deferred until the next lease cycle"
@@ -1590,10 +1591,8 @@ impl EmailProcessor {
 
     /// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
-        info!(
-            concurrency = self.config.base.concurrency,
-            "Starting email processor"
-        );
+        let concurrency = self.config.base.concurrency;
+        info!(concurrency, "Starting email processor");
 
         // Queue-depth metrics must NOT depend on transport health: while the
         // transport is down (e.g. missing credentials), the poll loop below
@@ -1709,11 +1708,12 @@ impl EmailProcessor {
 
             // ── SCALE-H-04: Load shedding check ───────────────
             if self.backpressure.is_shedding() {
+                let backlog = self.backpressure.backlog();
+                let in_flight = self.backpressure.in_flight();
+                let available = self.backpressure.available();
                 warn!(
-                    backlog = self.backpressure.backlog(),
-                    in_flight = self.backpressure.in_flight(),
-                    available = self.backpressure.available(),
-                    "Load shedding active — pausing poll loop"
+                    backlog,
+                    in_flight, available, "Load shedding active — pausing poll loop"
                 );
                 sleep(Duration::from_secs(1)).await;
                 continue;
@@ -1889,9 +1889,10 @@ impl EmailProcessor {
                 .execute(&self.db)
                 .await
             {
+                let parent_count = parents.len();
                 warn!(
                     error = %e,
-                    parents = parents.len(),
+                    parents = parent_count,
                     "Failed to transition claimed message parents to 'processing'"
                 );
             }
@@ -1931,12 +1932,12 @@ impl EmailProcessor {
     /// right emitter. Time-gated to avoid a grouped COUNT on every poll.
     async fn record_queue_depth_metrics(&self) {
         let now_ms = Utc::now().timestamp_millis();
-        let last = self
-            .queue_metrics_last_emit_ms
-            .swap(now_ms, Ordering::SeqCst);
+        let last = self.queue_metrics_last_emit_ms.load(Ordering::SeqCst);
         if now_ms.saturating_sub(last) < 10_000 {
             return;
         }
+        self.queue_metrics_last_emit_ms
+            .store(now_ms, Ordering::SeqCst);
 
         let rows: Result<Vec<(String, i64)>, sqlx::Error> =
             sqlx::query_as("SELECT status, COUNT(*) FROM email_queue GROUP BY status")
@@ -2040,10 +2041,14 @@ impl EmailProcessor {
             let mut uncached: Vec<String> = Vec::new();
             for email in &emails {
                 let cache_key = format!("{}:{}", tenant_id, canonical_recipient(email));
-                match self.suppression_cache.get(&cache_key) {
-                    Some(cached) if !cached.suppressed => {}
-                    Some(_) => unreachable!("positive suppression results are never cached"),
-                    None => uncached.push(canonical_recipient(email)),
+                if let Some(cached) = self.suppression_cache.get(&cache_key) {
+                    // F55 invariant: only NEGATIVE results are ever cached.
+                    debug_assert!(
+                        !cached.suppressed,
+                        "positive suppression results are never cached"
+                    );
+                } else {
+                    uncached.push(canonical_recipient(email));
                 }
             }
 
@@ -2204,9 +2209,10 @@ impl EmailProcessor {
         self.record_outcome(outcome);
 
         let duration = start.elapsed();
+        let duration_ms = duration.as_millis();
         debug!(
             job_id = %job_id,
-            duration_ms = duration.as_millis(),
+            duration_ms,
             outcome = ?outcome,
             "Job processed"
         );
@@ -2368,9 +2374,10 @@ impl EmailProcessor {
             match select_warmup_ip(&self.redis, &pool, &today).await {
                 Ok(Some(reserved)) => Some(reserved),
                 Ok(None) => {
+                    let candidates = pool.len();
                     debug!(
                         job_id = %job.id,
-                        candidates = pool.len(),
+                        candidates,
                         "every warming dedicated IP is at its canonical daily cap — deferring row"
                     );
                     self.requeue_job(job, "warmup_limit").await?;
@@ -2396,11 +2403,13 @@ impl EmailProcessor {
             Some(reserved) => reserved.route(),
             None => DeliveryRoute::SesShared,
         };
+        let route_kind = transport_kind_for(&route);
+        let warmup_selected = reserved.is_some();
         debug!(
             job_id = %job.id,
             route = %route,
-            route_kind = %transport_kind_for(&route),
-            warmup_selected = reserved.is_some(),
+            route_kind = %route_kind,
+            warmup_selected,
             "dispatch route resolved"
         );
 
@@ -2414,7 +2423,7 @@ impl EmailProcessor {
                 job_id = %job.id,
                 tenant_id = %job.tenant_id,
                 domain_id = %job.domain_id,
-                route_kind = %transport_kind_for(&route),
+                route_kind = %route_kind,
                 "send admission exhausted — deferring row"
             );
             self.requeue_job(job, "send_rate_limited").await?;
@@ -3031,9 +3040,8 @@ impl EmailProcessor {
     /// ([`EmailProcessor::reconcile_stuck_parents`]) instead of failing
     /// the send path.
     async fn reconcile_parent_progress(&self, job: &EmailJob) {
-        let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) else {
-            return;
-        };
+        #[rustfmt::skip]
+        let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) else { return; };
         if let Err(e) = sqlx::query(MESSAGES_PROGRESS_UPDATE_SQL)
             .bind(message_uuid)
             .bind(&job.tenant_id)
@@ -3061,9 +3069,10 @@ impl EmailProcessor {
             .await
         {
             Ok(updated) => {
-                if updated.rows_affected() > 0 {
+                let parents = updated.rows_affected();
+                if parents > 0 {
                     info!(
-                        parents = updated.rows_affected(),
+                        parents,
                         "reconciled stuck parent messages with all-terminal recipients"
                     );
                 }
@@ -3097,6 +3106,7 @@ impl EmailProcessor {
         smtp_response: Option<&str>,
         error_message: Option<&str>,
     ) {
+        let attempt_number = job.attempt + 1;
         if let Err(e) = sqlx::query(
             r#"
             INSERT INTO email_delivery_log
@@ -3108,7 +3118,7 @@ impl EmailProcessor {
         )
         .bind(&job.id)
         // job.attempt is 0-based; attempt_number is 1-based.
-        .bind(job.attempt + 1)
+        .bind(attempt_number)
         .bind(smtp_response)
         .bind(success)
         .bind(error_message)
@@ -3118,7 +3128,7 @@ impl EmailProcessor {
         {
             warn!(
                 job_id = %job.id,
-                attempt = job.attempt + 1,
+                attempt = attempt_number,
                 error = %e,
                 "Failed to record delivery attempt in email_delivery_log"
             );
@@ -3558,10 +3568,11 @@ impl EmailProcessor {
     ) {
         match record_sales_outcome_if_linked(&self.db, &job.id, event, provider).await {
             Ok(Some(outcome_id)) => {
+                let outcome_rung = event.outcome().unwrap_or("none");
                 debug!(
                     job_id = %job.id,
                     outcome_id = %outcome_id,
-                    outcome = event.outcome().unwrap_or("none"),
+                    outcome = outcome_rung,
                     "Sales V2 outcome recorded from a delivery fact"
                 );
             }
@@ -3578,10 +3589,11 @@ impl EmailProcessor {
 
         match record_sender_event_if_linked(&self.db, &job.id, event, &job.to).await {
             Ok(Some(sender_event_id)) => {
+                let ledger_event = event.sender_ledger_event().unwrap_or("none");
                 debug!(
                     job_id = %job.id,
                     sender_event_id = %sender_event_id,
-                    event_type = event.sender_ledger_event().unwrap_or("none"),
+                    event_type = ledger_event,
                     "sender-health ledger row recorded from a delivery fact"
                 );
             }
@@ -4403,9 +4415,8 @@ pub async fn record_sales_outcome_if_linked(
     .fetch_optional(db)
     .await?;
 
-    let Some(provenance) = provenance else {
-        return Ok(None);
-    };
+    #[rustfmt::skip]
+    let Some(provenance) = provenance else { return Ok(None) };
     if provenance.tenant_id.is_empty() {
         return Ok(None);
     }
@@ -5148,7 +5159,14 @@ mod tests {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let mut child = std::process::Command::new("redis-server")
+        let mut child = spawn_redis_server(port)?;
+        redis_ready(&mut child, port, 50, Duration::from_millis(100)).await
+    }
+
+    /// Spawn a private `redis-server` bound to `port` (no persistence).
+    /// Split from [`ephemeral_redis`] so the readiness loop is injectable.
+    pub(crate) fn spawn_redis_server(port: u16) -> Option<std::process::Child> {
+        std::process::Command::new("redis-server")
             .args([
                 "--port",
                 &port.to_string(),
@@ -5162,24 +5180,35 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok()?;
-        for _ in 0..50 {
-            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
+            .ok()
+    }
+
+    /// Poll PING until the server answers, then return its pool. The
+    /// attempt count and per-attempt backoff are parameters so a test can
+    /// prove the exhausted path (child killed, `None`) without waiting out
+    /// the production budget.
+    pub(crate) async fn redis_ready(
+        child: &mut std::process::Child,
+        port: u16,
+        attempts: u32,
+        backoff: Duration,
+    ) -> Option<RedisPool> {
+        let url = format!("redis://127.0.0.1:{port}");
+        for _ in 0..attempts {
+            if let Ok(client) = redis::Client::open(url.as_str()) {
                 if let Ok(mut conn) = client.get_connection() {
                     if redis::cmd("PING")
                         .query::<String>(&mut conn)
                         .map(|r| r == "PONG")
                         .unwrap_or(false)
                     {
-                        return deadpool_redis::Config::from_url(format!(
-                            "redis://127.0.0.1:{port}"
-                        ))
-                        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                        .ok();
+                        return deadpool_redis::Config::from_url(url)
+                            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                            .ok();
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(backoff).await;
         }
         let _ = child.kill();
         let _ = child.wait();
@@ -5668,13 +5697,8 @@ mod tests {
     /// evidence stay NULL. Gated on TEST_DATABASE_URL.
     #[tokio::test]
     async fn provider_provenance_is_persisted_and_carried_through() {
-        let pool =
-            match migrator::test_support::fresh_canonical_pool("worker_provider", "carry").await {
-                Ok(pool) => pool,
-                Err(error) => panic!("{}", error.panic_message()),
-            };
-        let Some(pool) = pool else {
-            eprintln!("skipping provider_provenance_is_persisted_and_carried_through: no TEST_DATABASE_URL");
+        let Some(pool) = crate::test_support::canonical_pool("worker_provider", "carry").await
+        else {
             return;
         };
 
@@ -6244,10 +6268,10 @@ mod tests {
     /// row instead of sending), and refills over elapsed time — the clock
     /// is injected as `now_ms`, so refill is tested without sleeping.
     #[tokio::test]
-    async fn send_admission_bucket_exhausts_then_refills() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+    async fn send_admission_bucket_exhausts_then_refills() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
 
         let keys = send_admission_keys(&tracking_gate_job(), TransportKind::SesShared);
         let t0 = 1_000_000i64;
@@ -6272,16 +6296,17 @@ mod tests {
                 .unwrap(),
             "after a full refill period the bucket admits again"
         );
+        Ok(())
     }
 
     /// The tenant bucket is SHARED across the tenant's domains while each
     /// domain keeps its own bucket: exhausting the tenant ceiling refuses a
     /// different domain whose own bucket still has tokens.
     #[tokio::test]
-    async fn send_admission_buckets_are_per_tenant_and_per_domain() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+    async fn send_admission_buckets_are_per_tenant_and_per_domain(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
 
         let mut job = tracking_gate_job();
         job.tenant_id = "tenant-rl".into();
@@ -6309,16 +6334,17 @@ mod tests {
         assert!(reserve_send_admission(&redis, &keys_other, 1, t0)
             .await
             .unwrap());
+        Ok(())
     }
 
     /// Adversarial 9: shared and dedicated sends do not consume each other's
     /// buckets. Draining the shared bucket leaves the dedicated bucket at full
     /// capacity and vice versa.
     #[tokio::test]
-    async fn shared_and_dedicated_rate_buckets_are_independent() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+    async fn shared_and_dedicated_rate_buckets_are_independent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
         let job = tracking_gate_job();
         let shared = send_admission_keys(&job, TransportKind::SesShared);
         let dedicated = send_admission_keys(&job, TransportKind::Dedicated);
@@ -6347,13 +6373,15 @@ mod tests {
                 .unwrap(),
             "the dedicated bucket then exhausts on its own"
         );
+        Ok(())
     }
 
     /// The processor-level gate consumes the route's configured rate and
     /// defers (returns false) once it is exhausted; a 0 rate disables the
     /// gate; an unreachable Redis fails OPEN (best-effort).
     #[tokio::test]
-    async fn check_send_admission_gates_on_config_rate_and_fails_open() {
+    async fn check_send_admission_gates_on_config_rate_and_fails_open(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         crate::common::ensure_aws_test_env();
         let shared_route = DeliveryRoute::SesShared;
         // Unreachable Redis: the gate must fail open (warn + admit).
@@ -6385,9 +6413,8 @@ mod tests {
             "Redis unavailability must not block sends (best-effort gate)"
         );
 
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
         let db = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_lazy("postgres://localhost/unused")
@@ -6450,6 +6477,7 @@ mod tests {
                 .unwrap(),
             "rate 0 must disable the admission gate without touching Redis"
         );
+        Ok(())
     }
 
     /// D/F25/F75: the audit `messages` row must follow the COMPLETE
@@ -6837,10 +6865,10 @@ mod tests {
     /// pool selects nothing, the retired domain-keyed counter is ignored,
     /// and an unavailable store fails closed.
     #[tokio::test]
-    async fn warmup_selection_reads_the_cap_but_consumes_nothing() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+    async fn warmup_selection_reads_the_cap_but_consumes_nothing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
 
         let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "203.0.113.9", true, 3)])
             .expect("candidate pool");
@@ -6924,6 +6952,7 @@ mod tests {
             select_warmup_ip(&dead_redis, &pool, &today).await.is_err(),
             "an unavailable quota store must not select a warming send"
         );
+        Ok(())
     }
 
     /// P0 aggregate selection (ephemeral redis): with two warming IPs the
@@ -6931,10 +6960,10 @@ mod tests {
     /// the idle IP first and an at-cap IP is skipped — spreading without
     /// consuming (consumption is the relay's, at the effect boundary).
     #[tokio::test]
-    async fn aggregate_selection_prefers_the_least_utilised_ip() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+    async fn aggregate_selection_prefers_the_least_utilised_ip(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
         let now = Utc::now();
         let pool = select_delivery_ip(
             now,
@@ -6992,6 +7021,7 @@ mod tests {
             .await
             .expect("redis available")
             .is_none());
+        Ok(())
     }
 
     /// P0 graduation: an `active` (graduated) IP is still SELECTED for a
@@ -7034,10 +7064,10 @@ mod tests {
     /// an active one exists, the send SPILLS to the active IP instead of
     /// deferring mail that has a valid capacity.
     #[tokio::test]
-    async fn exhausted_warming_pool_spills_to_an_active_ip() {
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+    async fn exhausted_warming_pool_spills_to_an_active_ip(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
         let now = Utc::now();
         let mut pool = select_delivery_ip(
             now,
@@ -7068,6 +7098,7 @@ mod tests {
             .expect("redis available")
             .expect("the active IP must absorb the overflow");
         assert_eq!(reserved.candidate.dedicated_ip_id, "dip-active");
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------
@@ -7962,6 +7993,16 @@ mod tests {
         }
     }
 
+    /// The double's full EmailTransport contract: identity, verify, close.
+    #[tokio::test]
+    async fn recording_transport_contract_is_exercised() {
+        let t = RecordingTransport::new("rec", true);
+        let _name = EmailTransport::transport_name(&t);
+        let _binding = EmailTransport::supports_source_binding(&t);
+        t.verify().await.expect("verify");
+        t.close().await.expect("close");
+    }
+
     fn test_email() -> PreparedEmail {
         PreparedEmail {
             send_unit: "email_queue:job-1:recipient@example.com".into(),
@@ -8215,7 +8256,8 @@ mod tests {
     /// nothing to Redis (this embedded test relay runs without a gate, and
     /// the production gate's accounting is proven in the outbound-mta crate).
     #[tokio::test]
-    async fn verified_outbound_mta_send_leaves_no_worker_side_warmup_writes() {
+    async fn verified_outbound_mta_send_leaves_no_worker_side_warmup_writes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use crate::email::OutboundMtaTransport;
         use outbound_mta::test_support::{
             FakeSmtpConfig, FakeSmtpServer, MemoryLedger, StaticMxResolver,
@@ -8223,9 +8265,8 @@ mod tests {
         use outbound_mta::{Relay, RelayConfig};
         use std::sync::Arc as StdArc;
 
-        let Some(redis) = ephemeral_redis().await else {
-            return;
-        };
+        #[rustfmt::skip]
+        let Some(redis) = ephemeral_redis().await else { return Ok(()) };
         let job = tracking_gate_job();
         let pool = select_delivery_ip(Utc::now(), &[dedicated_ip("dip-1", "127.0.0.1", true, 3)])
             .expect("candidate pool");
@@ -8277,6 +8318,7 @@ mod tests {
             .expect("counter read");
         assert_eq!(count, None, "selection must not consume capacity");
         assert_eq!(server.messages().len(), 1);
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------
@@ -8376,10 +8418,7 @@ mod sales_feedback_db_tests {
     use uuid::Uuid;
 
     async fn feedback_pool(test_name: &str) -> Option<PgPool> {
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
     struct FeedbackFixture {
@@ -8611,10 +8650,10 @@ mod sales_feedback_db_tests {
     /// Adversarial 6: SMTP/provider acceptance alone produces NO `delivered`
     /// outcome — the audit's specific prohibition.
     #[tokio::test]
-    async fn smtp_acceptance_produces_no_delivered_outcome() {
-        let Some(pool) = feedback_pool("smtp_acceptance").await else {
-            return;
-        };
+    async fn smtp_acceptance_produces_no_delivered_outcome(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = feedback_pool("smtp_acceptance").await else { return Ok(()) };
         let fixture = seed_feedback_fixture(&pool, "smtp-acceptance").await;
 
         let inserted = record_sales_outcome_if_linked(
@@ -8649,16 +8688,17 @@ mod sales_feedback_db_tests {
             sender_events, 0,
             "acceptance must not write a `delivered` sender event either"
         );
+        Ok(())
     }
 
     /// Adversarial 7: a hard bounce produces exactly one `bounce` outcome and
     /// one `hard_bounce` ledger row for the step execution, even when the
     /// provider callback is delivered twice.
     #[tokio::test]
-    async fn hard_bounce_is_recorded_exactly_once_for_the_step_execution() {
-        let Some(pool) = feedback_pool("hard_bounce_once").await else {
-            return;
-        };
+    async fn hard_bounce_is_recorded_exactly_once_for_the_step_execution(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = feedback_pool("hard_bounce_once").await else { return Ok(()) };
         let fixture = seed_feedback_fixture(&pool, "hard-bounce-once").await;
         let recipient = "prospect@example.com";
 
@@ -8778,15 +8818,16 @@ mod sales_feedback_db_tests {
             events, 2,
             "the deferral joins the hard bounce in the ledger"
         );
+        Ok(())
     }
 
     /// Non-sales mail (no typed provenance) and legacy non-UUID ids record
     /// nothing — the typed columns are the gate.
     #[tokio::test]
-    async fn queue_rows_without_sales_provenance_record_nothing() {
-        let Some(pool) = feedback_pool("no_sales_provenance").await else {
-            return;
-        };
+    async fn queue_rows_without_sales_provenance_record_nothing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = feedback_pool("no_sales_provenance").await else { return Ok(()) };
         let plain_queue_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO email_queue (id, from_address, to_addresses, subject, status) \
@@ -8827,6 +8868,7 @@ mod sales_feedback_db_tests {
         .await
         .expect("legacy id recording");
         assert!(legacy.is_none());
+        Ok(())
     }
 }
 
@@ -8847,10 +8889,7 @@ mod acceptance_ledger_db_tests {
 
     async fn acceptance_pool(test_name: &str) -> Option<PgPool> {
         crate::test_support::install_test_tracing();
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
     fn acceptance_job() -> EmailJob {
@@ -8875,6 +8914,16 @@ mod acceptance_ledger_db_tests {
             attempt: 0,
             created_at: Utc::now(),
         }
+    }
+
+    /// The doubles' EmailTransport contract: identity, verify, close.
+    #[tokio::test]
+    async fn acceptance_doubles_contract_is_exercised() {
+        let counting = CountingTransport::default();
+        let _name = EmailTransport::transport_name(&counting);
+        let _binding = EmailTransport::supports_source_binding(&counting);
+        counting.verify().await.expect("verify");
+        counting.close().await.expect("close");
     }
 
     fn acceptance_email() -> PreparedEmail {
@@ -8971,11 +9020,10 @@ mod acceptance_ledger_db_tests {
     /// transport is refused by the pre-DATA gate and inserts NO acceptance
     /// row — the deferral happens before the ledger is touched.
     #[tokio::test]
-    async fn dedicated_route_without_dedicated_transport_inserts_no_acceptance_row() {
-        let Some(pool) = acceptance_pool("acc_no_transport").await else {
-            eprintln!("skipping dedicated_route_without_dedicated_transport_inserts_no_acceptance_row: no TEST_DATABASE_URL");
-            return;
-        };
+    async fn dedicated_route_without_dedicated_transport_inserts_no_acceptance_row(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_no_transport").await else { return Ok(()) };
         let job = acceptance_job();
         let route = DeliveryRoute::Dedicated {
             dedicated_ip_id: "dip-1".into(),
@@ -8991,16 +9039,16 @@ mod acceptance_ledger_db_tests {
         assert_eq!(acceptance_count(&pool, &send_unit_of(&job)).await, 0);
         assert_eq!(transport.calls(), 0);
         pool.close().await;
+        Ok(())
     }
 
     /// Adversarial 3 (ledger half): an unverifiable dedicated route never
     /// reaches the transport and leaves no `accepted` (indeed no) row.
     #[tokio::test]
-    async fn unverifiable_dedicated_route_defers_before_the_ledger() {
-        let Some(pool) = acceptance_pool("acc_unverifiable").await else {
-            eprintln!("skipping unverifiable_dedicated_route_defers_before_the_ledger: no TEST_DATABASE_URL");
-            return;
-        };
+    async fn unverifiable_dedicated_route_defers_before_the_ledger(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_unverifiable").await else { return Ok(()) };
         let job = acceptance_job();
         let route = DeliveryRoute::Dedicated {
             dedicated_ip_id: "dip-1".into(),
@@ -9042,16 +9090,15 @@ mod acceptance_ledger_db_tests {
         assert_eq!(acceptance_count(&pool, &send_unit_of(&job)).await, 0);
         assert_eq!(unverifiable.calls(), 0, "transport must never be called");
         pool.close().await;
+        Ok(())
     }
 
     /// Adversarial 4 (the exactly-once gate): the second reserve for the same
     /// send unit is refused and the recording transport saw exactly ONE call.
     #[tokio::test]
-    async fn duplicate_reserve_never_submits_twice() {
-        let Some(pool) = acceptance_pool("acc_duplicate").await else {
-            eprintln!("skipping duplicate_reserve_never_submits_twice: no TEST_DATABASE_URL");
-            return;
-        };
+    async fn duplicate_reserve_never_submits_twice() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_duplicate").await else { return Ok(()) };
         let job = acceptance_job();
         let route = DeliveryRoute::SesShared;
         let transport = CountingTransport::default();
@@ -9081,18 +9128,16 @@ mod acceptance_ledger_db_tests {
         );
         assert_eq!(acceptance_state(&pool, &send_unit).await, "accepted");
         pool.close().await;
+        Ok(())
     }
 
     /// Adversarial 5: a failed submission records `failed` and a retry is
     /// allowed; a successful one records `accepted` and a retry is refused.
     #[tokio::test]
-    async fn failed_submission_allows_retry_accepted_blocks_it() {
-        let Some(pool) = acceptance_pool("acc_retry").await else {
-            eprintln!(
-                "skipping failed_submission_allows_retry_accepted_blocks_it: no TEST_DATABASE_URL"
-            );
-            return;
-        };
+    async fn failed_submission_allows_retry_accepted_blocks_it(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_retry").await else { return Ok(()) };
         let job = acceptance_job();
         let route = DeliveryRoute::SesShared;
         let send_unit = send_unit_of(&job);
@@ -9127,16 +9172,16 @@ mod acceptance_ledger_db_tests {
         );
         assert_eq!(transport.calls(), 1);
         pool.close().await;
+        Ok(())
     }
 
     /// Adversarial 6: a crashed `reserved` row is reclaimed after the lease,
     /// exactly once — the ledger's primary key serializes the claim.
     #[tokio::test]
-    async fn crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once() {
-        let Some(pool) = acceptance_pool("acc_reclaim").await else {
-            eprintln!("skipping crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once: no TEST_DATABASE_URL");
-            return;
-        };
+    async fn crashed_reserved_row_is_reclaimed_after_the_lease_exactly_once(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_reclaim").await else { return Ok(()) };
         let job = acceptance_job();
         let route = DeliveryRoute::SesShared;
         let send_unit = send_unit_of(&job);
@@ -9237,18 +9282,16 @@ mod acceptance_ledger_db_tests {
             "a swept reservation is immediately retryable through the claim"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// The sales identity flows straight into the ledger primary key, so a
     /// retried step execution can never create a second row.
     #[tokio::test]
-    async fn sales_send_unit_is_the_queue_idempotency_key() {
-        let Some(pool) = acceptance_pool("acc_sales_unit").await else {
-            eprintln!(
-                "skipping sales_send_unit_is_the_queue_idempotency_key: no TEST_DATABASE_URL"
-            );
-            return;
-        };
+    async fn sales_send_unit_is_the_queue_idempotency_key() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = acceptance_pool("acc_sales_unit").await else { return Ok(()) };
         let step_execution_id = uuid::Uuid::new_v4();
         let job = EmailJob {
             sales_step_execution_id: Some(step_execution_id.to_string()),
@@ -9278,6 +9321,7 @@ mod acceptance_ledger_db_tests {
             AcceptanceClaim::AlreadyAccepted
         );
         pool.close().await;
+        Ok(())
     }
 }
 
@@ -9294,10 +9338,7 @@ mod end_to_end_db_tests {
 
     async fn e2e_pool(test_name: &str) -> Option<PgPool> {
         crate::test_support::install_test_tracing();
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
     fn e2e_redis() -> RedisPool {
@@ -9460,6 +9501,32 @@ mod end_to_end_db_tests {
     /// Processor with the SES double wired for the shared route; rate
     /// admission disabled (covered by its own focused tests) so the e2e
     /// assertions stay deterministic.
+    /// The doubles' EmailTransport contract: identity, verify, close.
+    #[tokio::test]
+    async fn e2e_doubles_contract_is_exercised() {
+        let scripted = ScriptedTransport::new(SendMode::Success);
+        let _name = EmailTransport::transport_name(scripted.as_ref());
+        let _binding = EmailTransport::supports_source_binding(scripted.as_ref());
+        scripted.verify().await.expect("verify");
+        scripted.close().await.expect("close");
+
+        let extra = Arc::new(ExtraTransport {
+            mode: ExtraMode::SesPermanent,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let _ename = EmailTransport::transport_name(extra.as_ref());
+        extra.verify().await.expect("extra verify");
+        extra.close().await.expect("extra close");
+
+        let dedicated = Arc::new(DedicatedDouble {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let _dname = EmailTransport::transport_name(dedicated.as_ref());
+        assert!(EmailTransport::supports_source_binding(dedicated.as_ref()));
+        dedicated.verify().await.expect("dedicated verify");
+        dedicated.close().await.expect("dedicated close");
+    }
+
     async fn build_processor(pool: &PgPool, transport: Arc<ScriptedTransport>) -> EmailProcessor {
         build_processor_with(pool, transport, false).await
     }
@@ -9512,10 +9579,10 @@ mod end_to_end_db_tests {
     /// A job whose authorized domain row has vanished (deleted/unverified
     /// after enqueue) is a permanent job error — dead-lettered, never sent.
     #[tokio::test]
-    async fn vanished_domain_row_is_a_permanent_job_error() {
-        let Some(pool) = e2e_pool("e2e_vanished_domain").await else {
-            return;
-        };
+    async fn vanished_domain_row_is_a_permanent_job_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_vanished_domain").await else { return Ok(()) };
         let fixture = seed(&pool, "vanished").await;
         // Delete the domain AFTER the queue row exists (the API authorized it
         // once; the worker re-checks at dispatch).
@@ -9545,15 +9612,16 @@ mod end_to_end_db_tests {
                 .expect("row");
         assert_eq!(status, "failed", "permanently rejected rows dead-letter");
         pool.close().await;
+        Ok(())
     }
 
     /// The full success path: claim, route, exactly-once reserve, submit,
     /// record, row transition, events, delivery log, reputation.
     #[tokio::test]
-    async fn successful_dispatch_transitions_every_durable_surface_once() {
-        let Some(pool) = e2e_pool("e2e_success").await else {
-            return;
-        };
+    async fn successful_dispatch_transitions_every_durable_surface_once(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_success").await else { return Ok(()) };
         let fixture = seed(&pool, "success").await;
         let transport = ScriptedTransport::new(SendMode::Success);
         let processor = build_processor(&pool, transport.clone()).await;
@@ -9625,16 +9693,17 @@ mod end_to_end_db_tests {
         let again = processor.fetch_jobs(10).await.expect("second claim");
         assert!(again.is_empty(), "a sent row is never re-claimed");
         pool.close().await;
+        Ok(())
     }
 
     /// A replayed logical send (the ledger already records acceptance) is
     /// NEVER submitted again: the row is completed as possibly-sent and the
     /// double stays untouched.
     #[tokio::test]
-    async fn replayed_send_is_completed_without_a_second_submission() {
-        let Some(pool) = e2e_pool("e2e_replay").await else {
-            return;
-        };
+    async fn replayed_send_is_completed_without_a_second_submission(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_replay").await else { return Ok(()) };
         let fixture = seed(&pool, "replay").await;
         let transport = ScriptedTransport::new(SendMode::Success);
         let processor = build_processor(&pool, transport.clone()).await;
@@ -9676,6 +9745,7 @@ mod end_to_end_db_tests {
             "the recipient is recorded as possibly-sent: {possibly:?}"
         );
         pool.close().await;
+        Ok(())
     }
 
     // ── failure taxonomy ───────────────────────────────────────────────────
@@ -9683,10 +9753,10 @@ mod end_to_end_db_tests {
     /// 5xx with an address-proving enhanced code: bounced row, recipient
     /// suppressed, bounce event recorded, replay of the send impossible.
     #[tokio::test]
-    async fn hard_bounce_suppresses_only_the_proven_invalid_recipient() {
-        let Some(pool) = e2e_pool("e2e_hard_bounce").await else {
-            return;
-        };
+    async fn hard_bounce_suppresses_only_the_proven_invalid_recipient(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_hard_bounce").await else { return Ok(()) };
         let fixture = seed(&pool, "hard").await;
         let transport = ScriptedTransport::new(SendMode::HardBounce);
         let processor = build_processor(&pool, transport.clone()).await;
@@ -9730,15 +9800,16 @@ mod end_to_end_db_tests {
             "the refusal frees the unit for retry, never leaves it reserved"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A policy 5xx WITHOUT address proof (5.7.x spam verdict) dead-letters
     /// the message but must NOT suppress the mailbox.
     #[tokio::test]
-    async fn policy_refusal_never_suppresses_the_recipient() {
-        let Some(pool) = e2e_pool("e2e_policy_refusal").await else {
-            return;
-        };
+    async fn policy_refusal_never_suppresses_the_recipient(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_policy_refusal").await else { return Ok(()) };
         let fixture = seed(&pool, "policy").await;
         struct PolicyTransport;
         #[async_trait::async_trait]
@@ -9809,14 +9880,15 @@ mod end_to_end_db_tests {
             "a policy refusal says nothing about the mailbox — no suppression"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// 4xx: the row is requeued with backoff and the attempt counter advances.
     #[tokio::test]
-    async fn soft_bounce_requeues_with_backoff_and_advances_the_attempt() {
-        let Some(pool) = e2e_pool("e2e_soft_bounce").await else {
-            return;
-        };
+    async fn soft_bounce_requeues_with_backoff_and_advances_the_attempt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_soft_bounce").await else { return Ok(()) };
         let fixture = seed(&pool, "soft").await;
         let transport = ScriptedTransport::new(SendMode::SoftBounce);
         let processor = build_processor(&pool, transport.clone()).await;
@@ -9847,15 +9919,16 @@ mod end_to_end_db_tests {
             "the SMTP failure text is persisted"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// An unclassifiable transport error at the attempt ceiling dead-letters
     /// the recipient into `email_dlq` and terminalizes the row.
     #[tokio::test]
-    async fn unknown_error_at_the_ceiling_moves_the_row_to_the_dlq() {
-        let Some(pool) = e2e_pool("e2e_dlq").await else {
-            return;
-        };
+    async fn unknown_error_at_the_ceiling_moves_the_row_to_the_dlq(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_dlq").await else { return Ok(()) };
         let fixture = seed(&pool, "dlq").await;
         let transport = ScriptedTransport::new(SendMode::UnknownError);
         let processor = build_processor_with(&pool, transport.clone(), true).await;
@@ -9877,6 +9950,7 @@ mod end_to_end_db_tests {
         .expect("dlq");
         assert_eq!(dlq, 1, "the exhausted recipient is dead-lettered");
         pool.close().await;
+        Ok(())
     }
 
     // ── dispatch gates ─────────────────────────────────────────────────────
@@ -9884,10 +9958,9 @@ mod end_to_end_db_tests {
     /// A globally suppressed recipient is never handed to the transport and
     /// the row terminalizes as suppressed.
     #[tokio::test]
-    async fn suppressed_recipient_is_never_submitted() {
-        let Some(pool) = e2e_pool("e2e_suppressed").await else {
-            return;
-        };
+    async fn suppressed_recipient_is_never_submitted() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_suppressed").await else { return Ok(()) };
         let fixture = seed(&pool, "suppressed").await;
         sqlx::query(
             "INSERT INTO suppressions (id, tenant_id, email, reason) VALUES ($1, $2, $3, 'unsubscribe')",
@@ -9916,15 +9989,15 @@ mod end_to_end_db_tests {
         let (status, _, _) = queue_row(&pool, fixture.queue_id).await;
         assert_eq!(status, "suppressed");
         pool.close().await;
+        Ok(())
     }
 
     /// A suspended tenant defers the job with the real reason, before any
     /// transport (or ledger) effect.
     #[tokio::test]
-    async fn suspended_tenant_defers_before_any_effect() {
-        let Some(pool) = e2e_pool("e2e_tenant").await else {
-            return;
-        };
+    async fn suspended_tenant_defers_before_any_effect() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_tenant").await else { return Ok(()) };
         let fixture = seed(&pool, "tenant").await;
         sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
             .bind(&fixture.tenant_id)
@@ -9959,15 +10032,16 @@ mod end_to_end_db_tests {
             "no acceptance row may exist for a deferred job"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A queue row without an authorized domain is permanently rejected: the
     /// row dead-letters into `email_dlq` instead of ever sending unsigned.
     #[tokio::test]
-    async fn row_without_an_authorized_domain_is_permanently_rejected() {
-        let Some(pool) = e2e_pool("e2e_no_domain").await else {
-            return;
-        };
+    async fn row_without_an_authorized_domain_is_permanently_rejected(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_no_domain").await else { return Ok(()) };
         let fixture = seed(&pool, "no-domain").await;
         sqlx::query("UPDATE email_queue SET domain_id = NULL WHERE id = $1")
             .bind(fixture.queue_id)
@@ -9996,16 +10070,17 @@ mod end_to_end_db_tests {
                 .expect("dlq");
         assert_eq!(dlq, 1);
         pool.close().await;
+        Ok(())
     }
 
     /// A queue row whose `from` no longer matches its authorized domain is a
     /// permanent job error (never an unsigned/other-tenant send) and
     /// dead-letters.
     #[tokio::test]
-    async fn sender_domain_mismatch_is_a_permanent_job_error() {
-        let Some(pool) = e2e_pool("e2e_sender_mismatch").await else {
-            return;
-        };
+    async fn sender_domain_mismatch_is_a_permanent_job_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_sender_mismatch").await else { return Ok(()) };
         let fixture = seed(&pool, "mismatch").await;
         sqlx::query("UPDATE email_queue SET from_address = 'attacker@other.example' WHERE id = $1")
             .bind(fixture.queue_id)
@@ -10033,18 +10108,24 @@ mod end_to_end_db_tests {
                 .expect("dlq");
         assert_eq!(dlq, 1);
         pool.close().await;
+        Ok(())
     }
 
     /// The error-rate circuit breaker latches once the 20-outcome window is
     /// at least half failures, and a healthy window clears it again.
     #[tokio::test]
-    async fn error_rate_breaker_latches_and_recovers() {
+    async fn error_rate_breaker_latches_and_recovers() -> Result<(), Box<dyn std::error::Error>> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .expect("lazy pool");
         let transport = ScriptedTransport::new(SendMode::Success);
         let processor = build_processor(&pool, transport).await;
 
+        // Capture a pre-call floor: the latch is `now_at_record + 60s`, so
+        // it must be at least `before + 60s` regardless of how long this
+        // thread is descheduled (a wall-clock `> Utc::now()` assert broke
+        // under full-workspace load when the process stalled >60s).
+        let before = Utc::now().timestamp_millis();
         for _ in 0..(ERROR_WINDOW_SIZE - 1) {
             processor.record_outcome(SendOutcome::TransportError);
         }
@@ -10056,8 +10137,8 @@ mod end_to_end_db_tests {
         processor.record_outcome(SendOutcome::TransportError);
         let latched = processor.error_cooldown_until.load(Ordering::SeqCst);
         assert!(
-            latched > Utc::now().timestamp_millis(),
-            "the breaker latched"
+            latched >= before + ERROR_COOLDOWN.as_millis() as i64,
+            "the breaker latched ({latched} < {before} + cooldown)"
         );
 
         // A window of successes does not unlatch it (the cooldown owns the
@@ -10070,6 +10151,7 @@ mod end_to_end_db_tests {
             latched,
             "successes neither unlatch nor extend the cooldown"
         );
+        Ok(())
     }
 
     // ── pure helpers ───────────────────────────────────────────────────────
@@ -10185,18 +10267,14 @@ mod end_to_end_db_tests {
             dedicated_ips: Vec::new(),
             return_path: None,
         };
+        let missing_selector = smtp_dkim_config_for_domain(&domain);
         assert!(
-            matches!(
-                smtp_dkim_config_for_domain(&domain),
-                Err(ProcessorError::Dkim(_))
-            ),
+            matches!(missing_selector, Err(ProcessorError::Dkim(_))),
             "a missing selector is refused"
         );
         domain.dkim_selector = Some("sel".into());
-        assert!(matches!(
-            smtp_dkim_config_for_domain(&domain),
-            Err(ProcessorError::Dkim(_))
-        ));
+        let missing_keys = smtp_dkim_config_for_domain(&domain);
+        assert!(matches!(missing_keys, Err(ProcessorError::Dkim(_))));
         domain.dkim_private_key = Some("dkim:v1:not-a-key".into());
         assert!(matches!(
             smtp_dkim_config_for_domain(&domain),
@@ -10536,10 +10614,10 @@ mod end_to_end_db_tests {
     /// An OPEN circuit breaker must defer the claimed row (retryable) and
     /// never submit it.
     #[tokio::test]
-    async fn circuit_open_defers_row_without_submission() {
-        let Some(pool) = e2e_pool("e2e_circuit_open").await else {
-            return;
-        };
+    async fn circuit_open_defers_row_without_submission() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_circuit_open").await else { return Ok(()) };
         let fixture = seed(&pool, "circuit").await;
         let transport = ScriptedTransport::new(SendMode::Success);
         let processor = build_processor(&pool, transport.clone()).await;
@@ -10565,6 +10643,7 @@ mod end_to_end_db_tests {
             "deferral reason recorded: {reason:?}"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// The structured error classes map to the recorded outcome and the
@@ -10572,7 +10651,7 @@ mod end_to_end_db_tests {
     /// transient → soft-bounce requeue, string Soft/Hard bounce transport
     /// errors reuse the same classes, RateLimited defers.
     #[tokio::test]
-    async fn ses_error_outcomes_map_to_bounce_classes() {
+    async fn ses_error_outcomes_map_to_bounce_classes() -> Result<(), Box<dyn std::error::Error>> {
         for (label, mode, expect_status) in [
             ("ses_permanent", ExtraMode::SesPermanent, "bounced"),
             ("ses_transient", ExtraMode::SesTransient, "pending"),
@@ -10580,9 +10659,8 @@ mod end_to_end_db_tests {
             ("transport_hard", ExtraMode::TransportHardBounce, "bounced"),
             ("rate_limited", ExtraMode::RateLimited, "pending"),
         ] {
-            let Some(pool) = e2e_pool(&format!("e2e_class_{label}")).await else {
-                return;
-            };
+            #[rustfmt::skip]
+            let Some(pool) = e2e_pool(&format!("e2e_class_{label}")).await else { return Ok(()) };
             let fixture = seed(&pool, label).await;
             let transport = Arc::new(ExtraTransport {
                 mode: mode.clone(),
@@ -10634,15 +10712,15 @@ mod end_to_end_db_tests {
             }
             pool.close().await;
         }
+        Ok(())
     }
 
     /// A worker with NO transport at all defers before DATA with
     /// ses_transport_unconfigured — the row stays retryable.
     #[tokio::test]
-    async fn unconfigured_transport_defers_before_data() {
-        let Some(pool) = e2e_pool("e2e_no_transport").await else {
-            return;
-        };
+    async fn unconfigured_transport_defers_before_data() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_no_transport").await else { return Ok(()) };
         let fixture = seed(&pool, "no-transport").await;
         let mut config = EmailConfig::default();
         config.tracking.enabled = false;
@@ -10663,13 +10741,15 @@ mod end_to_end_db_tests {
             "{reason:?}"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// Warmup reservation: a warming dedicated IP at its canonical daily cap
     /// defers the row with warmup_limit; an unreachable quota store defers
     /// with warmup_admission_unavailable (fail closed, never unlimited).
     #[tokio::test]
-    async fn warmup_reservation_cap_and_store_outage_fail_closed() {
+    async fn warmup_reservation_cap_and_store_outage_fail_closed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Shared-keyspace guard: the warmup counters live in the shared Redis
         // (keyed per IP+day). IPs are uuid-unique, but the guard keeps the
         // pattern honest across parallel processes.
@@ -10680,9 +10760,8 @@ mod end_to_end_db_tests {
         };
 
         // ── cap reached ──
-        let Some(pool) = e2e_pool("e2e_warmup_cap").await else {
-            return;
-        };
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_warmup_cap").await else { return Ok(()) };
         let mut fixture = seed(&pool, "warmup-cap").await;
         let ip_id = uuid::Uuid::new_v4();
         sqlx::query(
@@ -10740,9 +10819,8 @@ mod end_to_end_db_tests {
         pool.close().await;
 
         // ── quota store unreachable: fail closed ──
-        let Some(pool) = e2e_pool("e2e_warmup_down").await else {
-            return;
-        };
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_warmup_down").await else { return Ok(()) };
         let mut fixture = seed(&pool, "warmup-down").await;
         let ip_id = uuid::Uuid::new_v4();
         sqlx::query(
@@ -10789,16 +10867,17 @@ mod end_to_end_db_tests {
             "{reason:?}"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// Send admission: with a 1/sec shared-pool rate, a second send for the
     /// SAME tenant inside the same second is deferred (send_rate_limited) and
     /// the attempt is NOT consumed.
     #[tokio::test]
-    async fn send_admission_exhaustion_defers_the_second_send() {
-        let Some(pool) = e2e_pool("e2e_admission").await else {
-            return;
-        };
+    async fn send_admission_exhaustion_defers_the_second_send(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_admission").await else { return Ok(()) };
         let fixture = seed(&pool, "admission").await;
         // A second row for the same tenant (different recipients).
         let second_id = uuid::Uuid::new_v4();
@@ -10916,16 +10995,17 @@ mod end_to_end_db_tests {
         let (status, _) = row_deferral(&pool, deferred_id).await;
         assert_eq!(status, "sent");
         pool.close().await;
+        Ok(())
     }
 
     /// A LIVE acceptance reservation (unexpired lease) defers the retry with
     /// acceptance_in_flight instead of double-submitting; once the lease
     /// expires the claim reclaims it in place and submits.
     #[tokio::test]
-    async fn in_flight_acceptance_reservation_defers_until_the_lease_expires() {
-        let Some(pool) = e2e_pool("e2e_inflight").await else {
-            return;
-        };
+    async fn in_flight_acceptance_reservation_defers_until_the_lease_expires(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = e2e_pool("e2e_inflight").await else { return Ok(()) };
         let fixture = seed(&pool, "inflight").await;
         let transport = ScriptedTransport::new(SendMode::Success);
         let processor = build_processor(&pool, transport.clone()).await;
@@ -10985,6 +11065,7 @@ mod end_to_end_db_tests {
             "the reclaimed row records the acceptance"
         );
         pool.close().await;
+        Ok(())
     }
 }
 
@@ -11006,10 +11087,7 @@ mod orchestration_tests {
 
     async fn orch_pool(test_name: &str) -> Option<TestPool> {
         crate::test_support::install_test_tracing();
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
     fn orch_redis() -> RedisPool {
@@ -11035,6 +11113,16 @@ mod orchestration_tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// The orchestration double's contract: identity, verify, close.
+    #[tokio::test]
+    async fn orch_double_contract_is_exercised() {
+        let transport = PerRecipientTransport::bounce("nobody@invalid.test");
+        let _name = EmailTransport::transport_name(transport.as_ref());
+        let _binding = EmailTransport::supports_source_binding(transport.as_ref());
+        transport.verify().await.expect("verify");
+        transport.close().await.expect("close");
     }
 
     fn orch_config(concurrency: usize, poll_ms: u64) -> EmailConfig {
@@ -11241,10 +11329,10 @@ mod orchestration_tests {
     /// drained and the cooldown elapses it resumes and stops promptly on
     /// shutdown.
     #[tokio::test]
-    async fn backpressured_loop_sheds_then_resumes_and_stops_promptly() {
-        let Some(pool) = orch_pool("orch_shed").await else {
-            return;
-        };
+    async fn backpressured_loop_sheds_then_resumes_and_stops_promptly(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_shed").await else { return Ok(()) };
         let fixture = seed(&pool, "shed").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -11345,6 +11433,7 @@ mod orchestration_tests {
                 .expect("pending count");
         assert_eq!(pending, 0, "the queue is fully drained");
         pool.close().await;
+        Ok(())
     }
 
     // ── 2. Error-rate cooldown: the loop waits it out without hot-looping ─
@@ -11353,10 +11442,10 @@ mod orchestration_tests {
     /// fetch: the first (and only) submission happens only after the
     /// cooldown elapses — proving the pause instead of a hot poll.
     #[tokio::test]
-    async fn error_cooldown_pauses_polling_until_it_elapses() {
-        let Some(pool) = orch_pool("orch_cooldown").await else {
-            return;
-        };
+    async fn error_cooldown_pauses_polling_until_it_elapses(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_cooldown").await else { return Ok(()) };
         let fixture = seed(&pool, "cooldown").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -11401,6 +11490,7 @@ mod orchestration_tests {
         assert_eq!(transport.calls(), 1);
         assert_eq!(queue_status(&pool, fixture.queue_id).await, "sent");
         pool.close().await;
+        Ok(())
     }
 
     // ── 3. Idle shutdown breaks promptly ──────────────────────────────────
@@ -11409,10 +11499,9 @@ mod orchestration_tests {
     /// shutdown — the select! arm on the shutdown notification, not the
     /// 60 s interval, decides the exit latency.
     #[tokio::test]
-    async fn idle_loop_breaks_promptly_on_shutdown() {
-        let Some(pool) = orch_pool("orch_idle_stop").await else {
-            return;
-        };
+    async fn idle_loop_breaks_promptly_on_shutdown() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_idle_stop").await else { return Ok(()) };
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let mut config = orch_config(2, 60_000);
         config.base.poll_interval = Duration::from_secs(60);
@@ -11452,6 +11541,7 @@ mod orchestration_tests {
         );
         assert_eq!(transport.calls(), 0, "an empty queue submits nothing");
         pool.close().await;
+        Ok(())
     }
 
     // ── 4. Full start/stop lifecycle: background sweeps + queue service ───
@@ -11460,10 +11550,10 @@ mod orchestration_tests {
     /// stale-reservation reconciliation sweeps alongside the poll loop, and
     /// `stop` tears everything down.
     #[tokio::test]
-    async fn start_serves_the_queue_and_runs_the_background_sweeps() {
-        let Some(pool) = orch_pool("orch_start").await else {
-            return;
-        };
+    async fn start_serves_the_queue_and_runs_the_background_sweeps(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_start").await else { return Ok(()) };
         let fixture = seed(&pool, "start").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -11496,15 +11586,15 @@ mod orchestration_tests {
             "the queue-depth metrics exporter must have emitted at least once"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// An SMTP deployment without DKIM enabled must refuse to start: signed
     /// mail is a launch precondition, not a per-send concern.
     #[tokio::test]
-    async fn start_refuses_smtp_transport_without_dkim() {
-        let Some(pool) = orch_pool("orch_smtp_no_dkim").await else {
-            return;
-        };
+    async fn start_refuses_smtp_transport_without_dkim() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_smtp_no_dkim").await else { return Ok(()) };
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let mut config = orch_config(2, 20);
         config.transport_type = TransportType::Smtp;
@@ -11525,11 +11615,13 @@ mod orchestration_tests {
         );
         assert_eq!(transport.calls(), 0);
         pool.close().await;
+        Ok(())
     }
 
     /// A transport that cannot verify its credentials fails the start.
     #[tokio::test]
-    async fn start_fails_when_the_transport_cannot_verify() {
+    async fn start_fails_when_the_transport_cannot_verify() -> Result<(), Box<dyn std::error::Error>>
+    {
         struct Unverifiable;
         #[async_trait::async_trait]
         impl EmailTransport for Unverifiable {
@@ -11554,9 +11646,8 @@ mod orchestration_tests {
             }
         }
 
-        let Some(pool) = orch_pool("orch_verify_fail").await else {
-            return;
-        };
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_verify_fail").await else { return Ok(()) };
         let processor = build(
             &pool,
             Arc::new(Unverifiable) as Arc<dyn EmailTransport>,
@@ -11571,6 +11662,7 @@ mod orchestration_tests {
         assert!(error.contains("no credentials"));
         assert!(!processor.is_running.load(Ordering::SeqCst));
         pool.close().await;
+        Ok(())
     }
 
     // ── 5. Database outage: every best-effort surface degrades, none panics
@@ -11579,10 +11671,10 @@ mod orchestration_tests {
     /// governance surface must degrade to its failure arm without panicking
     /// and without being mistaken for authoritative data.
     #[tokio::test]
-    async fn database_outage_degrades_every_best_effort_surface() {
-        let Some(pool) = orch_pool("orch_outage").await else {
-            return;
-        };
+    async fn database_outage_degrades_every_best_effort_surface(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_outage").await else { return Ok(()) };
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
             &pool,
@@ -11653,6 +11745,7 @@ mod orchestration_tests {
         );
 
         pool.close().await;
+        Ok(())
     }
 
     async fn fixture_queue_id(_pool: &PgPool) -> String {
@@ -11685,10 +11778,9 @@ mod orchestration_tests {
 
     /// The Redis-unavailable arm of the reputation counter.
     #[tokio::test]
-    async fn sent_reputation_survives_a_redis_outage() {
-        let Some(pool) = orch_pool("orch_rep_redis").await else {
-            return;
-        };
+    async fn sent_reputation_survives_a_redis_outage() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_rep_redis").await else { return Ok(()) };
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -11703,6 +11795,7 @@ mod orchestration_tests {
             .record_sent_reputation("redis-outage.example")
             .await;
         pool.close().await;
+        Ok(())
     }
 
     // ── 6. Stale lease tokens fence EVERY durable write ───────────────────
@@ -11712,10 +11805,10 @@ mod orchestration_tests {
     /// possibly-sent, soft bounce, hard bounce, dead-letter, and requeue are
     /// ALL fenced on the claim token.
     #[tokio::test]
-    async fn stale_lease_tokens_fence_every_durable_write() {
-        let Some(pool) = orch_pool("orch_fence").await else {
-            return;
-        };
+    async fn stale_lease_tokens_fence_every_durable_write() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_fence").await else { return Ok(()) };
         let fixture = seed(&pool, "fence").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -11844,6 +11937,7 @@ mod orchestration_tests {
                 .expect("acceptances");
         assert_eq!(acceptances, 0, "fenced handlers never touch the ledger");
         pool.close().await;
+        Ok(())
     }
 
     // ── 7. Dispatch-time gate refusal arms ────────────────────────────────
@@ -11852,10 +11946,10 @@ mod orchestration_tests {
     /// a missing tenant row are both RESTRICTED (cached for the window), and
     /// a dispatch on the missing tenant requeues with the gate's reason.
     #[tokio::test]
-    async fn tenant_identity_gates_refuse_without_sending() {
-        let Some(pool) = orch_pool("orch_tenant_gates").await else {
-            return;
-        };
+    async fn tenant_identity_gates_refuse_without_sending() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_tenant_gates").await else { return Ok(()) };
         let _fixture = seed(&pool, "tenant").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -11894,14 +11988,15 @@ mod orchestration_tests {
             .expect("deferral is a success outcome");
         assert_eq!(transport.calls(), 0, "a restricted tenant never submits");
         pool.close().await;
+        Ok(())
     }
 
     /// A suspended tenant defers at dispatch with the gate's requeue reason.
     #[tokio::test]
-    async fn suspended_tenant_requeues_with_the_gate_reason() {
-        let Some(pool) = orch_pool("orch_suspended").await else {
-            return;
-        };
+    async fn suspended_tenant_requeues_with_the_gate_reason(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_suspended").await else { return Ok(()) };
         let fixture = seed(&pool, "suspended").await;
         sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
             .bind(&fixture.tenant_id)
@@ -11934,15 +12029,16 @@ mod orchestration_tests {
             Some("tenant_suspended")
         );
         pool.close().await;
+        Ok(())
     }
 
     /// An empty envelope recipient cannot be consent-checked: dispatch
     /// defers with the identity reason and never reaches the transport.
     #[tokio::test]
-    async fn consent_with_a_missing_recipient_identity_defers_dispatch() {
-        let Some(pool) = orch_pool("orch_consent_identity").await else {
-            return;
-        };
+    async fn consent_with_a_missing_recipient_identity_defers_dispatch(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_consent_identity").await else { return Ok(()) };
         let fixture = seed(&pool, "consent-id").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -11977,15 +12073,16 @@ mod orchestration_tests {
             Some("consent_recipient_identity_missing")
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A shared-pool send on a domain that lost SES verification defers at
     /// the route-readiness gate — before any ledger or transport touch.
     #[tokio::test]
-    async fn unverified_shared_domain_defers_at_the_readiness_gate() {
-        let Some(pool) = orch_pool("orch_readiness").await else {
-            return;
-        };
+    async fn unverified_shared_domain_defers_at_the_readiness_gate(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_readiness").await else { return Ok(()) };
         let fixture = seed(&pool, "readiness").await;
         sqlx::query("UPDATE domains SET ses_verified = false WHERE id = $1")
             .bind(fixture.domain_id)
@@ -12017,6 +12114,7 @@ mod orchestration_tests {
             Some("domain_ses_not_verified")
         );
         pool.close().await;
+        Ok(())
     }
 
     /// Seeds one ACTIVE dedicated IP for the fixture tenant.
@@ -12044,10 +12142,9 @@ mod orchestration_tests {
     /// A dedicated-route job with DKIM disabled defers instead of leaving
     /// unsigned.
     #[tokio::test]
-    async fn dedicated_route_with_dkim_disabled_defers() {
-        let Some(pool) = orch_pool("orch_ded_no_dkim").await else {
-            return;
-        };
+    async fn dedicated_route_with_dkim_disabled_defers() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_ded_no_dkim").await else { return Ok(()) };
         let fixture = seed(&pool, "ded-no-dkim").await;
         seed_dedicated_ip(&pool, &fixture.tenant_id).await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
@@ -12072,15 +12169,16 @@ mod orchestration_tests {
             Some("dedicated_dkim_disabled")
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A dedicated-route job on a worker with NO dedicated transport defers
     /// before any ledger touch (route fails closed).
     #[tokio::test]
-    async fn dedicated_route_without_a_relay_defers_unconfigured() {
-        let Some(pool) = orch_pool("orch_ded_no_relay").await else {
-            return;
-        };
+    async fn dedicated_route_without_a_relay_defers_unconfigured(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_ded_no_relay").await else { return Ok(()) };
         let fixture = seed(&pool, "ded-no-relay").await;
         seed_dedicated_ip(&pool, &fixture.tenant_id).await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
@@ -12113,6 +12211,7 @@ mod orchestration_tests {
             .expect("ledger");
         assert_eq!(count, 0, "the pre-DATA gate runs before the ledger");
         pool.close().await;
+        Ok(())
     }
 
     /// A relay-style double for dedicated-route dispatches. Reports the
@@ -12247,10 +12346,10 @@ mod orchestration_tests {
     /// With warmup throttling disabled the send still rides the dedicated
     /// route (selection without consumption) and delivers once.
     #[tokio::test]
-    async fn warmup_disabled_keeps_the_dedicated_route_without_consuming_quota() {
-        let Some(pool) = orch_pool("orch_ded_warmup_off").await else {
-            return;
-        };
+    async fn warmup_disabled_keeps_the_dedicated_route_without_consuming_quota(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_ded_warmup_off").await else { return Ok(()) };
         // Serialize the env snapshot/install with other env-mutating tests,
         // then release the LOCK (not the guard): the guard captures the
         // pre-test value and restores it after the dispatch, while the env
@@ -12283,15 +12382,16 @@ mod orchestration_tests {
             "a delivered row is terminal"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A relay that ACCEPTS but reports the wrong source IP produces a
     /// recorded contract violation on the ledger — and is NEVER retried.
     #[tokio::test]
-    async fn accepted_send_with_a_route_contract_violation_is_recorded_not_retried() {
-        let Some(pool) = orch_pool("orch_contract").await else {
-            return;
-        };
+    async fn accepted_send_with_a_route_contract_violation_is_recorded_not_retried(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_contract").await else { return Ok(()) };
         // Serialize the env snapshot/install with other env-mutating tests,
         // then release the LOCK (not the guard): the guard captures the
         // pre-test value and restores it after the dispatch, while the env
@@ -12332,15 +12432,16 @@ mod orchestration_tests {
             "the note names the requested vs reported IP: {note}"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// An acceptance-ledger INSERT failure defers the send (exactly-once is
     /// never bypassed) — the transport must not be touched.
     #[tokio::test]
-    async fn acceptance_ledger_unavailable_defers_without_submitting() {
-        let Some(pool) = orch_pool("orch_ledger_outage").await else {
-            return;
-        };
+    async fn acceptance_ledger_unavailable_defers_without_submitting(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_ledger_outage").await else { return Ok(()) };
         let fixture = seed(&pool, "ledger-outage").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -12381,6 +12482,7 @@ mod orchestration_tests {
             Some("acceptance_ledger_unavailable")
         );
         pool.close().await;
+        Ok(())
     }
 
     // ── 8. Per-recipient isolation in a multi-recipient row ───────────────
@@ -12390,10 +12492,9 @@ mod orchestration_tests {
     /// invalid one is suppressed, the row is released back to pending with
     /// its remainder, and the next claim finishes the last recipient.
     #[tokio::test]
-    async fn one_bad_recipient_never_blocks_the_others() {
-        let Some(pool) = orch_pool("orch_multi").await else {
-            return;
-        };
+    async fn one_bad_recipient_never_blocks_the_others() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_multi").await else { return Ok(()) };
         let fixture = seed(&pool, "multi").await;
         let a = format!("a-{}@multi.test", &fixture.tenant_id[5..]);
         let b = format!("b-{}@multi.test", &fixture.tenant_id[5..]);
@@ -12498,6 +12599,7 @@ mod orchestration_tests {
             "a fully delivered row is never re-claimed"
         );
         pool.close().await;
+        Ok(())
     }
 
     // ── 9. Soft bounce at the retry ceiling escalates to the hard path ────
@@ -12505,10 +12607,10 @@ mod orchestration_tests {
     /// A soft bounce on the LAST allowed attempt escalates to the hard-bounce
     /// handler: the row terminates as bounced, but a 4xx never suppresses.
     #[tokio::test]
-    async fn soft_bounce_at_the_retry_ceiling_escalates_without_suppressing() {
-        let Some(pool) = orch_pool("orch_soft_ceiling").await else {
-            return;
-        };
+    async fn soft_bounce_at_the_retry_ceiling_escalates_without_suppressing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_soft_ceiling").await else { return Ok(()) };
         let fixture = seed(&pool, "soft-ceiling").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let processor = build(
@@ -12548,6 +12650,7 @@ mod orchestration_tests {
             "a transient 4xx never proves an address invalid, even at the ceiling"
         );
         pool.close().await;
+        Ok(())
     }
 
     // ── 10. The visibility lease overflow guard ───────────────────────────
@@ -12556,10 +12659,10 @@ mod orchestration_tests {
     /// maximum representable lease instead of overflowing the DateTime
     /// arithmetic and panicking the poll loop.
     #[tokio::test]
-    async fn absurd_visibility_timeout_clamps_instead_of_panicking() {
-        let Some(pool) = orch_pool("orch_vis_overflow").await else {
-            return;
-        };
+    async fn absurd_visibility_timeout_clamps_instead_of_panicking(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_vis_overflow").await else { return Ok(()) };
         seed(&pool, "vis").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let mut config = orch_config(2, 20);
@@ -12583,15 +12686,16 @@ mod orchestration_tests {
             "the claimed lease must sit far in the future"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// An absurd retry delay must clamp the retry_at stamp instead of
     /// overflowing the DateTime arithmetic inside the soft-bounce handler.
     #[tokio::test]
-    async fn absurd_retry_delay_clamps_instead_of_panicking() {
-        let Some(pool) = orch_pool("orch_retry_overflow").await else {
-            return;
-        };
+    async fn absurd_retry_delay_clamps_instead_of_panicking(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = orch_pool("orch_retry_overflow").await else { return Ok(()) };
         let fixture = seed(&pool, "retry").await;
         let transport = PerRecipientTransport::bounce("nobody@invalid.test");
         let mut config = orch_config(2, 20);
@@ -12627,5 +12731,2025 @@ mod orchestration_tests {
         assert_eq!(status, "pending", "the soft bounce requeues");
         assert_eq!(attempt, 1, "the attempt advanced once");
         pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod residual_arms_db_tests {
+    //! Deterministic proofs for the residual dispatch arms: the
+    //! per-statement SQL sub-failure arms inside the success/bounce
+    //! handlers (trigger-based fault injection on the exact table), the
+    //! poll loop's depth-probe / fetch-outage / suppression-sentinel arms
+    //! (privilege revocation + transactional DDL for intra-iteration
+    //! ordering), and the unit-reachable guards around them.
+    //!
+    //! Fault injection works by arming a `BEFORE INSERT/UPDATE/DELETE`
+    //! trigger whose function raises when the matching `fault_injection`
+    //! flag row is present; flags are flipped between statements, so a
+    //! specific statement of the handler is targeted while the rest of the
+    //! handler runs for real.
+
+    use super::*;
+    use sqlx::PgPool;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn residual_pool(name: &str) -> Option<PgPool> {
+        crate::test_support::install_test_tracing();
+        crate::test_support::canonical_pool(name, name).await
+    }
+
+    fn residual_redis() -> RedisPool {
+        let url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool")
+    }
+
+    /// Poll every 10 ms until `pred` holds or the deadline elapses.
+    async fn wait_until(deadline: Duration, mut pred: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        loop {
+            if pred() {
+                return true;
+            }
+            if Instant::now().duration_since(start) >= deadline {
+                return pred();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Poll the queue row until `want(status, requeue_reason)` holds or the
+    /// deadline passes.
+    async fn wait_for_row(
+        pool: &PgPool,
+        queue_id: uuid::Uuid,
+        deadline: Duration,
+        want: impl Fn(&str, Option<&str>) -> bool,
+    ) -> bool {
+        let start = Instant::now();
+        loop {
+            let (status, reason): (String, Option<String>) = sqlx::query_as(
+                "SELECT status, metadata->>'requeue_reason' FROM email_queue WHERE id = $1",
+            )
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("row state");
+            if want(&status, reason.as_deref()) {
+                return true;
+            }
+            if Instant::now().duration_since(start) >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn config_with(transport_type: TransportType) -> EmailConfig {
+        let mut config = EmailConfig {
+            base: crate::common::ProcessorConfig {
+                name: "residual".to_string(),
+                concurrency: 2,
+                poll_interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.transport_type = transport_type;
+        config.tracking.enabled = false;
+        config.tracking.secret_key = None;
+        config.ses.max_send_rate = 0;
+        config
+    }
+
+    struct ResidualFixture {
+        tenant_id: String,
+        domain_id: uuid::Uuid,
+        queue_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+        sender: String,
+    }
+
+    /// Tenant (active) + verified domain + one pending single-recipient row.
+    async fn seed(pool: &PgPool, label: &str) -> ResidualFixture {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = &suffix[..12];
+        let tenant_id = format!("res-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("Residual {label} {suffix}"))
+        .bind(format!("res-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+
+        let domain_id = uuid::Uuid::new_v4();
+        let domain_name = format!("res-{suffix}.example");
+        sqlx::query(
+            "INSERT INTO domains \
+                 (id, tenant_id, name, status, verified, dkim_enabled, ses_verified, \
+                  dkim_selector, dkim_public_key, dkim_private_key) \
+             VALUES ($1, $2, $3, 'verified', true, true, true, 'sel', 'pub', 'dkim:v1:test')",
+        )
+        .bind(domain_id)
+        .bind(&tenant_id)
+        .bind(&domain_name)
+        .execute(pool)
+        .await
+        .expect("insert domain");
+
+        let queue_id = uuid::Uuid::new_v4();
+        let message_id = uuid::Uuid::new_v4();
+        let sender = format!("sender@{domain_name}");
+        let recipient = "user@example.com".to_string();
+        insert_residual_queue_row(
+            pool, &queue_id, &tenant_id, domain_id, message_id, &sender, &recipient,
+        )
+        .await;
+
+        ResidualFixture {
+            tenant_id,
+            domain_id,
+            queue_id,
+            message_id,
+            sender,
+        }
+    }
+
+    async fn insert_residual_queue_row(
+        pool: &PgPool,
+        queue_id: &uuid::Uuid,
+        tenant_id: &str,
+        domain_id: uuid::Uuid,
+        message_id: uuid::Uuid,
+        sender: &str,
+        recipient: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category) \
+             VALUES ($1, $2, ARRAY[$3], 'residual', 'pending', $4, $5, $6, $3, \
+                     'body', '{}'::jsonb, 0, 'marketing')",
+        )
+        .bind(queue_id)
+        .bind(sender)
+        .bind(recipient)
+        .bind(tenant_id)
+        .bind(message_id)
+        .bind(domain_id)
+        .execute(pool)
+        .await
+        .expect("insert email_queue row");
+    }
+
+    // ── fault injection ────────────────────────────────────────────────────
+
+    /// Provision the flag table + a BEFORE <event> trigger on `table` whose
+    /// function raises when the flag row exists. Idempotent per flag.
+    async fn install_fault(pool: &PgPool, flag: &str, table: &str, event: &str) {
+        sqlx::query("CREATE TABLE IF NOT EXISTS fault_injection (flag TEXT PRIMARY KEY)")
+            .execute(pool)
+            .await
+            .expect("fault table");
+        let ret = if event == "DELETE" { "OLD" } else { "NEW" };
+        let fname = format!("wpf_{flag}_{event}");
+        let tname = format!("wpt_{flag}_{event}");
+        let create_fn = format!(
+            "CREATE OR REPLACE FUNCTION {fname}() RETURNS trigger AS $$ \
+             BEGIN \
+               IF EXISTS (SELECT 1 FROM fault_injection WHERE flag = '{flag}') THEN \
+                 RAISE EXCEPTION 'injected fault {flag}'; \
+               END IF; \
+               RETURN {ret}; \
+             END; \
+             $$ LANGUAGE plpgsql"
+        );
+        sqlx::query(&create_fn)
+            .execute(pool)
+            .await
+            .expect("fault fn");
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {tname} ON {table}"))
+            .execute(pool)
+            .await
+            .expect("drop old fault trigger");
+        sqlx::query(&format!(
+            "CREATE TRIGGER {tname} BEFORE {event} ON {table} \
+             FOR EACH ROW EXECUTE FUNCTION {fname}()"
+        ))
+        .execute(pool)
+        .await
+        .expect("fault trigger");
+    }
+
+    async fn set_fault(pool: &PgPool, flag: &str, on: bool) {
+        if on {
+            sqlx::query("INSERT INTO fault_injection (flag) VALUES ($1) ON CONFLICT DO NOTHING")
+                .bind(flag)
+                .execute(pool)
+                .await
+                .expect("arm fault");
+        } else {
+            sqlx::query("DELETE FROM fault_injection WHERE flag = $1")
+                .bind(flag)
+                .execute(pool)
+                .await
+                .expect("disarm fault");
+        }
+    }
+
+    // ── transport double ──────────────────────────────────────────────────
+
+    #[derive(Clone)]
+    enum ResidualMode {
+        Success,
+        SoftBounce,
+    }
+
+    struct ResidualTransport {
+        mode: ResidualMode,
+        calls: AtomicUsize,
+    }
+
+    impl ResidualTransport {
+        fn new(mode: ResidualMode) -> Arc<Self> {
+            Arc::new(Self {
+                mode,
+                calls: AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmailTransport for ResidualTransport {
+        fn transport_name(&self) -> &str {
+            "residual"
+        }
+
+        fn supports_source_binding(&self) -> bool {
+            true
+        }
+
+        async fn verify(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _email: &PreparedEmail,
+            route: &DeliveryRoute,
+        ) -> ProcessorResult<DeliveryReceipt> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode {
+                ResidualMode::Success => Ok(DeliveryReceipt {
+                    transport: match route {
+                        DeliveryRoute::SesShared => TransportType::Ses,
+                        DeliveryRoute::Dedicated { .. } => TransportType::Smtp,
+                    },
+                    transport_message_id: Some("residual-message-1".into()),
+                    actual_source_ip: route.dedicated_source_ip(),
+                    recipient_provider: Some("Google Workspace".into()),
+                    provider_source: Some("mx_resolved".into()),
+                }),
+                ResidualMode::SoftBounce => Err(ProcessorError::Smtp {
+                    code: 450,
+                    enhanced: Some("4.2.1".into()),
+                    message: "mailbox busy".into(),
+                }),
+            }
+        }
+
+        async fn close(&self) -> ProcessorResult<()> {
+            Ok(())
+        }
+    }
+
+    async fn build(
+        pool: &PgPool,
+        transport: Arc<ResidualTransport>,
+        config: EmailConfig,
+    ) -> Arc<EmailProcessor> {
+        let hybrid = HybridTransport::new(Some(transport as Arc<dyn EmailTransport>), None);
+        Arc::new(
+            EmailProcessor::with_transport(pool.clone(), residual_redis(), config, hybrid)
+                .await
+                .expect("processor"),
+        )
+    }
+
+    async fn row_state(pool: &PgPool, queue_id: uuid::Uuid) -> (String, Option<String>) {
+        sqlx::query_as("SELECT status, metadata->>'requeue_reason' FROM email_queue WHERE id = $1")
+            .bind(queue_id)
+            .fetch_one(pool)
+            .await
+            .expect("row state")
+    }
+
+    // ── unit-reachable guards ──────────────────────────────────────────────
+
+    /// An empty candidate pool has nothing to select: `Ok(None)` without
+    /// touching Redis.
+    #[tokio::test]
+    async fn select_warmup_ip_empty_pool_returns_none() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(_pool) = residual_pool("res_warmup_empty").await else { return Ok(()) };
+        let chosen = select_warmup_ip(&residual_redis(), &[], "2026-09-21")
+            .await
+            .expect("selection over an empty pool");
+        assert!(chosen.is_none());
+        Ok(())
+    }
+
+    /// Expansion beyond the available slots truncates AND warns — the
+    /// deferral of the excess recipients is observable in the log stream.
+    #[tokio::test]
+    async fn expansion_warns_and_truncates_beyond_the_slot_cap() {
+        let row = QueuedEmailRow {
+            id: "00000000-0000-0000-0000-0000000000aa".into(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "t".into(),
+            domain_id: "d".into(),
+            from: "s@example.com".into(),
+            to: "a@example.com".into(),
+            to_addresses: Some(vec!["a@example.com".into(), "b@example.com".into()]),
+            subject: "s".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: Some(serde_json::json!({})),
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: Some(serde_json::json!({})),
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        };
+        let jobs = expand_rows_within_cap(vec![row], 1);
+        assert_eq!(jobs.len(), 1, "only the first recipient fits the cap");
+    }
+
+    /// `record_acceptance_accepted` on a row that is no longer `reserved`
+    /// (the lease was lost mid-submission) must surface the missed write —
+    /// a later retry could otherwise submit a second time silently.
+    #[tokio::test]
+    async fn acceptance_record_missed_after_lease_loss_is_loud(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_acc_missed").await else { return Ok(()) };
+        let job = EmailJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "t-missed".into(),
+            ..bare_job()
+        };
+        let route = DeliveryRoute::SesShared;
+        let unit = send_unit_of(&job);
+        assert_eq!(
+            claim_acceptance(&pool, &job, &route).await.unwrap(),
+            AcceptanceClaim::Claimed
+        );
+        // The lease rotates away (crash + reclaim): the row leaves `reserved`.
+        sqlx::query("UPDATE sales_delivery_acceptances SET state = 'failed' WHERE send_unit = $1")
+            .bind(&unit)
+            .execute(&pool)
+            .await
+            .expect("rotate away");
+        let receipt = DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: Some("late-acceptance".into()),
+            actual_source_ip: None,
+            recipient_provider: None,
+            provider_source: None,
+        };
+        record_acceptance_accepted(&pool, &unit, &receipt, None)
+            .await
+            .expect("recording is best-effort, never an error");
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM sales_delivery_acceptances WHERE send_unit = $1")
+                .bind(&unit)
+                .fetch_one(&pool)
+                .await
+                .expect("state");
+        assert_eq!(
+            state, "failed",
+            "the late acceptance must not overwrite a rotated lease"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    fn bare_job() -> EmailJob {
+        EmailJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: "t".into(),
+            domain_id: uuid::Uuid::new_v4().to_string(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            subject: "s".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    // ── dispatch: acceptance-ledger write failures are loud, not retries ──
+
+    /// The transport ACCEPTED, but recording the acceptance on the ledger
+    /// fails (injected UPDATE fault). The message stays delivered — the
+    /// failure is a loud operational event, never a retry signal.
+    #[tokio::test]
+    async fn accepted_send_with_a_failing_ledger_write_is_loud(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_acc_write_success").await else { return Ok(()) };
+        let fixture = seed(&pool, "acc-write-success").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        install_fault(&pool, "acc_write", "sales_delivery_acceptances", "UPDATE").await;
+        set_fault(&pool, "acc_write", true).await;
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect("dispatch completes");
+
+        assert_eq!(
+            transport.calls(),
+            1,
+            "the message was accepted exactly once"
+        );
+        let (status, _) = row_state(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent", "an accepted send is not retried");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The transport REFUSED and recording the refusal fails (same injected
+    /// fault). The refusal handlers still run; the reservation lease is the
+    /// recovery path.
+    #[tokio::test]
+    async fn refused_send_with_a_failing_ledger_write_still_retries(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_acc_write_fail").await else { return Ok(()) };
+        let fixture = seed(&pool, "acc-write-fail").await;
+        let transport = ResidualTransport::new(ResidualMode::SoftBounce);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        install_fault(&pool, "acc_write", "sales_delivery_acceptances", "UPDATE").await;
+        set_fault(&pool, "acc_write", true).await;
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        // The classified bounce IS the outcome of a failed dispatch — the
+        // ledger-write failure must not change it into a retry signal.
+        let error = processor
+            .process_job(job)
+            .await
+            .expect_err("the soft bounce is the dispatch outcome");
+
+        assert_eq!(transport.calls(), 1);
+        assert!(error.to_string().contains("mailbox busy"));
+        let (status, reason) = row_state(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending", "a soft bounce requeues");
+        assert_eq!(
+            reason.as_deref(),
+            None,
+            "a soft bounce defers without a named reason"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── poll loop: depth probe + fetch outage arms ────────────────────────
+
+    /// A failed queue-depth probe (permission revoked mid-iteration by a
+    /// trigger on the claim's parent update) keeps the last backpressure
+    /// sample and the loop still serves the batch; the NEXT iteration's
+    /// fetch hits the same outage and recovers once the privilege returns.
+    #[tokio::test] // real time: the loop must observe real elapsed polls
+    async fn depth_probe_failure_keeps_the_last_sample_and_fetch_outages_recover(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_depth_probe").await else { return Ok(()) };
+        let fixture = seed(&pool, "depth-probe").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        let role: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&pool)
+            .await
+            .expect("role");
+
+        // The claim's parent update fires this trigger BETWEEN fetch_jobs
+        // and pending_queue_depth within the same iteration: the depth probe
+        // runs with SELECT revoked on email_queue and must fail closed to
+        // the "keep last sample" arm.
+        sqlx::query(&format!(
+            "CREATE OR REPLACE FUNCTION res_revoke_depth() RETURNS trigger AS $$ \
+             BEGIN EXECUTE 'REVOKE SELECT ON email_queue FROM {role}'; \
+             RETURN NEW; END; $$ LANGUAGE plpgsql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("revoke fn");
+        sqlx::query("DROP TRIGGER IF EXISTS res_revoke_depth_t ON messages")
+            .execute(&pool)
+            .await
+            .expect("drop old revoke trigger");
+        sqlx::query(
+            "CREATE TRIGGER res_revoke_depth_t BEFORE UPDATE ON messages \
+             FOR EACH STATEMENT EXECUTE FUNCTION res_revoke_depth()",
+        )
+        .execute(&pool)
+        .await
+        .expect("revoke trigger");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+
+        // The batch still completes: only the depth probe failed. The poll
+        // key is transport side (the test's own SELECT is revoked too).
+        assert!(
+            wait_until(Duration::from_secs(15), || transport.calls() == 1).await,
+            "the claimed job must still be served despite the depth-probe outage"
+        );
+
+        // Restore the privilege: the NEXT fetch succeeds and the loop keeps
+        // polling (proving the fetch-error arm did not kill it).
+        sqlx::query(&format!("GRANT SELECT ON email_queue TO {role}"))
+            .execute(&pool)
+            .await
+            .expect("restore select");
+        sqlx::query("DROP TRIGGER IF EXISTS res_revoke_depth_t ON messages")
+            .execute(&pool)
+            .await
+            .expect("drop trigger");
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(10),
+                |status, _| { status == "sent" }
+            )
+            .await,
+            "the row settles at sent"
+        );
+
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A fetch outage (SELECT revoked) hits the loop's error arm and the
+    /// loop recovers into serving as soon as the outage ends.
+    #[tokio::test] // real time: the loop must observe real elapsed polls
+    async fn fetch_outage_hits_the_error_arm_and_recovers() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_fetch_outage").await else { return Ok(()) };
+        let fixture = seed(&pool, "fetch-outage").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        let role: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&pool)
+            .await
+            .expect("role");
+
+        sqlx::query(&format!("REVOKE SELECT ON email_queue FROM {role}"))
+            .execute(&pool)
+            .await
+            .expect("revoke");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        // Several failed polls happen while the privilege is gone.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(transport.calls(), 0, "nothing is claimed during the outage");
+
+        sqlx::query(&format!("GRANT SELECT ON email_queue TO {role}"))
+            .execute(&pool)
+            .await
+            .expect("restore");
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(15),
+                |status, _| { status == "sent" }
+            )
+            .await,
+            "the loop must recover into serving after the outage"
+        );
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── poll loop: suppression sentinel + suppressed recipients ──────────
+
+    /// A suppression CHECK failure flags the job for REQUEUE (never for
+    /// suppression); with the requeue write itself failing, the loop logs
+    /// and moves on. Both arms proven in one lifecycle.
+    #[tokio::test] // real time: the loop must observe real elapsed polls
+    async fn suppression_check_failure_requeues_and_survives_a_failing_requeue(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_suppression_sentinel").await else { return Ok(()) };
+        let fixture = seed(&pool, "suppression-sentinel").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        let role: String = sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&pool)
+            .await
+            .expect("role");
+
+        sqlx::query(&format!("REVOKE SELECT ON suppressions FROM {role}"))
+            .execute(&pool)
+            .await
+            .expect("revoke suppressions read");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(10),
+                |status, reason| {
+                    status == "pending" && reason == Some(SUPPRESSION_CHECK_FAILED)
+                }
+            )
+            .await,
+            "the failed suppression CHECK must requeue with the sentinel reason"
+        );
+        assert_eq!(
+            transport.calls(),
+            0,
+            "a failed consent check never dispatches"
+        );
+
+        // Phase 2: the requeue write itself fails (injected UPDATE fault on
+        // email_queue) — the loop logs the failure and keeps polling. The
+        // loop is parked between phases so the reset cannot race a claim.
+        processor.stop().await.expect("stop park one");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        sqlx::query("UPDATE email_queue SET scheduled_at = NULL WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("make the row claimable again");
+        install_fault(&pool, "requeue_write", "email_queue", "UPDATE").await;
+        // Target ONLY the requeue write (the claim's UPDATE must keep
+        // working): the requeue is the write that stamps requeue_reason.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION wpf_requeue_write_UPDATE() RETURNS trigger AS $$ \
+             BEGIN \
+               IF NEW.metadata->>'requeue_reason' IS NOT NULL THEN \
+                 RAISE EXCEPTION 'injected fault requeue_write'; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("retarget requeue fault fn");
+        set_fault(&pool, "requeue_write", true).await;
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_two = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(transport.calls(), 0);
+
+        set_fault(&pool, "requeue_write", false).await;
+        sqlx::query(&format!("GRANT SELECT ON suppressions TO {role}"))
+            .execute(&pool)
+            .await
+            .expect("restore suppressions read");
+        processor.stop().await.expect("stop park two");
+        tokio::time::timeout(Duration::from_secs(10), loop_two)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A positively suppressed recipient is suppressed at claim time; when
+    /// the suppression WRITE fails (injected fault), the loop logs the
+    /// failure and moves on instead of stalling.
+    #[tokio::test] // real time: the loop must observe real elapsed polls
+    async fn poll_loop_suppresses_and_survives_suppression_write_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_poll_suppress").await else { return Ok(()) };
+        let fixture = seed(&pool, "poll-suppress").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, created_at) \
+             VALUES ('sup_resid', $1, 'user@example.com', 'hard_bounce', NOW())",
+        )
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed suppression");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(10),
+                |status, _| { status == "suppressed" }
+            )
+            .await,
+            "the suppressed recipient must terminalize as suppressed"
+        );
+        assert_eq!(transport.calls(), 0, "suppressed mail never dispatches");
+
+        // Phase 2: the durable suppression write fails — the loop logs and
+        // continues (the row stays claimable for the next poll). The loop
+        // is parked between phases so the reset cannot race a claim.
+        processor.stop().await.expect("stop park one");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        sqlx::query(
+            "UPDATE email_queue SET status = 'pending', scheduled_at = NULL, \
+             metadata = metadata - 'pending_recipients' WHERE id = $1",
+        )
+        .bind(fixture.queue_id)
+        .execute(&pool)
+        .await
+        .expect("reset row");
+        install_fault(&pool, "suppress_write", "email_queue", "UPDATE").await;
+        set_fault(&pool, "suppress_write", true).await;
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_two = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        set_fault(&pool, "suppress_write", false).await;
+        processor.stop().await.expect("stop park two");
+        tokio::time::timeout(Duration::from_secs(10), loop_two)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A job whose processing errs (absent domain row) is dead-lettered by
+    /// the poll loop; the failure is logged at debug and the loop goes on.
+    #[tokio::test] // real time: the loop must observe real elapsed polls
+    async fn poll_loop_dead_letters_permanent_job_errors_and_continues(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_poll_deadletter").await else { return Ok(()) };
+        let fixture = seed(&pool, "poll-deadletter").await;
+        // A second row (same tenant) for the phase-2 write-failure arm; it
+        // must exist while the domain row is still present (FK).
+        let second = uuid::Uuid::new_v4();
+        insert_residual_queue_row(
+            &pool,
+            &second,
+            &fixture.tenant_id,
+            fixture.domain_id,
+            uuid::Uuid::new_v4(),
+            &fixture.sender,
+            "second@example.com",
+        )
+        .await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        // The domain vanishes after enqueue: a permanent job error.
+        sqlx::query("DELETE FROM domains WHERE id = $1")
+            .bind(fixture.domain_id)
+            .execute(&pool)
+            .await
+            .expect("delete domain");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(10),
+                |status, _| { status == "failed" }
+            )
+            .await,
+            "a permanently rejected job must dead-letter"
+        );
+        let dlq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1")
+                .bind(fixture.queue_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("dlq count");
+        assert_eq!(dlq, 1, "the dead letter carries the rejection reason");
+        assert_eq!(transport.calls(), 0);
+
+        // Park the loop so phase 2 owns the second row exclusively.
+        processor.stop().await.expect("stop phase one");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+
+        // Phase 2: a second row whose PERMANENT-FAILURE write itself fails
+        // (injected, targeted at status='failed') — the dispatch reports the
+        // dead-letter failure instead of stalling.
+        install_fault(&pool, "dlq_write", "email_queue", "UPDATE").await;
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION wpf_dlq_write_UPDATE() RETURNS trigger AS $$ \
+             BEGIN \
+               IF NEW.status = 'failed' THEN \
+                 RAISE EXCEPTION 'injected fault dlq_write'; \
+               END IF; \
+               RETURN NEW; \
+             END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("retarget dlq fault fn");
+        set_fault(&pool, "dlq_write", true).await;
+        sqlx::query(
+            "UPDATE email_queue SET status = 'pending', scheduled_at = NULL, \
+             metadata = metadata - 'lease_token' WHERE id = $1",
+        )
+        .bind(second)
+        .execute(&pool)
+        .await
+        .expect("reset the second row");
+        let job = processor
+            .fetch_jobs(10)
+            .await
+            .expect("claim second")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor
+            .process_job(job)
+            .await
+            .expect_err("the dead-letter write failure surfaces");
+        // Disarm via the SHARED helper (the local one is exercised above).
+        crate::test_support::set_fault(&pool, "dlq_write", false).await;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Renaming `messages` away breaks every best-effort message write: the
+    /// claim-time parent transition, the post-send provider stamp, and the
+    /// parent reconciliation all degrade to their failure arms while the
+    /// delivery itself completes. Renaming `email_delivery_log` breaks the
+    /// per-attempt log the same way.
+    #[tokio::test] // real time: the loop must observe real elapsed polls
+    async fn message_write_outages_degrade_every_best_effort_surface(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_messages_outage").await else { return Ok(()) };
+        let fixture = seed(&pool, "messages-outage").await;
+        // A scheduled row claimed only in phase 2 (after the events outage
+        // is armed).
+        let second = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  domain_id, \"to\", text, metadata, attempt, message_category, scheduled_at) \
+             VALUES ($1, $2, ARRAY[$3], 'phase two', 'pending', $4, gen_random_uuid(), $5, $3, \
+                     'body', '{}'::jsonb, 0, 'marketing', NOW() + INTERVAL '3 seconds')",
+        )
+        .bind(second)
+        .bind(&fixture.sender)
+        .bind("late@example.com")
+        .bind(&fixture.tenant_id)
+        .bind(fixture.domain_id)
+        .execute(&pool)
+        .await
+        .expect("insert scheduled row");
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+
+        sqlx::query("ALTER TABLE messages RENAME TO messages_gone")
+            .execute(&pool)
+            .await
+            .expect("break messages");
+        sqlx::query("ALTER TABLE email_delivery_log RENAME TO email_delivery_log_gone")
+            .execute(&pool)
+            .await
+            .expect("break delivery log");
+
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(15),
+                |status, _| { status == "sent" }
+            )
+            .await,
+            "the send must proceed despite the audit-write outages"
+        );
+
+        sqlx::query("ALTER TABLE messages_gone RENAME TO messages")
+            .execute(&pool)
+            .await
+            .expect("restore messages");
+        sqlx::query("ALTER TABLE email_delivery_log_gone RENAME TO email_delivery_log")
+            .execute(&pool)
+            .await
+            .expect("restore delivery log");
+
+        // Phase 2: the post-send `sent` event INSERT fails (events table
+        // gone) — the delivery stands, the analytics event is lost.
+        sqlx::query("ALTER TABLE events RENAME TO events_gone")
+            .execute(&pool)
+            .await
+            .expect("break events");
+        assert!(
+            wait_for_row(&pool, second, Duration::from_secs(20), |status, _| {
+                status == "sent"
+            })
+            .await,
+            "the scheduled row must deliver despite the events outage"
+        );
+        sqlx::query("ALTER TABLE events_gone RENAME TO events")
+            .execute(&pool)
+            .await
+            .expect("restore events");
+
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(10), loop_handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The queue-depth metrics export is time-gated: a second call inside
+    /// the 10 s window must early-return without re-querying.
+    #[tokio::test]
+    async fn queue_depth_metrics_are_time_gated() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_metrics_gate").await else { return Ok(()) };
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        processor.record_queue_depth_metrics().await;
+        let first = processor.queue_metrics_last_emit_ms.load(Ordering::SeqCst);
+        assert_ne!(first, 0, "the first export must stamp the emit time");
+        processor.record_queue_depth_metrics().await;
+        let second = processor.queue_metrics_last_emit_ms.load(Ordering::SeqCst);
+        assert_eq!(first, second, "an in-window export must early-return");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// `release_rows_with_remaining_recipients` degrades on a write error.
+    #[tokio::test]
+    async fn release_rows_degrades_when_the_write_fails() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_release_err").await else { return Ok(()) };
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        pool.close().await;
+        // Closed pool → the release write errors and is logged, never panics.
+        processor
+            .release_rows_with_remaining_recipients(&[(
+                uuid::Uuid::new_v4().to_string(),
+                Some("token".into()),
+            )])
+            .await;
+        Ok(())
+    }
+
+    // ── batch suppression check arms ──────────────────────────────────────
+
+    /// Negative results are cached, positives never are: a second call for
+    /// an unsuppressed recipient skips the query, a suppressed one is read
+    /// fresh, and a category opt-out is flagged every time.
+    #[tokio::test]
+    async fn batch_suppression_check_arms() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_batch_suppression").await else { return Ok(()) };
+        let fixture = seed(&pool, "batch-suppression").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+
+        let clean = EmailJob {
+            tenant_id: fixture.tenant_id.clone(),
+            to: "clean@example.com".into(),
+            ..bare_job()
+        };
+        let suppressed = EmailJob {
+            tenant_id: fixture.tenant_id.clone(),
+            to: "OptedOut@Example.com".into(),
+            ..bare_job()
+        };
+        sqlx::query(
+            "INSERT INTO suppressions (id, tenant_id, email, reason, created_at) \
+             VALUES ('sup_batch', $1, 'optedout@example.com', 'unsubscribe', NOW())",
+        )
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed suppression");
+
+        let verdicts = processor
+            .batch_suppression_check(std::slice::from_ref(&suppressed))
+            .await;
+        let suppressed_key = format!(
+            "{}:{}",
+            suppressed.tenant_id,
+            canonical_recipient(&suppressed.to)
+        );
+        assert_eq!(
+            verdicts.get(&suppressed_key).map(String::as_str),
+            Some("global_suppression:unsubscribe"),
+            "a positive verdict is read fresh from the database"
+        );
+
+        // First clean call: query + cache fill. Second clean call: the
+        // negative cache answers without the database.
+        let verdicts = processor
+            .batch_suppression_check(std::slice::from_ref(&clean))
+            .await;
+        assert!(verdicts.is_empty());
+        let verdicts = processor
+            .batch_suppression_check(std::slice::from_ref(&clean))
+            .await;
+        assert!(verdicts.is_empty(), "the cached negative skips the query");
+
+        // Category opt-out for a NON-exempt category flags fresh each call;
+        // global suppression takes precedence when both rows exist.
+        sqlx::query(
+            "INSERT INTO subscription_preferences \
+                 (id, tenant_id, email, category, subscribed, updated_at) \
+             VALUES ('spref_' || substr(md5(random()::text), 1, 20), $1, \
+                     'clean@example.com', 'marketing', false, NOW())",
+        )
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed opt-out");
+        let verdicts = processor
+            .batch_suppression_check(std::slice::from_ref(&clean))
+            .await;
+        let clean_key = format!("{}:{}", clean.tenant_id, canonical_recipient(&clean.to));
+        assert_eq!(
+            verdicts.get(&clean_key).map(String::as_str),
+            Some("category_opt_out:marketing"),
+            "the opt-out is read fresh (never cached)"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── dispatch gates on the dedicated route ─────────────────────────────
+
+    /// A dedicated route whose relay cannot verifiably bind the source IP
+    /// defers with the named `dedicated_route_unverifiable` reason.
+    #[tokio::test]
+    async fn unverifiable_dedicated_route_defers_with_the_named_reason(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_ded_unverifiable").await else { return Ok(()) };
+        let fixture = seed(&pool, "ded-unverifiable").await;
+        let ip_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status) \
+             VALUES ($1, $2, '203.0.113.50', 'active')",
+        )
+        .bind(ip_id)
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed dedicated ip");
+
+        // The dedicated backend exists but cannot prove the binding. DKIM
+        // is enabled so the earlier dedicated-DKIM gate passes and the
+        // unverifiable-binding gate is what refuses.
+        let mut config = config_with(TransportType::Smtp);
+        config.dkim.enabled = true;
+        struct NoBinding;
+        #[async_trait::async_trait]
+        impl EmailTransport for NoBinding {
+            fn transport_name(&self) -> &str {
+                "no-binding"
+            }
+            fn supports_source_binding(&self) -> bool {
+                false
+            }
+            async fn verify(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+            async fn send(
+                &self,
+                _email: &PreparedEmail,
+                _route: &DeliveryRoute,
+            ) -> ProcessorResult<DeliveryReceipt> {
+                unreachable!("an unverifiable dedicated route never submits")
+            }
+            async fn close(&self) -> ProcessorResult<()> {
+                Ok(())
+            }
+        }
+        let hybrid = HybridTransport::new(
+            Some(ResidualTransport::new(ResidualMode::Success) as Arc<dyn EmailTransport>),
+            Some(Arc::new(NoBinding) as Arc<dyn EmailTransport>),
+        );
+        let processor = Arc::new(
+            EmailProcessor::with_transport(pool.clone(), residual_redis(), config, hybrid)
+                .await
+                .expect("processor"),
+        );
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor.process_job(job).await.expect("deferred");
+        let (status, reason) = row_state(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(
+            reason.as_deref(),
+            Some("dedicated_route_unverifiable"),
+            "{reason:?}"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Every warming candidate at its canonical daily cap defers the row
+    /// with `warmup_limit`.
+    #[tokio::test]
+    async fn warming_pool_at_cap_defers_with_warmup_limit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_warmup_cap").await else { return Ok(()) };
+        let fixture = seed(&pool, "warmup-cap").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let mut config = config_with(TransportType::Smtp);
+        config.warmup.enabled = true;
+        config.dkim.enabled = true;
+        let hybrid = HybridTransport::new(None, Some(transport.clone() as Arc<dyn EmailTransport>));
+        let processor = Arc::new(
+            EmailProcessor::with_transport(pool.clone(), residual_redis(), config, hybrid)
+                .await
+                .expect("processor"),
+        );
+
+        let ip_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, warmup_started_at) \
+             VALUES ($1, $2, '203.0.113.51', 'warming', NOW() - INTERVAL '1 day')",
+        )
+        .bind(ip_id)
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed warming ip");
+        // Fill the canonical day-0 counter (50) for this IP+day.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let key = warmup_ip_counter_key("203.0.113.51", &today);
+        let mut conn = residual_redis().get().await.expect("redis");
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(50i64)
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("fill counter");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor.process_job(job).await.expect("deferred");
+        let (status, reason) = row_state(&pool, fixture.queue_id).await;
+        assert_eq!(status, "pending");
+        assert_eq!(reason.as_deref(), Some("warmup_limit"), "{reason:?}");
+        assert_eq!(transport.calls(), 0, "a capped warming pool never submits");
+        redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("cleanup counter");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A successful shared-route dispatch with send-admission rates enabled
+    /// passes both route-debug gates and the admission bucket.
+    #[tokio::test]
+    async fn successful_dispatch_with_admission_rates_logs_and_sends(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_dispatch_ok").await else { return Ok(()) };
+        let fixture = seed(&pool, "dispatch-ok").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let mut config = config_with(TransportType::Ses);
+        config.ses.max_send_rate = 100;
+        let processor = build(&pool, transport.clone(), config).await;
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor.process_job(job).await.expect("dispatch");
+        let (status, _) = row_state(&pool, fixture.queue_id).await;
+        assert_eq!(status, "sent");
+        assert_eq!(transport.calls(), 1);
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The dispatch-time authoritative consent recheck suppresses on a
+    /// category opt-out even when the claim-time batch check passed.
+    #[tokio::test]
+    async fn dispatch_consent_suppresses_category_opt_outs(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_consent_optout").await else { return Ok(()) };
+        let fixture = seed(&pool, "consent-optout").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        sqlx::query(
+            "INSERT INTO subscription_preferences \
+                 (id, tenant_id, email, category, subscribed, updated_at) \
+             VALUES ('spref_' || substr(md5(random()::text), 1, 20), $1, \
+                     'user@example.com', 'marketing', false, NOW())",
+        )
+        .bind(&fixture.tenant_id)
+        .execute(&pool)
+        .await
+        .expect("seed opt-out");
+
+        let job = processor
+            .fetch_jobs(1)
+            .await
+            .expect("claim")
+            .into_iter()
+            .next()
+            .expect("one job");
+        processor.process_job(job).await.expect("suppressed");
+        let (status, _) = row_state(&pool, fixture.queue_id).await;
+        assert_eq!(status, "suppressed", "the dispatch-time recheck suppresses");
+        assert_eq!(transport.calls(), 0);
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── unit-reachable handler guards ─────────────────────────────────────
+
+    /// `prepare_email` refuses a queue row whose envelope sender carries no
+    /// domain — the authorized domain can never match.
+    #[tokio::test]
+    async fn prepare_email_refuses_an_invalid_sender() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_bad_sender").await else { return Ok(()) };
+        let fixture = seed(&pool, "bad-sender").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        let domain = processor.get_domain(&bare_job()).await;
+        assert!(domain.is_err(), "an unknown domain row must refuse");
+        // The sender/domain agreement lives in get_domain: a sender whose
+        // envelope address carries no domain can never match its authorized
+        // domain, so the lookup refuses.
+        let job = EmailJob {
+            from: "no-domain".into(),
+            domain_id: fixture.domain_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            ..bare_job()
+        };
+        let error = processor
+            .get_domain(&job)
+            .await
+            .expect_err("an empty sender domain must refuse");
+        assert!(error.to_string().contains("invalid sender address"));
+        // The same row with the seeded sender resolves.
+        let seeded_job = EmailJob {
+            domain_id: fixture.domain_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            from: fixture.sender.clone(),
+            ..bare_job()
+        };
+        processor.get_domain(&seeded_job).await.expect("domain");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A success whose envelope sender has no domain skips the FBL
+    /// reputation counter (nothing to attribute) — and still completes.
+    #[tokio::test]
+    async fn handle_success_without_envelope_domain_skips_reputation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_no_env_domain").await else { return Ok(()) };
+        let fixture = seed(&pool, "no-env-domain").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        let job = EmailJob {
+            id: fixture.queue_id.to_string(),
+            message_id: fixture.message_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            from: "bare-sender-no-at".into(),
+            ..bare_job()
+        };
+        let receipt = DeliveryReceipt {
+            transport: TransportType::Ses,
+            transport_message_id: Some("no-env-1".into()),
+            actual_source_ip: None,
+            recipient_provider: None,
+            provider_source: None,
+        };
+        processor
+            .handle_success(&job, &receipt)
+            .await
+            .expect("success handling completes");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A Redis hash-type collision (the FBL key pre-set as a plain string)
+    /// must not fail the send — the reputation counter degrades to a log.
+    #[tokio::test]
+    async fn sent_reputation_redis_hash_failure_degrades() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_rep_wrongtype").await else { return Ok(()) };
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let key = reputation_sent_key("wrongtype.example", &today);
+        let mut conn = residual_redis().get().await.expect("redis");
+        redis::cmd("SET")
+            .arg(&key)
+            .arg("not-a-hash")
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("seed string key");
+        processor.record_sent_reputation("wrongtype.example").await;
+        redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("cleanup");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The DB mirror of the reputation counter degrades on a write failure.
+    #[tokio::test]
+    async fn db_sent_reputation_failure_degrades() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_rep_db_fail").await else { return Ok(()) };
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        install_fault(&pool, "rep_write", "sender_reputation", "INSERT").await;
+        set_fault(&pool, "rep_write", true).await;
+        processor.record_sent_reputation("db-fail.example").await;
+        set_fault(&pool, "rep_write", false).await;
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── sales feedback arms ───────────────────────────────────────────────
+
+    struct SalesSeed {
+        queue_id: uuid::Uuid,
+        tenant_id: String,
+        step_execution_id: uuid::Uuid,
+        sender_id: uuid::Uuid,
+    }
+
+    /// Minimal sales chain: tenant → sequence → version → step → sender →
+    /// enrollment → step execution, plus the linked queue row.
+    async fn seed_sales(pool: &PgPool, label: &str) -> SalesSeed {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = &suffix[..12];
+        let tenant_id = format!("ressales-{suffix}");
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("Residual sales {label} {suffix}"))
+        .bind(format!("ressales-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        let sequence_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequences (id, tenant_id, name, status) VALUES ($1, $2, $3, 'active')",
+        )
+        .bind(sequence_id)
+        .bind(&tenant_id)
+        .bind(format!("Residual seq {suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert sequence");
+        let version_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequence_versions \
+                 (id, tenant_id, sequence_id, version, status, locale, approved_by, approved_at) \
+             VALUES ($1, $2, $3, 1, 'active', 'en', 'residual-test', NOW())",
+        )
+        .bind(version_id)
+        .bind(&tenant_id)
+        .bind(sequence_id)
+        .execute(pool)
+        .await
+        .expect("insert version");
+        let step_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sequence_steps \
+                 (id, tenant_id, version_id, step_index, kind, min_delay_secs, max_delay_secs, sender_pool) \
+             VALUES ($1, $2, $3, 0, 'email', 0, 0, 'sales_outbound')",
+        )
+        .bind(step_id)
+        .bind(&tenant_id)
+        .bind(version_id)
+        .execute(pool)
+        .await
+        .expect("insert step");
+        let sender_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_sender_identities \
+                 (id, tenant_id, pool, from_email, from_name, domain, status, daily_limit) \
+             VALUES ($1, $2, 'sales_outbound', $3, 'Residual Sender', 'residual.example.com', 'active', 200)",
+        )
+        .bind(sender_id)
+        .bind(&tenant_id)
+        .bind(format!("sender-{suffix}@residual.example.com"))
+        .execute(pool)
+        .await
+        .expect("insert sender");
+        let account_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_accounts \
+                 (id, tenant_id, company, domain, country, country_confidence, lifecycle) \
+             VALUES ($1, $2, $3, $4, 'QZ', 0.95, 'discovered')",
+        )
+        .bind(account_id)
+        .bind(&tenant_id)
+        .bind(format!("Residual Co {suffix}"))
+        .bind(format!("residual-{suffix}.example"))
+        .execute(pool)
+        .await
+        .expect("insert account");
+        let contact_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_contacts (id, tenant_id, account_id, full_name, country) \
+             VALUES ($1, $2, $3, 'Residual Prospect', 'QZ')",
+        )
+        .bind(contact_id)
+        .bind(&tenant_id)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .expect("insert contact");
+        let enrollment_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_enrollments \
+                 (id, tenant_id, sequence_version_id, account_id, contact_id, state) \
+             VALUES ($1, $2, $3, $4, $5, 'active')",
+        )
+        .bind(enrollment_id)
+        .bind(&tenant_id)
+        .bind(version_id)
+        .bind(account_id)
+        .bind(contact_id)
+        .execute(pool)
+        .await
+        .expect("insert enrollment");
+        let step_execution_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sales_step_executions \
+                 (id, tenant_id, enrollment_id, sequence_version_id, sequence_step_id, \
+                  step_index, state, variant, idempotency_key) \
+             VALUES ($1, $2, $3, $4, $5, 0, 'sent', 'default', $6)",
+        )
+        .bind(step_execution_id)
+        .bind(&tenant_id)
+        .bind(enrollment_id)
+        .bind(version_id)
+        .bind(step_id)
+        .bind(format!("residual-{suffix}"))
+        .execute(pool)
+        .await
+        .expect("insert step execution");
+        let queue_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO email_queue \
+                 (id, from_address, to_addresses, subject, status, tenant_id, message_id, \
+                  sales_sender_identity_id, sales_step_execution_id, sales_enrollment_id) \
+             VALUES ($1, 'sender@residual.example.com', ARRAY['prospect@example.com'], \
+                     'Residual sales', 'pending', $2, gen_random_uuid(), $3, $4, $5)",
+        )
+        .bind(queue_id)
+        .bind(&tenant_id)
+        .bind(sender_id)
+        .bind(step_execution_id)
+        .bind(enrollment_id)
+        .execute(pool)
+        .await
+        .expect("insert sales queue row");
+        SalesSeed {
+            queue_id,
+            tenant_id,
+            step_execution_id,
+            sender_id,
+        }
+    }
+
+    /// All four `record_sales_feedback` arms: the hard-bounce outcome +
+    /// ledger row (Ok arms of BOTH writes), and both Err arms under an
+    /// injected INSERT fault.
+    #[tokio::test]
+    async fn sales_feedback_arms_prove_out() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_sales_feedback").await else { return Ok(()) };
+        let seed = seed_sales(&pool, "feedback").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+
+        let job = EmailJob {
+            id: seed.queue_id.to_string(),
+            tenant_id: seed.tenant_id.clone(),
+            sales_step_execution_id: Some(seed.step_execution_id.to_string()),
+            ..bare_job()
+        };
+
+        // Ok arms: one bounce outcome + one hard_bounce ledger row.
+        processor
+            .record_sales_feedback(&job, SalesDeliveryEvent::HardBounce, "smtp")
+            .await;
+        let outcome: String = sqlx::query_scalar(
+            "SELECT outcome FROM sales_outcomes \
+             WHERE tenant_id = $1 AND step_execution_id = $2",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.step_execution_id)
+        .fetch_one(&pool)
+        .await
+        .expect("outcome");
+        assert_eq!(outcome, "bounce");
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint FROM sales_sender_events \
+             WHERE tenant_id = $1 AND sender_identity_id = $2 AND event_type = 'hard_bounce'",
+        )
+        .bind(&seed.tenant_id)
+        .bind(seed.sender_id)
+        .fetch_one(&pool)
+        .await
+        .expect("ledger row");
+        assert_eq!(ledger, 1);
+
+        // Err arms: the outcome INSERT and the ledger INSERT both fail
+        // under the injected fault — logged + counted, never propagated.
+        // A HardBounce REPLAY still executes the INSERT (ON CONFLICT DO
+        // NOTHING), so the fault fires inside record_sales_outcome_if_linked.
+        install_fault(&pool, "sales_outcome", "sales_outcomes", "INSERT").await;
+        set_fault(&pool, "sales_outcome", true).await;
+        processor
+            .record_sales_feedback(&job, SalesDeliveryEvent::HardBounce, "smtp")
+            .await;
+        set_fault(&pool, "sales_outcome", false).await;
+        install_fault(&pool, "sender_event", "sales_sender_events", "INSERT").await;
+        set_fault(&pool, "sender_event", true).await;
+        processor
+            .record_sales_feedback(&job, SalesDeliveryEvent::SoftBounce, "smtp")
+            .await;
+        set_fault(&pool, "sender_event", false).await;
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A permanent-failure write matching zero rows (the row is gone — the
+    /// lease was lost and the new owner finished it) skips the dead-letter
+    /// insert entirely.
+    #[tokio::test]
+    async fn permanent_failure_with_zero_rows_writes_no_dlq(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_perm_zero_rows").await else { return Ok(()) };
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport, config_with(TransportType::Ses)).await;
+        let job = EmailJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            ..bare_job()
+        };
+        processor
+            .handle_permanent_job_failure(&job, &ProcessorError::Job("gone".into()))
+            .await
+            .expect("zero-row write is not an error");
+        let dlq: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::bigint FROM email_dlq WHERE job_id = $1")
+                .bind(&job.id)
+                .fetch_one(&pool)
+                .await
+                .expect("dlq count");
+        assert_eq!(dlq, 0, "no row, no dead letter");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The provider carry-through lookup degrades to (None, None) both when
+    /// nothing was persisted and when the events table is unavailable.
+    #[tokio::test]
+    async fn carried_recipient_provider_arms() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_carried_provider").await else { return Ok(()) };
+        let (provider, source) =
+            carried_recipient_provider(&pool, "t", "not-a-message", "r@example.com").await;
+        assert_eq!(provider, None);
+        assert_eq!(source, None);
+
+        sqlx::query("ALTER TABLE events RENAME TO events_gone")
+            .execute(&pool)
+            .await
+            .expect("break events");
+        let (provider, source) = carried_recipient_provider(&pool, "t", "m", "r@example.com").await;
+        assert_eq!(
+            provider, None,
+            "a lookup failure loses provenance, never fabricates it"
+        );
+        assert_eq!(source, None);
+        sqlx::query("ALTER TABLE events_gone RENAME TO events")
+            .execute(&pool)
+            .await
+            .expect("restore events");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Sales outcome/sender-event recording is a no-op for rows without a
+    /// parseable queue id, an unknown queue row, or an empty recipient.
+    #[tokio::test]
+    async fn sales_record_gates_for_non_uuid_and_missing_links(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_sales_gates").await else { return Ok(()) };
+        // Non-UUID queue row id → no provenance lookup at all.
+        let inserted = record_sales_outcome_if_linked(
+            &pool,
+            "not-a-uuid",
+            SalesDeliveryEvent::HardBounce,
+            "smtp",
+        )
+        .await
+        .expect("no error for a legacy id");
+        assert!(inserted.is_none());
+        // An unknown (but well-formed) queue row id → no provenance row.
+        let inserted = record_sales_outcome_if_linked(
+            &pool,
+            &uuid::Uuid::new_v4().to_string(),
+            SalesDeliveryEvent::HardBounce,
+            "smtp",
+        )
+        .await
+        .expect("no error for a missing row");
+        assert!(inserted.is_none());
+        // Sender events: legacy id, missing row, empty recipient.
+        for recipient in ["", "r@example.com"] {
+            let inserted = record_sender_event_if_linked(
+                &pool,
+                "not-a-uuid",
+                SalesDeliveryEvent::HardBounce,
+                recipient,
+            )
+            .await
+            .expect("no error");
+            assert!(inserted.is_none());
+            let inserted = record_sender_event_if_linked(
+                &pool,
+                &uuid::Uuid::new_v4().to_string(),
+                SalesDeliveryEvent::HardBounce,
+                recipient,
+            )
+            .await
+            .expect("no error");
+            assert!(inserted.is_none());
+        }
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A DKIM envelope that decrypts but carries no valid PEM key is
+    /// refused with the typed Dkim error (the decrypt arm alone is covered
+    /// by the corrupt-envelope case in `common`).
+    #[test]
+    fn dkim_config_refuses_an_invalid_private_key() {
+        use crate::test_support::ENV_LOCK;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(
+            apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+        let envelope = apexmail_lib::dkim::encrypt_dkim_private_key(
+            "definitely not a PEM private key",
+            &apexmail_lib::dkim::dkim_private_key_aad("t", "d"),
+        )
+        .expect("encrypt probe material");
+        let domain = crate::email::types::Domain {
+            id: "d".into(),
+            tenant_id: "t".into(),
+            domain: "example.com".into(),
+            dkim_selector: Some("sel".into()),
+            dkim_public_key: Some("pub".into()),
+            dkim_private_key: Some(envelope),
+            warmup_enabled: false,
+            warmup_day: 0,
+            ses_verified: true,
+            dedicated_ips: Vec::new(),
+            return_path: None,
+        };
+        let error = smtp_dkim_config_for_domain(&domain).expect_err("invalid key refused");
+        assert!(
+            error.to_string().contains("invalid"),
+            "a decryptable-but-unparseable key is the INVALID arm: {error}"
+        );
+    }
+
+    /// The readiness helper's exhausted path: a child that can never answer
+    /// PING (`--port 0` disables the TCP listener entirely, so every
+    /// connection is refused immediately) is killed and reports `None`.
+    #[tokio::test]
+    async fn redis_ready_exhaustion_kills_the_child() {
+        let mut child = super::tests::spawn_redis_server(0).expect("spawn");
+        let pool = super::tests::redis_ready(&mut child, 0, 2, Duration::from_millis(1)).await;
+        assert!(
+            pool.is_none(),
+            "a server that never PONGs must not yield a pool"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The start/stop lifecycle exercises the transport contract end to
+    /// end: verify() at start, close() at stop, and the queue-depth
+    /// exporter + reconciliation sweeps alongside.
+    #[tokio::test] // real time: the lifecycle polls for real
+    async fn start_stop_lifecycle_exercises_the_transport_contract(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_lifecycle").await else { return Ok(()) };
+        let fixture = seed(&pool, "lifecycle").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let processor = build(&pool, transport.clone(), config_with(TransportType::Ses)).await;
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.start().await }
+        });
+        assert!(
+            wait_for_row(
+                &pool,
+                fixture.queue_id,
+                Duration::from_secs(15),
+                |status, _| { status == "sent" }
+            )
+            .await,
+            "start must serve the seeded job"
+        );
+        processor.stop().await.expect("stop");
+        let result = tokio::time::timeout(Duration::from_secs(15), handle)
+            .await
+            .expect("start returns after stop")
+            .expect("join");
+        result.expect("start clean");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Zero concurrency: the loop cannot take slots, parks, and stops
+    /// promptly on shutdown.
+    #[tokio::test] // real time: the loop parks for real
+    async fn zero_concurrency_loop_parks_and_stops_promptly(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = residual_pool("res_zero_concurrency").await else { return Ok(()) };
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let mut config = config_with(TransportType::Ses);
+        config.base.concurrency = 0;
+        let processor = build(&pool, transport.clone(), config).await;
+        processor.is_running.store(true, Ordering::SeqCst);
+        let loop_handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(transport.calls(), 0, "zero slots claim nothing");
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(5), loop_handle)
+            .await
+            .expect("loop exits promptly")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    // ── residual arms round 2 ─────────────────────────────────────────────
+
+    /// A dedicated-route send with DKIM disabled is refused INSIDE
+    /// prepare_email with the typed Config error.
+    #[tokio::test]
+    async fn prepare_email_refuses_dedicated_routes_without_dkim(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = residual_pool("res_prep_no_dkim").await else {
+            return Ok(());
+        };
+        let fixture = seed(&pool, "prep-no-dkim").await;
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        let mut config = config_with(TransportType::Smtp);
+        config.dkim.enabled = false;
+        let processor = build(&pool, transport, config).await;
+        let job = EmailJob {
+            domain_id: fixture.domain_id.to_string(),
+            tenant_id: fixture.tenant_id.clone(),
+            from: fixture.sender.clone(),
+            ..bare_job()
+        };
+        let domain = processor.get_domain(&job).await.expect("domain");
+        let route = DeliveryRoute::Dedicated {
+            dedicated_ip_id: "dip-pnd".into(),
+            source_ip: "203.0.113.70".parse().expect("ip"),
+        };
+        let error = processor
+            .prepare_email(&job, &domain, &route)
+            .expect_err("a dedicated route without DKIM must refuse");
+        assert!(error.to_string().contains("DKIM is required"));
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The stuck-parent reconciliation sweep: a parent whose recipient rows
+    /// are ALL terminal but whose aggregate is stale is reconciled (the
+    /// info! arm with a nonzero sweep).
+    #[tokio::test]
+    async fn reconcile_stuck_parents_sweeps_and_reports() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(pool) = residual_pool("res_stuck_parent").await else {
+            return Ok(());
+        };
+        let fixture = seed(&pool, "stuck-parent").await;
+        // The parent `messages` row: aggregate still 'processing' while its
+        // only recipient row is terminal 'sent' — the crash residue.
+        // The recipient row is already terminal; the parent lags behind.
+        sqlx::query("UPDATE email_queue SET status = 'sent' WHERE id = $1")
+            .bind(fixture.queue_id)
+            .execute(&pool)
+            .await
+            .expect("terminal recipient row");
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_addresses, to_emails, \
+                                   subject, status, created_at, updated_at) \
+             VALUES ($1, $2, $3, ARRAY[$4::text], $5::jsonb, 'stuck parent', 'processing', \
+                     NOW(), NOW())",
+        )
+        .bind(fixture.message_id)
+        .bind(&fixture.tenant_id)
+        .bind(&fixture.sender)
+        .bind("user@example.com")
+        .bind(r#"["user@example.com"]"#)
+        .execute(&pool)
+        .await
+        .expect("insert stuck parent");
+
+        let processor = processor_from_pool(&pool).await;
+        processor.reconcile_stuck_parents().await;
+        let status: String = sqlx::query_scalar("SELECT status FROM messages WHERE id = $1")
+            .bind(fixture.message_id)
+            .fetch_one(&pool)
+            .await
+            .expect("parent row");
+        assert_eq!(status, "sent", "the stuck parent must reconcile");
+        pool.close().await;
+        Ok(())
+    }
+
+    async fn processor_from_pool(pool: &PgPool) -> Arc<EmailProcessor> {
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        build(pool, transport, config_with(TransportType::Ses)).await
+    }
+
+    /// The transport double's full EmailTransport contract, exercised
+    /// directly (verify/close/identity are part of the trait surface even
+    /// when the dispatch tests only drive `send`).
+    #[tokio::test]
+    async fn residual_transport_double_contract_is_exercised() {
+        let transport = ResidualTransport::new(ResidualMode::Success);
+        assert_eq!(
+            EmailTransport::transport_name(transport.as_ref()),
+            "residual"
+        );
+        assert!(EmailTransport::supports_source_binding(transport.as_ref()));
+        transport.verify().await.expect("verify");
+        transport.close().await.expect("close");
+    }
+
+    /// The wait helper reports the deadline value when the predicate never
+    /// holds (and the immediate value when it holds right away).
+    #[tokio::test]
+    async fn wait_until_reports_the_deadline_value() {
+        assert!(
+            !wait_for_row_condition_never().await,
+            "an impossible predicate must report the deadline value"
+        );
+    }
+
+    async fn wait_for_row_condition_never() -> bool {
+        let start = std::time::Instant::now();
+        let deadline = Duration::from_millis(40);
+        loop {
+            if start.elapsed() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }

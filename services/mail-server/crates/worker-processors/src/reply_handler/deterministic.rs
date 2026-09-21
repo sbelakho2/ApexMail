@@ -21,7 +21,6 @@ use std::sync::LazyLock;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use regex::Regex;
-use tracing::warn;
 
 use super::types::{Evidence, ReplyDisposition, ReplyInput};
 
@@ -202,13 +201,10 @@ static SMTP_STATUS_RE: LazyLock<Option<Regex>> =
     LazyLock::new(|| compile(r"(?i)\b(5\d{2}|4\d{2})\b"));
 
 fn compile(pattern: &str) -> Option<Regex> {
-    match Regex::new(pattern) {
-        Ok(regex) => Some(regex),
-        Err(error) => {
-            warn!(pattern, %error, "invalid deterministic classifier regex");
-            None
-        }
-    }
+    // The patterns are compile-time constants: an invalid one is a
+    // programming error and must fail loudly instead of silently disabling
+    // part of the deterministic classifier.
+    Some(Regex::new(pattern).expect("invalid deterministic classifier regex"))
 }
 
 /// Find `field:` line values in a `message/delivery-status` body (e.g.

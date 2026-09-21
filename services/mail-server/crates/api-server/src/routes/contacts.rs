@@ -2278,3 +2278,469 @@ mod canonical_crud_tests {
         }
     }
 }
+
+/// Coverage wave for the counts / bulk-action / import surfaces plus the
+/// keyset-cursor decoder. HTTP-driven against the REAL router; the XLSX
+/// path uses a minimal store-method ZIP built in-process (no new
+/// dependencies).
+#[cfg(test)]
+mod bulk_import_coverage_tests {
+    use super::*;
+    use crate::app::test_support::adv::AdvEnv;
+
+    fn unique_tag_prefix() -> String {
+        format!("cov{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
+    }
+
+    async fn seed_contact(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        email: &str,
+        tags: serde_json::Value,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, name, status, tags, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'Seeded', 'active', $4, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(tenant)
+        .bind(email)
+        .bind(tags)
+        .execute(pool)
+        .await
+        .expect("seed contact");
+        id
+    }
+
+    #[tokio::test]
+    async fn counts_bulk_lifecycle_and_duplicate_resolution() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_bulk_wave").await else {
+            return;
+        };
+        let (env, tenant) =
+            AdvEnv::tenant(pool.clone(), &["contacts:read", "contacts:write"]).await;
+        let unique = unique_tag_prefix();
+
+        let a = seed_contact(
+            &pool,
+            &tenant,
+            &format!("a-{unique}@example.test"),
+            serde_json::json!([]),
+        )
+        .await;
+        let b = seed_contact(
+            &pool,
+            &tenant,
+            &format!("b-{unique}@example.test"),
+            serde_json::json!([]),
+        )
+        .await;
+        // A case-variant duplicate of `a`: the exact-address unique index
+        // admits both rows while duplicate resolution matches
+        // case-insensitively and keeps the OLDER one.
+        let dup = seed_contact(
+            &pool,
+            &tenant,
+            &format!("A-{unique}@EXAMPLE.test"),
+            serde_json::json!([]),
+        )
+        .await;
+
+        // Counts reflect the three seeded rows.
+        let (status, body) = env.get("/v1/contacts/counts").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body["total"].as_i64().unwrap_or(0) >= 3, "{body}");
+
+        // Bulk tag add, then remove.
+        let (status, body) = env
+            .post(
+                "/v1/contacts/bulk/tag",
+                &serde_json::json!({ "ids": [a, b], "tags": ["vip", "beta"], "action": "add" })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["affected"], 2, "{body}");
+
+        let (status, body) = env
+            .post(
+                "/v1/contacts/bulk/tag",
+                &serde_json::json!({ "ids": [a], "tags": ["vip"], "action": "remove" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        let tags: serde_json::Value =
+            sqlx::query_scalar("SELECT tags FROM contacts WHERE id = $1 AND tenant_id = $2")
+                .bind(a)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("tags");
+        assert_eq!(tags, serde_json::json!(["beta"]), "vip removed");
+
+        // Unknown action is a validation error.
+        let (status, _body) = env
+            .post(
+                "/v1/contacts/bulk/tag",
+                &serde_json::json!({ "ids": [a], "tags": ["x"], "action": "explode" }).to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+
+        // Bulk soft-delete, then restore.
+        let (status, body) = env
+            .post(
+                "/v1/contacts/bulk/delete",
+                &serde_json::json!({ "ids": [b] }).to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["affected"], 1);
+        let (status, body) = env
+            .post(
+                "/v1/contacts/bulk/restore",
+                &serde_json::json!({ "ids": [b] }).to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["affected"], 1);
+
+        // Duplicate resolution keeps the OLDEST row per email.
+        let (status, body) = env.post("/v1/contacts/bulk/resolve-duplicates", "{}").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body["affected"].as_i64().unwrap_or(0) >= 1, "{body}");
+        let dup_status: String =
+            sqlx::query_scalar("SELECT status FROM contacts WHERE id = $1 AND tenant_id = $2")
+                .bind(dup)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("dup row");
+        assert_eq!(dup_status, "deleted");
+        let a_status: String =
+            sqlx::query_scalar("SELECT status FROM contacts WHERE id = $1 AND tenant_id = $2")
+                .bind(a)
+                .bind(&tenant)
+                .fetch_one(&pool)
+                .await
+                .expect("a row");
+        assert_eq!(a_status, "active", "the oldest row survives");
+    }
+
+    /// Tagging a contact past the per-contact limit trips the database
+    /// CHECK — the handler maps that to 422, never a 500.
+    #[tokio::test]
+    async fn bulk_tag_over_the_limit_maps_the_check_violation_to_422() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_tag_limit").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["contacts:write"]).await;
+        let unique = unique_tag_prefix();
+
+        // A contact already holding MAX_CONTACT_TAGS tags.
+        let full_tags: Vec<String> = (0..MAX_CONTACT_TAGS).map(|i| format!("t{i:02}")).collect();
+        let id = seed_contact(
+            &pool,
+            &tenant,
+            &format!("full-{unique}@example.test"),
+            serde_json::json!(full_tags),
+        )
+        .await;
+
+        let (status, body) = env
+            .post(
+                "/v1/contacts/bulk/tag",
+                &serde_json::json!({ "ids": [id], "tags": ["overflow-1", "overflow-2"] })
+                    .to_string(),
+            )
+            .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.to_string().contains("per-contact limit"),
+            "the limit reason is surfaced: {body}"
+        );
+    }
+
+    /// The keyset cursor decoder's refusal arms + a working pagination
+    /// round trip.
+    #[tokio::test]
+    async fn keyset_cursor_refusals_and_pagination_round_trip() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_cursor_wave").await else {
+            return;
+        };
+        let (env, tenant) = AdvEnv::tenant(pool.clone(), &["contacts:read"]).await;
+        let unique = unique_tag_prefix();
+        for i in 0..3 {
+            seed_contact(
+                &pool,
+                &tenant,
+                &format!("p{i}-{unique}@example.test"),
+                serde_json::json!([]),
+            )
+            .await;
+        }
+
+        // The wire cursor format is hex(payload); payload = "<rfc3339>\n<uuid>".
+        fn hex_cursor(payload: &str) -> String {
+            payload.bytes().map(|b| format!("{b:02x}")).collect()
+        }
+
+        // Malformed cursors are 400s — one test per decoder arm.
+        let bad_cursors = [
+            ("zz".to_string(), "malformed encoding"), // not hex
+            (
+                hex_cursor("no-separator-here"),
+                "created_at timestamp and row id",
+            ),
+            (
+                hex_cursor("not-a-timestamp\n11111111-1111-1111-1111-111111111111"),
+                "encoded created_at timestamp",
+            ),
+            (
+                hex_cursor("2020-01-01T00:00:00+00:00\nnot-a-uuid"),
+                "malformed row id",
+            ),
+        ];
+        for (cursor, needle) in &bad_cursors {
+            let (status, body) = env
+                .get(&format!("/v1/contacts?limit=2&cursor={cursor}"))
+                .await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{cursor}: {body}"
+            );
+            assert!(body.to_string().contains(needle), "{cursor}: {body}");
+        }
+
+        let (status, _body) = env.get("/v1/contacts?limit=2").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+    }
+
+    // ── Minimal XLSX (store-method ZIP) builder ─────────────────────
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *slot = c;
+        }
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc = table[((crc ^ u32::from(b)) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        crc ^ 0xFFFF_FFFF
+    }
+
+    /// Store-method (uncompressed) ZIP with the four parts calamine needs.
+    fn minimal_xlsx(rows: &[&[&str]]) -> Vec<u8> {
+        struct Zip {
+            out: Vec<u8>,
+            entries: Vec<(String, u32, u32, u32)>,
+        }
+        impl Zip {
+            fn add(&mut self, name: &str, data: &[u8]) {
+                let offset = self.out.len() as u32;
+                let crc = crc32(data);
+                let n = name.as_bytes();
+                let size = data.len() as u32;
+                self.out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+                self.out.extend_from_slice(&20u16.to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out.extend_from_slice(&0x21u16.to_le_bytes());
+                self.out.extend_from_slice(&crc.to_le_bytes());
+                self.out.extend_from_slice(&size.to_le_bytes());
+                self.out.extend_from_slice(&size.to_le_bytes());
+                self.out.extend_from_slice(&(n.len() as u16).to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out.extend_from_slice(n);
+                self.out.extend_from_slice(data);
+                self.entries.push((name.to_string(), crc, size, offset));
+            }
+
+            fn finish(mut self) -> Vec<u8> {
+                let cd_start = self.out.len() as u32;
+                let count = self.entries.len() as u16;
+                let mut cd = Vec::new();
+                for (name, crc, size, offset) in &self.entries {
+                    let n = name.as_bytes();
+                    cd.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+                    cd.extend_from_slice(&20u16.to_le_bytes());
+                    cd.extend_from_slice(&20u16.to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0x21u16.to_le_bytes());
+                    cd.extend_from_slice(&crc.to_le_bytes());
+                    cd.extend_from_slice(&size.to_le_bytes());
+                    cd.extend_from_slice(&size.to_le_bytes());
+                    cd.extend_from_slice(&(n.len() as u16).to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0u16.to_le_bytes());
+                    cd.extend_from_slice(&0u32.to_le_bytes());
+                    cd.extend_from_slice(&offset.to_le_bytes());
+                    cd.extend_from_slice(n);
+                }
+                let cd_size = cd.len() as u32;
+                self.out.extend_from_slice(&cd);
+                self.out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out.extend_from_slice(&count.to_le_bytes());
+                self.out.extend_from_slice(&count.to_le_bytes());
+                self.out.extend_from_slice(&cd_size.to_le_bytes());
+                self.out.extend_from_slice(&cd_start.to_le_bytes());
+                self.out.extend_from_slice(&0u16.to_le_bytes());
+                self.out
+            }
+        }
+
+        let mut sheet = String::from(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>",
+        );
+        for (ri, row) in rows.iter().enumerate() {
+            sheet.push_str(&format!("<row r=\"{}\">", ri + 1));
+            for (ci, cell) in row.iter().enumerate() {
+                sheet.push_str(&format!(
+                    "<c r=\"{}{}\" t=\"inlineStr\"><is><t>{cell}</t></is></c>",
+                    (b'A' + ci as u8) as char,
+                    ri + 1
+                ));
+            }
+            sheet.push_str("</row>");
+        }
+        sheet.push_str("</sheetData></worksheet>");
+
+        let mut z = Zip {
+            out: Vec::new(),
+            entries: Vec::new(),
+        };
+        z.add(
+            "[Content_Types].xml",
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        );
+        z.add(
+            "_rels/.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        );
+        z.add(
+            "xl/workbook.xml",
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        );
+        z.add(
+            "xl/_rels/workbook.xml.rels",
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        );
+        z.add("xl/worksheets/sheet1.xml", sheet.as_bytes());
+        z.finish()
+    }
+
+    async fn post_import(
+        env: &AdvEnv,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::Body;
+        use axum::http::{header, Method, Request};
+        use tower::ServiceExt;
+
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/contacts/import")
+            .header("x-api-key", &env.credential);
+        if let Some(ct) = content_type {
+            builder = builder.header(header::CONTENT_TYPE, ct);
+        }
+        let request = builder.body(Body::from(body)).expect("request");
+        let response = env.app.clone().oneshot(request).await.expect("response");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+        };
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn csv_and_xlsx_imports_validate_cap_and_report() {
+        let Some(pool) = crate::test_db::canonical_pool("contacts_import_wave").await else {
+            return;
+        };
+        let (env, _tenant) = AdvEnv::tenant(pool.clone(), &["contacts:write"]).await;
+        let unique = unique_tag_prefix();
+
+        // CSV happy path: valid, invalid, duplicate-in-file, and blank rows.
+        let csv = format!(
+            "email,name\nok1-{unique}@example.test,One\nnot-an-email,Bad\nok1-{unique}@example.test,Dup\nok2-{unique}@example.test,\n"
+        );
+        // No content type: the handler defaults to CSV parsing.
+        let (status, body) = post_import(&env, None, csv.into_bytes()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["imported"], 2, "{body}");
+        assert_eq!(body["skipped"], 2, "{body}");
+        assert_eq!(body["format"], "csv");
+
+        // Case-insensitive duplicate normalises into one import.
+        let csv = format!("email,name\nOK1-{unique}@EXAMPLE.test,Again\n");
+        let (status, body) = post_import(&env, None, csv.into_bytes()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["imported"], 1, "{body}");
+
+        // CSV with invalid UTF-8 is a 400 parse error.
+        let (status, body) = post_import(&env, None, b"email,name\n\xff\xfe,x\n".to_vec()).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("CSV parse error"), "{body}");
+
+        // XLSX detection runs on the ZIP file magic (the content-type
+        // gate in front of the router only admits json/multipart/form
+        // payloads, so the magic-byte path is the production one).
+        let xlsx = minimal_xlsx(&[
+            &["email", "name"],
+            &[&format!("xl1-{unique}@example.test"), "Alpha"],
+            &[&format!("xl2-{unique}@example.test"), "Beta"],
+        ]);
+        let (status, body) = post_import(&env, None, xlsx).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["imported"], 2, "{body}");
+        assert_eq!(body["format"], "xlsx");
+
+        // Corrupt XLSX bytes are a 400 parse error, never a 500.
+        let (status, body) = post_import(&env, None, b"PK\x03\x04garbage".to_vec()).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("XLSX parse error"), "{body}");
+
+        // Oversize XLSX is refused before parsing (magic bytes only — the
+        // first four bytes of the buffer are the ZIP signature).
+        let mut big = vec![b'P'; MAX_XLSX_BODY_BYTES + 1];
+        big[..4].copy_from_slice(b"PK\x03\x04");
+        let (status, body) = post_import(&env, None, big).await;
+        assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+
+        // The row cap applies to CSV too.
+        let mut csv = String::from("email,name\n");
+        for i in 0..(MAX_IMPORT_ROWS + 1) {
+            csv.push_str(&format!("z{i}@example.test,Row\n"));
+        }
+        let (status, body) = post_import(&env, None, csv.into_bytes()).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("maximum is"), "{body}");
+
+        let _ = &env.credential;
+    }
+}

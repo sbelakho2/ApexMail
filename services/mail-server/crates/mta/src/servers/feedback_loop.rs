@@ -302,32 +302,9 @@ impl FeedbackLoopServer {
                 None
             }
             FblSourceCheck::Transient => {
-                let mut s = BufStream::new(socket);
-                log_smtp_reject(
-                    "fbl",
-                    ip,
-                    &session_id,
-                    "451 4.3.0 Temporary failure verifying FBL source",
-                );
-                let _ = write_reply(
-                    &mut s,
-                    "fbl",
-                    ip,
-                    &session_id,
-                    "451 4.3.0 Temporary failure verifying FBL source\r\n",
-                )
-                .await;
-                log_session_summary(
-                    "fbl",
-                    ip,
-                    &session_id,
-                    false,
-                    false,
-                    0,
-                    started.elapsed().as_millis(),
-                    "transient_source",
-                );
-                return;
+                return self
+                    .reject_transient_source(socket, ip, &session_id, started)
+                    .await;
             }
         };
 
@@ -344,7 +321,7 @@ impl FeedbackLoopServer {
         let mut close_reason = "closed";
         // F-14 (ported from inbound/submission): hard wall-clock cap for the
         // whole session and a 4xx/5xx reply budget.
-        let session_deadline = std::time::Instant::now() + SESSION_DEADLINE;
+        let session_deadline = tokio::time::Instant::now() + SESSION_DEADLINE;
         let mut error_count: u32 = 0;
 
         // Single write point for 4xx/5xx replies: every reject counts toward
@@ -407,7 +384,7 @@ impl FeedbackLoopServer {
             }
 
             // F-14 (ported): the session must not outlive the deadline.
-            if std::time::Instant::now() >= session_deadline {
+            if tokio::time::Instant::now() >= session_deadline {
                 log_smtp_reject(
                     "fbl",
                     ip,
@@ -496,16 +473,15 @@ impl FeedbackLoopServer {
                 let mut overflowed = false;
                 // E-9:total DATA deadline so a slow client cannot drip-feed
                 // lines forever.
-                let deadline = std::time::Instant::now() + DATA_TOTAL_TIMEOUT;
+                let deadline = tokio::time::Instant::now() + DATA_TOTAL_TIMEOUT;
                 loop {
                     line.clear();
+                    // Clamping the per-line timeout to the remaining total
+                    // enforces the whole-payload deadline with this single
+                    // timer — no redundant pre-check needed.
                     let remaining = deadline
-                        .checked_duration_since(std::time::Instant::now())
+                        .checked_duration_since(tokio::time::Instant::now())
                         .unwrap_or(Duration::ZERO);
-                    if remaining.is_zero() {
-                        timed_out = true;
-                        break;
-                    }
                     let per_line = remaining.min(DATA_LINE_TIMEOUT);
                     match tokio::time::timeout(
                         per_line,
@@ -550,12 +526,8 @@ impl FeedbackLoopServer {
                                 loop {
                                     line.clear();
                                     let remaining = deadline
-                                        .checked_duration_since(std::time::Instant::now())
+                                        .checked_duration_since(tokio::time::Instant::now())
                                         .unwrap_or(Duration::ZERO);
-                                    if remaining.is_zero() {
-                                        timed_out = true;
-                                        break;
-                                    }
                                     match tokio::time::timeout(
                                         remaining.min(DATA_LINE_TIMEOUT),
                                         read_line_capped(&mut stream, MAX_DATA_LINE),
@@ -659,6 +631,44 @@ impl FeedbackLoopServer {
     }
 
     // ── rDNS verification ──────────────────────────────────────────────────────
+
+    /// Answer a session whose source verification failed transiently: 451
+    /// (retry later), never a silent drop and never a hard rejection.
+    /// Extracted from `handle_session` so the reply contract is testable
+    /// without a live DNS outage.
+    async fn reject_transient_source(
+        &self,
+        socket: TcpStream,
+        ip: IpAddr,
+        session_id: &str,
+        started: std::time::Instant,
+    ) {
+        let mut s = BufStream::new(socket);
+        log_smtp_reject(
+            "fbl",
+            ip,
+            session_id,
+            "451 4.3.0 Temporary failure verifying FBL source",
+        );
+        let _ = write_reply(
+            &mut s,
+            "fbl",
+            ip,
+            session_id,
+            "451 4.3.0 Temporary failure verifying FBL source\r\n",
+        )
+        .await;
+        log_session_summary(
+            "fbl",
+            ip,
+            session_id,
+            false,
+            false,
+            0,
+            started.elapsed().as_millis(),
+            "transient_source",
+        );
+    }
 
     async fn verify_fbl_source(&self, ip: IpAddr) -> FblSourceCheck {
         // Check cache
@@ -1301,6 +1311,9 @@ async fn write_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+const TEST_LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1500,11 +1513,9 @@ Original-Message-ID: <original@example.com>\r\n";
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
-
     /// Test server whose rDNS verdict for loopback is seeded in the cache, so
     /// full sessions run deterministically without touching real DNS.
-    fn test_fbl_server(rdns_ok: bool) -> std::sync::Arc<FeedbackLoopServer> {
+    pub(super) fn test_fbl_server(rdns_ok: bool) -> std::sync::Arc<FeedbackLoopServer> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
@@ -1537,11 +1548,11 @@ Original-Message-ID: <original@example.com>\r\n";
                 reason: "source_network_mismatch (provider=test)".into(),
             }
         };
-        server.rdns_cache.insert(LOOPBACK, verdict);
+        server.rdns_cache.insert(TEST_LOOPBACK, verdict);
         server
     }
 
-    async fn fbl_read_reply(
+    pub(super) async fn fbl_read_reply(
         reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
     ) -> String {
         let mut line = String::new();
@@ -1553,7 +1564,7 @@ Original-Message-ID: <original@example.com>\r\n";
     }
 
     /// Read a complete (possibly multi-line) SMTP reply.
-    async fn fbl_read_full_reply(
+    pub(super) async fn fbl_read_full_reply(
         reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
     ) -> String {
         let mut full = String::new();
@@ -1789,7 +1800,7 @@ Original-Message-ID: <original@example.com>\r\n";
             "fbl.test".into(),
         ));
         small.rdns_cache.insert(
-            LOOPBACK,
+            TEST_LOOPBACK,
             FblSourceCheck::Authoritative {
                 provider: "google".into(),
                 method: FblValidationMethod::RdnsFcrcdns,
@@ -1868,13 +1879,12 @@ mod adversarial_db_tests {
     //!
     //! Trust model under test: only an authoritative source may suppress or
     //! move reputation; forged ARF fields are recorded but never trusted.
+    const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 
     use super::*;
     use sqlx::PgPool;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
-
-    const LOOPBACK: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
 
     async fn test_pool(test_name: &str) -> Option<PgPool> {
         match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
@@ -1909,7 +1919,7 @@ mod adversarial_db_tests {
             "fbl.test".into(),
         ));
         server.rdns_cache.insert(
-            LOOPBACK,
+            TEST_LOOPBACK,
             FblSourceCheck::Authoritative {
                 provider: "google".into(),
                 method: FblValidationMethod::RdnsFcrcdns,
@@ -2913,5 +2923,363 @@ mod verify_source_wire_tests {
         let server = server(registry_with(Some("192.0.2.0/24")), &dns);
         let check = server.verify_fbl_source(GOOGLE_FBL_IP).await;
         assert!(matches!(check, FblSourceCheck::Authoritative { .. }));
+    }
+    // ── wire matrix: command/data error arms, budgets, virtual-time timers ─
+
+    /// A live FBL session over a real loopback socket; the pool/redis are
+    /// unreachable so nothing here may depend on them.
+    async fn fbl_conversation(
+        server: std::sync::Arc<FeedbackLoopServer>,
+        steps: &[&[u8]],
+    ) -> Vec<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(super::tests::fbl_read_reply(&mut reader)
+            .await
+            .starts_with("220"));
+        let mut replies = Vec::new();
+        for step in steps {
+            writer.write_all(step).await.unwrap();
+            let mut reply = String::new();
+            loop {
+                let line = super::tests::fbl_read_reply(&mut reader).await;
+                let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+                reply.push_str(&line);
+                if !more {
+                    break;
+                }
+            }
+            replies.push(reply);
+        }
+        let _ = writer.write_all(b"QUIT\r\n").await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+        replies
+    }
+
+    #[tokio::test]
+    async fn fbl_command_error_arms_reply_exactly() {
+        let replies = fbl_conversation(
+            super::tests::test_fbl_server(true),
+            &[
+                b"EHLO client.example\r\n",
+                b"MAILX FROM:<>\r\n", // verb mismatch is the final else
+                b"MAIL FROMX:<>\r\n", // MAIL verb with a malformed argument
+                b"MAIL FROM:<>\r\n",
+                b"RCPTX TO:<a@fbl.test>\r\n", // unknown verb: 500
+                b"NOOP\r\n",
+            ],
+        )
+        .await;
+        assert!(replies[0].starts_with("250"));
+        assert!(replies[1].starts_with("500 5.5.2 Command not recognised"));
+        let mail_syntax = &replies[2];
+        assert!(
+            mail_syntax.starts_with("501 5.5.4 Syntax: MAIL FROM:<address>"),
+            "MAIL syntax: {mail_syntax:?}"
+        );
+        assert!(replies[3].starts_with("250 2.0.0 Ok"));
+        assert!(replies[4].starts_with("500 5.5.2 Command not recognised"));
+        assert!(replies[5].starts_with("250 2.0.0"));
+    }
+
+    #[tokio::test]
+    async fn fbl_bare_lf_and_overlong_command_lines_are_refused() {
+        let mut long = b"X".repeat(super::MAX_COMMAND_LINE + 1);
+        long.extend_from_slice(b"\r\n");
+        let noop: &[u8] = b"NOOP\r\n";
+        let bare: &[u8] = b"NOOP\n";
+        let replies = fbl_conversation(
+            super::tests::test_fbl_server(true),
+            &[bare, noop, &long, noop],
+        )
+        .await;
+        let bare_reply = &replies[0];
+        assert!(
+            bare_reply.starts_with("500 5.5.2 Bare LF not allowed"),
+            "{bare_reply:?}"
+        );
+        assert!(replies[1].starts_with("250"));
+        let too_long = &replies[2];
+        assert!(
+            too_long.starts_with("500 5.5.2 Line too long"),
+            "{too_long:?}"
+        );
+        assert!(replies[3].starts_with("250"), "still synchronised");
+    }
+
+    #[tokio::test]
+    async fn fbl_per_connection_message_budget_refuses_with_452() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let config = FeedbackConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 0,
+            hostname: "fbl.test".into(),
+            max_arf_size: 1024 * 1024,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 1,
+        };
+        let server = std::sync::Arc::new(FeedbackLoopServer::new(
+            config,
+            pool,
+            redis,
+            "fbl.test".into(),
+        ));
+        server.rdns_cache.insert(
+            super::TEST_LOOPBACK,
+            FblSourceCheck::Authoritative {
+                provider: "google".into(),
+                method: FblValidationMethod::RdnsFcrcdns,
+            },
+        );
+        let arf = b"Feedback-Type: abuse\r\nUser-Agent: test\r\n\r\n\r\n.\r\n";
+        async fn txn(
+            writer: &mut tokio::net::tcp::OwnedWriteHalf,
+            reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+            arf: &[u8],
+        ) -> String {
+            writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+            let mail = super::tests::fbl_read_full_reply(reader).await;
+            assert!(mail.starts_with("250"), "MAIL: {mail:?}");
+            writer
+                .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+                .await
+                .unwrap();
+            let rcpt = super::tests::fbl_read_full_reply(reader).await;
+            assert!(rcpt.starts_with("250"), "RCPT: {rcpt:?}");
+            writer.write_all(b"DATA\r\n").await.unwrap();
+            let data = super::tests::fbl_read_full_reply(reader).await;
+            assert!(data.starts_with("354"), "DATA: {data:?}");
+            writer.write_all(arf).await.unwrap();
+            super::tests::fbl_read_full_reply(reader).await
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(super::tests::fbl_read_reply(&mut reader)
+            .await
+            .starts_with("220"));
+
+        let reply = txn(&mut writer, &mut reader, arf).await;
+        assert!(
+            reply.starts_with("451") || reply.starts_with("250"),
+            "the first transaction passes the budget: {reply:?}"
+        );
+        // Transaction 2 is refused at DATA before any transfer happens.
+        writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+        assert!(super::tests::fbl_read_full_reply(&mut reader)
+            .await
+            .starts_with("250"));
+        writer
+            .write_all(b"RCPT TO:<abuse@fbl.test>\r\n")
+            .await
+            .unwrap();
+        assert!(super::tests::fbl_read_full_reply(&mut reader)
+            .await
+            .starts_with("250"));
+        writer.write_all(b"DATA\r\n").await.unwrap();
+        let reply = super::tests::fbl_read_full_reply(&mut reader).await;
+        assert!(
+            reply.starts_with("452 4.5.3 Too many messages from this connection"),
+            "the per-connection budget must refuse: {reply:?}"
+        );
+        let _ = writer.write_all(b"QUIT\r\n").await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+    }
+
+    #[tokio::test]
+    async fn a_transient_source_verification_answers_451_and_closes() {
+        // The reply contract for a session whose source verification failed
+        // transiently: exactly one 451 (the sender must retry), never a
+        // greeting, never a hard rejection.
+        let server = super::tests::test_fbl_server(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let write_task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            server
+                .reject_transient_source(
+                    socket,
+                    super::TEST_LOOPBACK,
+                    "transient-test",
+                    std::time::Instant::now(),
+                )
+                .await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, _writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        use tokio::io::AsyncBufReadExt as _;
+        let mut reply = String::new();
+        reader.read_line(&mut reply).await.expect("reply read");
+        assert!(
+            reply.starts_with("451 4.3.0 Temporary failure verifying FBL source"),
+            "a transient source verification must refuse with 451: {reply:?}"
+        );
+        let mut rest = Vec::new();
+        use tokio::io::AsyncReadExt as _;
+        let _ =
+            tokio::time::timeout(Duration::from_millis(50), reader.read_to_end(&mut rest)).await;
+        assert!(
+            rest.is_empty(),
+            "nothing else may be sent: {:?}",
+            String::from_utf8_lossy(&rest)
+        );
+        let _ = write_task.await;
+    }
+
+    #[tokio::test]
+    async fn fbl_connection_cap_refuses_with_421_before_the_greeting() {
+        let server = super::tests::test_fbl_server(true);
+        // The loopback slot is already taken: a new connection is refused.
+        server.connections.insert(super::TEST_LOOPBACK, 10);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, _) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let reply = super::tests::fbl_read_reply(&mut reader).await;
+        assert!(
+            reply.starts_with("421 4.7.0 Too many connections"),
+            "the connection cap must refuse before the greeting: {reply:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fbl_stalled_data_phase_answers_421_under_virtual_time() {
+        let server = super::tests::test_fbl_server(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(super::tests::fbl_read_reply(&mut reader)
+            .await
+            .starts_with("220"));
+        writer
+            .write_all(
+                b"EHLO c\r\n\
+                  MAIL FROM:<>\r\n\
+                  RCPT TO:<abuse@fbl.test>\r\n\
+                  DATA\r\n",
+            )
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert!(super::tests::fbl_read_full_reply(&mut reader)
+                .await
+                .starts_with('2'));
+        }
+        assert!(super::tests::fbl_read_full_reply(&mut reader)
+            .await
+            .starts_with("354"));
+        use tokio::io::AsyncBufReadExt as _;
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("reply read");
+        let reply = line;
+        assert!(
+            reply.starts_with("421 4.4.2 Data timeout exceeded"),
+            "a stalled FBL DATA phase must be answered 421 4.4.2: {reply:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fbl_session_deadline_closes_with_421_under_virtual_time() {
+        // Heartbeat NOOPs with the client owning the nearer timer (30s sleep,
+        // 60s read budget) so the 120s idle timer can never be the closer.
+        let server = super::tests::test_fbl_server(true);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(super::tests::fbl_read_reply(&mut reader)
+            .await
+            .starts_with("220"));
+        use tokio::io::AsyncBufReadExt as _;
+        let mut saw_deadline = false;
+        for _ in 0..70 {
+            writer.write_all(b"NOOP\r\n").await.unwrap();
+            writer.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let reply = loop {
+                let mut line = String::new();
+                match tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
+                    .await
+                {
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    Ok(Ok(0)) => panic!("session ended without the deadline reply"),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => panic!("read failed: {e}"),
+                }
+                break line;
+            };
+            if reply.starts_with("421 4.7.0 Session deadline exceeded") {
+                saw_deadline = true;
+                break;
+            }
+            assert!(reply.starts_with("250"), "{reply:?}");
+        }
+        assert!(
+            saw_deadline,
+            "the 30-minute FBL session deadline must close with 421"
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
     }
 }

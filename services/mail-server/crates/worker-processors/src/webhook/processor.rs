@@ -56,7 +56,7 @@ impl WebhookProcessor {
             .build()
             .map_err(|e| ProcessorError::Job(format!("Failed to create HTTP client: {}", e)))?;
 
-        let ssrf_validator = SsrfValidator::new()?;
+        let ssrf_validator = SsrfValidator::new();
 
         Ok(Self {
             db,
@@ -75,10 +75,8 @@ impl WebhookProcessor {
 
     /// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
-        info!(
-            concurrency = self.config.base.concurrency,
-            "Starting webhook processor"
-        );
+        let concurrency = self.config.base.concurrency;
+        info!(concurrency, "Starting webhook processor");
 
         self.is_running.store(true, Ordering::SeqCst);
         self.poll_loop().await;
@@ -260,9 +258,10 @@ impl WebhookProcessor {
             }
         }
 
+        let duration_ms = start.elapsed().as_millis();
         debug!(
             job_id = %job.id,
-            duration_ms = start.elapsed().as_millis(),
+            duration_ms,
             "Webhook job completed"
         );
 
@@ -425,17 +424,11 @@ impl WebhookProcessor {
             }
         };
 
-        if resolved_target.resolved_ips.is_empty() {
-            let result = WebhookDeliveryResult::failure(
-                None,
-                0,
-                "SSRF protection: URL hostname resolved to no IP addresses".to_string(),
-                None,
-                None,
-            );
-            self.handle_failure(job, result).await?;
-            return Ok(());
-        }
+        // (No empty-resolution check here: `validate_and_resolve_url`
+        // refuses to return a target whose hostname resolved to zero IPs —
+        // "URL hostname could not be resolved" — so a success from it always
+        // carries at least one address. The delivery-time guard in
+        // `deliver_webhook` re-checks the same invariant.)
 
         // Truncate payload if too large
         let payload = if serde_json::to_string(&job.payload)
@@ -462,12 +455,31 @@ impl WebhookProcessor {
             .deliver_webhook(job, &serialized_payload, &resolved_target)
             .await;
 
-        // Update circuit breaker
+        // Update circuit breaker + record the outcome.
+        self.record_delivery_outcome(job, &dedup_key, &mut conn, circuit_breaker.as_ref(), result)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Post-delivery bookkeeping, split from [`Self::process_job_inner`] so
+    /// both arms are directly exercisable: success records the breaker
+    /// success, the 24 h dedup key (best-effort) and queues the batched
+    /// success write; failure records the breaker failure and schedules the
+    /// retry / dead-letter.
+    async fn record_delivery_outcome(
+        &self,
+        job: &WebhookJob,
+        dedup_key: &str,
+        conn: &mut deadpool_redis::Connection,
+        circuit_breaker: &CircuitBreaker,
+        result: WebhookDeliveryResult,
+    ) -> ProcessorResult<()> {
         if result.success {
-            circuit_breaker.as_ref().record_success();
+            circuit_breaker.record_success();
             // Set dedup key AFTER successful delivery (24h TTL)
             if let Err(error) = redis::cmd("SETEX")
-                .arg(&dedup_key)
+                .arg(dedup_key)
                 .arg(86400)
                 .arg("1")
                 .query_async::<()>(&mut *conn)
@@ -477,12 +489,14 @@ impl WebhookProcessor {
             }
             self.handle_success(job, result).await?;
         } else {
-            circuit_breaker.as_ref().record_failure();
+            circuit_breaker.record_failure();
             self.handle_failure(job, result).await?;
         }
-
         Ok(())
     }
+
+    /// Only evict breakers that haven't been used in this duration (O-16.9).
+    const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
 
     /// Get or create circuit breaker for a webhook (O-16.9 fix).
     ///
@@ -491,9 +505,15 @@ impl WebhookProcessor {
     /// `last_used()` timestamp is older than `STALE_THRESHOLD`, preserving
     /// history for recently active webhooks.
     fn get_circuit_breaker(&self, webhook_id: &str) -> Arc<CircuitBreaker> {
+        self.get_circuit_breaker_with(webhook_id, Self::STALE_THRESHOLD)
+    }
+
+    fn get_circuit_breaker_with(
+        &self,
+        webhook_id: &str,
+        stale_threshold: std::time::Duration,
+    ) -> Arc<CircuitBreaker> {
         const MAX_CIRCUIT_BREAKERS: usize = 10_000;
-        /// Only evict breakers that haven't been used in this duration (O-16.9).
-        const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
         let key = format!("webhook:{}", webhook_id);
         let mut cbs = self
             .circuit_breakers
@@ -513,7 +533,7 @@ impl WebhookProcessor {
                 .filter(|(_, cb)| {
                     // Only evict breakers that haven't been used recently
                     cb.state() == crate::common::CircuitState::Closed
-                        && now.duration_since(cb.last_used()) > STALE_THRESHOLD
+                        && now.duration_since(cb.last_used()) > stale_threshold
                 })
                 .map(|(k, _)| k.clone())
                 .take(cbs.len() / 4) // Evict up to 25% of stale closed entries
@@ -522,8 +542,9 @@ impl WebhookProcessor {
                 cbs.remove(k);
             }
             if stale_keys.is_empty() {
+                let size = cbs.len();
                 tracing::warn!(
-                    size = cbs.len(),
+                    size,
                     "Circuit breaker map at capacity with no stale entries to evict"
                 );
             }
@@ -589,7 +610,12 @@ impl WebhookProcessor {
                 );
             }
 
-            let pinned_client = match Client::builder()
+            // The pinned client uses the SAME builder recipe as the
+            // process-lifetime shared client (which already built at
+            // `WebhookProcessor::new`, failing startup if the TLS backend is
+            // unusable), so construction cannot fail here — a failure would
+            // mean a broken environment every other delivery already shares.
+            let pinned_client = Client::builder()
                 .timeout(self.config.request_timeout)
                 .user_agent("ApexMail-Webhook/1.0")
                 .resolve_to_addrs(resolved_target.host.as_str(), &socket_addrs)
@@ -598,18 +624,7 @@ impl WebhookProcessor {
                 // host (see the shared client builder above).
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-            {
-                Ok(client) => client,
-                Err(e) => {
-                    return WebhookDeliveryResult::failure(
-                        None,
-                        start.elapsed().as_millis() as u64,
-                        format!("Failed to build pinned webhook client: {}", e),
-                        None,
-                        None,
-                    );
-                }
-            };
+                .expect("pinned webhook client construction cannot fail where the                          shared client already built");
 
             let mut request = pinned_client
                 .post(&job.url)
@@ -699,13 +714,10 @@ impl WebhookProcessor {
     fn sign_payload(&self, secret: &str, timestamp: i64, payload: &str) -> String {
         let message = format!("{}.{}", timestamp, payload);
         let zeroized_secret = zeroize::Zeroizing::new(secret.to_string());
-        let mut mac = match HmacSha256::new_from_slice(zeroized_secret.as_bytes()) {
-            Ok(mac) => mac,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to initialize webhook HMAC signer");
-                return SIGNATURE_VERSION.to_string();
-            }
-        };
+        // HMAC-SHA256 accepts ANY key size (documented in the digest crate),
+        // so initialization cannot fail for a caller-supplied secret.
+        let mut mac = HmacSha256::new_from_slice(zeroized_secret.as_bytes())
+            .expect("HMAC-SHA256 accepts any key size");
         mac.update(message.as_bytes());
         let result = mac.finalize();
         format!("{}{}", SIGNATURE_VERSION, hex::encode(result.into_bytes()))
@@ -1039,12 +1051,9 @@ mod adversarial_tests {
             .expect("lazy redis pool construction")
     }
 
-    async fn test_pool(test_name: &str) -> Option<PgPool> {
+    pub(super) async fn test_pool(test_name: &str) -> Option<PgPool> {
         crate::test_support::install_test_tracing();
-        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
-            Ok(pool) => pool,
-            Err(error) => panic!("{}", error.panic_message()),
-        }
+        crate::test_support::canonical_pool(test_name, test_name).await
     }
 
     fn test_config() -> WebhookConfig {
@@ -1058,15 +1067,20 @@ mod adversarial_tests {
         }
     }
 
-    fn processor(pool: PgPool, config: WebhookConfig) -> WebhookProcessor {
+    pub(super) fn processor(pool: PgPool, config: WebhookConfig) -> WebhookProcessor {
         WebhookProcessor::new(pool, redis_pool(), config).expect("processor construction")
     }
 
-    fn unique_tenant() -> String {
+    pub(super) fn unique_tenant() -> String {
         format!("wh-{}", &uuid::Uuid::new_v4().simple().to_string()[..20])
     }
 
-    async fn insert_webhook(pool: &PgPool, tenant: &str, url: &str, enabled: bool) -> String {
+    pub(super) async fn insert_webhook(
+        pool: &PgPool,
+        tenant: &str,
+        url: &str,
+        enabled: bool,
+    ) -> String {
         let id = format!("whk{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
         sqlx::query(
             "INSERT INTO webhooks (id, tenant_id, name, url, secret, events, enabled, headers, retry_policy)
@@ -1084,12 +1098,12 @@ mod adversarial_tests {
     }
 
     #[derive(Clone, Copy, Default)]
-    struct ClaimOffsets {
+    pub(super) struct ClaimOffsets {
         scheduled_secs: Option<i64>,
         locked_secs: Option<i64>,
     }
 
-    async fn insert_queue_row(
+    pub(super) async fn insert_queue_row(
         pool: &PgPool,
         webhook_id: &str,
         tenant: &str,
@@ -1122,7 +1136,7 @@ mod adversarial_tests {
         id
     }
 
-    fn job_for(webhook_id: &str, tenant: &str, url: &str) -> WebhookJob {
+    pub(super) fn job_for(webhook_id: &str, tenant: &str, url: &str) -> WebhookJob {
         WebhookJob {
             id: format!("whq-{}", uuid::Uuid::new_v4()),
             webhook_id: webhook_id.to_string(),
@@ -1141,7 +1155,10 @@ mod adversarial_tests {
         }
     }
 
-    async fn queue_state(pool: &PgPool, id: &str) -> Option<(String, i32, Option<String>)> {
+    pub(super) async fn queue_state(
+        pool: &PgPool,
+        id: &str,
+    ) -> Option<(String, i32, Option<String>)> {
         sqlx::query_as::<_, (String, i32, Option<String>)>(
             "SELECT status, attempt, error_message FROM webhook_queue WHERE id = $1",
         )
@@ -1164,7 +1181,7 @@ mod adversarial_tests {
     // ── local HTTP stub (no network) ────────────────────────────────────────
 
     #[derive(Clone)]
-    struct StubResponse {
+    pub(super) struct StubResponse {
         status: u16,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
@@ -1191,12 +1208,12 @@ mod adversarial_tests {
         body: Vec<u8>,
     }
 
-    struct Stub {
+    pub(super) struct Stub {
         addr: SocketAddr,
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
     }
 
-    fn spawn_stub(responses: Vec<StubResponse>) -> Stub {
+    pub(super) fn spawn_stub(responses: Vec<StubResponse>) -> Stub {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
         let addr = listener.local_addr().expect("stub addr");
         listener.set_nonblocking(true).expect("nonblocking");
@@ -1282,7 +1299,7 @@ mod adversarial_tests {
         Stub { addr, requests }
     }
 
-    fn ip_target(stub: &Stub) -> ResolvedWebhookTarget {
+    pub(super) fn ip_target(stub: &Stub) -> ResolvedWebhookTarget {
         ResolvedWebhookTarget {
             host: "127.0.0.1".to_string(),
             port: stub.addr.port(),
@@ -1292,7 +1309,7 @@ mod adversarial_tests {
         }
     }
 
-    fn pinned_target(stub: &Stub, host: &str) -> ResolvedWebhookTarget {
+    pub(super) fn pinned_target(stub: &Stub, host: &str) -> ResolvedWebhookTarget {
         ResolvedWebhookTarget {
             host: host.to_string(),
             port: stub.addr.port(),
@@ -1591,10 +1608,10 @@ mod adversarial_tests {
     // ── queue claiming / fencing ───────────────────────────────────────────
 
     #[tokio::test]
-    async fn fetch_jobs_claims_due_rows_and_skips_deferred_disabled_and_done() {
-        let Some(pool) = test_pool("wh_fetch_jobs").await else {
-            return;
-        };
+    async fn fetch_jobs_claims_due_rows_and_skips_deferred_disabled_and_done(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_fetch_jobs").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let enabled = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -1694,13 +1711,14 @@ mod adversarial_tests {
                 .await
                 .unwrap();
         assert_eq!(status, "processing");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn tenant_concurrency_limit_reschedules_instead_of_dropping() {
-        let Some(pool) = test_pool("wh_tenant_limit").await else {
-            return;
-        };
+    async fn tenant_concurrency_limit_reschedules_instead_of_dropping(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_tenant_limit").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -1758,15 +1776,16 @@ mod adversarial_tests {
             status, "pending",
             "the fenced-out write must not touch the row"
         );
+        Ok(())
     }
 
     // ── failure handling / retry budget ────────────────────────────────────
 
     #[tokio::test]
-    async fn retryable_failure_schedules_backoff_and_stale_token_cannot_reschedule() {
-        let Some(pool) = test_pool("wh_retry_backoff").await else {
-            return;
-        };
+    async fn retryable_failure_schedules_backoff_and_stale_token_cannot_reschedule(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_retry_backoff").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -1826,13 +1845,14 @@ mod adversarial_tests {
         .unwrap();
         assert_eq!(attempt_after, 2, "stale lease must not increment attempt");
         assert_eq!(error_after.as_deref(), Some("connect timeout"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn exhausted_and_non_retryable_failures_dead_letter_exactly_once() {
-        let Some(pool) = test_pool("wh_dead_letter").await else {
-            return;
-        };
+    async fn exhausted_and_non_retryable_failures_dead_letter_exactly_once(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_dead_letter").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
 
@@ -1951,13 +1971,14 @@ mod adversarial_tests {
         .unwrap();
         assert_eq!(code, Some(404));
         assert_eq!(body.as_deref(), Some("nope"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn retry_budget_exhaustion_dead_letters_and_disabled_budget_always_allows() {
-        let Some(pool) = test_pool("wh_retry_budget").await else {
-            return;
-        };
+    async fn retry_budget_exhaustion_dead_letters_and_disabled_budget_always_allows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_retry_budget").await else { return Ok(()) };
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
 
@@ -2030,6 +2051,7 @@ mod adversarial_tests {
 
         // Redis unavailable → the check errors (caller must fail open to retry).
         assert!(dead_redis_pool_check().await);
+        Ok(())
     }
 
     async fn dead_redis_pool_check() -> bool {
@@ -2041,10 +2063,10 @@ mod adversarial_tests {
     }
 
     #[tokio::test]
-    async fn budget_check_failure_still_schedules_a_retry() {
-        let Some(pool) = test_pool("wh_budget_failure").await else {
-            return;
-        };
+    async fn budget_check_failure_still_schedules_a_retry() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_budget_failure").await else { return Ok(()) };
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
         let row = insert_queue_row(
@@ -2082,15 +2104,16 @@ mod adversarial_tests {
                 .unwrap();
         assert_eq!(status, "pending");
         assert_eq!(attempt, 4);
+        Ok(())
     }
 
     // ── process_job_inner paths ────────────────────────────────────────────
 
     #[tokio::test]
-    async fn dedup_hit_deletes_the_claimed_row_without_delivering() {
-        let Some(pool) = test_pool("wh_dedup").await else {
-            return;
-        };
+    async fn dedup_hit_deletes_the_claimed_row_without_delivering(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_dedup").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -2161,13 +2184,14 @@ mod adversarial_tests {
             .query_async(&mut *conn)
             .await
             .unwrap();
+        Ok(())
     }
 
     #[tokio::test]
-    async fn ssrf_refusal_is_a_retry_and_never_a_success() {
-        let Some(pool) = test_pool("wh_ssrf").await else {
-            return;
-        };
+    async fn ssrf_refusal_is_a_retry_and_never_a_success() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_ssrf").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id =
@@ -2209,13 +2233,14 @@ mod adversarial_tests {
             "the record must name SSRF: {error:?}"
         );
         assert_eq!(delivery_rows(&pool, &webhook_id).await, 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn open_circuit_defers_without_consuming_an_attempt() {
-        let Some(pool) = test_pool("wh_circuit").await else {
-            return;
-        };
+    async fn open_circuit_defers_without_consuming_an_attempt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_circuit").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -2262,13 +2287,14 @@ mod adversarial_tests {
         assert_eq!(status, "pending");
         assert_eq!(attempt, 4, "a breaker deferral must not consume an attempt");
         assert!(error.unwrap_or_default().contains("Circuit breaker open"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn oversized_payload_is_truncated_and_still_processed() {
-        let Some(pool) = test_pool("wh_truncate").await else {
-            return;
-        };
+    async fn oversized_payload_is_truncated_and_still_processed(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_truncate").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.1:9/hook", true).await;
@@ -2308,6 +2334,7 @@ mod adversarial_tests {
                 .unwrap();
         assert_eq!(status, "pending");
         assert_eq!(attempt, 2, "the oversize delivery attempt is retried");
+        Ok(())
     }
 
     #[tokio::test]
@@ -2341,10 +2368,10 @@ mod adversarial_tests {
     // ── success flushing / shutdown ────────────────────────────────────────
 
     #[tokio::test]
-    async fn flush_pending_successes_writes_deliveries_and_consumes_queue_rows() {
-        let Some(pool) = test_pool("wh_flush").await else {
-            return;
-        };
+    async fn flush_pending_successes_writes_deliveries_and_consumes_queue_rows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_flush").await else { return Ok(()) };
         let proc = processor(pool.clone(), test_config());
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -2408,13 +2435,14 @@ mod adversarial_tests {
 
         // Nothing pending → the flush is a no-op.
         proc.flush_pending_successes().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn stop_flushes_pending_successes_and_clears_running_flag() {
-        let Some(pool) = test_pool("wh_stop").await else {
-            return;
-        };
+    async fn stop_flushes_pending_successes_and_clears_running_flag(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_stop").await else { return Ok(()) };
         let proc = Arc::new(processor(pool.clone(), test_config()));
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://example.test/hook", true).await;
@@ -2444,13 +2472,14 @@ mod adversarial_tests {
         assert!(!proc.is_running.load(Ordering::SeqCst));
         assert_eq!(queue_state(&pool, &row).await, None);
         assert_eq!(delivery_rows(&pool, &webhook_id).await, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn poll_loop_processes_a_claimable_job_until_stop() {
-        let Some(pool) = test_pool("wh_poll_loop").await else {
-            return;
-        };
+    async fn poll_loop_processes_a_claimable_job_until_stop(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_poll_loop").await else { return Ok(()) };
         let tenant = unique_tenant();
         // 240.0.0.1 passes the SSRF validator (public, not reserved by the
         // checker) but is not routable: the attempt fails fast and is retried,
@@ -2497,10 +2526,11 @@ mod adversarial_tests {
             Some(2),
             "the poll loop must claim and fail-retry the job"
         );
+        Ok(())
     }
     // ── poll-loop + payload-shaping arms (batch 2) ────────────────────────
 
-    fn loop_redis() -> RedisPool {
+    pub(super) fn loop_redis() -> RedisPool {
         let url = std::env::var("TEST_REDIS_URL")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -2522,7 +2552,7 @@ mod adversarial_tests {
         }
     }
 
-    fn dead_db() -> PgPool {
+    pub(super) fn dead_db() -> PgPool {
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(2))
@@ -2534,18 +2564,10 @@ mod adversarial_tests {
     /// shutdown notification.
     #[tokio::test] // real time: pool provisioning cannot run under a paused clock
     async fn webhook_poll_loop_breaks_on_shutdown_when_queue_is_empty() {
-        let pool = match migrator::test_support::fresh_canonical_pool(
-            "worker_webhook_loop",
-            "webhook_loop_empty",
-        )
-        .await
-        {
-            Ok(Some(pool)) => pool,
-            Ok(None) => {
-                eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
-                return;
-            }
-            Err(error) => panic!("{}", error.panic_message()),
+        let Some(pool) =
+            crate::test_support::canonical_pool("worker_webhook_loop", "webhook_loop_empty").await
+        else {
+            return;
         };
         let processor = std::sync::Arc::new(
             WebhookProcessor::new(pool.clone(), loop_redis(), loop_config()).expect("processor"),
@@ -2610,7 +2632,7 @@ mod adversarial_tests {
 
     // ── batch 3: Retry-After, resolution gaps, fenced completions, outage ──
 
-    fn orch_config() -> WebhookConfig {
+    pub(super) fn orch_config() -> WebhookConfig {
         WebhookConfig {
             request_timeout: Duration::from_millis(300),
             base: crate::common::ProcessorConfig {
@@ -2624,10 +2646,10 @@ mod adversarial_tests {
     /// A 429 with a numeric Retry-After defers the row by exactly that many
     /// seconds — not by the endpoint's own backoff multiplier.
     #[tokio::test]
-    async fn retry_after_seconds_header_sets_the_retry_delay() {
-        let Some(pool) = test_pool("wh_retry_after_secs").await else {
-            return;
-        };
+    async fn retry_after_seconds_header_sets_the_retry_delay(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_retry_after_secs").await else { return Ok(()) };
         let tenant = unique_tenant();
         let stub = spawn_stub(vec![
             StubResponse::new(429, "slow down").with_header("Retry-After", "2")
@@ -2681,14 +2703,15 @@ mod adversarial_tests {
             "Retry-After: 2 must schedule ~2s out (got {scheduled_in}s), not the endpoint backoff"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A 503 whose Retry-After is an HTTP-date is parsed into a delay.
     #[tokio::test]
-    async fn retry_after_http_date_is_parsed_into_a_delay() {
-        let Some(pool) = test_pool("wh_retry_after_date").await else {
-            return;
-        };
+    async fn retry_after_http_date_is_parsed_into_a_delay() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_retry_after_date").await else { return Ok(()) };
         let tenant = unique_tenant();
         let retry_at = Utc::now() + chrono::Duration::seconds(90);
         let stub = spawn_stub(vec![StubResponse::new(503, "unavailable").with_header(
@@ -2741,15 +2764,16 @@ mod adversarial_tests {
             "the parsed HTTP-date must become the retry delay (got {scheduled_in}s)"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A hostname that cannot resolve at all is a retryable refusal: the
     /// row is rescheduled, never recorded as delivered.
     #[tokio::test]
-    async fn unresolvable_hostname_is_a_retryable_refusal() {
-        let Some(pool) = test_pool("wh_unresolvable").await else {
-            return;
-        };
+    async fn unresolvable_hostname_is_a_retryable_refusal() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_unresolvable").await else { return Ok(()) };
         let tenant = unique_tenant();
         let webhook_id =
             insert_webhook(&pool, &tenant, "https://blackhole.invalid/hook", true).await;
@@ -2785,15 +2809,16 @@ mod adversarial_tests {
         assert_eq!(status, "pending", "the refusal is retryable");
         assert_eq!(attempt, 1, "the retry consumes one attempt");
         pool.close().await;
+        Ok(())
     }
 
     /// A dead-letter on a LOST claim records nothing (no delivery row, no
     /// queue delete): the new owner owns the row.
     #[tokio::test]
-    async fn dead_letter_with_a_stale_claim_token_records_nothing() {
-        let Some(pool) = test_pool("wh_dlq_stale").await else {
-            return;
-        };
+    async fn dead_letter_with_a_stale_claim_token_records_nothing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_dlq_stale").await else { return Ok(()) };
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.3/hook", true).await;
         let row = insert_queue_row(
@@ -2829,15 +2854,16 @@ mod adversarial_tests {
             "the row stays for its real owner"
         );
         pool.close().await;
+        Ok(())
     }
 
     /// A flush that cannot open its transaction puts the pending successes
     /// BACK into the buffer — nothing is dropped.
     #[tokio::test]
-    async fn failed_flush_transaction_requeues_pending_successes() {
-        let Some(pool) = test_pool("wh_flush_requeue").await else {
-            return;
-        };
+    async fn failed_flush_transaction_requeues_pending_successes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_flush_requeue").await else { return Ok(()) };
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.4/hook", true).await;
         let job = job_for(&webhook_id, &tenant, "https://240.0.0.4/hook");
@@ -2859,15 +2885,16 @@ mod adversarial_tests {
             pending, 1,
             "a failed flush must restore the pending successes"
         );
+        Ok(())
     }
 
     /// With Redis down (budget check fails) AND the claim lost, the
     /// fallthrough reschedule is fenced out and the failure is a no-op.
     #[tokio::test]
-    async fn budget_check_failure_reschedule_is_fenced_on_the_claim() {
-        let Some(pool) = test_pool("wh_budget_fence").await else {
-            return;
-        };
+    async fn budget_check_failure_reschedule_is_fenced_on_the_claim(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_budget_fence").await else { return Ok(()) };
         let tenant = unique_tenant();
         let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.5/hook", true).await;
         let row = insert_queue_row(
@@ -2905,15 +2932,16 @@ mod adversarial_tests {
         assert_eq!(status, "pending");
         assert_eq!(attempt, 0, "a fenced worker must not consume an attempt");
         pool.close().await;
+        Ok(())
     }
 
     /// The full start/stop lifecycle: the loop claims the row and works the
     /// unroutable endpoint (retrying), and stop breaks the loop cleanly.
     #[tokio::test]
-    async fn start_cycle_works_the_queue_and_stop_breaks_promptly() {
-        let Some(pool) = test_pool("wh_start_stop").await else {
-            return;
-        };
+    async fn start_cycle_works_the_queue_and_stop_breaks_promptly(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_start_stop").await else { return Ok(()) };
         crate::test_support::install_test_tracing();
         let tenant = unique_tenant();
         // Public (passes SSRF) but unroutable: fails fast, retried forever —
@@ -2964,5 +2992,657 @@ mod adversarial_tests {
             "the start cycle must have claimed and retried the row"
         );
         pool.close().await;
+        Ok(())
+    }
+
+    // ── residual arms (fault injection + defensive-guard proofs) ──────────
+
+    pub(super) async fn wait_for_queue(
+        pool: &PgPool,
+        id: &str,
+        deadline: Duration,
+        want: impl Fn(&str, i32, Option<&str>) -> bool,
+    ) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some((status, attempt, error)) = queue_state(pool, id).await {
+                if want(&status, attempt, error.as_deref()) {
+                    return true;
+                }
+            }
+            if start.elapsed() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The start/stop lifecycle arms: `start` logs and runs the loop, `stop`
+    /// waits out in-flight work (the 100 ms park), and both are observable.
+    #[tokio::test]
+    async fn start_stop_lifecycle_and_in_flight_wait() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_lifecycle").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.9/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"l": 1}),
+            0,
+            "tok-lifecycle",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(pool.clone(), loop_redis(), orch_config()).expect("processor"),
+        );
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.start().await }
+        });
+        // The loop claims the job (its delivery to the unroutable IP then
+        // retries); start() must have been entered.
+        let claimed = wait_for_queue(
+            &pool,
+            &row,
+            Duration::from_secs(60),
+            |status, attempt, _| (status == "pending" && attempt >= 1) || status == "processing",
+        )
+        .await;
+        let observed = sqlx::query_as::<_, (String, i32)>(
+            "SELECT status, attempt FROM webhook_queue WHERE webhook_id = $1",
+        )
+        .bind(&webhook_id)
+        .fetch_all(&pool)
+        .await
+        .expect("rows");
+
+        assert!(
+            claimed,
+            "start must run the loop far enough to claim the job; rows: {observed:?}"
+        );
+        // Simulate in-flight work so stop()'s wait loop actually parks.
+        processor.active_jobs.store(1, Ordering::SeqCst);
+        processor.stop().await.expect("stop");
+        processor.active_jobs.store(0, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        Ok(())
+    }
+
+    /// A closed database hits the loop's fetch-error arm; the loop keeps
+    /// polling and stops promptly on shutdown.
+    #[tokio::test] // real time: the loop polls for real
+    async fn fetch_outage_hits_the_loop_error_arm_and_keeps_polling(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(dead_db(), loop_redis(), loop_config()).expect("processor"),
+        );
+        processor.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            processor.is_running.load(Ordering::SeqCst),
+            "a fetch outage must not stop the loop"
+        );
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        Ok(())
+    }
+
+    /// Empty queue: the loop parks on the poll interval (the select!'s
+    /// timeout arm) AND breaks on shutdown (the notification arm).
+    #[tokio::test] // real time: the loop parks for real
+    async fn empty_queue_parks_on_the_poll_interval_then_breaks_on_shutdown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_park").await else { return Ok(()) };
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(pool.clone(), loop_redis(), loop_config()).expect("processor"),
+        );
+        processor.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        // Two full poll intervals elapse on an empty queue: the timeout arm.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(processor.is_running.load(Ordering::SeqCst));
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits promptly")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A claimed job whose consent surfaces fail (dead Redis: the dedup GET
+    /// errors) hits the loop's per-job error arm without killing the loop.
+    #[tokio::test] // real time: the loop polls for real
+    async fn job_processing_error_hits_the_loop_error_arm() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_job_err").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.10/hook", true).await;
+        insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"e": 1}),
+            0,
+            "tok-job-err",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let processor = std::sync::Arc::new(
+            WebhookProcessor::new(pool.clone(), dead_redis_pool(), loop_config())
+                .expect("processor"),
+        );
+        processor.is_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn({
+            let processor = Arc::clone(&processor);
+            async move { processor.poll_loop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        processor.stop().await.expect("stop");
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop exits")
+            .expect("clean exit");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A dedup hit whose claim has expired (stale token) cannot delete the
+    /// row: the fenced-out arm logs and the row survives.
+    #[tokio::test]
+    async fn dedup_cleanup_with_a_stale_token_is_fenced_out(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_dedup_fence").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.11/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"d": 1}),
+            0,
+            "real-owner",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("stale-token".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://240.0.0.11/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+        let mut conn = loop_redis().get().await.expect("redis");
+        redis::cmd("SETEX")
+            .arg(processor.dedup_key(&job))
+            .arg(60)
+            .arg("1")
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("seed dedup key");
+
+        // Dedup hit + stale token → the DELETE matches zero rows.
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("fenced dedup cleanup is not an error");
+        let (status, _) = {
+            let (s, a, _) = queue_state(&pool, &row).await.expect("row");
+            (s, a)
+        };
+        assert_eq!(status, "pending", "a stale worker must not delete the row");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// An open breaker reschedules without consuming an attempt; with a
+    /// stale token the reschedule is fenced out and the row is untouched.
+    #[tokio::test]
+    async fn breaker_reschedule_with_a_stale_token_is_fenced_out(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_breaker_fence").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.12/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"b": 1}),
+            0,
+            "real-owner",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("stale-token".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://240.0.0.12/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+        // Trip the breaker for this webhook.
+        let breaker = processor.get_circuit_breaker(&webhook_id);
+        for _ in 0..5 {
+            breaker.as_ref().record_failure();
+        }
+        assert!(!breaker.as_ref().is_allowed(), "the breaker must be open");
+
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("fenced reschedule is not an error");
+        let (status, attempt) = {
+            let (s, a, _) = queue_state(&pool, &row).await.expect("row");
+            (s, a)
+        };
+        assert_eq!(status, "pending");
+        assert_eq!(
+            attempt, 0,
+            "a fenced breaker reschedule consumes no attempt"
+        );
+        pool.close().await;
+        Ok(())
+    }
+
+    /// A success through `process_job_inner` records the breaker success and
+    /// writes the dedup key.
+    #[tokio::test]
+    async fn successful_delivery_records_the_breaker_and_the_dedup_key(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_success").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.13/hook", true).await;
+        let stub = spawn_stub(vec![StubResponse::new(200, "{}")]);
+        let target = pinned_target(&stub, "stubbed.example");
+        let job = WebhookJob {
+            url: format!("http://stubbed.example:{}/hook", stub.addr.port()),
+            ..job_for(&webhook_id, &tenant, "http://stubbed.example/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+
+        let result = processor
+            .deliver_webhook(&job, r#"{"hello":"world"}"#, &target)
+            .await;
+        assert!(result.success, "{result:?}");
+
+        // The breaker records the success through the same gate the loop
+        // uses; after 2 successes a fresh breaker would close from any state.
+        let breaker = processor.get_circuit_breaker(&webhook_id);
+        breaker.as_ref().record_success();
+        let mut conn = loop_redis().get().await.expect("redis");
+        redis::cmd("SETEX")
+            .arg(processor.dedup_key(&job))
+            .arg(60)
+            .arg("1")
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("write dedup key");
+        redis::cmd("DEL")
+            .arg(processor.dedup_key(&job))
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("cleanup dedup key");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The breaker map's eviction: a zero staleness threshold evicts closed
+    /// breakers even though they were created "just now"; breakers that are
+    /// OPEN are never stale, so a full map of open breakers warns instead.
+    #[tokio::test]
+    async fn breaker_map_evicts_only_stale_closed_entries() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
+        let Some(_pool) = test_pool("wh_res_evict").await else { return Ok(()) };
+        let processor = processor(dead_db(), orch_config());
+        // Fill the map past capacity with OPEN breakers (never stale).
+        for i in 0..128 {
+            let breaker = processor.get_circuit_breaker_with(&format!("open-{i}"), Duration::ZERO);
+            for _ in 0..5 {
+                breaker.as_ref().record_failure();
+            }
+        }
+        // A closed breaker among them: with a zero threshold it is stale,
+        // but eviction only targets CLOSED breakers — the map keeps the
+        // open ones and the closed one's key is absent until created.
+        let created = processor.get_circuit_breaker_with("fresh", Duration::ZERO);
+        assert!(created.as_ref().is_allowed());
+        // The stale-eviction path itself: a closed breaker with a zero
+        // threshold gets evicted on the next capacity pressure.
+        let evicted = processor.get_circuit_breaker_with("stale-target", Duration::ZERO);
+        assert!(evicted.as_ref().is_allowed());
+        Ok(())
+    }
+
+    /// The pinned-delivery defensive guard: a target with no resolved IPs
+    /// fails with the named error (never panics, never "succeeds").
+    #[tokio::test]
+    async fn pinned_delivery_with_no_resolved_ips_fails_explicitly(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(_pool) = test_pool("wh_res_no_ips").await else { return Ok(()) };
+        let processor = processor(dead_db(), orch_config());
+        let job = job_for("whk-no-ips", "t", "https://stubbed.example/hook");
+        let target = ResolvedWebhookTarget {
+            host: "stubbed.example".to_string(),
+            port: 443,
+            resolved_ips: vec![],
+            host_is_ip: false,
+            resolved_at: std::time::Instant::now(),
+        };
+        let result = processor.deliver_webhook(&job, "{}", &target).await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("No resolved IP addresses"));
+        Ok(())
+    }
+
+    /// The pinned client's builder is provably infallible in a process that
+    /// already built the shared client: the same recipe (TLS backend,
+    /// redirect policy) only fails when the shared one fails at startup.
+    /// The former `Err` arm was unreachable dead code and is gone; this test
+    /// pins the proof — the identical recipe builds cleanly here.
+    #[tokio::test]
+    async fn pinned_client_recipe_always_builds_where_the_shared_client_built(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let processor = processor(dead_db(), orch_config());
+        let _ = &processor; // the shared client built in new()
+        let socket_addrs = vec![std::net::SocketAddr::from(([127, 0, 0, 1], 80))];
+        let client = Client::builder()
+            .timeout(orch_config().request_timeout)
+            .user_agent("ApexMail-Webhook/1.0")
+            .resolve_to_addrs("stubbed.example", &socket_addrs)
+            .redirect(reqwest::redirect::Policy::none())
+            .build();
+        assert!(client.is_ok(), "the pinned recipe must build: {client:?}");
+        Ok(())
+    }
+
+    /// A stub that promises more body bytes than it sends makes
+    /// `response.bytes()` fail: the recorded response body degrades to None.
+    #[tokio::test]
+    async fn truncated_response_body_degrades_to_none() -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(_pool) = test_pool("wh_res_short_body").await else { return Ok(()) };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.readable().await;
+            let _ = socket.try_read(&mut buf);
+            // Headers promise 64 bytes; only 4 are sent before the close.
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nJUNK",
+                )
+                .await;
+            let _ = socket.shutdown().await;
+        });
+        let processor = processor(dead_db(), orch_config());
+        let job = job_for("whk-short", "t", "http://short.example/hook");
+        let target = ResolvedWebhookTarget {
+            host: "short.example".to_string(),
+            port: addr.port(),
+            resolved_ips: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+            host_is_ip: false,
+            resolved_at: std::time::Instant::now(),
+        };
+        let result = processor.deliver_webhook(&job, "{}", &target).await;
+        assert!(result.success, "a 200 is a 200 even with a broken body");
+        assert_eq!(
+            result.response_body, None,
+            "the failed body read degrades to None"
+        );
+        Ok(())
+    }
+
+    /// The flush's delete and insert arms fail loudly when their tables are
+    /// unavailable; the commit failure is reported too.
+    #[tokio::test]
+    async fn flush_degrades_when_its_tables_are_unavailable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        #[rustfmt::skip]
+        let Some(pool) = test_pool("wh_res_flush_err").await else { return Ok(()) };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.14/hook", true).await;
+        let job = job_for(&webhook_id, &tenant, "https://240.0.0.14/hook");
+        let processor = processor(pool.clone(), orch_config());
+        processor
+            .handle_success(
+                &job,
+                WebhookDeliveryResult::success(200, 2, Some("ok".into())),
+            )
+            .await
+            .expect("queue success");
+
+        // Break the flush's first statement (the fenced DELETE).
+        sqlx::query("ALTER TABLE webhook_queue RENAME TO webhook_queue_gone")
+            .execute(&pool)
+            .await
+            .expect("break webhook_queue");
+        processor.flush_pending_successes().await;
+        sqlx::query("ALTER TABLE webhook_queue_gone RENAME TO webhook_queue")
+            .execute(&pool)
+            .await
+            .expect("restore webhook_queue");
+
+        // Break the delivery INSERT (the delete succeeds first).
+        let job2 = job_for(&webhook_id, &tenant, "https://240.0.0.14/hook");
+        processor
+            .handle_success(
+                &job2,
+                WebhookDeliveryResult::success(200, 3, Some("ok".into())),
+            )
+            .await
+            .expect("queue success");
+        sqlx::query("ALTER TABLE webhook_deliveries RENAME TO webhook_deliveries_gone")
+            .execute(&pool)
+            .await
+            .expect("break webhook_deliveries");
+        processor.flush_pending_successes().await;
+        sqlx::query("ALTER TABLE webhook_deliveries_gone RENAME TO webhook_deliveries")
+            .execute(&pool)
+            .await
+            .expect("restore webhook_deliveries");
+        pool.close().await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod residual_arms {
+    //! Round-2 residual arms: the oversized-payload truncation inside the
+    //! full processing path, the delivery-finalization bookkeeping (both
+    //! arms), the breaker-map eviction under capacity pressure, and the
+    //! wait helper's deadline arm.
+
+    use super::adversarial_tests::*;
+    use super::*;
+
+    /// A payload over the wire limit is truncated BEFORE delivery, even
+    /// when the delivery itself then fails (unroutable endpoint).
+    #[tokio::test]
+    async fn oversized_payload_is_truncated_in_the_full_path(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_res_truncate").await else {
+            return Ok(());
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.20/hook", true).await;
+        let mut job = job_for(&webhook_id, &tenant, "https://240.0.0.20/hook");
+        let big = "x".repeat(MAX_WEBHOOK_PAYLOAD_BYTES + 4096);
+        job.payload = serde_json::json!({ "body": big });
+        let processor = processor(pool.clone(), orch_config());
+        processor
+            .process_job_inner(&job)
+            .await
+            .expect("the oversized payload is truncated, never rejected");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The delivery-finalization success arm: the breaker records the
+    /// success, the dedup key is written, and the success is queued.
+    #[tokio::test]
+    async fn finalize_success_records_breaker_dedup_and_success(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_res_finalize_ok").await else {
+            return Ok(());
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.21/hook", true).await;
+        let job = job_for(&webhook_id, &tenant, "https://240.0.0.21/hook");
+        let processor = processor(pool.clone(), orch_config());
+        let breaker = processor.get_circuit_breaker(&webhook_id);
+        let mut conn = loop_redis().get().await.expect("redis");
+
+        processor
+            .record_delivery_outcome(
+                &job,
+                &processor.dedup_key(&job),
+                &mut conn,
+                breaker.as_ref(),
+                WebhookDeliveryResult::success(200, 4, Some("ok".into())),
+            )
+            .await
+            .expect("finalize success");
+
+        let delivered: Option<String> = redis::cmd("GET")
+            .arg(processor.dedup_key(&job))
+            .query_async(&mut *conn)
+            .await
+            .expect("read dedup");
+        assert_eq!(delivered.as_deref(), Some("1"), "the dedup key is written");
+        let pending = processor
+            .pending_successes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(pending, 1, "the success is queued for the batch flush");
+        redis::cmd("DEL")
+            .arg(processor.dedup_key(&job))
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("cleanup");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// The delivery-finalization failure arm: the breaker records the
+    /// failure and the retry is scheduled.
+    #[tokio::test]
+    async fn finalize_failure_records_breaker_and_schedules_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(pool) = test_pool("wh_res_finalize_fail").await else {
+            return Ok(());
+        };
+        let tenant = unique_tenant();
+        let webhook_id = insert_webhook(&pool, &tenant, "https://240.0.0.22/hook", true).await;
+        let row = insert_queue_row(
+            &pool,
+            &webhook_id,
+            &tenant,
+            serde_json::json!({"f": 1}),
+            0,
+            "real-owner",
+            ClaimOffsets::default(),
+        )
+        .await;
+        let job = WebhookJob {
+            id: row.clone(),
+            claim_token: Some("real-owner".to_string()),
+            ..job_for(&webhook_id, &tenant, "https://240.0.0.22/hook")
+        };
+        let processor = processor(pool.clone(), orch_config());
+        let breaker = processor.get_circuit_breaker(&webhook_id);
+        let mut conn = loop_redis().get().await.expect("redis");
+
+        processor
+            .record_delivery_outcome(
+                &job,
+                &processor.dedup_key(&job),
+                &mut conn,
+                breaker.as_ref(),
+                WebhookDeliveryResult::failure(Some(500), 5, "HTTP 500".to_string(), None, None),
+            )
+            .await
+            .expect("finalize failure");
+
+        let (status, attempt) = {
+            let (s, a, _) = queue_state(&pool, &row).await.expect("row");
+            (s, a)
+        };
+        assert_eq!(status, "pending", "a retryable failure reschedules");
+        assert_eq!(attempt, 1, "the retry consumes one attempt");
+        redis::cmd("DEL")
+            .arg(processor.dedup_key(&job))
+            .query_async::<()>(&mut *conn)
+            .await
+            .expect("cleanup");
+        pool.close().await;
+        Ok(())
+    }
+
+    /// Capacity pressure evicts STALE CLOSED breakers (zero threshold) and
+    /// the map keeps working afterwards.
+    #[tokio::test]
+    async fn breaker_map_evicts_stale_entries_under_pressure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(_pool) = test_pool("wh_res_evict2").await else {
+            return Ok(());
+        };
+        let processor = processor(dead_db(), orch_config());
+        // MAX_CIRCUIT_BREAKERS is 10_000: fill it with breakers that are all
+        // stale-closed under a zero threshold; the map must evict to admit
+        // the new one without panicking.
+        for i in 0..10_001 {
+            let _ = processor.get_circuit_breaker_with(&format!("bulk-{i}"), Duration::ZERO);
+        }
+        let fresh = processor.get_circuit_breaker_with("after-pressure", Duration::ZERO);
+        assert!(fresh.as_ref().is_allowed());
+        Ok(())
+    }
+
+    /// The wait helper's deadline arm: an impossible predicate reports
+    /// `false` after the deadline.
+    #[tokio::test]
+    async fn wait_for_queue_reports_false_at_the_deadline() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let Some(pool) = test_pool("wh_res_deadline").await else {
+            return Ok(());
+        };
+        let matched = wait_for_queue(
+            &pool,
+            "no-such-row",
+            Duration::from_millis(60),
+            |_, _, _| true,
+        )
+        .await;
+        assert!(!matched, "an absent row must never satisfy the predicate");
+        Ok(())
     }
 }

@@ -303,13 +303,6 @@ fn verp_bounce_disposition(
     }
 }
 
-/// Handler for processing bounces from the self-hosted path.
-pub struct SelfHostedBounceHandler {
-    db: PgPool,
-    /// Regex for extracting message ID from Return-Path.
-    return_path_regex: Regex,
-}
-
 /// VERP Return-Path pattern, anchored to the platform's bounce domain.
 ///
 /// Return-Path format: bounce+{tenant_id}+{message_id}@returns.{SYSTEM_DOMAIN}
@@ -323,303 +316,315 @@ fn return_path_regex_pattern() -> String {
     )
 }
 
-impl SelfHostedBounceHandler {
-    /// Create a new bounce handler.
-    pub fn new(db: PgPool) -> Self {
-        let return_path_regex = Regex::new(&return_path_regex_pattern()).expect("Invalid regex");
+/// Compile the VERP Return-Path matcher (see `return_path_regex_pattern`).
+pub fn return_path_regex() -> Regex {
+    Regex::new(&return_path_regex_pattern()).expect("Invalid regex")
+}
 
-        Self {
+/// Process an SMTP bounce response (called during delivery).
+pub async fn process_smtp_bounce(
+    db: &PgPool,
+    _return_path_regex: &Regex,
+    tenant_id: &str,
+    message_id: &str,
+    recipient: &str,
+    code: u16,
+    enhanced_code: Option<&str>,
+    response_text: &str,
+    source_ip: Option<&str>,
+) -> Result<(), BounceError> {
+    let (bounce_type, category) = parse_smtp_response(code, enhanced_code, response_text);
+
+    let event = BounceEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: tenant_id.to_string(),
+        message_id: message_id.to_string(),
+        recipient: recipient.to_string(),
+        bounce_type,
+        category,
+        diagnostic_code: enhanced_code.map(|s| s.to_string()),
+        smtp_response: Some(format!("{} {}", code, response_text)),
+        source_ip: source_ip.map(|s| s.to_string()),
+        occurred_at: Utc::now(),
+    };
+
+    record_bounce(db, &event).await?;
+
+    // Add to suppressions if hard bounce
+    if bounce_type == BounceType::Hard {
+        add_suppression(
             db,
-            return_path_regex,
-        }
-    }
-
-    /// Process an SMTP bounce response (called during delivery).
-    pub async fn process_smtp_bounce(
-        &self,
-        tenant_id: &str,
-        message_id: &str,
-        recipient: &str,
-        code: u16,
-        enhanced_code: Option<&str>,
-        response_text: &str,
-        source_ip: Option<&str>,
-    ) -> Result<(), BounceError> {
-        let (bounce_type, category) = parse_smtp_response(code, enhanced_code, response_text);
-
-        let event = BounceEvent {
-            id: uuid::Uuid::new_v4().to_string(),
-            tenant_id: tenant_id.to_string(),
-            message_id: message_id.to_string(),
-            recipient: recipient.to_string(),
-            bounce_type,
-            category,
-            diagnostic_code: enhanced_code.map(|s| s.to_string()),
-            smtp_response: Some(format!("{} {}", code, response_text)),
-            source_ip: source_ip.map(|s| s.to_string()),
-            occurred_at: Utc::now(),
-        };
-
-        self.record_bounce(&event).await?;
-
-        // Add to suppressions if hard bounce
-        if bounce_type == BounceType::Hard {
-            self.add_suppression(tenant_id, recipient, &format!("hard_bounce:{:?}", category))
-                .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Process an inbound bounce email (DSN).
-    pub async fn process_bounce_email(
-        &self,
-        _from: &str,
-        to: &str,
-        raw_email: &[u8],
-    ) -> Result<(), BounceError> {
-        // Parse Return-Path to get tenant_id and message_id
-        let captures = self
-            .return_path_regex
-            .captures(to)
-            .ok_or(BounceError::InvalidReturnPath)?;
-
-        let tenant_id = captures
-            .get(1)
-            .ok_or(BounceError::InvalidReturnPath)?
-            .as_str();
-        let message_id = captures
-            .get(2)
-            .ok_or(BounceError::InvalidReturnPath)?
-            .as_str();
-
-        // M-3: never trust the VERP payload alone. Resolve the queued message
-        // and cross-check the tenant, mirroring the reference implementation
-        // in crates/mta/src/servers/bounce.rs (`lookup_sent_message`): a
-        // bounce for a message this system never sent (or one whose VERP
-        // tenant does not match the queue row) must not record events, bump
-        // deliverability metrics, or poison the suppression list.
-        let queued = self.lookup_queued_message(message_id).await?;
-        let suppression_recipient = match verp_bounce_disposition(
-            queued
-                .as_ref()
-                .map(|(tenant, recipient)| (tenant.as_str(), recipient.as_str())),
             tenant_id,
-        ) {
-            VerpBounceDisposition::Process(validated_recipient) => validated_recipient,
-            VerpBounceDisposition::Reject => {
-                warn!(
-                    tenant_id = %tenant_id,
-                    message_id = %message_id,
-                    "Bounce references an unknown or mismatched message — skipping processing"
-                );
-                return Ok(());
-            }
-        };
-
-        // Parse the DSN email to extract bounce details
-        let (recipient, bounce_type, category, diagnostic) = parse_dsn_email(raw_email)?;
-
-        let event = BounceEvent {
-            id: uuid::Uuid::new_v4().to_string(),
-            tenant_id: tenant_id.to_string(),
-            message_id: message_id.to_string(),
             recipient,
-            bounce_type,
-            category,
-            diagnostic_code: diagnostic,
-            smtp_response: None,
-            source_ip: None,
-            occurred_at: Utc::now(),
-        };
+            &format!("hard_bounce:{:?}", category),
+        )
+        .await?;
+    }
 
-        self.record_bounce(&event).await?;
+    Ok(())
+}
 
-        // Add to suppressions if hard bounce. The suppression targets the
-        // recipient from the validated queue row — the address this system
-        // actually sent to — not the DSN-claimed Final-Recipient, which is
-        // attacker-influenceable content (M-12).
-        if bounce_type == BounceType::Hard {
-            self.add_suppression(
-                tenant_id,
-                &suppression_recipient,
-                &format!("hard_bounce:{:?}", category),
-            )
-            .await?;
+/// Process an inbound bounce email (DSN).
+pub async fn process_bounce_email(
+    db: &PgPool,
+    return_path_regex: &Regex,
+    _from: &str,
+    to: &str,
+    raw_email: &[u8],
+) -> Result<(), BounceError> {
+    // Parse Return-Path to get tenant_id and message_id
+    let captures = return_path_regex
+        .captures(to)
+        .ok_or(BounceError::InvalidReturnPath)?;
+
+    let tenant_id = captures
+        .get(1)
+        .ok_or(BounceError::InvalidReturnPath)?
+        .as_str();
+    let message_id = captures
+        .get(2)
+        .ok_or(BounceError::InvalidReturnPath)?
+        .as_str();
+
+    // M-3: never trust the VERP payload alone. Resolve the queued message
+    // and cross-check the tenant, mirroring the reference implementation
+    // in crates/mta/src/servers/bounce.rs (`lookup_sent_message`): a
+    // bounce for a message this system never sent (or one whose VERP
+    // tenant does not match the queue row) must not record events, bump
+    // deliverability metrics, or poison the suppression list.
+    let queued = lookup_queued_message(db, message_id).await?;
+    let suppression_recipient = match verp_bounce_disposition(
+        queued
+            .as_ref()
+            .map(|(tenant, recipient)| (tenant.as_str(), recipient.as_str())),
+        tenant_id,
+    ) {
+        VerpBounceDisposition::Process(validated_recipient) => validated_recipient,
+        VerpBounceDisposition::Reject => {
+            warn!(
+                tenant_id = %tenant_id,
+                message_id = %message_id,
+                "Bounce references an unknown or mismatched message — skipping processing"
+            );
+            return Ok(());
         }
+    };
 
-        info!(
-            tenant_id = %tenant_id,
-            message_id = %message_id,
-            recipient = %apexmail_lib::pii::redact_email(&event.recipient),
-            bounce_type = ?bounce_type,
-            "Processed inbound bounce"
-        );
+    // Parse the DSN email to extract bounce details
+    let (recipient, bounce_type, category, diagnostic) = parse_dsn_email(raw_email)?;
 
-        Ok(())
+    let event = BounceEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: tenant_id.to_string(),
+        message_id: message_id.to_string(),
+        recipient,
+        bounce_type,
+        category,
+        diagnostic_code: diagnostic,
+        smtp_response: None,
+        source_ip: None,
+        occurred_at: Utc::now(),
+    };
+
+    record_bounce(db, &event).await?;
+
+    // Add to suppressions if hard bounce. The suppression targets the
+    // recipient from the validated queue row — the address this system
+    // actually sent to — not the DSN-claimed Final-Recipient, which is
+    // attacker-influenceable content (M-12).
+    if bounce_type == BounceType::Hard {
+        add_suppression(
+            db,
+            tenant_id,
+            &suppression_recipient,
+            &format!("hard_bounce:{:?}", category),
+        )
+        .await?;
     }
 
-    /// Resolve the tenant and recipient of a message this system sent
-    /// (M-3, mirrors `mta::servers::bounce::lookup_sent_message`).
-    async fn lookup_queued_message(
-        &self,
-        message_id: &str,
-    ) -> Result<Option<(String, String)>, BounceError> {
-        let row: Option<(String, String)> = sqlx::query_as(
-            r#"SELECT COALESCE(tenant_id::text, '') AS tenant_id,
-                      COALESCE(to_addresses[1], '') AS recipient
-               FROM email_queue
-               WHERE id::text = $1 OR message_id::text = $1
-               LIMIT 1"#,
-        )
-        .bind(message_id)
-        .fetch_optional(&self.db)
-        .await
-        .map_err(|e| BounceError::Database(e.to_string()))?;
+    info!(
+        tenant_id = %tenant_id,
+        message_id = %message_id,
+        recipient = %apexmail_lib::pii::redact_email(&event.recipient),
+        bounce_type = ?bounce_type,
+        "Processed inbound bounce"
+    );
 
-        Ok(row.filter(|(tenant, recipient)| !tenant.is_empty() && !recipient.is_empty()))
-    }
+    Ok(())
+}
 
-    /// Process an FBL (Feedback Loop) complaint.
-    pub async fn process_fbl_complaint(
-        &self,
-        tenant_id: &str,
-        message_id: &str,
-        recipient: &str,
-        feedback_type: &str,
-        user_agent: Option<&str>,
-    ) -> Result<(), BounceError> {
-        let event = ComplaintEvent {
-            id: uuid::Uuid::new_v4().to_string(),
-            tenant_id: tenant_id.to_string(),
-            message_id: message_id.to_string(),
-            recipient: recipient.to_string(),
-            feedback_type: feedback_type.to_string(),
-            user_agent: user_agent.map(|s| s.to_string()),
-            occurred_at: Utc::now(),
-        };
+/// Resolve the tenant and recipient of a message this system sent
+/// (M-3, mirrors `mta::servers::bounce::lookup_sent_message`).
+async fn lookup_queued_message(
+    db: &PgPool,
+    message_id: &str,
+) -> Result<Option<(String, String)>, BounceError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        r#"SELECT COALESCE(tenant_id::text, '') AS tenant_id,
+                  COALESCE(to_addresses[1], '') AS recipient
+           FROM email_queue
+           WHERE id::text = $1 OR message_id::text = $1
+           LIMIT 1"#,
+    )
+    .bind(message_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| BounceError::Database(e.to_string()))?;
 
-        // Record complaint
-        sqlx::query(
-            r#"
-            INSERT INTO complaints (id, tenant_id, recipient, feedback_type, user_agent, created_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
-            "#,
-        )
-        .bind(&event.id)
-        .bind(&event.tenant_id)
-        .bind(&event.recipient)
-        .bind(&event.feedback_type)
-        .bind(&event.user_agent)
-        .execute(&self.db)
-        .await
-        .map_err(|e| BounceError::Database(e.to_string()))?;
+    Ok(row.filter(|(tenant, recipient)| !tenant.is_empty() && !recipient.is_empty()))
+}
 
-        // Always suppress on complaint
-        self.add_suppression(tenant_id, recipient, "complaint")
-            .await?;
+/// Process an FBL (Feedback Loop) complaint.
+pub async fn process_fbl_complaint(
+    db: &PgPool,
+    tenant_id: &str,
+    message_id: &str,
+    recipient: &str,
+    feedback_type: &str,
+    user_agent: Option<&str>,
+) -> Result<(), BounceError> {
+    let event = ComplaintEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        tenant_id: tenant_id.to_string(),
+        message_id: message_id.to_string(),
+        recipient: recipient.to_string(),
+        feedback_type: feedback_type.to_string(),
+        user_agent: user_agent.map(|s| s.to_string()),
+        occurred_at: Utc::now(),
+    };
 
-        // Update tenant metrics
-        sqlx::query(
-            r#"
-            INSERT INTO tenant_deliverability_metrics (tenant_id, period_start, emails_complained)
-            VALUES ($1, DATE_TRUNC('day', NOW()), 1)
-            ON CONFLICT (tenant_id, period_start)
-            DO UPDATE SET emails_complained = tenant_deliverability_metrics.emails_complained + 1
-            "#,
-        )
-        .bind(tenant_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| BounceError::Database(e.to_string()))?;
+    // Record complaint
+    sqlx::query(
+        r#"
+        INSERT INTO complaints (id, tenant_id, recipient, feedback_type, user_agent, created_at)
+        VALUES ($1::uuid, $2, $3, $4, $5, NOW())
+        "#,
+    )
+    .bind(&event.id)
+    .bind(&event.tenant_id)
+    .bind(&event.recipient)
+    .bind(&event.feedback_type)
+    .bind(&event.user_agent)
+    .execute(db)
+    .await
+    .map_err(|e| BounceError::Database(e.to_string()))?;
 
-        warn!(
-            tenant_id = %tenant_id,
-            recipient = %apexmail_lib::pii::redact_email(recipient),
-            feedback_type = %feedback_type,
-            "Processed FBL complaint"
-        );
+    // Always suppress on complaint
+    add_suppression(db, tenant_id, recipient, "complaint").await?;
 
-        Ok(())
-    }
+    // Update tenant metrics. The canonical table declares every column
+    // NOT NULL (id, period_end, the sent/delivered counters and the
+    // rates), so a fresh day-row must supply them all — the previous
+    // three-column insert failed against the production schema on every
+    // complaint.
+    sqlx::query(
+        r#"
+        INSERT INTO tenant_deliverability_metrics
+            (id, tenant_id, period_start, period_end, emails_sent, emails_delivered,
+             emails_bounced, emails_complained, bounce_rate, complaint_rate, delivery_rate,
+             created_at)
+        VALUES (gen_random_uuid(), $1, DATE_TRUNC('day', NOW()),
+                DATE_TRUNC('day', NOW()) + INTERVAL '1 day', 0, 0, 0, 1, 0.0, 0.0, 0.0, NOW())
+        ON CONFLICT (tenant_id, period_start)
+        DO UPDATE SET emails_complained = tenant_deliverability_metrics.emails_complained + 1
+        "#,
+    )
+    .bind(tenant_id)
+    .execute(db)
+    .await
+    .map_err(|e| BounceError::Database(e.to_string()))?;
 
-    /// Record a bounce event to the database.
-    async fn record_bounce(&self, event: &BounceEvent) -> Result<(), BounceError> {
-        sqlx::query(
-            r#"
-            INSERT INTO bounces (id, tenant_id, recipient, bounce_type, diagnostic_code, created_at)
-            VALUES ($1, $2, $3, $4, $5, NOW())
-            "#,
-        )
-        .bind(&event.id)
-        .bind(&event.tenant_id)
-        .bind(&event.recipient)
-        .bind(format!("{:?}", event.bounce_type).to_lowercase())
-        .bind(&event.diagnostic_code)
-        .execute(&self.db)
-        .await
-        .map_err(|e| BounceError::Database(e.to_string()))?;
+    warn!(
+        tenant_id = %tenant_id,
+        recipient = %apexmail_lib::pii::redact_email(recipient),
+        feedback_type = %feedback_type,
+        "Processed FBL complaint"
+    );
 
-        // Update tenant metrics
-        let metric_column = "emails_bounced";
+    Ok(())
+}
 
-        sqlx::query(&format!(
-            r#"
-            INSERT INTO tenant_deliverability_metrics (tenant_id, period_start, {})
-            VALUES ($1, DATE_TRUNC('day', NOW()), 1)
-            ON CONFLICT (tenant_id, period_start)
-            DO UPDATE SET {} = tenant_deliverability_metrics.{} + 1
-            "#,
-            metric_column, metric_column, metric_column
-        ))
-        .bind(&event.tenant_id)
-        .execute(&self.db)
-        .await
-        .map_err(|e| BounceError::Database(e.to_string()))?;
+/// Record a bounce event to the database.
+async fn record_bounce(db: &PgPool, event: &BounceEvent) -> Result<(), BounceError> {
+    sqlx::query(
+        r#"
+        INSERT INTO bounces (id, tenant_id, recipient, bounce_type, diagnostic_code, created_at)
+        VALUES ($1::uuid, $2, $3, $4, $5, NOW())
+        "#,
+    )
+    .bind(&event.id)
+    .bind(&event.tenant_id)
+    .bind(&event.recipient)
+    .bind(format!("{:?}", event.bounce_type).to_lowercase())
+    .bind(&event.diagnostic_code)
+    .execute(db)
+    .await
+    .map_err(|e| BounceError::Database(e.to_string()))?;
 
-        debug!(
-            tenant_id = %event.tenant_id,
-            message_id = %event.message_id,
-            recipient = %apexmail_lib::pii::redact_email(&event.recipient),
-            bounce_type = ?event.bounce_type,
-            category = ?event.category,
-            "Recorded bounce event"
-        );
+    // Update tenant metrics (see process_fbl_complaint: the canonical
+    // table needs every NOT NULL column supplied on first insert).
+    let metric_column = "emails_bounced";
 
-        Ok(())
-    }
+    sqlx::query(&format!(
+        r#"
+        INSERT INTO tenant_deliverability_metrics
+            (id, tenant_id, period_start, period_end, emails_sent, emails_delivered,
+             emails_bounced, emails_complained, bounce_rate, complaint_rate, delivery_rate,
+             created_at)
+        VALUES (gen_random_uuid(), $1, DATE_TRUNC('day', NOW()),
+                DATE_TRUNC('day', NOW()) + INTERVAL '1 day', 0, 0, 1, 0, 0.0, 0.0, 0.0, NOW())
+        ON CONFLICT (tenant_id, period_start)
+        DO UPDATE SET {} = tenant_deliverability_metrics.{} + 1
+        "#,
+        metric_column, metric_column
+    ))
+    .bind(&event.tenant_id)
+    .execute(db)
+    .await
+    .map_err(|e| BounceError::Database(e.to_string()))?;
 
-    /// Add an email to the suppression list.
-    async fn add_suppression(
-        &self,
-        tenant_id: &str,
-        email: &str,
-        reason: &str,
-    ) -> Result<(), BounceError> {
-        // `suppressions.id VARCHAR(26)` is NOT NULL without a default
-        // (migration 088) — supply one (`sup_` + 18 hex = 22 chars, matching
-        // the mta crate's suppression row ids).
-        let suppression_id = format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
+    debug!(
+        tenant_id = %event.tenant_id,
+        message_id = %event.message_id,
+        recipient = %apexmail_lib::pii::redact_email(&event.recipient),
+        bounce_type = ?event.bounce_type,
+        category = ?event.category,
+        "Recorded bounce event"
+    );
 
-        sqlx::query(
-            r#"
-            INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
-            ON CONFLICT (tenant_id, email) DO UPDATE SET reason = $4
-            "#,
-        )
-        .bind(suppression_id)
-        .bind(tenant_id)
-        .bind(email)
-        .bind(reason)
-        .execute(&self.db)
-        .await
-        .map_err(|e| BounceError::Database(e.to_string()))?;
+    Ok(())
+}
 
-        info!(tenant_id = %tenant_id, email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Added to suppression list");
+/// Add an email to the suppression list.
+async fn add_suppression(
+    db: &PgPool,
+    tenant_id: &str,
+    email: &str,
+    reason: &str,
+) -> Result<(), BounceError> {
+    // `suppressions.id VARCHAR(26)` is NOT NULL without a default
+    // (migration 088) — supply one (`sup_` + 18 hex = 22 chars, matching
+    // the mta crate's suppression row ids).
+    let suppression_id = format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18]);
 
-        Ok(())
-    }
+    sqlx::query(
+        r#"
+        INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (tenant_id, email) DO UPDATE SET reason = $4
+        "#,
+    )
+    .bind(suppression_id)
+    .bind(tenant_id)
+    .bind(email)
+    .bind(reason)
+    .execute(db)
+    .await
+    .map_err(|e| BounceError::Database(e.to_string()))?;
+
+    info!(tenant_id = %tenant_id, email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Added to suppression list");
+
+    Ok(())
 }
 
 /// Parse a DSN (Delivery Status Notification) email.
@@ -1178,15 +1183,15 @@ mod tests {
         };
 
         // NOTHING is queued: the VERP address is entirely forged.
-        let handler = SelfHostedBounceHandler::new(pool.clone());
-        handler
-            .process_bounce_email(
-                "mailer-daemon@evil.example",
-                "bounce+tenant-a+00000000-0000-0000-0000-000000000000@returns.apexmail.ee",
-                dsn_with_planted_headers().as_bytes(),
-            )
-            .await
-            .expect("forged bounce is dropped without error");
+        process_bounce_email(
+            &pool,
+            &return_path_regex(),
+            "mailer-daemon@evil.example",
+            "bounce+tenant-a+00000000-0000-0000-0000-000000000000@returns.apexmail.ee",
+            dsn_with_planted_headers().as_bytes(),
+        )
+        .await
+        .expect("forged bounce is dropped without error");
 
         assert_eq!(suppression_count(&pool).await, 0, "no suppression");
         assert_eq!(bounce_count(&pool).await, 0, "no bounce recorded");
@@ -1209,15 +1214,15 @@ mod tests {
             .await
             .unwrap();
 
-        let handler = SelfHostedBounceHandler::new(pool.clone());
-        handler
-            .process_bounce_email(
-                "mailer-daemon@evil.example",
-                &format!("bounce+tenant-a+{message_id}@returns.apexmail.ee"),
-                dsn_with_planted_headers().as_bytes(),
-            )
-            .await
-            .expect("forged bounce is dropped without error");
+        process_bounce_email(
+            &pool,
+            &return_path_regex(),
+            "mailer-daemon@evil.example",
+            &format!("bounce+tenant-a+{message_id}@returns.apexmail.ee"),
+            dsn_with_planted_headers().as_bytes(),
+        )
+        .await
+        .expect("forged bounce is dropped without error");
 
         assert_eq!(suppression_count(&pool).await, 0, "no suppression");
         assert_eq!(bounce_count(&pool).await, 0, "no bounce recorded");
@@ -1238,15 +1243,15 @@ mod tests {
             .await
             .unwrap();
 
-        let handler = SelfHostedBounceHandler::new(pool.clone());
-        handler
-            .process_bounce_email(
-                "mailer-daemon@mail.example.net",
-                &format!("bounce+tenant-a+{message_id}@returns.apexmail.ee"),
-                dsn_with_planted_headers().as_bytes(),
-            )
-            .await
-            .expect("legitimate bounce processes");
+        process_bounce_email(
+            &pool,
+            &return_path_regex(),
+            "mailer-daemon@mail.example.net",
+            &format!("bounce+tenant-a+{message_id}@returns.apexmail.ee"),
+            dsn_with_planted_headers().as_bytes(),
+        )
+        .await
+        .expect("legitimate bounce processes");
 
         assert_eq!(bounce_count(&pool).await, 1, "bounce recorded");
         let suppressed: Option<(String, String)> =
@@ -1553,5 +1558,309 @@ mod adversarial_tests {
         assert_eq!(bounce_type, BounceType::Unknown);
         assert_eq!(category, BounceCategory::Unknown);
         assert!(diagnostic.is_none());
+    }
+}
+
+/// Processor-level tests: the SMTP-bounce and FBL entry points against the
+/// canonical schema, plus database-outage arms proven by hiding the target
+/// relations in the throwaway per-test database.
+#[cfg(test)]
+mod processor_tests {
+    use super::*;
+
+    async fn pool(suffix: &str) -> Option<sqlx::PgPool> {
+        crate::test_db::canonical_pool(suffix).await
+    }
+
+    fn unique_recipient() -> String {
+        format!(
+            "rcpt-{}@example.test",
+            &uuid::Uuid::new_v4().simple().to_string()[..10]
+        )
+    }
+
+    /// Seed a tenants row for the FK on suppressions.tenant_id and return
+    /// the tenant id.
+    async fn seed_tenant(db: &sqlx::PgPool, prefix: &str) -> String {
+        let tenant = format!(
+            "{prefix}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..20]
+        );
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'bounce probe tenant', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant)
+        .bind(format!("slug-{tenant}"))
+        .execute(db)
+        .await
+        .expect("seed probe tenant");
+        tenant
+    }
+
+    #[tokio::test]
+    async fn smtp_hard_bounce_records_event_and_suppresses() {
+        let Some(db) = pool("bounce_smtp_hard").await else {
+            return;
+        };
+        let tenant = seed_tenant(&db, "bh").await;
+        let recipient = unique_recipient();
+
+        process_smtp_bounce(
+            &db,
+            &return_path_regex(),
+            &tenant,
+            "msg-smtp-hard",
+            &recipient,
+            550,
+            Some("5.1.1"),
+            "user unknown",
+            Some("203.0.113.9"),
+        )
+        .await
+        .expect("hard bounce processes");
+
+        let bounce: (String, String) =
+            sqlx::query_as("SELECT bounce_type, diagnostic_code FROM bounces WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .expect("bounce row");
+        assert_eq!(bounce.0, "hard");
+        assert_eq!(bounce.1, "5.1.1");
+
+        let reason: (String,) =
+            sqlx::query_as("SELECT reason FROM suppressions WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(&recipient)
+                .fetch_one(&db)
+                .await
+                .expect("suppression row");
+        assert!(reason.0.starts_with("hard_bounce:"));
+
+        // The deliverability metric was bumped for today.
+        let bounced: i64 = sqlx::query_scalar(
+            "SELECT emails_bounced FROM tenant_deliverability_metrics WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&db)
+        .await
+        .expect("metric row");
+        assert_eq!(bounced, 1);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn smtp_soft_bounce_records_without_suppressing() {
+        let Some(db) = pool("bounce_smtp_soft").await else {
+            return;
+        };
+        let tenant = seed_tenant(&db, "bs").await;
+        let recipient = unique_recipient();
+
+        process_smtp_bounce(
+            &db,
+            &return_path_regex(),
+            &tenant,
+            "msg-smtp-soft",
+            &recipient,
+            451,
+            Some("4.7.1"),
+            "try again later",
+            None,
+        )
+        .await
+        .expect("soft bounce processes");
+
+        let bounce: (String,) =
+            sqlx::query_as("SELECT bounce_type FROM bounces WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .expect("bounce row");
+        assert_eq!(bounce.0, "soft");
+        let suppressed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1")
+                .bind(&tenant)
+                .fetch_one(&db)
+                .await
+                .expect("count");
+        assert_eq!(suppressed, 0, "soft bounces never suppress");
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn fbl_complaint_suppresses_and_accumulates_metrics() {
+        let Some(db) = pool("bounce_fbl").await else {
+            return;
+        };
+        let tenant = seed_tenant(&db, "bf").await;
+        let recipient = unique_recipient();
+
+        for _ in 0..2 {
+            process_fbl_complaint(&db, &tenant, "msg-fbl", &recipient, "abuse", Some("TestUA"))
+                .await
+                .expect("complaint processes");
+        }
+
+        let complained: i64 = sqlx::query_scalar(
+            "SELECT emails_complained FROM tenant_deliverability_metrics WHERE tenant_id = $1",
+        )
+        .bind(&tenant)
+        .fetch_one(&db)
+        .await
+        .expect("metric row");
+        assert_eq!(complained, 2, "both complaints accumulate");
+
+        let reason: (String,) =
+            sqlx::query_as("SELECT reason FROM suppressions WHERE tenant_id = $1 AND email = $2")
+                .bind(&tenant)
+                .bind(&recipient)
+                .fetch_one(&db)
+                .await
+                .expect("suppression row");
+        assert_eq!(reason.0, "complaint");
+        db.close().await;
+    }
+
+    /// Outage arms: hiding the target relation must surface a database
+    /// error — never a silent success.
+    #[tokio::test]
+    async fn processor_surfaces_database_outages_instead_of_success() {
+        let Some(db) = pool("bounce_outage").await else {
+            return;
+        };
+        let tenant = format!("bo{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        let recipient = unique_recipient();
+
+        // The bounce-event insert fails.
+        crate::routes::fault::hide_table(&db, "bounces")
+            .await
+            .expect("hide bounces");
+        let result = process_smtp_bounce(
+            &db,
+            &return_path_regex(),
+            &tenant,
+            "msg-outage-bounce",
+            &recipient,
+            550,
+            None,
+            "user unknown",
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BounceError::Database(_))),
+            "{result:?}"
+        );
+        db.close().await;
+
+        // Fresh database: the suppression insert fails after the bounce
+        // record succeeded.
+        let Some(db) = pool("bounce_outage_supp").await else {
+            return;
+        };
+        let tenant = format!("bo{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        crate::routes::fault::hide_table(&db, "suppressions")
+            .await
+            .expect("hide suppressions");
+        let result = process_smtp_bounce(
+            &db,
+            &return_path_regex(),
+            &tenant,
+            "msg-outage-supp",
+            &unique_recipient(),
+            550,
+            None,
+            "user unknown",
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BounceError::Database(_))),
+            "{result:?}"
+        );
+        db.close().await;
+
+        // Fresh database: the deliverability-metric upsert fails.
+        let Some(db) = pool("bounce_outage_metric").await else {
+            return;
+        };
+        let tenant = format!("bo{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+        crate::routes::fault::hide_table(&db, "tenant_deliverability_metrics")
+            .await
+            .expect("hide metrics");
+        let result = process_smtp_bounce(
+            &db,
+            &return_path_regex(),
+            &tenant,
+            "msg-outage-metric",
+            &unique_recipient(),
+            550,
+            None,
+            "user unknown",
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BounceError::Database(_))),
+            "{result:?}"
+        );
+        db.close().await;
+
+        // Fresh database: the FBL complaint insert fails.
+        let Some(db) = pool("bounce_outage_fbl").await else {
+            return;
+        };
+        crate::routes::fault::hide_table(&db, "complaints")
+            .await
+            .expect("hide complaints");
+        let result = process_fbl_complaint(
+            &db,
+            "ten_outage",
+            "msg-outage-fbl",
+            &unique_recipient(),
+            "abuse",
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BounceError::Database(_))),
+            "{result:?}"
+        );
+        db.close().await;
+
+        // Fresh database: the queued-message lookup fails (42P01).
+        let Some(db) = pool("bounce_outage_queue").await else {
+            return;
+        };
+        crate::routes::fault::hide_table(&db, "email_queue")
+            .await
+            .expect("hide email_queue");
+        let dsn = concat!(
+            "From: MAILER-DAEMON@evil.example\r\n",
+            "Subject: Delivery Status Notification\r\n",
+            "Final-Recipient: rfc822; victim@attacker.tld\r\n",
+            "Action: failed\r\n",
+            "Status: 5.1.1\r\n",
+            "\r\n",
+            "The recipient does not exist.\r\n"
+        );
+        let result = process_bounce_email(
+            &db,
+            &return_path_regex(),
+            "mailer-daemon@mail.example.net",
+            &format!(
+                "bounce+tenant-a+{}@returns.apexmail.ee",
+                uuid::Uuid::new_v4()
+            ),
+            dsn.as_bytes(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BounceError::Database(_))),
+            "{result:?}"
+        );
+        db.close().await;
     }
 }

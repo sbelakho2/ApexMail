@@ -253,6 +253,11 @@ pub struct InboundServer {
     /// Failed-AUTH lockout tracking (per-IP + per-account), shared with
     /// the submission server.
     auth_fail_tracker: AuthFailTracker,
+    /// Shared resolver for PTR/FCrDNS verification (interior mutability so
+    /// tests can point it at a loopback mock before any session runs;
+    /// production clones the process-wide static once at construction — the
+    /// same pattern the FBL server uses).
+    rdns_resolver: std::sync::RwLock<TokioResolver>,
     shutdown: Arc<Notify>,
     /// RCPT-time mailbox resolution (the `mail_accounts` registry).
     mailbox_directory: Arc<dyn MailboxDirectory>,
@@ -288,6 +293,7 @@ impl InboundServer {
                 .time_to_live(Duration::from_secs(600))
                 .build(),
             auth_fail_tracker,
+            rdns_resolver: std::sync::RwLock::new(INBOUND_RDNS_RESOLVER.clone()),
             shutdown: Arc::new(Notify::new()),
             mailbox_directory,
             verp_domains: verp_domains
@@ -1678,6 +1684,36 @@ impl InboundServer {
     ///   `451 4.4.3`, and the result is NEVER cached: a DNS outage must not
     ///   poison the 600 s cache into hard-rejecting every sender.
     async fn verify_inbound_source(&self, ip: IpAddr) -> SourceCheck {
+        // Clone out of the lock — the guard must not be held across the
+        // DNS awaits (the future is spawned per session and must stay Send).
+        let resolver = self
+            .rdns_resolver
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        self.verify_inbound_source_with(&resolver, ip).await
+    }
+
+    /// Point the FCrDNS resolver at a mock (tests only) — the same seam the
+    /// FBL server exposes; sessions started afterwards resolve PTR/A records
+    /// against the loopback mock instead of the system resolver.
+    #[cfg(test)]
+    pub(crate) fn set_rdns_resolver_for_tests(&self, resolver: TokioResolver) {
+        *self
+            .rdns_resolver
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = resolver;
+    }
+
+    /// [`Self::verify_inbound_source`] against an explicit resolver — the
+    /// production path always passes the shared static; tests pass a
+    /// loopback mock so the whole FCrDNS matrix runs on the real resolver
+    /// wire path without touching the network.
+    async fn verify_inbound_source_with(
+        &self,
+        resolver: &TokioResolver,
+        ip: IpAddr,
+    ) -> SourceCheck {
         if ptr_verification_exempt(ip) {
             return SourceCheck::Confirmed(None);
         }
@@ -1686,7 +1722,6 @@ impl InboundServer {
             return cached;
         }
 
-        let resolver = &*INBOUND_RDNS_RESOLVER;
         let result = match resolver.reverse_lookup(ip).await {
             Ok(lookup) => {
                 // trust-dns 0.26 removed typed lookup iteration; extract the
@@ -2271,7 +2306,7 @@ mod tests {
             .expect("lazy redis pool construction")
     }
 
-    async fn test_inbound(ip: IpAddr) -> (InboundServer, SessionContext) {
+    pub(super) async fn test_inbound(ip: IpAddr) -> (InboundServer, SessionContext) {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://127.0.0.1:1/mta_test")
@@ -5809,5 +5844,911 @@ mod inbound_edge_arms {
             .expect("stop unblocks")
             .expect("no panic");
         assert!(result.is_ok(), "{result:?}");
+    }
+}
+
+#[cfg(test)]
+mod dispatch_fcrdns_auth_tests {
+    //! End-to-end coverage for the arms that need a REAL DNS stack or a REAL
+    //! user table: the FCrDNS matrix (loopback UDP mock), the DMARC
+    //! disposition dispatch (reject/quarantine/tempfail), the ARC sealing
+    //! paths, and AUTH success/failure classification against the canonical
+    //! users table.
+
+    use super::*;
+    use crate::auth::test_dns::{resolver_at, DnsAnswer, MockDns};
+    use sqlx::PgPool;
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use tokio::io::AsyncWriteExt;
+
+    fn public_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))
+    }
+
+    async fn pool(test_name: &str) -> Option<PgPool> {
+        match migrator::test_support::fresh_canonical_pool(test_name, test_name).await {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        }
+    }
+
+    fn basic_config(require_fcrdns: bool, arc_seal: bool) -> InboundConfig {
+        InboundConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 25,
+            secure_port: 465,
+            hostname: "inbound.test".into(),
+            max_message_size: 1024 * 1024,
+            max_recipients: 100,
+            auth_required: false,
+            advertise_auth_port25: false,
+            require_fcrdns,
+            arc_seal,
+            tls: Default::default(),
+        }
+    }
+
+    fn dmarc_enforcing_authenticator(port: u16, enforce_dmarc: bool) -> Arc<EmailAuthenticator> {
+        // Point BOTH the mail-auth SPF/DKIM resolver (its own bundled hickory
+        // 0.24 stack) and the DMARC TXT resolver (the workspace hickory 0.26
+        // resolver) at the same loopback UDP mock.
+        use mail_auth::hickory_resolver::config::{
+            NameServerConfig, NameServerConfigGroup, Protocol as McProtocol, ResolverConfig,
+            ResolverOpts,
+        };
+        let mut group = NameServerConfigGroup::new();
+        group.push(NameServerConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            McProtocol::Udp,
+        ));
+        let config = ResolverConfig::from_parts(None, vec![], group);
+        let mut opts = ResolverOpts::default();
+        opts.attempts = 1;
+        opts.timeout = Duration::from_millis(500);
+        opts.try_tcp_on_error = false;
+        opts.cache_size = 0;
+        let mail_auth_resolver =
+            mail_auth::Resolver::with_capacity(config, opts, 0).expect("mail-auth resolver");
+        Arc::new(EmailAuthenticator::with_injected_resolvers(
+            crate::config::EmailAuthConfig {
+                require_spf: false,
+                require_dkim: false,
+                enforce_dmarc,
+                allow_soft_fail: true,
+                trusted_relays: Vec::new(),
+                spf_cache_max_entries: 10_000,
+            },
+            "inbound.test".into(),
+            mail_auth_resolver,
+            resolver_at(port),
+        ))
+    }
+
+    async fn dispatch_server(
+        test: &str,
+        require_fcrdns: bool,
+        arc_seal: bool,
+        dns_rules: HashMap<&'static str, DnsAnswer>,
+        enforce_dmarc: bool,
+    ) -> (Arc<InboundServer>, MockDns) {
+        let pool = pool(test).await.unwrap();
+        let mock = MockDns::start(dns_rules).await;
+        let authenticator = dmarc_enforcing_authenticator(mock.port, enforce_dmarc);
+        let mut server = InboundServer::new(
+            basic_config(require_fcrdns, arc_seal),
+            RateLimitConfig {
+                enabled: true,
+                max_connections_per_ip: 10,
+                max_messages_per_connection: 100,
+                max_recipients_per_message: 100,
+            },
+            pool,
+            super::adversarial_session_tests::unroutable_redis_pool(),
+            authenticator,
+            "inbound.test".into(),
+            vec!["bounces.apexmail.ee".into()],
+        )
+        .expect("inbound server construction");
+        server.mailbox_directory = Arc::new(super::adversarial_session_tests::AcceptAllDirectory);
+        // Sessions resolve the (public, non-exempt) peer's PTR against the
+        // mock — never against the system resolver.
+        server.set_rdns_resolver_for_tests(resolver_at(mock.port));
+        (Arc::new(server), mock)
+    }
+
+    fn plain_context(ip: IpAddr) -> SessionContext {
+        SessionContext {
+            id: "dispatch-test".into(),
+            client_ip: ip,
+            authenticated: false,
+            tls_active: true,
+            tenant_id: None,
+            message_count: 0,
+            start_time: chrono::Utc::now(),
+            helo_hostname: "send.example.com".into(),
+            mail_from: None,
+            rcpt_to: Vec::new(),
+            spf_status: None,
+            auth_login_user: None,
+            auth_plain_pending: false,
+            auth_enabled: true,
+            helo_seen: true,
+            client_rdns: None,
+            mail_smtputf8: false,
+        }
+    }
+
+    async fn cmd(server: &InboundServer, line: &str, ctx: &mut SessionContext) -> String {
+        let (verb, arg) = split_verb(line.trim());
+        server.handle_command(&verb, arg, line, ctx, false).await
+    }
+
+    /// Drive a full DATA transaction over a duplex stream and return the
+    /// end-of-DATA reply.
+    async fn data_transaction(
+        server: Arc<InboundServer>,
+        mail_from: &str,
+        rcpt: &str,
+        body: &[u8],
+    ) -> String {
+        let (client, server_side) = tokio::io::duplex(256 * 1024);
+        // The DMARC/ARC data tests are not about FCrDNS: the exempt
+        // 10.9.9.9 peer skips the PTR gate entirely.
+        let task = tokio::spawn(async move {
+            server
+                .run_plain_session(server_side, super::adversarial_data_tests::peer(), None)
+                .await
+        });
+        let mut client = BufStream::new(client);
+        let greeting = super::adversarial_data_tests::read_smtp_response(&mut client).await;
+        assert!(greeting.starts_with("220"), "{greeting:?}");
+        for step in [
+            "EHLO send.example.com".to_string(),
+            format!("MAIL FROM:<{mail_from}>"),
+            format!("RCPT TO:<{rcpt}>"),
+            "DATA".to_string(),
+        ] {
+            client.write_all(step.as_bytes()).await.unwrap();
+            client.write_all(b"\r\n").await.unwrap();
+            client.flush().await.unwrap();
+            let resp = super::adversarial_data_tests::read_smtp_response(&mut client).await;
+            assert!(
+                resp.starts_with('2') || resp.starts_with('3'),
+                "{step} -> {resp:?}"
+            );
+        }
+        // Dot-stuff nothing here (no leading dots in the fixtures) but
+        // re-terminate every line, INCLUDING the header/body separator —
+        // only the artifact after the final newline is dropped.
+        let parts: Vec<&[u8]> = body.split(|&b| b == b'\n').collect();
+        for (i, line) in parts.iter().enumerate() {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if i + 1 == parts.len() && line.is_empty() {
+                continue;
+            }
+            client
+                .write_all(format!("{}\r\n", String::from_utf8_lossy(line)).as_bytes())
+                .await
+                .unwrap();
+        }
+        client.write_all(b".\r\n").await.unwrap();
+        client.flush().await.unwrap();
+        let reply = super::adversarial_data_tests::read_smtp_response(&mut client).await;
+        let _ = client.write_all(b"QUIT\r\n").await;
+        let _ = client.flush().await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+        reply
+    }
+
+    fn spf_rule() -> (&'static str, DnsAnswer) {
+        (
+            "send.example.com",
+            DnsAnswer::Txt(vec![vec!["v=spf1 -all".into()]]),
+        )
+    }
+
+    // ── FCrDNS matrix over the loopback mock ──────────────────────────────
+
+    #[tokio::test]
+    async fn fcrdns_confirmed_is_cached_and_replayed() {
+        let rules = HashMap::from([
+            (
+                "10.113.0.203.in-addr.arpa",
+                DnsAnswer::Ptr(vec!["host.fcrdns.example.com".into()]),
+            ),
+            ("host.fcrdns.example.com", DnsAnswer::Ips(vec![public_ip()])),
+        ]);
+        let mock = MockDns::start(rules).await;
+        let (server, _ctx) = super::tests::test_inbound(public_ip()).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(
+            check,
+            SourceCheck::Confirmed(Some("host.fcrdns.example.com".into()))
+        );
+        // A determinate outcome lands in the cache; the replay must return
+        // the identical verdict without consulting DNS again.
+        assert!(server.rdns_cache.get(&public_ip()).is_some());
+        let replay = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(replay, check);
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_ptr_without_forward_match_carries_the_unconfirmed_host() {
+        let rules = HashMap::from([
+            (
+                "10.113.0.203.in-addr.arpa",
+                DnsAnswer::Ptr(vec!["host.fcrdns.example.com".into()]),
+            ),
+            (
+                "host.fcrdns.example.com",
+                DnsAnswer::Ips(vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))]),
+            ),
+        ]);
+        let mock = MockDns::start(rules).await;
+        let (server, _ctx) = super::tests::test_inbound(public_ip()).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(
+            check,
+            SourceCheck::NoReverseDns(Some("host.fcrdns.example.com".into()))
+        );
+        assert!(server.rdns_cache.get(&public_ip()).is_some());
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_forward_lookup_failure_is_transient_and_never_cached() {
+        let rules = HashMap::from([
+            (
+                "10.113.0.203.in-addr.arpa",
+                DnsAnswer::Ptr(vec!["host.fcrdns.example.com".into()]),
+            ),
+            ("host.fcrdns.example.com", DnsAnswer::Servfail),
+        ]);
+        let mock = MockDns::start(rules).await;
+        let (server, _ctx) = super::tests::test_inbound(public_ip()).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(check, SourceCheck::Transient);
+        assert!(
+            server.rdns_cache.get(&public_ip()).is_none(),
+            "a transient outcome must never poison the cache"
+        );
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_ptr_servfail_is_transient() {
+        let rules = HashMap::from([("10.113.0.203.in-addr.arpa", DnsAnswer::Servfail)]);
+        let mock = MockDns::start(rules).await;
+        let (server, _ctx) = super::tests::test_inbound(public_ip()).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(check, SourceCheck::Transient);
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_empty_ptr_hostname_reads_as_no_reverse_dns() {
+        // A PTR record whose target renders empty (the root name) yields an
+        // answer set with no usable hostnames — NODATA semantics, not a
+        // resolver failure.
+        let rules = HashMap::from([("10.113.0.203.in-addr.arpa", DnsAnswer::Ptr(vec!["".into()]))]);
+        let mock = MockDns::start(rules).await;
+        let (server, _ctx) = super::tests::test_inbound(public_ip()).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(check, SourceCheck::NoReverseDns(None));
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_second_ptr_hostname_can_confirm() {
+        let rules = HashMap::from([
+            (
+                "10.113.0.203.in-addr.arpa",
+                DnsAnswer::Ptr(vec![
+                    "wrong.fcrdns.example.com".into(),
+                    "right.fcrdns.example.com".into(),
+                ]),
+            ),
+            (
+                "wrong.fcrdns.example.com",
+                DnsAnswer::Ips(vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))]),
+            ),
+            (
+                "right.fcrdns.example.com",
+                DnsAnswer::Ips(vec![public_ip()]),
+            ),
+        ]);
+        let mock = MockDns::start(rules).await;
+        let (server, _ctx) = super::tests::test_inbound(public_ip()).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, public_ip())
+            .await;
+        assert_eq!(
+            check,
+            SourceCheck::Confirmed(Some("right.fcrdns.example.com".into()))
+        );
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn fcrdns_exempt_ip_never_consults_the_resolver() {
+        let mock = MockDns::start(HashMap::new()).await;
+        let (server, _ctx) =
+            super::tests::test_inbound(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))).await;
+        let check = server
+            .verify_inbound_source_with(&mock.resolver, IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)))
+            .await;
+        assert_eq!(check, SourceCheck::Confirmed(None));
+        mock.stop();
+    }
+
+    // ── the MAIL FROM gate with a public (non-exempt) source IP ───────────
+
+    #[tokio::test]
+    async fn mail_from_tempfails_on_transient_fcrdns_even_when_not_required() {
+        let rules = HashMap::from([("10.113.0.203.in-addr.arpa", DnsAnswer::Servfail)]);
+        let (server, mock) =
+            dispatch_server("inbound_fcrdns_transient", false, false, rules, false).await;
+        let mut ctx = plain_context(public_ip());
+        let reply = cmd(&server, "MAIL FROM:<s@send.example.com>", &mut ctx).await;
+        assert!(
+            reply.starts_with("451 4.4.3"),
+            "a DNS outage must tempfail regardless of the policy flag: {reply:?}"
+        );
+        assert!(ctx.mail_from.is_none(), "no transaction may start");
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn mail_from_is_hard_refused_without_fcrdns_only_when_required() {
+        let rules = HashMap::from([
+            (
+                "10.113.0.203.in-addr.arpa",
+                DnsAnswer::Ptr(vec!["host.fcrdns.example.com".into()]),
+            ),
+            (
+                "host.fcrdns.example.com",
+                DnsAnswer::Ips(vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))]),
+            ),
+        ]);
+        // Policy ON: the unconfirmed PTR is a permanent 550 5.7.25.
+        let (server, mock) =
+            dispatch_server("inbound_fcrdns_required", true, false, rules.clone(), false).await;
+        let mut ctx = plain_context(public_ip());
+        let reply = cmd(&server, "MAIL FROM:<s@send.example.com>", &mut ctx).await;
+        assert!(
+            reply.starts_with("550 5.7.25"),
+            "require_fcrdns must hard-refuse: {reply:?}"
+        );
+        mock.stop();
+
+        // Policy OFF (the default): the sender is accepted with a warning and
+        // the (unconfirmed) PTR hostname rides into the session context.
+        let (server, mock) =
+            dispatch_server("inbound_fcrdns_lenient", false, false, rules, false).await;
+        let mut ctx = plain_context(public_ip());
+        let reply = cmd(&server, "MAIL FROM:<s@send.example.com>", &mut ctx).await;
+        assert!(
+            reply.starts_with("250"),
+            "lenient default accepts: {reply:?}"
+        );
+        assert_eq!(ctx.client_rdns.as_deref(), Some("host.fcrdns.example.com"));
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn mail_from_with_confirmed_fcrdns_records_the_confirmed_host() {
+        let rules = HashMap::from([
+            (
+                "10.113.0.203.in-addr.arpa",
+                DnsAnswer::Ptr(vec!["host.fcrdns.example.com".into()]),
+            ),
+            ("host.fcrdns.example.com", DnsAnswer::Ips(vec![public_ip()])),
+        ]);
+        let (server, mock) =
+            dispatch_server("inbound_fcrdns_confirmed", true, false, rules, false).await;
+        let mut ctx = plain_context(public_ip());
+        let reply = cmd(&server, "MAIL FROM:<s@send.example.com>", &mut ctx).await;
+        assert!(
+            reply.starts_with("250"),
+            "FCrDNS-confirmed sender: {reply:?}"
+        );
+        assert_eq!(ctx.client_rdns.as_deref(), Some("host.fcrdns.example.com"));
+        mock.stop();
+    }
+
+    // ── DMARC disposition dispatch (the end-of-DATA policy gate) ──────────
+
+    #[tokio::test]
+    async fn dmarc_reject_policy_refuses_data_with_550() {
+        let rules = HashMap::from([
+            spf_rule(),
+            (
+                "_dmarc.example.com",
+                DnsAnswer::Txt(vec![vec!["v=DMARC1; p=reject".into()]]),
+            ),
+        ]);
+        let (server, mock) =
+            dispatch_server("inbound_dmarc_reject", false, false, rules, true).await;
+        let body = b"From: u@example.com\r\nTo: r@rcpt.example.com\r\nSubject: t\r\n\r\nhello\r\n";
+        let reply =
+            data_transaction(server, "s@send.example.com", "r@rcpt.example.com", body).await;
+        assert!(
+            reply.starts_with("550") && reply.contains("5.7.1"),
+            "p=reject must be a permanent refusal: {reply:?}"
+        );
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn dmarc_quarantine_policy_accepts_and_persists_quarantine() {
+        let rules = HashMap::from([
+            spf_rule(),
+            (
+                "_dmarc.example.com",
+                DnsAnswer::Txt(vec![vec!["v=DMARC1; p=quarantine".into()]]),
+            ),
+        ]);
+        let (server, mock) =
+            dispatch_server("inbound_dmarc_quarantine", false, false, rules, true).await;
+        let body = b"From: u@example.com\r\nTo: r@rcpt.example.com\r\nSubject: t\r\n\r\nhello\r\n";
+        let reply = data_transaction(
+            server.clone(),
+            "s@send.example.com",
+            "r@rcpt.example.com",
+            body,
+        )
+        .await;
+        assert!(
+            reply.starts_with("250"),
+            "quarantine still accepts: {reply:?}"
+        );
+        let (disposition, auth_results): (String, String) =
+            sqlx::query_as("SELECT disposition, auth_results FROM inbound_messages")
+                .fetch_one(&server.pool)
+                .await
+                .expect("inbound row");
+        assert_eq!(disposition, "quarantine");
+        assert!(auth_results.contains("dmarc=fail"), "{auth_results:?}");
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn dmarc_lookup_tempfail_answers_451_and_persists_nothing() {
+        let rules = HashMap::from([
+            spf_rule(),
+            // The mock answers SERVFAIL for an absent rule; the DMARC lookup
+            // must classify that as TRANSIENT (never as "no record
+            // published") and the session must tempfail.
+            ("_dmarc.example.com", DnsAnswer::Servfail),
+        ]);
+        let (server, mock) =
+            dispatch_server("inbound_dmarc_tempfail", false, false, rules, true).await;
+        let body = b"From: u@example.com\r\nTo: r@rcpt.example.com\r\nSubject: t\r\n\r\nhello\r\n";
+        let reply = data_transaction(
+            server.clone(),
+            "s@send.example.com",
+            "r@rcpt.example.com",
+            body,
+        )
+        .await;
+        assert!(
+            reply.starts_with("451"),
+            "transient DMARC lookup failure must tempfail: {reply:?}"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbound_messages")
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a tempfailed message must not be persisted");
+        mock.stop();
+    }
+
+    // ── ARC sealing (F-16) ────────────────────────────────────────────────
+
+    /// Owns the process-level DKIM-envelope encryption key for one test
+    /// (nextest gives every test its own process; the previous value is
+    /// restored on drop for hygiene).
+    struct DkimKeyEnv;
+    impl DkimKeyEnv {
+        fn set() -> Self {
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            );
+            Self
+        }
+    }
+    impl Drop for DkimKeyEnv {
+        fn drop(&mut self) {
+            std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV);
+        }
+    }
+
+    /// Seed a managed domain with a real DKIM key envelope; returns the
+    /// private key so the seal can be cryptographically re-verified.
+    async fn seed_arc_domain(
+        pool: &PgPool,
+        domain: &str,
+        corrupt_key: bool,
+    ) -> Option<rsa::RsaPrivateKey> {
+        let tenant = format!("arc-{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("ARC {domain}"))
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("dkim keypair");
+        let row_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO domains
+                 (id, tenant_id, name, verified, status, dkim_enabled, dkim_selector,
+                  dkim_public_key, dkim_private_key, ses_verified)
+             VALUES (gen_random_uuid(), $1, $2, true, 'verified', true, 'arc-sel', 'pub', '', true)
+             RETURNING id",
+        )
+        .bind(&tenant)
+        .bind(domain)
+        .fetch_one(pool)
+        .await
+        .expect("insert domain");
+        if corrupt_key {
+            sqlx::query(
+                "UPDATE domains SET dkim_private_key = 'dkim:v1:not-a-real-envelope' WHERE id = $1",
+            )
+            .bind(row_id)
+            .execute(pool)
+            .await
+            .expect("store corrupt envelope");
+            return None;
+        }
+        let aad = apexmail_lib::dkim::dkim_private_key_aad(&tenant, &row_id.to_string());
+        let envelope =
+            apexmail_lib::dkim::encrypt_dkim_private_key(key_pair.private_key_pem.as_str(), &aad)
+                .expect("seal dkim envelope");
+        sqlx::query("UPDATE domains SET dkim_private_key = $1 WHERE id = $2")
+            .bind(&envelope)
+            .bind(row_id)
+            .execute(pool)
+            .await
+            .expect("store envelope");
+        Some(parse_rsa_private_key(key_pair.private_key_pem.as_str()).expect("parse generated key"))
+    }
+
+    async fn arc_server(
+        test: &'static str,
+        corrupt_key: bool,
+    ) -> (
+        Arc<InboundServer>,
+        Option<rsa::RsaPrivateKey>,
+        MockDns,
+        std::mem::ManuallyDrop<DkimKeyEnv>,
+    ) {
+        // The key must be present at seal time (spawn_blocking decrypt), not
+        // just at seed time — hold it for the whole test.
+        let env = std::mem::ManuallyDrop::new(DkimKeyEnv::set());
+        let (server, mock) =
+            dispatch_server(test, false, true, HashMap::from([spf_rule()]), false).await;
+        let key = seed_arc_domain(&server.pool, "arc.example.com", corrupt_key).await;
+        (server, key, mock, env)
+    }
+
+    #[tokio::test]
+    async fn arc_seal_signs_the_accepted_message_and_the_chain_verifies() {
+        let (server, sealing_key, mock, _env) = arc_server("inbound_arc_seal", false).await;
+        let Some(sealing_key) = sealing_key else {
+            panic!("the non-corrupt fixture must return the sealing key");
+        };
+        let body =
+            b"From: u@example.com\r\nTo: r@arc.example.com\r\nSubject: sealed\r\n\r\nhello\r\n";
+        let reply = data_transaction(
+            server.clone(),
+            "s@send.example.com",
+            "r@arc.example.com",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{reply:?}");
+        let raw: Vec<u8> = sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_one(&server.pool)
+            .await
+            .expect("stored message");
+        let raw_text = String::from_utf8_lossy(&raw);
+        assert!(
+            raw_text.contains("ARC-Authentication-Results: i=1;")
+                && raw_text.contains("ARC-Message-Signature: i=1;")
+                && raw_text.contains("ARC-Seal: i=1;"),
+            "the ARC set must ride on the stored message: {raw_text:?}"
+        );
+
+        // The seal must cryptographically verify against the sealing key
+        // over the STORED bytes (trace headers + raw message re-parsed).
+        let (headers, body_bytes) = crate::servers::submission::split_headers_body(&raw);
+        let sets = crate::auth::parse_arc_headers(&String::from_utf8_lossy(headers));
+        assert_eq!(sets.len(), 1, "exactly one ARC set");
+        let public_key = sealing_key.to_public_key();
+        let status = crate::auth::verify_arc_chain(&sets, headers, body_bytes, &|_, _| {
+            Some(public_key.clone())
+        });
+        assert_eq!(status, crate::auth::ArcChainStatus::Pass);
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn arc_seal_skips_when_the_domain_has_no_ready_key() {
+        // arc_seal=true but NO domains row carries a ready key for the
+        // recipient's domain: the message is still accepted, unsealed.
+        // arc_seal=true but NO domains row for the recipient's domain:
+        // there is no managed key, so the message is accepted unsealed.
+        let (server, mock) = dispatch_server(
+            "inbound_arc_nokey",
+            false,
+            true,
+            HashMap::from([spf_rule()]),
+            false,
+        )
+        .await;
+        let body = b"From: u@example.com\r\nTo: r@rcpt.example.com\r\nSubject: t\r\n\r\nhello\r\n";
+        let reply = data_transaction(
+            server.clone(),
+            "s@send.example.com",
+            "r@rcpt.example.com",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{reply:?}");
+        let raw: Vec<u8> = sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            !text.contains("ARC-Seal:"),
+            "no managed key means no seal: {text:?}"
+        );
+        assert!(text.contains("Authentication-Results:"), "{text:?}");
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn arc_seal_skips_messages_that_already_carry_a_chain() {
+        let (server, _key, mock, _env) = arc_server("inbound_arc_prechained", false).await;
+        let body = b"From: u@example.com\r\nARC-Seal: i=1; a=rsa-sha256; cv=none; d=relay.example; s=r; b=AAA\r\nTo: r@arc.example.com\r\nSubject: relayed\r\n\r\nhello\r\n";
+        let reply = data_transaction(
+            server.clone(),
+            "s@send.example.com",
+            "r@arc.example.com",
+            body,
+        )
+        .await;
+        assert!(reply.starts_with("250"), "{reply:?}");
+        let raw: Vec<u8> = sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert_eq!(
+            text.matches("ARC-Seal:").count(),
+            1,
+            "first-hop-only sealing must not stack a second set: {text:?}"
+        );
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn arc_seal_survives_a_corrupt_key_envelope() {
+        let (server, _key, mock, _env) = arc_server("inbound_arc_corrupt", true).await;
+        let body = b"From: u@example.com\r\nTo: r@arc.example.com\r\nSubject: t\r\n\r\nhello\r\n";
+        let reply = data_transaction(
+            server.clone(),
+            "s@send.example.com",
+            "r@arc.example.com",
+            body,
+        )
+        .await;
+        assert!(
+            reply.starts_with("250"),
+            "a seal failure must never reject mail: {reply:?}"
+        );
+        let raw: Vec<u8> = sqlx::query_scalar("SELECT raw_message FROM inbound_messages")
+            .fetch_one(&server.pool)
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&raw).contains("ARC-Seal:"),
+            "corrupt envelope means no seal"
+        );
+        mock.stop();
+    }
+
+    // ── AUTH success / classification against the canonical users table ───
+
+    async fn seed_user(pool: &PgPool, email: &str, password_hash: &str, status: &str) {
+        let tenant = format!("auth-{}", &uuid::Uuid::new_v4().simple().to_string()[..21]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, $2, $3, 'free', 'active')",
+        )
+        .bind(&tenant)
+        .bind(format!("auth {email}"))
+        .bind(&tenant)
+        .execute(pool)
+        .await
+        .expect("insert tenant");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, password_hash, status)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant)
+        .bind(email)
+        .bind(password_hash)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert user");
+    }
+
+    async fn auth_server(test: &str) -> Arc<InboundServer> {
+        let (server, mock) = dispatch_server(test, false, false, HashMap::new(), false).await;
+        mock.stop();
+        server
+    }
+
+    #[tokio::test]
+    async fn inbound_auth_plain_inline_and_two_step_succeed_with_235() {
+        use base64::Engine as _;
+        let server = auth_server("inbound_auth_ok").await;
+        let password = "correct horse battery staple";
+        let email = format!(
+            "auth-{}@example.test",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        seed_user(
+            &server.pool,
+            &email,
+            &apexmail_lib::crypto::hash_password(password).unwrap(),
+            "active",
+        )
+        .await;
+        let b64 =
+            base64::engine::general_purpose::STANDARD.encode(format!("\0{email}\0{password}"));
+
+        // Inline initial response.
+        let mut ctx = plain_context(public_ip());
+        let reply = cmd(&server, &format!("AUTH PLAIN {b64}"), &mut ctx).await;
+        assert!(reply.starts_with("235"), "{reply:?}");
+        assert!(ctx.authenticated);
+
+        // Two-step continuation.
+        let mut ctx = plain_context(public_ip());
+        let step1 = cmd(&server, "AUTH PLAIN", &mut ctx).await;
+        assert!(step1.starts_with("334"), "{step1:?}");
+        let reply = cmd(&server, &b64, &mut ctx).await;
+        assert!(reply.starts_with("235"), "{reply:?}");
+        assert!(ctx.authenticated);
+    }
+
+    #[tokio::test]
+    async fn inbound_auth_login_two_step_completes_with_235() {
+        use base64::Engine as _;
+        let server = auth_server("inbound_auth_login_ok").await;
+        let password = "another correct staple";
+        let email = format!(
+            "login-{}@example.test",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        seed_user(
+            &server.pool,
+            &email,
+            &apexmail_lib::crypto::hash_password(password).unwrap(),
+            "active",
+        )
+        .await;
+
+        let mut ctx = plain_context(public_ip());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(email.as_bytes());
+        let step1 = cmd(&server, "AUTH LOGIN", &mut ctx).await;
+        assert!(step1.starts_with("334"), "{step1:?}");
+        let step2 = cmd(&server, &b64, &mut ctx).await;
+        assert!(
+            step2.starts_with("334 UGFzc3dvcmQ6"),
+            "password prompt: {step2:?}"
+        );
+        let b64p = base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
+        let step3 = cmd(&server, &b64p, &mut ctx).await;
+        assert!(step3.starts_with("235"), "{step3:?}");
+        assert!(ctx.authenticated);
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_classifies_unknown_inactive_and_wrong_password() {
+        let server = auth_server("inbound_auth_matrix").await;
+        let password = "hunter2 password";
+        let good = format!(
+            "good-{}@example.test",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let inactive = format!(
+            "inactive-{}@example.test",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        seed_user(
+            &server.pool,
+            &good,
+            &apexmail_lib::crypto::hash_password(password).unwrap(),
+            "active",
+        )
+        .await;
+        seed_user(
+            &server.pool,
+            &inactive,
+            &apexmail_lib::crypto::hash_password(password).unwrap(),
+            "suspended",
+        )
+        .await;
+
+        // Unknown account: indistinguishable failure (with dummy-verify cost).
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77));
+        let result = server
+            .authenticate_user("nobody@example.test", password, ip)
+            .await;
+        assert!(matches!(result, Err(AuthError::Failed)));
+
+        // Inactive account fails even with the right password.
+        let result = server.authenticate_user(&inactive, password, ip).await;
+        assert!(matches!(result, Err(AuthError::Failed)));
+
+        // Wrong password for a real account.
+        let result = server.authenticate_user(&good, "wrong password", ip).await;
+        assert!(matches!(result, Err(AuthError::Failed)));
+
+        // Correct credentials for a real, active account.
+        let result = server.authenticate_user(&good, password, ip).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn legacy_bcrypt_hash_authenticates_and_migrates_to_argon2id() {
+        let server = auth_server("inbound_auth_bcrypt").await;
+        let password = "legacy bcrypt password";
+        let email = format!(
+            "bcrypt-{}@example.test",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let legacy = bcrypt::hash(password, 4).expect("bcrypt hash");
+        seed_user(&server.pool, &email, &legacy, "active").await;
+
+        let ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 78));
+        let result = server.authenticate_user(&email, password, ip).await;
+        let verified = result.expect("legacy hash must verify");
+        assert!(verified.eq_ignore_ascii_case(&email), "{verified:?}");
+
+        let (stored_hash,): (String,) =
+            sqlx::query_as("SELECT password_hash FROM users WHERE LOWER(email) = LOWER($1)")
+                .bind(&email)
+                .fetch_one(&server.pool)
+                .await
+                .expect("user row");
+        assert!(
+            stored_hash.starts_with("$argon2id$"),
+            "the row must be migrated to argon2id: {stored_hash:?}"
+        );
     }
 }

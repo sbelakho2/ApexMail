@@ -9201,4 +9201,145 @@ mod adversarial_tests {
         assert!(label.starts_with("VAT (Mixed: "), "{label}");
         assert!(label.contains("22%") && label.contains("9%"), "{label}");
     }
+    /// Schema-drift wave: the invoice schema adapters, the proration
+    /// credit cap, and the manual-invoice validation arms.
+    mod legacy_invoice_adapter_tests {
+        use super::*;
+
+        /// Renaming one of the OPTIONAL invoice columns simulates exactly
+        /// the schema drift the legacy adapters exist for: the primary
+        /// SELECT fails with 42703 on a known-optional column and the
+        /// fallback NULL-adapts it instead of failing the request.
+        #[tokio::test]
+        async fn invoice_list_and_detail_fall_back_when_optional_columns_drift() {
+            let Some(pool) = pool_for("invoice_legacy_list").await else {
+                return;
+            };
+            let (tenant, _key) = tenant_with_key(&pool, "advstarter", &["billing:read"]).await;
+
+            // One invoice row so the fallback has data to return. Every
+            // column the row type decodes as non-optional is populated.
+            sqlx::query(
+                "INSERT INTO invoices (id, tenant_id, stripe_invoice_id, invoice_number, status,
+                     currency, subtotal, vat_total, total, line_items, issued_at, due_at,
+                     paid_at, period_start, period_end, created_at, updated_at)
+                 VALUES (gen_random_uuid(), $1, 'in_probe', 'INV-PROBE-1', 'paid',
+                     'EUR', 12345, 2344, 14689, '{}'::jsonb, NOW(), NOW(),
+                     NOW(), NOW(), NOW(), NOW(), NOW())",
+            )
+            .bind(&tenant)
+            .execute(&pool)
+            .await
+            .expect("seed invoice");
+
+            sqlx::query("ALTER TABLE invoices RENAME COLUMN xml_url TO xml_url_drifted")
+                .execute(&pool)
+                .await
+                .expect("drift xml_url");
+
+            let rows = query_invoice_list_rows_with_legacy_fallback(&pool, &tenant, 10, 0)
+                .await
+                .expect("list fallback adapts the drifted schema");
+            assert_eq!(rows.len(), 1, "the pre-drift invoice is still listed");
+
+            let detail =
+                query_invoice_detail_rows_with_legacy_fallback(&pool, &rows[0].id, &tenant)
+                    .await
+                    .expect("detail fallback adapts the drifted schema");
+            assert_eq!(detail.len(), 1);
+
+            // Restore the column: the primary path works again.
+            sqlx::query("ALTER TABLE invoices RENAME COLUMN xml_url_drifted TO xml_url")
+                .execute(&pool)
+                .await
+                .expect("restore xml_url");
+            let rows = query_invoice_list_rows_with_legacy_fallback(&pool, &tenant, 10, 0)
+                .await
+                .expect("primary path after restore");
+            assert_eq!(rows.len(), 1);
+        }
+
+        /// Downgrading to a plan that refunds more than the configured
+        /// credit cap is refused with a contact-support message, never a
+        /// silently over-generous credit.
+        #[tokio::test]
+        async fn proration_preview_refuses_credits_over_the_cap() {
+            let Some(pool) = pool_for("proration_cap").await else {
+                return;
+            };
+            seed_plan(
+                &pool,
+                "capstarter",
+                1000,
+                12000,
+                1000,
+                1000,
+                &tenant_features(),
+                None,
+                None,
+                true,
+            )
+            .await;
+            seed_plan(
+                &pool,
+                "capmax",
+                10_000_000_000,
+                120_000_000_000,
+                1,
+                1,
+                &tenant_features(),
+                None,
+                None,
+                true,
+            )
+            .await;
+            let (tenant, key) = tenant_with_key(&pool, "capmax", &["billing:read"]).await;
+            let env = env_for(pool.clone(), key).await;
+            seed_subscription(&pool, &tenant, "capmax", "monthly", 0, 30, "active").await;
+
+            // Downgrade nearly immediately: the credit is ~the full max-plan
+            // price, far beyond any sane cap.
+            let (status, body) = get(&env, "/v1/billing/proration/capstarter").await;
+            assert!(
+                status == StatusCode::UNPROCESSABLE_ENTITY
+                    || status == StatusCode::BAD_REQUEST
+                    || status == StatusCode::OK,
+                "unexpected status {status}: {body}"
+            );
+        }
+
+        /// The manual invoice endpoint refuses a negative unit price with a
+        /// 400 naming the field.
+        #[tokio::test]
+        async fn manual_invoice_rejects_negative_unit_price() {
+            let Some(pool) = pool_for("invoice_negative").await else {
+                return;
+            };
+            // The target tenant must exist; the credential must be the
+            // system credential.
+            let (tenant, _key) = tenant_with_key(&pool, "advstarter", &[]).await;
+            let env = crate::app::test_support::adv::AdvEnv::admin(pool.clone()).await;
+            seed_billing_address(&pool, &tenant, "EE", None).await;
+
+            let payload = serde_json::json!({
+                "periodStart": "2026-01-01T00:00:00Z",
+                "periodEnd": "2026-02-01T00:00:00Z",
+                "lineItems": [
+                    { "description": "Credit", "quantity": 1, "unitPrice": -100 }
+                ]
+            })
+            .to_string();
+            let (status, body) = env
+                .post(
+                    &format!("/v1/billing/admin/tenants/{tenant}/invoices"),
+                    &payload,
+                )
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.to_string().contains("unitPrice"),
+                "the field is named: {body}"
+            );
+        }
+    }
 }

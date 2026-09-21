@@ -360,10 +360,11 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
     let mut tracked_by_value: HashMap<String, String> = HashMap::new();
 
     for element in doc.select(&ANCHOR_SELECTOR) {
-        let href_attr = match element.value().attr("href") {
-            Some(href) => href,
-            None => continue,
-        };
+        // The `a[href]` selector guarantees the attribute exists.
+        let href_attr = element
+            .value()
+            .attr("href")
+            .expect("a[href] selects only anchors carrying an href");
 
         // Skip mailto:, tel:, and internal links
         if href_attr.starts_with("mailto:")
@@ -1168,17 +1169,16 @@ mod adversarial_batch {
         std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
         let html = r#"<html><body>Hi<script>document.write("</body>");</script></body>"#;
         let out = add_tracking_pixel(html, &job(), &tracking_config());
-        let pixel_at = out.find(r#"<img src="#);
-        let decoy_at = out.find(r#"document.write("</body>")"#);
-        let real_body_end = out.rfind("</body>").expect("real body close");
-        let _ = real_body_end;
-        match (pixel_at, decoy_at) {
-            (Some(pixel), Some(decoy)) => assert!(
-                pixel > decoy,
-                "the pixel must land AFTER the in-script decoy, not inside it"
-            ),
-            _ => panic!("expected both the pixel and the decoy in the output"),
-        }
+        let pixel = out
+            .find(r#"<img src="#)
+            .expect("the pixel must be present in the output");
+        let decoy = out
+            .find(r#"document.write("</body>")"#)
+            .expect("the in-script decoy must survive verbatim");
+        assert!(
+            pixel > decoy,
+            "the pixel must land AFTER the in-script decoy, not inside it"
+        );
         std::env::remove_var(TRACKING_SECRET_KEY_ENV);
     }
 
@@ -1189,15 +1189,16 @@ mod adversarial_batch {
         std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
         let html = r#"<html><body>Hi<style>div::after{content:"</body>"}</style></body>"#;
         let out = add_tracking_pixel(html, &job(), &tracking_config());
-        let pixel_at = out.find(r#"<img src="#);
-        let style_at = out.find(r#"content:"</body>""#);
-        match (pixel_at, style_at) {
-            (Some(pixel), Some(decoy)) => assert!(
-                pixel > decoy,
-                "the pixel must land AFTER the in-style decoy"
-            ),
-            _ => panic!("expected both the pixel and the decoy in the output"),
-        }
+        let pixel = out
+            .find(r#"<img src="#)
+            .expect("the pixel must be present in the output");
+        let decoy = out
+            .find(r#"content:"</body>""#)
+            .expect("the in-style decoy must survive verbatim");
+        assert!(
+            pixel > decoy,
+            "the pixel must land AFTER the in-style decoy"
+        );
         std::env::remove_var(TRACKING_SECRET_KEY_ENV);
     }
 
@@ -1263,5 +1264,101 @@ mod adversarial_batch {
         );
         let html = r#"<a href="https://x.test/a">go</a>"#;
         assert_eq!(rewrite_href_spans(html, &tracked), html);
+    }
+}
+
+#[cfg(test)]
+mod residual_arms {
+    //! The decoy-walk and raw-scan guards: a `</body>` decoy as the LAST
+    //! candidate (the backwards scan must skip it inside script/style and
+    //! keep walking), and a document ending on a dangling `href=`.
+
+    use super::*;
+    use crate::test_support::ENV_LOCK;
+
+    const SECRET: &str = "residual-tracking-secret-32-bytes!";
+
+    fn job() -> EmailJob {
+        EmailJob {
+            id: "ra-j".into(),
+            message_id: "ra-m".into(),
+            tenant_id: "ra-t".into(),
+            domain_id: "ra-d".into(),
+            from: "s@example.com".into(),
+            to: "r@example.com".into(),
+            subject: "s".into(),
+            html: None,
+            text: None,
+            headers: None,
+            attachments: None,
+            campaign_id: None,
+            message_category: "marketing".into(),
+            tags: None,
+            metadata: None,
+            sales_step_execution_id: None,
+            scheduled_at: None,
+            attempt: 0,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn config() -> TrackingConfig {
+        TrackingConfig {
+            enabled: true,
+            base_url: "https://t.example".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
+            secret_key: Some(zeroize::Zeroizing::new(SECRET.to_string())),
+        }
+    }
+
+    /// The LAST `</body>` candidate lives INSIDE a script: the backwards
+    /// scan must skip it (logging the skip) and keep walking — the pixel
+    /// never lands inside the script.
+    #[test]
+    fn pixel_skips_a_trailing_body_decoy_inside_script() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let html = r#"<html><body>Hi<script>var end = "</body>";</script>"#;
+        let out = add_tracking_pixel(html, &job(), &config());
+        let pixel = out.find(r#"<img src="#).expect("pixel appended");
+        let script_close = out.find("</script>").expect("script preserved");
+        assert!(
+            pixel > script_close,
+            "the pixel must not land inside the script element: {out}"
+        );
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+    }
+
+    /// Same for a trailing style decoy.
+    #[test]
+    fn pixel_skips_a_trailing_body_decoy_inside_style() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let html = r#"<html><body>Hi<style>p::after{content:"</body>"}</style>"#;
+        let out = add_tracking_pixel(html, &job(), &config());
+        let pixel = out.find(r#"<img src="#).expect("pixel appended");
+        let style_close = out.find("</style>").expect("style preserved");
+        assert!(
+            pixel > style_close,
+            "the pixel must not land inside the style element: {out}"
+        );
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
+    }
+
+    /// A document ending exactly on a dangling `href=` has no value to
+    /// read: the raw scan skips it instead of panicking.
+    #[test]
+    fn rewrite_scan_survives_an_href_equal_at_eof() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(TRACKING_SECRET_KEY_ENV, SECRET);
+        let html = r#"<a href="https://x.test/a">go</a>href="#;
+        let out = rewrite_links(html, &job(), &config());
+        assert!(
+            out.ends_with("href="),
+            "the dangling marker survives: {out}"
+        );
+        std::env::remove_var(TRACKING_SECRET_KEY_ENV);
     }
 }

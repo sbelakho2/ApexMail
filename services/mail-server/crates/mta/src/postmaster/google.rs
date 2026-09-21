@@ -98,7 +98,13 @@ pub struct GoogleClient {
 
 impl GoogleClient {
     pub fn new(creds: GoogleCredentials) -> Result<Self, String> {
-        Self::with_endpoints(creds, POSTMASTER_BASE.to_string(), TOKEN_URL.to_string())
+        // Both endpoints are overridable so tests (and self-hosted probes)
+        // can point the poll at loopback servers instead of Google.
+        let base_url = std::env::var("GOOGLE_POSTMASTER_API_BASE")
+            .unwrap_or_else(|_| POSTMASTER_BASE.to_string());
+        let token_url =
+            std::env::var("GOOGLE_OAUTH_TOKEN_URL").unwrap_or_else(|_| TOKEN_URL.to_string());
+        Self::with_endpoints(creds, base_url, token_url)
     }
 
     /// Build a client against explicit endpoints. Production callers use

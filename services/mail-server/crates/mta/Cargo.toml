@@ -93,6 +93,10 @@ psl = "2.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen = "0.13"
+# Legacy-hash migration fixture: seeds a bcrypt password row to prove the
+# AUTH login path migrates it to Argon2id. Reuses the workspace bcrypt
+# crate apexmail-lib already depends on — no new vendor graph.
+bcrypt = { workspace = true }
 # Canonical provisioned schema for the DB-backed server tests
 # (`migrator::test_support::fresh_canonical_pool`), the same fixture the
 # worker-processors suite uses. `TEST_DATABASE_URL` gates the suite:

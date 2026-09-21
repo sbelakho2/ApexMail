@@ -265,10 +265,10 @@ pub fn truncate_payload(payload: &serde_json::Value, max_bytes: usize) -> serde_
     }
 
     let truncated = truncate_value(payload, 1024);
-    let serialized = match serde_json::to_string(&truncated) {
-        Ok(value) => value,
-        Err(_) => return truncated,
-    };
+    // Serializing a `serde_json::Value` cannot fail (object keys are always
+    // strings by construction).
+    let serialized =
+        serde_json::to_string(&truncated).expect("serializing a serde_json::Value cannot fail");
 
     if serialized.len() > max_bytes {
         // Aggressive truncation

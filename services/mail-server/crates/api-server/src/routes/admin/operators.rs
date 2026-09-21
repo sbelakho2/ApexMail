@@ -650,3 +650,139 @@ mod adversarial_tests {
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 }
+
+/// Database-outage arms for the operator lifecycle: a failed INSERT and a
+/// failed DELETE must answer the generic Internal error — never leak the
+/// driver detail — while a duplicate email still maps to 409.
+#[cfg(test)]
+mod outage_tests {
+    use crate::app::test_support::adv::AdvEnv;
+    use axum::http::StatusCode;
+
+    async fn seed_operator(pool: &sqlx::PgPool, tenant: &str, email: &str) -> String {
+        // The system tenant is referenced by the admin credential but is
+        // not auto-seeded in per-test databases.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'system', $1 || '-slug', 'enterprise', 'active', NOW(), NOW())
+             ON CONFLICT (id) DO UPDATE SET name = tenants.name",
+        )
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .expect("seed system tenant");
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, mfa_enabled, email_verified, created_at, updated_at)
+             VALUES ($1::uuid, $2, $3, 'Seeded Op', 'x', 'admin', 'active', false, true, NOW(), NOW())",
+        )
+        .bind(&id)
+        .bind(tenant)
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("seed operator");
+        id
+    }
+
+    #[tokio::test]
+    async fn operator_insert_failure_maps_to_internal_and_duplicate_to_conflict() {
+        let Some(pool) = crate::test_db::canonical_pool("ops_insert_fail").await else {
+            return;
+        };
+        // The machine credential carries the literal `system` tenant, and
+        // users.tenant_id has an FK to tenants — provision the sentinel row.
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status)
+             VALUES ('system', 'System Sentinel', 'system-probe-slug', 'enterprise', 'active')
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed system tenant");
+        let env = AdvEnv::admin(pool.clone()).await;
+
+        // A healthy create first (proof the route works).
+        let unique = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let (status, body) = env
+            .post(
+                "/v1/admin/operators",
+                &serde_json::json!({
+                    "email": format!("op-{unique}@example.test"),
+                    "name": "Op One",
+                    "role": "admin"
+                })
+                .to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(!body["tempPassword"].as_str().unwrap_or_default().is_empty());
+
+        // The exact duplicate is a 409 (unique-violation arm).
+        let (status, body) = env
+            .post(
+                "/v1/admin/operators",
+                &serde_json::json!({ "email": format!("op-{unique}@example.test") }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        // Any other database failure (relation hidden) is a generic 500
+        // that leaks nothing.
+        crate::routes::fault::hide_table(&pool, "users")
+            .await
+            .expect("hide users");
+        let (status, body) = env
+            .post(
+                "/v1/admin/operators",
+                &serde_json::json!({ "email": format!("op2-{unique}@example.test") }).to_string(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            !body.to_string().contains("42P01"),
+            "no driver detail in the response: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_delete_failure_maps_to_internal() {
+        let Some(pool) = crate::test_db::canonical_pool("ops_delete_fail").await else {
+            return;
+        };
+        let env = AdvEnv::admin(pool.clone()).await;
+        let tenant = env.tenant_id.clone();
+        let target = seed_operator(
+            &pool,
+            &tenant,
+            &format!("del-{}@example.test", uuid::Uuid::new_v4().simple()),
+        )
+        .await;
+
+        // Unknown id is a 404 (proven before arming so the fault trigger
+        // cannot interfere with middleware bookkeeping).
+        let other = uuid::Uuid::new_v4().to_string();
+        let (status, body) = env
+            .delete(&format!("/v1/admin/operators/{other}?confirm=true"))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+        // Arm the fault so the DELETE statement itself fails after the
+        // guards have passed.
+        crate::routes::fault::arm_delete_fault(&pool, "users", "ops_delete", 0)
+            .await
+            .expect("arm users delete fault");
+
+        let (status, body) = env
+            .delete(&format!("/v1/admin/operators/{target}?confirm=true"))
+            .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        // The failed DELETE left the operator in place.
+        let still_there: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE id = $1::uuid")
+            .bind(&target)
+            .fetch_one(&pool)
+            .await
+            .expect("count target");
+        assert_eq!(still_there, 1, "the failed delete did not remove the row");
+    }
+}

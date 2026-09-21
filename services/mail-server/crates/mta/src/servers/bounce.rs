@@ -209,7 +209,7 @@ impl BounceServer {
         let mut close_reason = "closed";
         // F-14 (ported from inbound/submission): hard wall-clock cap for the
         // whole session and a 4xx/5xx reply budget.
-        let session_deadline = std::time::Instant::now() + SESSION_DEADLINE;
+        let session_deadline = tokio::time::Instant::now() + SESSION_DEADLINE;
         let mut error_count: u32 = 0;
 
         // Single write point for 4xx/5xx replies: every reject counts toward
@@ -272,7 +272,7 @@ impl BounceServer {
             }
 
             // F-14 (ported): the session must not outlive the deadline.
-            if std::time::Instant::now() >= session_deadline {
+            if tokio::time::Instant::now() >= session_deadline {
                 log_smtp_reject(
                     "bounce",
                     peer_ip,
@@ -362,16 +362,15 @@ impl BounceServer {
                 // E-9:total DATA deadline so a slow client cannot drip-feed
                 // lines forever (each line gets at most DATA_LINE_TIMEOUT but
                 // the whole payload at most DATA_TOTAL_TIMEOUT).
-                let deadline = std::time::Instant::now() + DATA_TOTAL_TIMEOUT;
+                let deadline = tokio::time::Instant::now() + DATA_TOTAL_TIMEOUT;
                 loop {
                     line.clear();
+                    // Clamping the per-line timeout to the remaining total
+                    // enforces the whole-payload deadline with this single
+                    // timer — no redundant pre-check needed.
                     let remaining = deadline
-                        .checked_duration_since(std::time::Instant::now())
+                        .checked_duration_since(tokio::time::Instant::now())
                         .unwrap_or(Duration::ZERO);
-                    if remaining.is_zero() {
-                        timed_out = true;
-                        break;
-                    }
                     let per_line = remaining.min(DATA_LINE_TIMEOUT);
                     match tokio::time::timeout(
                         per_line,
@@ -415,12 +414,8 @@ impl BounceServer {
                                 loop {
                                     line.clear();
                                     let remaining = deadline
-                                        .checked_duration_since(std::time::Instant::now())
+                                        .checked_duration_since(tokio::time::Instant::now())
                                         .unwrap_or(Duration::ZERO);
-                                    if remaining.is_zero() {
-                                        timed_out = true;
-                                        break;
-                                    }
                                     match tokio::time::timeout(
                                         remaining.min(DATA_LINE_TIMEOUT),
                                         read_line_capped(&mut stream, MAX_DATA_LINE),
@@ -1263,9 +1258,15 @@ fn extract_status_code(message: &str) -> String {
 
 /// True when a (lower-cased, trimmed) header line marks the start of the
 /// attached original message, i.e. the DSN part is over (M54).
+///
+/// Only `message/rfc822` marks that boundary. `message/delivery-status` is
+/// the DSN's OWN per-recipient part — the part whose `Status:` header is the
+/// authoritative classification input — so treating it as the end of the DSN
+/// skipped every real-world DSN's Status header and downgraded the whole
+/// classification to keyword heuristics (hard bounces recorded as transient,
+/// suppressions never firing for standard DSNs).
 fn is_attached_original_boundary(trimmed_lower: &str) -> bool {
     trimmed_lower.starts_with("content-type: message/rfc822")
-        || trimmed_lower.starts_with("content-type: message/delivery-status")
 }
 
 fn is_dsn_header_line(trimmed_lower: &str) -> bool {
@@ -2465,6 +2466,410 @@ mod tests {
             source.contains(trim_needle),
             "the webhook push path must trim the queue to a bounded length"
         );
+    }
+
+    // ── command-phase error arms over a real socket ────────────────────────
+
+    /// Drive raw lines against a live bounce session and return every reply
+    /// (multi-line aware). The pool/redis are unreachable: nothing here may
+    /// need them.
+    async fn bounce_conversation(steps: &[&[u8]]) -> Vec<String> {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(read_reply(&mut reader).await.starts_with("220"));
+        let mut replies = Vec::new();
+        for step in steps {
+            writer.write_all(step).await.unwrap();
+            let reply = read_full_reply(&mut reader).await;
+            replies.push(reply);
+        }
+        let _ = writer.write_all(b"QUIT\r\n").await;
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+        replies
+    }
+
+    #[tokio::test]
+    async fn bounce_command_error_arms_reply_exactly() {
+        let replies = bounce_conversation(&[
+            b"EHLO client.example\r\n",
+            b"MAIL FROMX:<>\r\n", // MAIL syntax error (F-06)
+            b"MAIL FROM:<>\r\n",  // ok
+            b"RCPT TOX:<bounces+x@bounces.apexmail.ee>\r\n", // RCPT syntax error (F-06)
+            b"VRFY somebody\r\n", // 252, no directory harvest
+            b"HELP\r\n",          // 214 command list
+            b"NOOP\r\n",          // 250
+        ])
+        .await;
+        assert!(replies[0].starts_with("250"));
+        let mail_syntax = &replies[1];
+        assert!(
+            mail_syntax.starts_with("501 5.5.4 Syntax: MAIL FROM:<address>"),
+            "MAIL syntax: {mail_syntax:?}"
+        );
+        assert!(replies[2].starts_with("250"));
+        let rcpt_syntax = &replies[3];
+        assert!(
+            rcpt_syntax.starts_with("501 5.5.4 Syntax: RCPT TO:<address>"),
+            "RCPT syntax: {rcpt_syntax:?}"
+        );
+        let vrfy = &replies[4];
+        assert!(
+            vrfy.starts_with("252 2.5.2"),
+            "VRFY must not reveal validity: {vrfy:?}"
+        );
+        let help = &replies[5];
+        assert!(help.starts_with("214 2.0.0"), "{help:?}");
+        let noop = &replies[6];
+        assert!(noop.starts_with("250 2.0.0"), "{noop:?}");
+    }
+
+    #[tokio::test]
+    async fn a_bare_lf_command_line_is_refused_with_500() {
+        let replies = bounce_conversation(&[b"NOOP\n", b"NOOP\r\n"]).await;
+        let bare_lf = &replies[0];
+        assert!(
+            bare_lf.starts_with("500 5.5.2 Bare LF not allowed"),
+            "bare-LF commands must be refused: {bare_lf:?}"
+        );
+        let post_drain = &replies[1];
+        assert!(
+            post_drain.starts_with("250"),
+            "the session must stay synchronised: {post_drain:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overlong_command_line_is_drained_and_refused_with_500() {
+        let mut long_line = b"X".repeat(MAX_COMMAND_LINE + 1);
+        long_line.extend_from_slice(b"\r\n");
+        let noop: &[u8] = b"NOOP\r\n";
+        let replies = bounce_conversation(&[noop, &long_line, noop]).await;
+        assert!(replies[0].starts_with("250"));
+        let too_long = &replies[1];
+        assert!(
+            too_long.starts_with("500 5.5.2 Line too long"),
+            "over-long command line: {too_long:?}"
+        );
+        assert!(
+            replies[2].starts_with("250"),
+            "the remainder must be drained so the session stays synchronised"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_data_phase_rate_and_message_budgets_reply_452() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://127.0.0.1:1/mta_test")
+            .expect("lazy pool");
+        let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let config = BounceConfig {
+            enabled: true,
+            host: "127.0.0.1".into(),
+            port: 0,
+            hostname: "bounce.test".into(),
+            verp_domain: "bounces.apexmail.ee".into(),
+            verp_sanitize: true,
+            max_message_size: 1024 * 1024,
+            max_connections_per_ip: 10,
+            max_messages_per_connection: 1,
+            max_messages_per_ip_per_hour: 2,
+        };
+        let server = std::sync::Arc::new(BounceServer::new(
+            config,
+            pool,
+            redis,
+            "bounce.test".into(),
+            None,
+            true,
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(read_reply(&mut reader).await.starts_with("220"));
+
+        async fn data_txn(
+            writer: &mut tokio::net::tcp::OwnedWriteHalf,
+            reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+            recipient: &str,
+        ) -> String {
+            writer.write_all(b"MAIL FROM:<>\r\n").await.unwrap();
+            assert!(read_full_reply(reader).await.starts_with("250"));
+            writer
+                .write_all(format!("RCPT TO:<{recipient}>\r\n").as_bytes())
+                .await
+                .unwrap();
+            assert!(read_full_reply(reader).await.starts_with("250"));
+            writer.write_all(b"DATA\r\n").await.unwrap();
+            read_full_reply(reader).await
+        }
+
+        // Transaction 1: admitted at DATA, processing fails on the
+        // unreachable DB (451) — the per-connection counter still moved.
+        let reply = data_txn(
+            &mut writer,
+            &mut reader,
+            "bounces+a=example.com=user@bounces.apexmail.ee",
+        )
+        .await;
+        assert!(reply.starts_with("354"), "{reply:?}");
+        writer
+            .write_all(b"Subject: b\r\n\r\nfailed\r\n.\r\n")
+            .await
+            .unwrap();
+        assert!(read_full_reply(&mut reader).await.starts_with("451"));
+
+        // Transaction 2: refused at DATA with 452 before any transfer.
+        let reply = data_txn(
+            &mut writer,
+            &mut reader,
+            "bounces+b=example.com=user@bounces.apexmail.ee",
+        )
+        .await;
+        assert!(
+            reply.starts_with("452 4.5.3 Too many messages from this connection"),
+            "the per-connection budget must refuse: {reply:?}"
+        );
+
+        writer.write_all(b"QUIT\r\n").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+    }
+
+    /// Under a paused clock every client timer must be SHORTER than the
+    /// server's 120s idle timer, otherwise auto-advance fires the idle
+    /// deadline before the (real-I/O) reply lands. A 60s cap + 30s pause
+    /// between retries guarantees that.
+    async fn paused_read_line(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        loop {
+            let mut line = String::new();
+            match tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line)).await {
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    continue;
+                }
+                Ok(Ok(0)) => panic!("session EOF before the expected reply"),
+                Ok(Ok(_)) => return line,
+                Ok(Err(e)) => panic!("read failed: {e}"),
+            }
+        }
+    }
+
+    async fn paused_read_full(
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) -> String {
+        let mut full = String::new();
+        loop {
+            let line = paused_read_line(reader).await;
+            let more = line.len() >= 4 && line.as_bytes()[3] == b'-';
+            full.push_str(&line);
+            if !more {
+                return full;
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_bounce_session_is_answered_421_under_virtual_time() {
+        // Idle in the command phase: the 120s idle timer fires in virtual
+        // time and the session is closed with 421 (never silently).
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let greeting = paused_read_line(&mut reader).await;
+        assert!(greeting.starts_with("220"), "GREETING: {greeting:?}");
+        writer.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let ehlo = paused_read_full(&mut reader).await;
+        assert!(ehlo.starts_with("250"), "EHLO: {ehlo:?}");
+        // ...and then nothing at all.
+        let reply = paused_read_line(&mut reader).await;
+        assert!(
+            reply.starts_with("421 4.4.2 Idle timeout"),
+            "an idle bounce session must be told why it is going away: {reply:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_bounce_data_phase_answers_421_4_4_2() {
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(read_reply(&mut reader).await.starts_with("220"));
+        // PIPELINE the whole command sequence so the session never idles in
+        // the command phase; the only pending timer after DATA is the
+        // per-line DATA timer, which paused virtual time fires.
+        writer
+            .write_all(
+                b"EHLO c\r\n\
+                  MAIL FROM:<>\r\n\
+                  RCPT TO:<bounces+msg123=example.com=user@bounces.apexmail.ee>\r\n\
+                  DATA\r\n",
+            )
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            let reply = read_full_reply(&mut reader).await;
+            assert!(reply.starts_with('2'), "{reply:?}");
+        }
+        assert!(read_full_reply(&mut reader).await.starts_with("354"));
+        let reply = paused_read_line(&mut reader).await;
+        assert!(
+            reply.starts_with("421 4.4.2 Data timeout exceeded"),
+            "a stalled bounce DATA phase must be answered 421 4.4.2: {reply:?}"
+        );
+        // After the 421 the session breaks; plain await (a timeout(5s) here
+        // would be its own paused-clock timer and could elapse first).
+        let _ = task.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_bounce_session_deadline_closes_with_421_under_virtual_time() {
+        // Heartbeat the session with a NOOP every 30 virtual seconds. The
+        // reply read carries its own 60s budget: the client therefore ALWAYS
+        // owns the nearer runtime timer (60 < the server's 120s idle), so
+        // the idle timer can never be the closer — only the 30-minute
+        // session deadline can.
+        let server = std::sync::Arc::new(test_bounce_server());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = server.clone();
+        let task = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            srv.handle_session(socket, peer).await;
+        });
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let (reader, mut writer) = tcp.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        assert!(paused_read_line(&mut reader).await.starts_with("220"));
+
+        use tokio::io::AsyncBufReadExt as _;
+        let mut saw_deadline = false;
+        for _ in 0..70 {
+            writer.write_all(b"NOOP\r\n").await.unwrap();
+            writer.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let reply = loop {
+                let mut line = String::new();
+                match tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
+                    .await
+                {
+                    // No reply within this virtual window yet — heartbeat on.
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    Ok(Ok(0)) => panic!("session ended without the deadline reply"),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => panic!("read failed: {e}"),
+                }
+                break line;
+            };
+            if reply.starts_with("421 4.7.0 Session deadline exceeded") {
+                saw_deadline = true;
+                break;
+            }
+            assert!(reply.starts_with("250"), "{reply:?}");
+        }
+        assert!(
+            saw_deadline,
+            "the 30-minute session deadline must close the session with 421"
+        );
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("session must finish")
+            .expect("no panic");
+    }
+
+    // ── classification matrix (pure) ───────────────────────────────────────
+
+    fn dsn_with_status(status: &str, extra: &str) -> String {
+        format!(
+            "Content-Type: multipart/report; report-type=delivery-status; boundary=B\r\n\r\n\
+             --B\r\n\r\n\
+             Content-Type: message/delivery-status\r\n\r\n\
+             Final-Recipient: rfc822; user@example.com\r\n\
+             Action: failed\r\n\
+             Status: {status} {extra}\r\n"
+        )
+    }
+
+    #[test]
+    fn classify_bounce_maps_every_enhanced_code_family() {
+        let cases: &[(&str, &str, BounceType)] = &[
+            ("5.1.3", "bad-syntax", BounceType::Hard),
+            ("5.1.4", "ambiguous-address", BounceType::Hard),
+            ("5.1.6", "moved", BounceType::Hard),
+            ("5.1.9", "address-error", BounceType::Hard),
+            ("5.2.3", "message-too-large", BounceType::Hard),
+            ("5.2.9", "mailbox-error", BounceType::Hard),
+            ("5.7.13", "account-disabled", BounceType::Hard),
+            ("5.7.99", "security-error", BounceType::Hard),
+            ("4.2.9", "mailbox-temp", BounceType::Soft),
+        ];
+        for (status, expected_subtype, expected_type) in cases {
+            let info = classify_bounce(&dsn_with_status(status, "detail"));
+            assert_eq!(info.bounce_type, *expected_type, "status {status}");
+            assert_eq!(info.bounce_subtype, *expected_subtype, "status {status}");
+        }
+    }
+
+    #[test]
+    fn a_bare_policy_5_7_1_is_soft_while_an_authentication_5_7_1_is_hard() {
+        let bare = classify_bounce(&dsn_with_status(
+            "5.7.1",
+            "message content rejected by policy",
+        ));
+        assert_eq!(bare.bounce_type, BounceType::Soft);
+        assert_eq!(bare.bounce_subtype, "policy");
+
+        let auth = classify_bounce(&dsn_with_status("5.7.1", "DMARC authentication failed"));
+        assert_eq!(auth.bounce_type, BounceType::Hard);
+        assert_eq!(auth.bounce_subtype, "policy");
     }
 }
 

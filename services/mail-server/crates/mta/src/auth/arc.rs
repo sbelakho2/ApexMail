@@ -536,11 +536,17 @@ pub fn parse_arc_headers(raw_headers: &str) -> Vec<ArcSet> {
     sets.into_values().collect()
 }
 
-/// Format an ARC set for insertion into a message.
+/// Format an ARC set for insertion into a message: the three header fields,
+/// each terminated with CRLF, with NO trailing terminator of its own — the
+/// assembler (`build_stored_message`) supplies exactly one separator before
+/// the original message. (A trailing CRLF here used to double up into a
+/// blank line that terminated the stored header block early, demoting the
+/// original message's own headers to body bytes for every downstream
+/// parser.)
 pub fn format_arc_headers_for_message(set: &ArcSet) -> String {
     format!(
-        "{}\r\n{}\r\n{}\r\n",
-        set.seal, set.message_signature, set.authentication_results,
+        "{}\r\n{}\r\n{}",
+        set.authentication_results, set.message_signature, set.seal,
     )
 }
 

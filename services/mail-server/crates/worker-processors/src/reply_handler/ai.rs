@@ -130,8 +130,9 @@ pub async fn classify_or_fallback(
     match classifier.classify(input).await {
         Ok(classification) => sanitize_classification(classification),
         Err(error) => {
+            let classifier_name = classifier.name();
             warn!(
-                classifier = classifier.name(),
+                classifier = classifier_name,
                 %error,
                 "AI reply classification unavailable; falling back to Unknown (no guess)"
             );

@@ -64,13 +64,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_pool_connects_to_the_configured_database() {
+    async fn db_pool_connects_to_the_configured_database() -> Result<(), Box<dyn std::error::Error>>
+    {
+        #[rustfmt::skip]
         let Some(url) = std::env::var("TEST_DATABASE_URL")
             .ok()
             .filter(|url| !url.trim().is_empty())
-        else {
-            return;
-        };
+        else { return Ok(()) };
         let pool = create_db_pool(&url, 2).await.unwrap_or_else(|error| {
             panic!(
                 "configured TEST_DATABASE_URL is unusable ({error}); \
@@ -83,6 +83,7 @@ mod tests {
             .expect("the pool must serve queries with statement caching enabled");
         assert_eq!(one, 1);
         pool.close().await;
+        Ok(())
     }
 
     #[test]

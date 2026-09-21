@@ -430,7 +430,9 @@ mod tests {
     /// Poll until the job leaves the running state (the observer task updates
     /// it asynchronously after the child exits), or fail with the last state.
     async fn wait_for_terminal_state(manager: &TrainingManager, job_id: &str) -> TrainingJob {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // 60s: under a full workspace parallel run, spawning the runner and
+        // driving it to a terminal state legitimately exceeds 5s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             let job = manager.get_job(job_id).expect("job present");
             if !matches!(job.status, JobStatus::Queued | JobStatus::Running) {

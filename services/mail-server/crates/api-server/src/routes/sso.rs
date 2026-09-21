@@ -2583,3 +2583,258 @@ mod adversarial_handler_tests {
         assert!(!crate::routes::auth::role_requires_mfa("viewer"));
     }
 }
+
+/// Pure-helper coverage: the redirect sanitizer, the Google token-info
+/// validator, the GitHub verified-email selection, and the state
+/// encode/decode round trip. No HTTP, no network, no database.
+#[cfg(test)]
+mod sanitizer_and_token_tests {
+    use super::*;
+    use axum::http::header;
+
+    // ── sanitize_redirect ───────────────────────────────────────────
+
+    #[test]
+    fn sanitize_redirect_allows_safe_relative_paths() {
+        assert_eq!(sanitize_redirect("/"), "/");
+        assert_eq!(sanitize_redirect("/dashboard"), "/dashboard");
+        assert_eq!(
+            sanitize_redirect("/billing/invoices?x=1"),
+            "/billing/invoices?x=1"
+        );
+    }
+
+    #[test]
+    fn sanitize_redirect_falls_back_to_dashboard_for_unsafe_input() {
+        assert_eq!(sanitize_redirect(""), "/dashboard");
+        assert_eq!(sanitize_redirect("https://evil.example"), "/dashboard");
+        assert_eq!(sanitize_redirect("//evil.example"), "/dashboard");
+        assert_eq!(sanitize_redirect("/\\evil.example"), "/dashboard");
+        assert_eq!(sanitize_redirect("relative/path"), "/dashboard");
+        assert_eq!(sanitize_redirect("/path%2f%2f.."), "/dashboard");
+        assert_eq!(sanitize_redirect("/ok/../.."), "/dashboard");
+        assert_eq!(sanitize_redirect("/with\0nul"), "/dashboard");
+    }
+
+    #[test]
+    fn sanitize_redirect_rejects_control_characters_raw_and_encoded() {
+        assert_eq!(sanitize_redirect("/a\r\nb"), "/dashboard");
+        assert_eq!(sanitize_redirect("/a\tb"), "/dashboard");
+        assert_eq!(sanitize_redirect("/a%0d%0ab"), "/dashboard");
+        assert_eq!(sanitize_redirect("/a\u{7f}b"), "/dashboard");
+    }
+
+    // ── Google token-info validation ────────────────────────────────
+
+    fn token_info(overrides: serde_json::Value) -> GoogleTokenInfoResponse {
+        let base = serde_json::json!({
+            "aud": "client-id",
+            "iss": "accounts.google.com",
+            "exp": "9999999999",
+            "sub": "subject-1",
+            "email": "user@example.com",
+            "email_verified": "true",
+            "name": "User One",
+        });
+        let merged = match (base.as_object(), overrides.as_object()) {
+            (Some(base), Some(overrides)) => {
+                let mut base = base.clone();
+                for (k, v) in overrides {
+                    if v.is_null() {
+                        base.remove(k);
+                    } else {
+                        base.insert(k.clone(), v.clone());
+                    }
+                }
+                serde_json::Value::Object(base)
+            }
+            _ => unreachable!("objects"),
+        };
+        serde_json::from_value(merged).expect("token info shape")
+    }
+
+    #[test]
+    fn google_token_accepts_the_canonical_shape() {
+        let profile =
+            validate_google_token_info(token_info(serde_json::json!({})), "client-id", 1_000_000)
+                .expect("valid token");
+        assert_eq!(profile.subject, "subject-1");
+        assert_eq!(profile.email, "user@example.com");
+        assert_eq!(profile.name, "User One");
+    }
+
+    #[test]
+    fn google_token_rejects_mismatched_audience_issuer_expiry_and_identity() {
+        // Wrong audience.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "aud": "other" })),
+            "client-id",
+            0
+        )
+        .is_err());
+        // Spoofed issuer.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "iss": "https://evil.example" })),
+            "client-id",
+            0
+        )
+        .is_err());
+        // Both issuer spellings are accepted.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "iss": "https://accounts.google.com" })),
+            "client-id",
+            0
+        )
+        .is_ok());
+        // Unparseable expiry.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "exp": "soon" })),
+            "client-id",
+            0
+        )
+        .is_err());
+        // Missing expiry.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "exp": null })),
+            "client-id",
+            0
+        )
+        .is_err());
+        // Expired.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "exp": "100" })),
+            "client-id",
+            1_000
+        )
+        .is_err());
+        // Unverified / oddly-cased email flag.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "email_verified": "false" })),
+            "client-id",
+            0
+        )
+        .is_err());
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "email_verified": null })),
+            "client-id",
+            0
+        )
+        .is_err());
+        // Missing / blank email.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "email": null })),
+            "client-id",
+            0
+        )
+        .is_err());
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "email": "   " })),
+            "client-id",
+            0
+        )
+        .is_err());
+        // Missing / blank sub.
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "sub": null })),
+            "client-id",
+            0
+        )
+        .is_err());
+        assert!(validate_google_token_info(
+            token_info(serde_json::json!({ "sub": "" })),
+            "client-id",
+            0
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn google_email_verified_accepts_true_and_one() {
+        assert!(google_email_verified(Some("true")));
+        assert!(google_email_verified(Some("TRUE")));
+        assert!(google_email_verified(Some("1")));
+        assert!(!google_email_verified(Some("yes")));
+        assert!(!google_email_verified(Some("0")));
+        assert!(!google_email_verified(None));
+    }
+
+    // ── OAuth state helpers ─────────────────────────────────────────
+
+    #[test]
+    fn oauth_state_round_trips_the_return_path() {
+        let state = generate_oauth_state("/billing").expect("state");
+        assert!(state.ends_with(":/billing"));
+        assert_eq!(redirect_from_oauth_state(&state), "/billing");
+        // A state without a colon redirects to the dashboard.
+        assert_eq!(redirect_from_oauth_state("no-colon-state"), "/dashboard");
+        // An unsafe embedded path is sanitized.
+        assert_eq!(
+            redirect_from_oauth_state("hash://evil.example"),
+            "/dashboard"
+        );
+    }
+
+    #[test]
+    fn oauth_state_validation_binds_cookie_and_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "sso_google_state=abc123".parse().expect("cookie"),
+        );
+
+        // Missing returned state.
+        assert!(validate_oauth_state(&headers, "sso_google_state", None).is_err());
+        // Missing cookie.
+        let empty = HeaderMap::new();
+        assert!(validate_oauth_state(&empty, "sso_google_state", Some("abc123")).is_err());
+        // Mismatched value.
+        assert!(validate_oauth_state(&headers, "sso_google_state", Some("zzz")).is_err());
+        // Match returns the sanitized redirect target.
+        let target = validate_oauth_state(&headers, "sso_google_state", Some("abc123"))
+            .expect("matching state");
+        assert_eq!(target, "/dashboard");
+        // The cookie stores the FULL state (token:next); the query
+        // parameter must equal it for the match to succeed.
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            header::COOKIE,
+            "sso_google_state=abc:/billing".parse().expect("cookie"),
+        );
+        let target = validate_oauth_state(&headers2, "sso_google_state", Some("abc:/billing"))
+            .expect("matching state with path");
+        assert_eq!(target, "/billing");
+    }
+
+    // ── GitHub verified-email selection ─────────────────────────────
+
+    #[test]
+    fn github_email_selection_never_trusts_unverified_addresses() {
+        let emails = serde_json::json!([
+            { "email": "primary@x.test", "primary": true, "verified": true },
+            { "email": "other@x.test", "primary": false, "verified": true }
+        ]);
+        assert_eq!(
+            select_verified_github_email(Some("profile@x.test"), emails.as_array().expect("arr")),
+            Some("primary@x.test".to_string())
+        );
+
+        // Only an unverified entry: even the profile email must NOT match.
+        let unverified = serde_json::json!([
+            { "email": "u@x.test", "primary": true, "verified": false }
+        ]);
+        assert_eq!(
+            select_verified_github_email(Some("u@x.test"), unverified.as_array().expect("arr")),
+            None
+        );
+
+        // First verified wins when no primary exists.
+        let no_primary = serde_json::json!([
+            { "email": "v1@x.test", "primary": false, "verified": true },
+            { "email": "v2@x.test", "primary": false, "verified": true }
+        ]);
+        assert_eq!(
+            select_verified_github_email(None, no_primary.as_array().expect("arr")),
+            Some("v1@x.test".to_string())
+        );
+    }
+}

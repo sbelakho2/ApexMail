@@ -57,7 +57,7 @@ static SSRF_RESOLVER: LazyLock<TokioResolver> = LazyLock::new(|| {
 
 impl SsrfValidator {
     /// Create a new SSRF validator.
-    pub fn new() -> ProcessorResult<Self> {
+    pub fn new() -> Self {
         let resolver = SSRF_RESOLVER.clone();
 
         let cache = Cache::builder()
@@ -80,12 +80,12 @@ impl SsrfValidator {
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(30));
 
-        Ok(Self {
+        Self {
             resolver,
             cache,
             extra_blocked_hosts,
             max_resolution_age,
-        })
+        }
     }
 
     /// Validate a URL for safe webhook delivery.
@@ -261,21 +261,9 @@ impl SsrfValidator {
 
 impl Default for SsrfValidator {
     fn default() -> Self {
-        Self::new().unwrap_or_else(|e| {
-            tracing::error!(
-                "Failed to create default SSRF validator: {}. Using fallback.",
-                e
-            );
-            Self {
-                resolver: SSRF_RESOLVER.clone(),
-                cache: Cache::builder()
-                    .max_capacity(dns_cache_max_entries())
-                    .time_to_live(Duration::from_secs(dns_cache_ttl_secs()))
-                    .build(),
-                extra_blocked_hosts: Vec::new(),
-                max_resolution_age: Duration::from_secs(30),
-            }
-        })
+        // `new` is infallible (the resolver is shared, the cache is built
+        // from bounded env-derived values), so `Default` delegates directly.
+        Self::new()
     }
 }
 
@@ -477,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_blocked_hostname() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
 
         assert!(validator.is_blocked_hostname("localhost"));
         assert!(validator.is_blocked_hostname("127.0.0.1"));
@@ -490,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_and_resolve_url_public_ip_target() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
         let resolved = validator
             .validate_and_resolve_url("https://8.8.8.8/webhook")
             .await
@@ -507,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_and_resolve_url_blocks_private_ip_target() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
         let err = validator
             .validate_and_resolve_url("https://127.0.0.1/webhook")
             .await
@@ -588,7 +576,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn scheme_https_enforcement_and_hostile_urls() {
-        let validator = SsrfValidator::new().expect("validator");
+        let validator = SsrfValidator::new();
         for url in [
             "ftp://example.com/hook",
             "file:///etc/passwd",
@@ -622,7 +610,7 @@ mod adversarial_tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("ALLOW_WEBHOOK_HTTP", "1");
         std::env::set_var("WEBHOOK_BLOCKED_HOSTS", "internal.corp, evil.example");
-        let validator = SsrfValidator::new().expect("validator");
+        let validator = SsrfValidator::new();
         let resolved =
             futures::executor::block_on(validator.validate_and_resolve_url("http://8.8.8.8/hook"))
                 .expect("the explicit override admits http");
@@ -636,7 +624,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn private_hostnames_fail_closed_even_when_resolution_is_unavailable() {
-        let validator = SsrfValidator::new().expect("validator");
+        let validator = SsrfValidator::new();
         let error = validator
             .validate_and_resolve_url("https://localhost/hook")
             .await
@@ -652,7 +640,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn freshness_check_skips_ip_targets_and_detects_rebinding() {
-        let validator = SsrfValidator::new().expect("validator");
+        let validator = SsrfValidator::new();
         let ip_target = ResolvedWebhookTarget {
             host: "8.8.8.8".to_string(),
             port: 443,
@@ -691,7 +679,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn validate_url_maps_to_the_resolve_variant() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
         assert!(validator.validate_url("https://8.8.8.8/hook").await.is_ok());
         let err = validator
             .validate_url("https://10.0.0.5:9/hook")
@@ -702,7 +690,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn ip_literal_targets_are_classified_without_dns() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
         // A PUBLIC IP literal resolves to itself, flagged host_is_ip.
         let target = validator
             .validate_and_resolve_url("https://1.1.1.1:8443/hook")
@@ -740,7 +728,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn an_unresolvable_public_hostname_is_refused() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
         // A syntactically valid, resolvable-looking name under a reserved
         // TLD cannot resolve: refused (never falls through to delivery).
         let err = validator
@@ -755,7 +743,7 @@ mod adversarial_tests {
 
     #[tokio::test]
     async fn resolution_freshness_detects_a_changed_binding() {
-        let validator = SsrfValidator::new().unwrap();
+        let validator = SsrfValidator::new();
         // A STALE resolution whose re-lookup returns a different set is a
         // refused rebinding. Host "8.8.8.8" re-resolves (literal lookup, no
         // DNS) to {8.8.8.8}, which differs from the pinned {1.1.1.1}.
@@ -826,5 +814,68 @@ mod ipv6_embedded_batch {
         assert!(!is_private_ip(
             &"64:ff9b::8.8.4.4".parse::<IpAddr>().expect("v6")
         ));
+    }
+}
+
+#[cfg(test)]
+mod residual_dns_tests {
+    //! The hostname-resolution half of the validator: a public hostname is
+    //! resolved, every resolved IP is checked, and the pinned target carries
+    //! host_is_ip = false. Requires working DNS (the same requirement as any
+    //! environment that actually delivers webhooks).
+
+    use super::*;
+
+    #[tokio::test]
+    async fn public_hostname_resolves_to_a_pinned_target() {
+        let validator = SsrfValidator::new();
+        let target = validator
+            .validate_and_resolve_url("https://example.com/hook")
+            .await
+            .expect("a public hostname must resolve and validate");
+        assert!(!target.host_is_ip);
+        assert!(
+            !target.resolved_ips.is_empty(),
+            "a successful validation always carries at least one resolved IP"
+        );
+        // The second validation is served from the resolution cache.
+        let second = validator
+            .validate_and_resolve_url("https://example.com/other")
+            .await
+            .expect("cached resolution");
+        assert_eq!(second.resolved_ips, target.resolved_ips);
+    }
+}
+
+#[cfg(test)]
+mod residual_ip_literal_tests {
+    //! The IP-literal half of the validator: private literals are refused
+    //! outright, public ones produce a pinned target, and Default works.
+
+    use super::*;
+
+    #[tokio::test]
+    async fn private_ip_literal_is_refused_and_public_literal_is_pinned() {
+        let validator = SsrfValidator::new();
+        let error = validator
+            .validate_and_resolve_url("https://10.0.0.5:8080/hook")
+            .await
+            .expect_err("an RFC1918 literal must be refused");
+        assert!(error.to_string().contains("private IP"), "{error}");
+
+        let target = validator
+            .validate_and_resolve_url("https://1.1.1.1/hook")
+            .await
+            .expect("a public literal must validate");
+        assert!(target.host_is_ip);
+        assert_eq!(
+            target.resolved_ips,
+            vec!("1.1.1.1".parse::<IpAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn default_delegates_to_new() {
+        let _ = SsrfValidator::default();
     }
 }

@@ -364,4 +364,119 @@ mod tests {
         let default_cfg = ScheduleConfig::default();
         assert_eq!(default_cfg.interval, Duration::from_secs(6 * 60 * 60));
     }
+    // ── poll success + secret-shape arms against a loopback SNDS mock ──────
+
+    /// A canned HTTP/1.1 server: one response for every connection.
+    async fn canned_http_server(response: &'static str) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                    let _ =
+                        tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+                });
+            }
+        });
+        addr
+    }
+
+    fn http_ok(body: &'static str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_successful_snds_poll_is_recorded_and_ingests_the_csv() {
+        let Some(pool) = test_pool("scheduler_snds_ok").await else {
+            return;
+        };
+        let csv = "192.0.2.1,2026-09-20,2026-09-20,100,90,80,Green,0,0,hello,example.com,raw\r\n";
+        let addr = canned_http_server(Box::leak(http_ok(csv).into_boxed_str())).await;
+        let previous = std::env::var("SNDS_DATA_URL").ok();
+        std::env::set_var("SNDS_DATA_URL", format!("http://{addr}/data.aspx"));
+        insert_credential(&pool, "snds-ok", "microsoft", "ref-snds", true).await;
+        let result = run_once(&pool, &resolver_returning(Ok("raw-access-key"))).await;
+        match previous {
+            Some(v) => std::env::set_var("SNDS_DATA_URL", v),
+            None => std::env::remove_var("SNDS_DATA_URL"),
+        }
+        result.expect("a loopback SNDS poll must succeed");
+        let (last_error, failures) = credential_state(&pool, "snds-ok").await;
+        assert_eq!(last_error, None, "a successful poll clears last_error");
+        assert_eq!(failures, 0);
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM postmaster_snds_reputation")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "the CSV row is ingested");
+    }
+
+    #[tokio::test]
+    async fn a_json_snds_secret_is_unwrapped_for_the_poll() {
+        let Some(pool) = test_pool("scheduler_snds_json").await else {
+            return;
+        };
+        let csv = "192.0.2.7,2026-09-20,2026-09-20,10,9,8,Green,0,0,h,sf,raw\r\n";
+        let addr = canned_http_server(Box::leak(http_ok(csv).into_boxed_str())).await;
+        let previous = std::env::var("SNDS_DATA_URL").ok();
+        std::env::set_var("SNDS_DATA_URL", format!("http://{addr}/data.aspx"));
+        insert_credential(&pool, "snds-json", "microsoft", "ref-json", true).await;
+        // The JSON secret shape must be unwrapped to the bare access key.
+        let result = run_once(
+            &pool,
+            &resolver_returning(Ok("{\"access_key\": \"key-123\"}")),
+        )
+        .await;
+        match previous {
+            Some(v) => std::env::set_var("SNDS_DATA_URL", v),
+            None => std::env::remove_var("SNDS_DATA_URL"),
+        }
+        result.expect("the JSON secret shape must poll successfully");
+    }
+
+    #[tokio::test]
+    async fn google_credentials_are_parsed_before_the_network_fails() {
+        let Some(pool) = test_pool("scheduler_google_parse").await else {
+            return;
+        };
+        // Both Google endpoints point at a dead loopback port: the secret
+        // parsing (client_id/client_secret/refresh_token) must succeed and
+        // the inevitable network failure must be recorded, never panic.
+        let previous_base = std::env::var("GOOGLE_POSTMASTER_API_BASE").ok();
+        let previous_token = std::env::var("GOOGLE_OAUTH_TOKEN_URL").ok();
+        std::env::set_var("GOOGLE_POSTMASTER_API_BASE", "http://127.0.0.1:1");
+        std::env::set_var("GOOGLE_OAUTH_TOKEN_URL", "http://127.0.0.1:1");
+        insert_credential(&pool, "g-parse", "google", "ref-g", true).await;
+        let result = run_once(
+            &pool,
+            &resolver_returning(Ok(
+                "{\"client_id\": \"id\", \"client_secret\": \"sec\", \"refresh_token\": \"rt\"}",
+            )),
+        )
+        .await;
+        match previous_base {
+            Some(v) => std::env::set_var("GOOGLE_POSTMASTER_API_BASE", v),
+            None => std::env::remove_var("GOOGLE_POSTMASTER_API_BASE"),
+        }
+        match previous_token {
+            Some(v) => std::env::set_var("GOOGLE_OAUTH_TOKEN_URL", v),
+            None => std::env::remove_var("GOOGLE_OAUTH_TOKEN_URL"),
+        }
+        // run_once never fails for a PER-CREDENTIAL failure — the tick must
+        // survive — but the failure must be recorded on the credential row.
+        result.expect("the tick itself must succeed");
+        let last_error = credential_state(&pool, "g-parse").await.0;
+        assert!(
+            last_error.is_some(),
+            "the dead-endpoint ingest failure must be recorded: {last_error:?}"
+        );
+    }
 }
