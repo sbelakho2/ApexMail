@@ -1653,7 +1653,10 @@ mod adversarial_tests {
         };
         let env = AdvEnv::admin(pool.clone()).await;
         let _ = seed_tenant(&pool, "a", "free", 1).await;
-        let sender = seed_tenant(&pool, "b", "pro", 2).await;
+        // Created TODAY: the newToday metric counts CURRENT_DATE signups,
+        // and on a shared test database no other test guarantees a
+        // same-day tenant (counting one was a cross-test coupling flake).
+        let sender = seed_tenant(&pool, "b", "pro", 0).await;
         seed_event(&pool, &sender, "sent", 1).await;
         seed_event(&pool, &sender, "opened", 20).await;
 

@@ -1,6 +1,7 @@
 # Fail hung tests instead of stalling the whole run: a test exceeding the
-# slow period is retried once, then terminated. Retries absorb one-off
-# scheduling stalls; a genuine hang fails the run with a thread dump in the
-# JUNIT output rather than blocking the pipeline for hours.
+# slow period is retried once, then terminated. The period must be generous
+# enough for INSTRUMENTED (llvm-cov) runs — migrator provisioning tests
+# legitimately run 20+ minutes there — while still bounding a real hang
+# (60 min max). Retries absorb one-off scheduling stalls.
 [profile.default]
-slow-timeout = { period = "300s", terminate-after = 2 }
+slow-timeout = { period = "1800s", terminate-after = 2 }
