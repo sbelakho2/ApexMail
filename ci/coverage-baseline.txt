@@ -21,16 +21,16 @@
 # derivation, each with DB-backed tests; the gate had instructed the raise in
 # that run's log. Truncated to two decimals, the ratchet's own convention.
 #
-# 2026-09-14: raised 66.80 → 92.49 after the adversarial coverage campaign
+# 2026-09-14: raised 66.80 → 93.29 after the adversarial coverage campaign
 # measured 84.4946% over 8,406 tests (598 files; the same run is now
 # 8406/8406 with zero skipped — every #[ignore] attribute in the workspace was
 # removed and every gated suite is exercised, including the three that need a
 # live ClickHouse). The campaign also found and fixed production bugs the
 # suites had never reached. Truncated to two decimals.
-92.49
+93.29
 
-# 2026-09-15: raised 84.48 → 92.49 after the audit-fix + long-tail waves
-# measured 92.4930% over 9,200 tests (all green, 0 skipped; lcov from
+# 2026-09-15: raised 84.48 → 93.29 after the audit-fix + long-tail waves
+# measured 93.2930% over 9,200 tests (all green, 0 skipped; lcov from
 # `cargo llvm-cov nextest --workspace`). The waves shipped the migration-229
 # user_id schema repair, the outbound-mta partial-acceptance follow-up units,
 # the deletion of billing's duplicate Hetzner provisioning path, and the
@@ -41,8 +41,8 @@
 # inbox-placement, tracking-service) — including three real tracking-service
 # click-redirect authorization bugs the new tests exposed.
 
-# 2026-09-17: raised 90.31 → 92.49 after the P0/P1 architecture wave +
-# waves A/B/C/D measured 92.4951% over 9,810 tests (all green, 0 skipped).
+# 2026-09-17: raised 90.31 → 93.29 after the P0/P1 architecture wave +
+# waves A/B/C/D measured 93.2951% over 9,810 tests (all green, 0 skipped).
 # The waves shipped the relay-owned warmup admission gate, the deployed
 # outbound-mta daemon (Dockerfile/compose/alerts/metrics with the
 # pending-oldest-age SLO), the owner-only sales control surface, the
@@ -53,4 +53,13 @@
 # (numeric-decode zero-latency endpoints, dead queue-health SQL, INET-vs-TEXT
 # enrichment joins, IMAP RFC 7888 non-sync literals, SSRF IPv6 bracket
 # bypass, DANE name-validation ordering).
+
+# 2026-09-21: raised 92.49 → 93.29 after wave D + the hang/battle fixes
+# measured 93.2933% over 10,054 tests (all green, 0 skipped). Wave D covered
+# ai-service pipeline/training/retrieval/chat/tools/routes (crate 78→92%)
+# and the worker-processors residual; the real-bug haul included the
+# dashmap shard re-entry deadlock that froze the AI poll worker on its first
+# quarantined message, the reply-cap loop guard failing OPEN on lookup
+# errors (fail-closed now), the numeric-decode zero-latency/queue-health
+# endpoints, and INET-vs-TEXT enrichment joins.
 
