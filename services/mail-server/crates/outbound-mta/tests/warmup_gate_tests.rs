@@ -356,12 +356,27 @@ async fn active_ip_admits_without_quota() {
         .execute(&db)
         .await
         .expect("advisory lock");
-    // The unique non-retired index forbids two rows on one address: the
-    // warming row is REPLACED by the graduated one (a real transition).
-    sqlx::query("UPDATE dedicated_ips SET status = 'active' WHERE ip_address = '127.0.0.1'")
-        .execute(&db)
-        .await
-        .expect("graduate the loopback ip");
+    // Seed the row THIS test needs — an UPDATE of a warming row left by a
+    // sibling process would silently match zero rows if that process had
+    // not seeded yet (or had cleaned up), and the submit would then defer
+    // with "dedicated IP no longer exists". The unique partial index
+    // (ip_address WHERE status non-retired) forbids two live rows on one
+    // address, so clear-then-insert as active.
+    sqlx::query(
+        "DELETE FROM dedicated_ips WHERE ip_address = '127.0.0.1' OR id = 'dip-gate-active'",
+    )
+    .execute(&db)
+    .await
+    .expect("clear loopback rows");
+    sqlx::query(
+        "INSERT INTO dedicated_ips (id, tenant_id, ip_address, status, warmup_started_at, created_at, updated_at)
+         VALUES ('dip-gate-active', 't_warm', '127.0.0.1', 'active', NOW() - INTERVAL '90 days', NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE SET status = 'active',
+             warmup_started_at = NOW() - INTERVAL '90 days', updated_at = NOW()",
+    )
+    .execute(&db)
+    .await
+    .expect("active loopback ip");
 
     let dead = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
