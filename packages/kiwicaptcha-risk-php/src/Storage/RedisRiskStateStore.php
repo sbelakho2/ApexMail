@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk\Storage;
 
+use KiwiCaptcha\Risk\DeploymentNamespace;
 use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\SignalVector;
 use Predis\Client;
@@ -64,13 +65,34 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     private bool $lastIsDuplicate = false;
 
     /**
-     * @param string   $namespace       deployment namespace used in the hash tag {kiwi:<namespace>}
+     * The encoded namespace inside the `{kiwi:<ns>}` hash tag, derived
+     * from the raw configured discriminator through the shared
+     * {@see DeploymentNamespace} derivation.
+     */
+    private readonly string $namespace;
+
+    /** The raw configured deployment discriminator this store was built from. */
+    private readonly string $rawNamespace;
+
+    /** The key-version contract the encoded namespace was derived under. */
+    private readonly int $namespaceVersion;
+
+    /**
+     * @param string   $namespace       the raw configured deployment
+     *                                  discriminator. The store derives
+     *                                  the encoded `{kiwi:<namespace>}`
+     *                                  tag internally, so an encoded
+     *                                  value is never passed here.
      * @param int      $hysteresisMs    global level hysteresis window
      * @param array<string, int> $saturations raw saturation values keyed src_fast..principal (Lua argv order)
+     * @param int      $namespaceKeyVersion the key-version contract
+     *                                  ({@see DeploymentNamespace::VERSION_LEGACY}
+     *                                  or
+     *                                  {@see DeploymentNamespace::VERSION_DIGEST})
      */
     public function __construct(
         private readonly Client $client,
-        private readonly string $namespace = 'd',
+        string $namespace = 'd',
         private readonly int $sourceEpochSecs = 900,
         private readonly int $subnetEpochSecs = 900,
         private readonly int $stateTtlSecs = 1800,
@@ -80,6 +102,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         private readonly int $hysteresisMs = 60000,
         private readonly array $saturations = self::DEFAULT_SATURATIONS,
         private readonly int $outcomeTtlSecs = self::DEFAULT_OUTCOME_TTL_SECS,
+        int $namespaceKeyVersion = DeploymentNamespace::VERSION_LEGACY,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
@@ -87,6 +110,9 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         if ($outcomeTtlSecs < 1) {
             throw new \InvalidArgumentException('outcomeTtlSecs must be >= 1');
         }
+        $this->rawNamespace = $namespace;
+        $this->namespaceVersion = $namespaceKeyVersion;
+        $this->namespace = DeploymentNamespace::derive($namespace, $namespaceKeyVersion);
         $path = dirname(__DIR__, 2) . '/resources/risk-v1.lua';
         if (!is_file($path)) {
             throw new \RuntimeException(
@@ -135,9 +161,22 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         return $this->lastIsDuplicate;
     }
 
+    /** The encoded deployment namespace inside the `{kiwi:<ns>}` hash tag. */
     public function namespace(): string
     {
         return $this->namespace;
+    }
+
+    /** The raw configured deployment discriminator this store was built from. */
+    public function rawNamespace(): string
+    {
+        return $this->rawNamespace;
+    }
+
+    /** The key-version contract the encoded namespace was derived under. */
+    public function namespaceVersion(): int
+    {
+        return $this->namespaceVersion;
     }
 
     /**
@@ -341,24 +380,63 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
      */
     private function observationKeys(RiskObservation $observation): array
     {
-        $ns = $this->namespace;
-        $tag = "{kiwi:{$ns}}";
-        $sourceId = $observation->sourceId;
-        $subnetId = $observation->subnetId;
-        $sessionId = $observation->sessionId ?? str_repeat('0', 32);
-        $principalId = $observation->principalId ?? str_repeat('0', 32);
+        return self::keysFor(
+            $this->rawNamespace,
+            $this->namespaceVersion,
+            $observation->sourceEpoch,
+            $observation->sourceIdPrev,
+            $observation->sourceId,
+            $observation->sourceIdNext,
+            $observation->subnetEpoch,
+            $observation->subnetIdPrev,
+            $observation->subnetId,
+            $observation->subnetIdNext,
+            $observation->sessionId,
+            $observation->principalId,
+            $observation->eventId,
+        );
+    }
+
+    /**
+     * The full key set for one observation, in the Lua keys order, built
+     * from the RAW configured discriminator and an explicit key version:
+     * the returned keys are exactly the keys a store constructed with the
+     * same pair produces. Public so tests (and tooling) can build and
+     * inspect the exact key layout; the Rust risk crate exposes the
+     * identical builder as `RedisRiskStateStore::keys_for`.
+     *
+     * @return list<string>
+     */
+    public static function keysFor(
+        string $rawNamespace,
+        int $namespaceKeyVersion,
+        int $sourceEpoch,
+        string $sourceIdPrev,
+        string $sourceId,
+        string $sourceIdNext,
+        int $subnetEpoch,
+        string $subnetIdPrev,
+        string $subnetId,
+        string $subnetIdNext,
+        ?string $sessionId,
+        ?string $principalId,
+        string $eventId,
+    ): array {
+        $tag = '{kiwi:'.DeploymentNamespace::derive($rawNamespace, $namespaceKeyVersion).'}';
+        $sessionId ??= str_repeat('0', 32);
+        $principalId ??= str_repeat('0', 32);
 
         return [
-            "{$tag}:risk:src:{$observation->sourceEpoch}:{$sourceId}",
-            "{$tag}:risk:src:" . ($observation->sourceEpoch - 1) . ":{$observation->sourceIdPrev}",
-            "{$tag}:risk:src:" . ($observation->sourceEpoch + 1) . ":{$observation->sourceIdNext}",
-            "{$tag}:risk:net:{$observation->subnetEpoch}:{$subnetId}",
-            "{$tag}:risk:net:" . ($observation->subnetEpoch - 1) . ":{$observation->subnetIdPrev}",
-            "{$tag}:risk:net:" . ($observation->subnetEpoch + 1) . ":{$observation->subnetIdNext}",
+            "{$tag}:risk:src:{$sourceEpoch}:{$sourceId}",
+            "{$tag}:risk:src:" . ($sourceEpoch - 1) . ":{$sourceIdPrev}",
+            "{$tag}:risk:src:" . ($sourceEpoch + 1) . ":{$sourceIdNext}",
+            "{$tag}:risk:net:{$subnetEpoch}:{$subnetId}",
+            "{$tag}:risk:net:" . ($subnetEpoch - 1) . ":{$subnetIdPrev}",
+            "{$tag}:risk:net:" . ($subnetEpoch + 1) . ":{$subnetIdNext}",
             "{$tag}:risk:session:{$sessionId}",
             "{$tag}:risk:principal:{$principalId}",
             "{$tag}:risk:global",
-            "{$tag}:risk:dedupe:{$observation->eventId}",
+            "{$tag}:risk:dedupe:{$eventId}",
         ];
     }
 

@@ -16,6 +16,7 @@
 mod common;
 
 use kiwicaptcha_risk::event::RiskEventKind;
+use kiwicaptcha_risk::namespace::NamespaceVersion;
 use kiwicaptcha_risk::redis::RedisRiskStateStore;
 use kiwicaptcha_risk::store::RiskStateStore;
 
@@ -39,7 +40,8 @@ fn redis_now_ms() -> u64 {
 /// The raw `iss` field of the observation's current-epoch source hash.
 fn raw_iss(store: &RedisRiskStateStore, o: &kiwicaptcha_risk::event::RiskObservation) -> i64 {
     let keys = RedisRiskStateStore::keys_for(
-        store.namespace(),
+        store.raw_namespace(),
+        NamespaceVersion::Legacy,
         o.source_epoch,
         &o.source_id_prev,
         &o.source_id,

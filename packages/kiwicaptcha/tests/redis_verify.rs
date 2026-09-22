@@ -4733,6 +4733,40 @@ fn delete_if_pending_is_the_atomic_tri_state() {
     let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
     let stored: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(stored["state"], "consumed", "the consumed record survives");
+
+    // corrupt -> reported as corrupt, never mutated: a record whose
+    // runtime state is neither pending, consumed nor cancelled is
+    // unknown state and the cleanup must not destroy it.
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    store.store(&issued.record).unwrap();
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    let corrupt = raw.replace("\"state\":\"pending\"", "\"state\":\"quantum\"");
+    assert_ne!(raw, corrupt, "the stored record carries the pending marker");
+    redis::cmd("SET")
+        .arg(&key)
+        .arg(&corrupt)
+        .query::<()>(&mut conn)
+        .unwrap();
+    assert!(matches!(
+        store.delete_if_pending(&issued.record.nonce).unwrap(),
+        DeleteIfPending::Corrupt
+    ));
+    let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+    assert_eq!(
+        raw, corrupt,
+        "a record with an unknown runtime state is never mutated"
+    );
+    let _: () = redis::cmd("DEL").arg(&key).query(&mut conn).unwrap();
 }
 
 #[test]

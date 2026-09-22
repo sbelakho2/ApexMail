@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace KiwiCaptcha\Risk\Calibration;
 
+use KiwiCaptcha\Risk\DeploymentNamespace;
 use KiwiCaptcha\Risk\RiskAction;
 use Predis\Client;
 
@@ -185,7 +186,14 @@ final class AggregateCalibrator implements CalibrationStore
 
     private readonly string $samplingMetricsScript;
 
+    /** The encoded namespace inside the `{kiwi:<ns>}` hash tag, derived from the raw discriminator. */
     private readonly string $namespace;
+
+    /** The raw configured deployment discriminator this calibrator was built from. */
+    private readonly string $rawNamespace;
+
+    /** The key-version contract the encoded namespace was derived under. */
+    private readonly int $namespaceVersion;
 
     /** @var array<int, array{bias:int, expiresAt:float}> bounded per-scope cache */
     private array $biasCache = [];
@@ -204,6 +212,7 @@ final class AggregateCalibrator implements CalibrationStore
         private readonly float $falseNegativeCost = self::DEFAULT_FALSE_NEGATIVE_COST,
         private readonly int $outcomeTtlSecs = self::DEFAULT_OUTCOME_TTL_SECS,
         private readonly string $scopeHmacKey = '',
+        int $namespaceKeyVersion = DeploymentNamespace::VERSION_LEGACY,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Calibration namespace must be non-empty and free of braces');
@@ -224,7 +233,9 @@ final class AggregateCalibrator implements CalibrationStore
             || $falseNegativeCost < 0.1 || $falseNegativeCost > 10.0) {
             throw new \InvalidArgumentException('falsePositiveCost and falseNegativeCost must be within 0.1..10.0');
         }
-        $this->namespace = $namespace;
+        $this->rawNamespace = $namespace;
+        $this->namespaceVersion = $namespaceKeyVersion;
+        $this->namespace = DeploymentNamespace::derive($namespace, $namespaceKeyVersion);
         $this->calibrationScript = self::loadScript('calibration.lua');
         $this->registerDecisionScript = self::loadScript('register_decision.lua');
         $this->confirmScript = self::loadScript('confirm.lua');
@@ -249,6 +260,18 @@ final class AggregateCalibrator implements CalibrationStore
     public function namespace(): string
     {
         return $this->namespace;
+    }
+
+    /** The raw configured deployment discriminator this calibrator was built from. */
+    public function rawNamespace(): string
+    {
+        return $this->rawNamespace;
+    }
+
+    /** The key-version contract the encoded namespace was derived under. */
+    public function namespaceVersion(): int
+    {
+        return $this->namespaceVersion;
     }
 
     /**

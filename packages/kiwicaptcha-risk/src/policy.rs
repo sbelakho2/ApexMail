@@ -247,22 +247,46 @@ impl RiskPolicy {
                         obj.len()
                     )));
                 }
+                // The canonical key grammar: the level keys are exactly the
+                // five literal spellings "0".."4". Generic integer parsing
+                // would accept non-canonical spellings ("01", "+1") and
+                // could map two distinct JSON keys onto one logical level,
+                // leaving another level at its built-in default — exactly
+                // the PHP/Rust parser divergence the scope-key grammar
+                // already closes. Every logical level must be declared
+                // exactly once.
+                let mut seen = [false; 5];
                 for (key, action) in obj {
-                    let level: u8 = key.parse().map_err(|_| {
-                        PolicyError::InvalidGlobalFloors(format!("bad level {key}"))
-                    })?;
-                    if level > 4 {
+                    let level = match key.as_str() {
+                        "0" => 0usize,
+                        "1" => 1,
+                        "2" => 2,
+                        "3" => 3,
+                        "4" => 4,
+                        _ => {
+                            return Err(PolicyError::InvalidGlobalFloors(format!(
+                                "bad level {key}"
+                            )));
+                        }
+                    };
+                    if seen[level] {
                         return Err(PolicyError::InvalidGlobalFloors(format!(
-                            "level {level} out of range 0..4"
+                            "duplicate level {level}"
                         )));
                     }
+                    seen[level] = true;
                     let parsed = parse_action(action)?;
                     if level == 0 && parsed != RiskAction::Allow {
                         return Err(PolicyError::InvalidGlobalFloors(
                             "level 0 must be \"allow\"".to_string(),
                         ));
                     }
-                    floors[level as usize] = parsed;
+                    floors[level] = parsed;
+                }
+                if seen.iter().any(|declared| !declared) {
+                    return Err(PolicyError::InvalidGlobalFloors(
+                        "global_floors must declare every level 0..=4".to_string(),
+                    ));
                 }
             }
         }
@@ -611,6 +635,35 @@ mod tests {
                     "scope {scope} score {score} violated its minimum"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn malformed_global_floor_sets_are_rejected() {
+        // The canonical key grammar: the level keys are exactly the five
+        // literal spellings "0".."4", each declared exactly once. A
+        // non-canonical spelling ("01", "+1", "04") must never be parsed
+        // onto a logical level, and a five-member object that repeats one
+        // logical level leaves another level absent — both are
+        // configuration errors in Rust exactly like the PHP parser's
+        // non-integer-key rejection.
+        let malformed = [
+            json!({"0": "allow", "1": "sha16", "01": "deny", "2": "sha18", "3": "sha20"}),
+            json!({"0": "allow", "1": "sha16", "+1": "deny", "2": "sha18", "3": "sha20"}),
+            json!({"0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "04": "sha20"}),
+            json!({"0": "allow", "1": "sha16", "2": "sha18", "3": "sha20"}),
+            json!({"0": "allow", "1": "sha16", "2": "sha18", "3": "sha20", "5": "sha20"}),
+        ];
+        for floors in malformed {
+            let mut cfg = config();
+            cfg["global_floors"] = floors.clone();
+            let err = RiskPolicy::from_config(3, &cfg)
+                .err()
+                .unwrap_or_else(|| panic!("the malformed global_floors {floors} must be rejected"));
+            assert!(
+                matches!(err, PolicyError::InvalidGlobalFloors(_)),
+                "the malformed global_floors {floors} fails the canonical-level rejection: {err}"
+            );
         }
     }
 

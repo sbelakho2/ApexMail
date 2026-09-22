@@ -428,5 +428,223 @@
       },
       "expected_score": 1000
     }
-  ]
+  ],
+  "namespace_vectors": [
+  {
+    "raw": "prod",
+    "version": 1,
+    "derived": "prod",
+    "observation_keys": [
+      "{kiwi:prod}:risk:src:1700000000:bb22",
+      "{kiwi:prod}:risk:src:1699999999:aa11",
+      "{kiwi:prod}:risk:src:1700000001:cc33",
+      "{kiwi:prod}:risk:net:1700000900:ee55",
+      "{kiwi:prod}:risk:net:1700000899:dd44",
+      "{kiwi:prod}:risk:net:1700000901:ff66",
+      "{kiwi:prod}:risk:session:00000000000000000000000000000000",
+      "{kiwi:prod}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:prod}:risk:global",
+      "{kiwi:prod}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:prod}:outcome:dec-1"
+  },
+  {
+    "raw": "tenant/a",
+    "version": 1,
+    "derived": "tenant_a",
+    "observation_keys": [
+      "{kiwi:tenant_a}:risk:src:1700000000:bb22",
+      "{kiwi:tenant_a}:risk:src:1699999999:aa11",
+      "{kiwi:tenant_a}:risk:src:1700000001:cc33",
+      "{kiwi:tenant_a}:risk:net:1700000900:ee55",
+      "{kiwi:tenant_a}:risk:net:1700000899:dd44",
+      "{kiwi:tenant_a}:risk:net:1700000901:ff66",
+      "{kiwi:tenant_a}:risk:session:00000000000000000000000000000000",
+      "{kiwi:tenant_a}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:tenant_a}:risk:global",
+      "{kiwi:tenant_a}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:tenant_a}:outcome:dec-1"
+  },
+  {
+    "raw": "tenant:a",
+    "version": 1,
+    "derived": "tenant_a",
+    "observation_keys": [
+      "{kiwi:tenant_a}:risk:src:1700000000:bb22",
+      "{kiwi:tenant_a}:risk:src:1699999999:aa11",
+      "{kiwi:tenant_a}:risk:src:1700000001:cc33",
+      "{kiwi:tenant_a}:risk:net:1700000900:ee55",
+      "{kiwi:tenant_a}:risk:net:1700000899:dd44",
+      "{kiwi:tenant_a}:risk:net:1700000901:ff66",
+      "{kiwi:tenant_a}:risk:session:00000000000000000000000000000000",
+      "{kiwi:tenant_a}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:tenant_a}:risk:global",
+      "{kiwi:tenant_a}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:tenant_a}:outcome:dec-1"
+  },
+  {
+    "raw": "/a/b_c",
+    "version": 1,
+    "derived": "_a_b_c",
+    "observation_keys": [
+      "{kiwi:_a_b_c}:risk:src:1700000000:bb22",
+      "{kiwi:_a_b_c}:risk:src:1699999999:aa11",
+      "{kiwi:_a_b_c}:risk:src:1700000001:cc33",
+      "{kiwi:_a_b_c}:risk:net:1700000900:ee55",
+      "{kiwi:_a_b_c}:risk:net:1700000899:dd44",
+      "{kiwi:_a_b_c}:risk:net:1700000901:ff66",
+      "{kiwi:_a_b_c}:risk:session:00000000000000000000000000000000",
+      "{kiwi:_a_b_c}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:_a_b_c}:risk:global",
+      "{kiwi:_a_b_c}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:_a_b_c}:outcome:dec-1"
+  },
+  {
+    "raw": "/a_b/c",
+    "version": 1,
+    "derived": "_a_b_c",
+    "observation_keys": [
+      "{kiwi:_a_b_c}:risk:src:1700000000:bb22",
+      "{kiwi:_a_b_c}:risk:src:1699999999:aa11",
+      "{kiwi:_a_b_c}:risk:src:1700000001:cc33",
+      "{kiwi:_a_b_c}:risk:net:1700000900:ee55",
+      "{kiwi:_a_b_c}:risk:net:1700000899:dd44",
+      "{kiwi:_a_b_c}:risk:net:1700000901:ff66",
+      "{kiwi:_a_b_c}:risk:session:00000000000000000000000000000000",
+      "{kiwi:_a_b_c}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:_a_b_c}:risk:global",
+      "{kiwi:_a_b_c}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:_a_b_c}:outcome:dec-1"
+  },
+  {
+    "raw": "tënänt/日本",
+    "version": 1,
+    "derived": "t__n__nt_______",
+    "observation_keys": [
+      "{kiwi:t__n__nt_______}:risk:src:1700000000:bb22",
+      "{kiwi:t__n__nt_______}:risk:src:1699999999:aa11",
+      "{kiwi:t__n__nt_______}:risk:src:1700000001:cc33",
+      "{kiwi:t__n__nt_______}:risk:net:1700000900:ee55",
+      "{kiwi:t__n__nt_______}:risk:net:1700000899:dd44",
+      "{kiwi:t__n__nt_______}:risk:net:1700000901:ff66",
+      "{kiwi:t__n__nt_______}:risk:session:00000000000000000000000000000000",
+      "{kiwi:t__n__nt_______}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:t__n__nt_______}:risk:global",
+      "{kiwi:t__n__nt_______}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:t__n__nt_______}:outcome:dec-1"
+  },
+  {
+    "raw": "prod",
+    "version": 2,
+    "derived": "n_6754af9632a2745e85c293e5aac08633",
+    "observation_keys": [
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1700000000:bb22",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1699999999:aa11",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:src:1700000001:cc33",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000900:ee55",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000899:dd44",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:net:1700000901:ff66",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:session:00000000000000000000000000000000",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:global",
+      "{kiwi:n_6754af9632a2745e85c293e5aac08633}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:n_6754af9632a2745e85c293e5aac08633}:outcome:dec-1"
+  },
+  {
+    "raw": "tenant/a",
+    "version": 2,
+    "derived": "n_584a11c77f870c594a006addb001b6af",
+    "observation_keys": [
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1700000000:bb22",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1699999999:aa11",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:src:1700000001:cc33",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000900:ee55",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000899:dd44",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:net:1700000901:ff66",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:session:00000000000000000000000000000000",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:global",
+      "{kiwi:n_584a11c77f870c594a006addb001b6af}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:n_584a11c77f870c594a006addb001b6af}:outcome:dec-1"
+  },
+  {
+    "raw": "tenant:a",
+    "version": 2,
+    "derived": "n_17a3e3a826ddc810fcba7c515438c955",
+    "observation_keys": [
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1700000000:bb22",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1699999999:aa11",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:src:1700000001:cc33",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000900:ee55",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000899:dd44",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:net:1700000901:ff66",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:session:00000000000000000000000000000000",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:global",
+      "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:n_17a3e3a826ddc810fcba7c515438c955}:outcome:dec-1"
+  },
+  {
+    "raw": "/a/b_c",
+    "version": 2,
+    "derived": "n_df04c2002ded3c11edb9c0bb36718086",
+    "observation_keys": [
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1700000000:bb22",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1699999999:aa11",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:src:1700000001:cc33",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000900:ee55",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000899:dd44",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:net:1700000901:ff66",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:session:00000000000000000000000000000000",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:global",
+      "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:n_df04c2002ded3c11edb9c0bb36718086}:outcome:dec-1"
+  },
+  {
+    "raw": "/a_b/c",
+    "version": 2,
+    "derived": "n_a6812404345a6b15a24d92f8ad62d205",
+    "observation_keys": [
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1700000000:bb22",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1699999999:aa11",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:src:1700000001:cc33",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000900:ee55",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000899:dd44",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:net:1700000901:ff66",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:session:00000000000000000000000000000000",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:global",
+      "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:n_a6812404345a6b15a24d92f8ad62d205}:outcome:dec-1"
+  },
+  {
+    "raw": "tënänt/日本",
+    "version": 2,
+    "derived": "n_b48c4fcfb774fee4fc5f08704b886099",
+    "observation_keys": [
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1700000000:bb22",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1699999999:aa11",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:src:1700000001:cc33",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000900:ee55",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000899:dd44",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:net:1700000901:ff66",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:session:00000000000000000000000000000000",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:principal:00000000000000000000000000000000",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:global",
+      "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:risk:dedupe:0123abcd"
+    ],
+    "outcome_ledger_key": "{kiwi:n_b48c4fcfb774fee4fc5f08704b886099}:outcome:dec-1"
+  }
+]
 }

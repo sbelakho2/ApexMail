@@ -123,10 +123,18 @@ final class RiskPolicy
                 throw new \InvalidArgumentException('Policy config "global_floors" must be an array');
             }
             foreach ($config['global_floors'] as $level => $action) {
-                $level = (int) $level;
-                if ($level < 0 || $level > 4) {
+                // The canonical key grammar: a level key is one of the
+                // five literal spellings 0..4. A non-integer spelling
+                // ('01', '+1', '04') must never be parsed onto a logical
+                // level — the Rust parser's literal-level grammar rejects
+                // the identical forms, and one shared acceptance set is
+                // what keeps the two policy readers in agreement.
+                if (!is_int($level) || $level < 0 || $level > 4) {
                     throw new \InvalidArgumentException(
-                        sprintf('Global floor level %d must be within 0..4', $level)
+                        sprintf(
+                            'Global floor level %s must be within 0..4',
+                            is_int($level) ? (string) $level : gettype($level),
+                        )
                     );
                 }
                 $parsed = is_string($action)

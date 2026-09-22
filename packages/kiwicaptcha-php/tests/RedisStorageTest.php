@@ -1416,6 +1416,19 @@ final class RedisStorageTest extends TestCase
         self::assertSame('deleted-pending', $result->state);
         self::assertNull($client->store['kiwicaptcha:pending-nonce'] ?? null, 'the pending record is deleted atomically');
 
+        // corrupt -> never mutated, reported as corrupt: a record whose
+        // runtime state is neither pending, consumed nor cancelled is
+        // unknown state and the cleanup must not destroy it.
+        $corruptJson = json_encode([
+            ...$this->makeRecord('corrupt-nonce')->toArray(),
+            'state' => 'quantum',
+        ], JSON_THROW_ON_ERROR);
+        $client->store['kiwicaptcha:corrupt-nonce'] = $corruptJson;
+        $result = $storage->deleteIfPending('corrupt-nonce');
+        self::assertSame('corrupt', $result->state);
+        self::assertTrue($result->isCorrupt());
+        self::assertSame($corruptJson, $client->store['kiwicaptcha:corrupt-nonce'] ?? null, 'a record with an unknown runtime state is never mutated');
+
         // consumed -> kept, state returned intact
         $storage->store($this->makeRecord('consumed-nonce'));
         $identity = 'op-'.hash('sha256', 'race');

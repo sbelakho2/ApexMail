@@ -428,8 +428,11 @@ return {updated, 1}
 /// deleted (the committed recovery evidence survives a racing redeem), a
 /// cancelled record is returned verbatim and never deleted either (dead
 /// but retained until its TTL — a cancellation can never be resurrected as
-/// pending), and only a pending record is deleted (the one-shot
-/// cheap-failure policy). Closes the check-then-delete toctou of a separate
+/// pending), and only a record carrying the exact `state":"pending"`
+/// marker is deleted (the one-shot cheap-failure policy). A record with
+/// any other runtime state is corrupt: it is reported as such and never
+/// mutated, mirroring the corruption semantics of the chain, post-solve
+/// and Siteverify state. Closes the check-then-delete toctou of a separate
 /// `consumed_state` read followed by `DEL`. The deleted-pending
 /// transition is durability-critical: [`RedisChallengeStore::delete_if_pending`]
 /// applies the same verified replica wait as the other transitions
@@ -447,8 +450,11 @@ end
 if string.find(v, '"state":"cancelled"', 1, true) then
   return {'cancelled', v}
 end
-redis.call("DEL", KEYS[1])
-return {'deleted-pending'}
+if string.find(v, '"state":"pending"', 1, true) then
+  redis.call("DEL", KEYS[1])
+  return {'deleted-pending'}
+end
+return {'corrupt'}
 "#;
 
 /// One atomic cancellation transition: the pending record is flipped to
@@ -549,6 +555,11 @@ pub enum DeleteIfPending {
     /// consumed state dominates the enum's size, and the common paths
     /// (missing / deleted-pending / cancelled) stay pointer-sized.
     Consumed(Box<ConsumedState>),
+    /// The record exists but does not carry the exact `state":"pending"`
+    /// marker (an unknown or malformed runtime state): the cleanup never
+    /// mutates it and reports the corruption to the caller, mirroring
+    /// the chain/post-solve/Siteverify corruption semantics.
+    Corrupt,
 }
 
 /// The outcome of the atomic pending → cancelled transition via
@@ -790,6 +801,7 @@ fn parse_delete_if_pending(value: redis::Value) -> DeleteIfPending {
     };
     match state.as_str() {
         "cancelled" => DeleteIfPending::Cancelled,
+        "corrupt" => DeleteIfPending::Corrupt,
         "consumed" => {
             let raw = match items.get(1) {
                 Some(redis::Value::BulkString(bytes)) => {
@@ -2517,12 +2529,14 @@ impl ProductionVerifier {
                     }
                     Ok(DeleteIfPending::DeletedPending)
                     | Ok(DeleteIfPending::Missing)
-                    | Ok(DeleteIfPending::Cancelled) => {
+                    | Ok(DeleteIfPending::Cancelled)
+                    | Ok(DeleteIfPending::Corrupt) => {
                         // Missing, or the pending record was atomically
                         // deleted, or the record is cancelled (dead but
-                        // retained — the cleanup never deletes it): the
-                        // one-shot verdict stands and the cancelled record is
-                        // never resurrectable.
+                        // retained — the cleanup never deletes it), or the
+                        // record carries an unknown runtime state (corrupt:
+                        // the cleanup never mutates it): the one-shot
+                        // verdict stands and no record was erased.
                         return VerifyOutcome::Invalid(e);
                     }
                     Err(_) => {

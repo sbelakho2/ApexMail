@@ -29,6 +29,7 @@ pub mod hysteresis;
 pub mod identity;
 pub mod keys;
 pub mod metrics;
+pub mod namespace;
 pub mod network;
 pub mod policy;
 pub mod profile;

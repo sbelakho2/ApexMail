@@ -377,7 +377,9 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
      * documented typed outcomes only, no unexpected exception, no
      * authorization surface. The fused cleanup's undecodable-consumed
      * envelope is the one documented RuntimeException, which the
-     * verifier's cleanup path maps to StorageUnavailable.
+     * verifier's cleanup path maps to StorageUnavailable; an envelope
+     * whose state marker is bogus answers the typed 'corrupt' cleanup
+     * state and is never mutated.
      */
     private function assertStoreBoundariesTyped(RedisStorage $storage, string $nonce): void
     {
@@ -386,7 +388,7 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         $this->assertTyped(fn () => $storage->consumedState($nonce), 'consumedState');
         try {
             $cleanup = $storage->deleteIfPending($nonce);
-            self::assertContains($cleanup->state, ['missing', 'deleted-pending', 'consumed', 'cancelled'], 'the cleanup state is typed');
+            self::assertContains($cleanup->state, ['missing', 'deleted-pending', 'consumed', 'cancelled', 'corrupt'], 'the cleanup state is typed');
         } catch (\RuntimeException $e) {
             self::assertStringContainsString('undecodable consumed envelope', $e->getMessage(), 'the documented fused-cleanup refusal');
         }

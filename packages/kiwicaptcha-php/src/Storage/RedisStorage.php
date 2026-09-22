@@ -228,7 +228,10 @@ LUA;
 -- notation). A consumed record is returned verbatim and kept. A
 -- cancelled record is returned verbatim and kept too: the cancelled
 -- challenge is dead but retained until its TTL, never eagerly deleted.
--- Only a pending record is deleted.
+-- Only a record carrying the exact '"state":"pending"' marker is
+-- deleted; any other runtime state is corrupt and is reported without
+-- mutating the record (the corruption semantics the chain, post-solve
+-- and Siteverify state apply).
 --
 -- The DEL is a durability-critical write: the caller applies the same
 -- verified WAIT barrier as the other transitions, so a burned challenge
@@ -246,8 +249,11 @@ end
 if string.find(v, '"state":"cancelled"', 1, true) then
   return {'cancelled', v}
 end
-redis.call("DEL", KEYS[1])
-return {'deleted-pending'}
+if string.find(v, '"state":"pending"', 1, true) then
+  redis.call("DEL", KEYS[1])
+  return {'deleted-pending'}
+end
+return {'corrupt'}
 LUA;
 
     /**
@@ -857,6 +863,14 @@ LUA;
             // ConsumedRecord rides along: the cancelled state is not
             // consumed evidence. No WAIT: no mutation occurred.
             return new \KiwiCaptcha\DeleteIfPendingResult('cancelled');
+        }
+        if ($state === 'corrupt') {
+            // The record exists but does not carry the exact pending
+            // marker (an unknown or malformed runtime state): the
+            // cleanup never mutates it and reports the corruption, the
+            // same fail-closed semantics the chain, post-solve and
+            // Siteverify state apply. No WAIT: no mutation occurred.
+            return new \KiwiCaptcha\DeleteIfPendingResult('corrupt');
         }
         // consumed: decode the retained envelope from the returned bytes
         // (the committed result and the recorded operation identity ride

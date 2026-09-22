@@ -153,8 +153,7 @@ pub enum BindingMode {
 ///   stored version flip can never change the effective protocol and a
 ///   stripped, substituted or injected program always invalidates the
 ///   challenge. An old verifier rejects version 4 as unknown.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChallengeRecord {
     pub nonce: String,
     pub scope: String,
@@ -331,6 +330,125 @@ pub struct ChallengeRecord {
     /// keep verifying unchanged. Shared with the PHP core.
     #[serde(default = "default_kid")]
     pub kid: u32,
+}
+
+/// The wire mirror of [`ChallengeRecord`]: exactly the serde attributes
+/// the interchange type carries, so unknown fields, aliases and defaults
+/// stay byte-compatible. It exists only to separate the permissive
+/// field-level decode from the structural contract enforced by
+/// [`ChallengeRecord`]'s `Deserialize`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChallengeRecord {
+    nonce: String,
+    scope: String,
+    #[serde(alias = "ip_hash")]
+    binding_tag: String,
+    issued_at: u64,
+    expires_at: u64,
+    algorithm: PoWAlgorithm,
+    m_kib: u32,
+    t: u32,
+    p: u32,
+    target_bits: u32,
+    salt: String,
+    prefix: String,
+    challenge: String,
+    min_duration_ms: u64,
+    #[serde(default)]
+    issued_at_ns: u64,
+    #[serde(default)]
+    attempts_used: u32,
+    #[serde(default = "default_protocol_version")]
+    protocol_version: u8,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default = "default_policy_version")]
+    policy_version: u32,
+    #[serde(default)]
+    request_binding: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    decoy_field: Option<String>,
+    #[serde(default)]
+    execution_program: Option<String>,
+    #[serde(default)]
+    execution_version: Option<u8>,
+    #[serde(default)]
+    execution_commitment: Option<String>,
+    #[serde(default = "default_kid")]
+    kid: u32,
+}
+
+impl From<RawChallengeRecord> for ChallengeRecord {
+    fn from(raw: RawChallengeRecord) -> Self {
+        ChallengeRecord {
+            nonce: raw.nonce,
+            scope: raw.scope,
+            binding_tag: raw.binding_tag,
+            issued_at: raw.issued_at,
+            expires_at: raw.expires_at,
+            algorithm: raw.algorithm,
+            m_kib: raw.m_kib,
+            t: raw.t,
+            p: raw.p,
+            target_bits: raw.target_bits,
+            salt: raw.salt,
+            prefix: raw.prefix,
+            challenge: raw.challenge,
+            min_duration_ms: raw.min_duration_ms,
+            issued_at_ns: raw.issued_at_ns,
+            attempts_used: raw.attempts_used,
+            protocol_version: raw.protocol_version,
+            region: raw.region,
+            policy_version: raw.policy_version,
+            request_binding: raw.request_binding,
+            issuer: raw.issuer,
+            hostname: raw.hostname,
+            decoy_field: raw.decoy_field,
+            execution_program: raw.execution_program,
+            execution_version: raw.execution_version,
+            execution_commitment: raw.execution_commitment,
+            kid: raw.kid,
+        }
+    }
+}
+
+/// Deserialization is the public reconstruction boundary of the
+/// cross-language storage schema: it decodes the wire mirror and then
+/// applies [`record_is_structurally_valid`], the same one-call
+/// structural authority the verifier and the Redis storage decoder
+/// consult. A record that violates the structural contract (an
+/// incomplete execution triplet, a protocol/extension mismatch, a
+/// broken identifier alphabet, impossible lifetimes) is rejected here,
+/// exactly like the PHP `ChallengeRecord::fromArray()` boundary — a
+/// library user can never hold a typed `ChallengeRecord` that the
+/// verifier would reject as malformed.
+impl<'de> Deserialize<'de> for ChallengeRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawChallengeRecord::deserialize(deserializer)?;
+        let record = ChallengeRecord::from(raw);
+        if !record_is_structurally_valid(&record) {
+            return Err(serde::de::Error::custom(
+                "challenge record violates the structural contract",
+            ));
+        }
+
+        Ok(record)
+    }
+}
+
+/// The one structural authority: the verifier's record validator, shared
+/// by the deserialization boundary, the Redis storage decoder and the
+/// verifier itself.
+pub fn record_is_structurally_valid(record: &ChallengeRecord) -> bool {
+    crate::verify::validate_record(record).is_ok()
 }
 
 fn default_kid() -> u32 {
@@ -3506,6 +3624,10 @@ mod tests {
 
         let mut plain = armed.record.clone();
         plain.decoy_field = None;
+        // Dropping the decoy from a v3 record is structurally invalid
+        // (the decoy is mandatory on v3 and forbidden on v2): the
+        // unarmed wire shape is a v2 record.
+        plain.protocol_version = 2;
         let plain_json = serde_json::to_string(&plain).unwrap();
         assert!(!plain_json.contains("decoy_field"));
         let plain_back: ChallengeRecord = serde_json::from_str(&plain_json).unwrap();

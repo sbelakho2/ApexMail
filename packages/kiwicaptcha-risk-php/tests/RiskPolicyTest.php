@@ -229,6 +229,36 @@ final class RiskPolicyTest extends TestCase
         self::assertCount(5, $policy->globalFloors);
     }
 
+    public function testGlobalFloorKeysAreCanonical(): void
+    {
+        // The level keys are exactly the five canonical spellings 0..4,
+        // each declared exactly once. A non-canonical spelling ('01',
+        // '+1', '04') must never be parsed onto a logical level, and a
+        // five-member set that repeats one logical level leaves another
+        // level absent: both are configuration errors here exactly like
+        // the Rust parser's literal-level grammar.
+        foreach ([
+            [0 => 'allow', 1 => 'sha16', '01' => 'deny', 2 => 'sha18', 3 => 'sha20'],
+            [0 => 'allow', 1 => 'sha16', '+1' => 'deny', 2 => 'sha18', 3 => 'sha20'],
+            [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', '04' => 'sha20'],
+        ] as $floors) {
+            $config = $this->config();
+            $config['global_floors'] = $floors;
+            try {
+                RiskPolicy::fromConfig($config);
+                self::fail(sprintf('the malformed global_floors %s must be rejected', json_encode($floors)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertThat(
+                    $e->getMessage(),
+                    self::logicalOr(
+                        self::stringContains('global_floors'),
+                        self::stringContains('Global floor level'),
+                    ),
+                );
+            }
+        }
+    }
+
     public function testGlobalFloorAppliedInDegradedMode(): void
     {
         $config = $this->config();

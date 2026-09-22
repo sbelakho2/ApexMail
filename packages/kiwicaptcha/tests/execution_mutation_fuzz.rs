@@ -921,9 +921,16 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
 
         // The record execution_commitment mutations: a substituted,
         // truncated or non-hex commitment fails the authenticated
-        // commitment equivalence before any execution work.
-        let mut base = serde_json::to_value(&probe.record).expect("record serializes");
-        let original_commitment = base["execution_commitment"].as_str().unwrap().to_string();
+        // commitment equivalence before any execution work. The record
+        // is mutated in memory: the public deserialization boundary
+        // applies the structural contract, so a structurally invalid
+        // commitment can no longer be built through serde — the
+        // verifier's gate is exercised directly.
+        let original_commitment = probe
+            .record
+            .execution_commitment
+            .clone()
+            .expect("the armed probe carries a commitment");
         let commitment_last = original_commitment.as_bytes()[63];
         let commitment_last_flipped = if commitment_last == b'1' { '2' } else { '1' };
         let commitment_last_mutated =
@@ -935,16 +942,14 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
             "g".repeat(64),
             "A".repeat(64),
         ] {
-            base["execution_commitment"] = serde_json::Value::String(commitment.clone());
-            let record: ChallengeRecord =
-                serde_json::from_value(base.clone()).expect("the mutated record still parses");
+            let mut record = probe.record.clone();
+            record.execution_commitment = Some(commitment.clone());
             let label = what(format!("commitment variant {}", commitment.len()));
             assert_eq!(
                 guarded(&label, || validate_record(&record)),
                 Err(VerifyError::MalformedRecord),
                 "{label} must fail the commitment equivalence"
             );
-            let mut record = record;
             let outcome = guarded(&label, || {
                 verify_probe(
                     &probe,
@@ -956,7 +961,6 @@ fn record_evidence_mutations_never_panic_and_reject_deterministically() {
             assert_invalid(&label, outcome);
             cases += 1;
         }
-        base["execution_commitment"] = serde_json::Value::String(original_commitment);
 
         // The record execution-version mutations: values outside the
         // canonical register (1..=MAX_EXECUTION_VERSION) are malformed,

@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::event::RiskObservation;
+use crate::namespace::{deployment_namespace, NamespaceVersion};
 use crate::signals::SignalVector;
 use crate::store::{
     AssessV2Reply, Observed, OutcomeRegistration, RiskStateStore, RiskStoreError,
@@ -88,7 +89,15 @@ pub const DEFAULT_POOL_SIZE: usize = 4;
 /// Redis-backed [`RiskStateStore`].
 pub struct RedisRiskStateStore {
     client: redis_crate::Client,
+    /// The encoded namespace inside the `{kiwi:<ns>}` hash tag, derived
+    /// from `raw_namespace` through the shared deployment derivation.
     namespace: String,
+    /// The raw configured deployment discriminator: kept so the namespace
+    /// version can be switched explicitly after construction, and so the
+    /// encoded value is never mistaken for the deployment identity.
+    raw_namespace: String,
+    /// The key-version contract the encoded namespace was derived under.
+    namespace_version: NamespaceVersion,
     state_ttl_secs: u64,
     dedupe_ttl_secs: u64,
     hysteresis_ms: u64,
@@ -220,15 +229,48 @@ impl RedisRiskStateStore {
     /// TTL, 86400 s principal TTL, 86400 s outcome-ledger TTL, default
     /// saturations, pool size 4).
     ///
+    /// `namespace` is the RAW configured discriminator: the store derives
+    /// the encoded `{kiwi:<ns>}` tag through the shared deployment
+    /// derivation ([`crate::namespace::deployment_namespace`]) with the
+    /// legacy key version, the historical key shape. A deployment that
+    /// migrates to the digest version switches explicitly through
+    /// [`RedisRiskStateStore::with_namespace_version`].
+    ///
     /// # Panics
     ///
     /// Panics if the namespace is empty or contains `{`/`}` (the hash tag
     /// would be malformed), mirroring the PHP constructor's
     /// `InvalidArgumentException`.
     pub fn new(client: redis_crate::Client, namespace: &str) -> RedisRiskStateStore {
+        RedisRiskStateStore::new_with_namespace_version(
+            client,
+            namespace,
+            NamespaceVersion::Legacy,
+        )
+    }
+
+    /// Builds a store with an explicit namespace key version (the raw
+    /// namespace is still the configured discriminator, never an encoded
+    /// value).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the namespace is empty or contains `{`/`}`.
+    pub fn new_with_namespace_version(
+        client: redis_crate::Client,
+        namespace: &str,
+        namespace_version: NamespaceVersion,
+    ) -> RedisRiskStateStore {
+        assert!(
+            !namespace.is_empty() && !namespace.contains(['{', '}']),
+            "Risk namespace must be non-empty and free of braces"
+        );
+        let encoded = deployment_namespace(namespace, namespace_version);
         RedisRiskStateStore {
             client,
-            namespace: namespace.to_string(),
+            namespace: encoded,
+            raw_namespace: namespace.to_string(),
+            namespace_version,
             state_ttl_secs: 1800,
             dedupe_ttl_secs: 60,
             hysteresis_ms: 60_000,
@@ -319,9 +361,31 @@ impl RedisRiskStateStore {
         store
     }
 
-    /// The deployment namespace inside the `{kiwi:<ns>}` hash tag.
+    /// The encoded deployment namespace inside the `{kiwi:<ns>}` hash
+    /// tag (the derived value, never the raw configured discriminator).
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// The raw configured deployment discriminator this store was built
+    /// from.
+    pub fn raw_namespace(&self) -> &str {
+        &self.raw_namespace
+    }
+
+    /// The key-version contract the encoded namespace was derived under.
+    pub fn namespace_version(&self) -> NamespaceVersion {
+        self.namespace_version
+    }
+
+    /// Re-derive every key from the raw namespace under an explicit key
+    /// version: switching an existing deployment to
+    /// [`NamespaceVersion::Digest`] changes its key space, so the caller
+    /// performs this deliberately as a migration.
+    pub fn with_namespace_version(mut self, namespace_version: NamespaceVersion) -> Self {
+        self.namespace = deployment_namespace(&self.raw_namespace, namespace_version);
+        self.namespace_version = namespace_version;
+        self
     }
 
     /// The configured connection pool size.
@@ -348,9 +412,14 @@ impl RedisRiskStateStore {
     /// safe. `session_id`/`principal_id` are hex-encoded; `None` maps to
     /// the contract's all-zero placeholder. Public so tests (and tooling)
     /// can build and inspect the exact key layout.
+    ///
+    /// `namespace` is the RAW configured discriminator and
+    /// `namespace_version` selects the derivation: the returned keys are
+    /// exactly the keys the store built with the same pair produces.
     #[allow(clippy::too_many_arguments)]
     pub fn keys_for(
         namespace: &str,
+        namespace_version: NamespaceVersion,
         source_epoch: i64,
         source_id_prev: &str,
         source_id: &str,
@@ -363,7 +432,10 @@ impl RedisRiskStateStore {
         principal_id: Option<&[u8]>,
         event_id: &str,
     ) -> Vec<String> {
-        let tag = format!("{{kiwi:{namespace}}}");
+        let tag = format!(
+            "{{kiwi:{}}}",
+            deployment_namespace(namespace, namespace_version)
+        );
         let session_id = session_id
             .map(hex::encode)
             .unwrap_or_else(|| "0".repeat(32));
@@ -391,7 +463,8 @@ impl RedisRiskStateStore {
         let now_ms = o.now_ms;
 
         let keys = Self::keys_for(
-            &self.namespace,
+            &self.raw_namespace,
+            self.namespace_version,
             o.source_epoch,
             &o.source_id_prev,
             &o.source_id,
@@ -506,7 +579,8 @@ impl RedisRiskStateStore {
         let now_ms = o.now_ms;
 
         let mut keys = Self::keys_for(
-            &self.namespace,
+            &self.raw_namespace,
+            self.namespace_version,
             o.source_epoch,
             &o.source_id_prev,
             &o.source_id,

@@ -404,14 +404,20 @@ final class FakePredisClient extends \Predis\Client
             try {
                 $obj = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
             } catch (\JsonException) {
-                // Corrupt values degrade to "missing" like the real Lua.
-                return ['missing'];
+                // A value without the exact pending marker is corrupt:
+                // the real Lua never mutates it and reports the
+                // corruption.
+                return ['corrupt'];
             }
-            if (($obj['state'] ?? 'pending') === 'consumed') {
+            $state = $obj['state'] ?? 'pending';
+            if ($state === 'consumed') {
                 return ['consumed', $raw];
             }
-            if (($obj['state'] ?? 'pending') === 'cancelled') {
+            if ($state === 'cancelled') {
                 return ['cancelled', $raw];
+            }
+            if ($state !== 'pending') {
+                return ['corrupt'];
             }
             unset($this->store[$key]);
 

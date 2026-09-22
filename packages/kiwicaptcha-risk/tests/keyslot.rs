@@ -5,6 +5,7 @@
 
 mod common;
 
+use kiwicaptcha_risk::namespace::NamespaceVersion;
 use kiwicaptcha_risk::redis::RedisRiskStateStore;
 
 #[test]
@@ -28,6 +29,7 @@ fn full_observation_key_set_is_single_slot() {
 
     let keys = RedisRiskStateStore::keys_for(
         &ns,
+        NamespaceVersion::Legacy,
         src_epoch,
         &src_prev,
         &src_cur,
@@ -95,6 +97,7 @@ fn keys_for_maps_missing_ids_to_the_zero_placeholder() {
     let (net_epoch, net_prev, net_cur, net_next) = common::epoch_ids(0xBB, common::T0);
     let keys = RedisRiskStateStore::keys_for(
         &ns,
+        NamespaceVersion::Legacy,
         src_epoch,
         &src_prev,
         &src_cur,
@@ -179,6 +182,7 @@ fn every_canonical_script_key_set_is_single_slot() {
                 "risk-v1.lua",
                 RedisRiskStateStore::keys_for(
                     &ns,
+                    NamespaceVersion::Legacy,
                     src_epoch,
                     &src_prev,
                     &src_cur,

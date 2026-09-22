@@ -134,6 +134,7 @@ use sha2::Sha256;
 use thiserror::Error;
 
 use crate::action::RiskAction;
+use crate::namespace::{deployment_namespace, NamespaceVersion};
 
 /// Calibration backend error; the engine treats any failure as a silent
 /// no-op (never breaks issuance).
@@ -310,7 +311,14 @@ pub trait CalibrationStore: Send + Sync {
 /// with hkdf info `kiwi/v2/scope-rate`, identical to the PHP side.
 pub struct RedisCalibrationStore {
     client: redis::Client,
+    /// The encoded namespace inside the `{kiwi:<ns>}` hash tag, derived
+    /// from `raw_namespace` through the shared deployment derivation.
     namespace: String,
+    /// The raw configured deployment discriminator, kept so the namespace
+    /// version can be switched explicitly after construction.
+    raw_namespace: String,
+    /// The key-version contract the encoded namespace was derived under.
+    namespace_version: NamespaceVersion,
     scope_hmac_key: [u8; 32],
     conn: Mutex<Option<redis::Connection>>,
     min_samples: i64,
@@ -470,6 +478,27 @@ impl RedisCalibrationStore {
         self
     }
 
+    /// Re-derive every key from the raw namespace under an explicit key
+    /// version: switching an existing deployment to
+    /// [`NamespaceVersion::Digest`] changes its key space, so the caller
+    /// performs this deliberately as a migration.
+    pub fn with_namespace_version(mut self, namespace_version: NamespaceVersion) -> Self {
+        self.namespace = deployment_namespace(&self.raw_namespace, namespace_version);
+        self.namespace_version = namespace_version;
+        self
+    }
+
+    /// The raw configured deployment discriminator this store was built
+    /// from.
+    pub fn raw_namespace(&self) -> &str {
+        &self.raw_namespace
+    }
+
+    /// The key-version contract the encoded namespace was derived under.
+    pub fn namespace_version(&self) -> NamespaceVersion {
+        self.namespace_version
+    }
+
     pub fn new(client: redis::Client, namespace: &str) -> RedisCalibrationStore {
         RedisCalibrationStore::with_limits(
             client,
@@ -589,7 +618,9 @@ impl RedisCalibrationStore {
         assert!(false_negative_cost > 0.0, "false_negative_cost must be > 0");
         RedisCalibrationStore {
             client,
-            namespace: namespace.to_string(),
+            namespace: deployment_namespace(namespace, NamespaceVersion::Legacy),
+            raw_namespace: namespace.to_string(),
+            namespace_version: NamespaceVersion::Legacy,
             scope_hmac_key: [0u8; 32],
             conn: Mutex::new(None),
             min_samples,
@@ -615,7 +646,8 @@ impl RedisCalibrationStore {
         }
     }
 
-    /// The deployment namespace inside the `{kiwi:<ns>}` hash tag.
+    /// The encoded deployment namespace inside the `{kiwi:<ns>}` hash
+    /// tag (the derived value, never the raw configured discriminator).
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
